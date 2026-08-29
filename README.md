@@ -1,0 +1,85 @@
+# ThreadHarbor
+
+ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，用来创建、持有和恢复远程 Codex、Grok 与 DeepSeek Harness Agent 会话。浏览器或 SSH 断开时，会话仍由远程 `threadharbor-hostd` 与 detached hold worker 继续运行；Web 重连后按 journal cursor 补齐记录。
+
+它不是 DeepSeek Harness 的 fork，也不包含 Harness 源码。安装时只有标准 `dsh.bundle` 与 `dsh.client` 插件进入目标 profile；开发用的 Harness checkout 位于被 Git 忽略的 `reference/deepseek-harness/`。
+
+## 当前能力
+
+- 每个 DSH Web 部署独立保存自己的主机、项目、会话和 transcript，多个 Web 服务互不发现、互不接管。
+- hostd 持有 Agent 原生连接、at-most-once prompt admission 和有界 journal，网页断线不终止会话。
+- 使用 Harness 的公开 slot 机制替换 `sidebar` 与 `conversation`，保留原生 Web runtime、layout、theme、settings 和本地会话服务；不修改 Harness 源码。
+- Web 内配置 SSH 主机，先展示并确认 SSH host-key 指纹，再以远程普通用户部署 hostd、安装 user service 并建立 loopback tunnel。
+- Web 内预览并确认 Agent 安装计划。Codex 安装 CLI 与 ACP adapter；Claude Code 使用官方 npm 包；Grok 接受部署管理员配置的发行命令。
+- Web 内启动 detached 登录流程，展示授权链接和一次性代码。Codex、Grok 使用 `--device-auth`；Claude Code 使用 `claude auth login`，需要时可把浏览器返回码送回远程 CLI。
+- 登录凭据始终保存在远程主机；Web 只看到链接、一次性代码与流程状态。
+
+Claude Code 的安装与登录已经支持，但当前没有配置 Claude 原生会话 adapter，因此不会出现在“新建会话”的可选后端中。这个限制会明确显示在主机库存里。
+
+## 安装
+
+发布包可直接作为标准 DSH bundle 安装：
+
+```sh
+dsh plugin --profile web add threadharbor
+dsh web
+```
+
+从源码开发：
+
+```sh
+git clone https://github.com/goodjin/threadharbor.git
+cd threadharbor
+corepack pnpm install
+npm run reference:checkout
+npm run check
+dsh plugin --profile web add .
+dsh web
+```
+
+`npm run reference:checkout` 只创建被忽略的 `reference/deepseek-harness/`，用于核对公开 API 和运行兼容性测试；构建产物不会把该目录打包。
+
+## SSH 主机流程
+
+在 ThreadHarbor 侧栏选择“添加主机 → SSH 自动部署”：
+
+1. 输入主机、用户、端口，以及可选的 Web 服务本机私钥绝对路径和 ProxyJump。
+2. ThreadHarbor 运行 `ssh-keyscan` 与 `ssh-keygen`，展示 SHA256 指纹。请先与主机管理员提供的指纹核对。
+3. 确认后，Web 服务把密钥写入 ThreadHarbor 自己的 `known_hosts`，以 `StrictHostKeyChecking=yes` 建连。
+4. Web 服务上传与自身版本一致的自包含 hostd artifact 到 `~/.local/share/threadharbor/current`，优先启用 `systemd --user`；没有 systemd 时使用 detached fallback。
+5. Web 服务持有 SSH loopback tunnel。网页断开不会关闭 tunnel、hostd、登录进程或 Agent hold。
+
+远程主机部署 hostd 需要 Node.js 22 或更新版本；安装 Codex 或 Claude Code 时还需要 npm。ThreadHarbor 不使用 `sudo`，也不会从浏览器接收任意 shell 命令。详细配置见 [docs/remote-hosts.zh.md](docs/remote-hosts.zh.md)。
+
+## 仓库结构
+
+```text
+packages/protocol/     浏览器、gateway、hostd 共用的 JSON 协议
+packages/hostd/        远程 daemon、hold worker、Agent 安装与登录 adapter
+packages/dsh-gateway/  DSH host 插件、独立 catalog、SSH tunnel 与 transcript projection
+packages/dsh-client/   DSH browser 插件，接管 sidebar/conversation slots
+cordis.patch.yml       安装到 DSH Web profile 的标准 bundle patch
+reference/             被 Git 忽略的 DeepSeek Harness 参考源码
+```
+
+设计说明见 [docs/architecture.zh.md](docs/architecture.zh.md)，其他 Web 插件的实现调研见 [docs/dsh-web-plugin-research.zh.md](docs/dsh-web-plugin-research.zh.md)，AgentHarbor/SessionPort 对比见 [docs/landscape.zh.md](docs/landscape.zh.md)。
+
+## 开发检查
+
+```sh
+npm run typecheck
+npm run test
+npm run build
+```
+
+需要 loopback TCP 或 Unix socket 的 hostd 测试在受限沙箱中可能得到 `EPERM`，应在允许本机 IPC 的环境原样重跑。
+
+## 安全原则
+
+- SSH 私钥只以 Web 服务上的文件路径引用，默认不上传、不持久化密钥内容。
+- 新主机必须显式确认 host-key 指纹；后续连接使用固定的专用 `known_hosts`。
+- 安装命令由 hostd 配置中的 adapter 固定，网页只能选择 adapter 并确认计划。
+- OAuth/device token、API key 和 Agent auth 文件不通过 gateway 或浏览器。
+- hostd 只监听 `127.0.0.1`，远程访问必须经过 SSH tunnel。
+
+MIT License

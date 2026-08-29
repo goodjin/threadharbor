@@ -1,0 +1,22 @@
+# ThreadHarbor is an out-of-tree DeepSeek Harness plugin. It keeps the stock
+# Web runtime and layout, then replaces only the two product-owned surfaces.
+- id: ui-sidebar
+  disabled: true
+- id: ui-conversation
+  disabled: true
+
+- insert:
+    - id: threadharbor-gateway
+      name: '@threadharbor/dsh-gateway'
+      config:
+        maxRequestBytes: 1048576
+        hostdRequestTimeoutMs: 45000
+        pollIntervalMs: 1000
+        maxTranscriptEntriesPerSession: 10000
+        sshKnownHostsPath: ~/.dsh/threadharbor/known_hosts
+        sshConnectTimeoutMs: 15000
+        sshInstallTimeoutMs: 600000
+        hostdRemotePort: 3091
+
+    - id: threadharbor-client
+      name: '@threadharbor/dsh-client'

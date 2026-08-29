@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noImplicitAny": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "composite": true,
+    "resolveJsonModule": true,
+    "jsx": "react-jsx",
+    "types": ["node"],
+    "rewriteRelativeImportExtensions": true,
+    "baseUrl": ".",
+    "ignoreDeprecations": "6.0",
+    "paths": {
+      "@threadharbor/protocol": ["packages/protocol/src/index.ts"],
+      "@threadharbor/hostd": ["packages/hostd/src/server.ts"],
+      "@threadharbor/dsh-gateway": ["packages/dsh-gateway/src/index.ts"],
+      "@threadharbor/dsh-client": ["packages/dsh-client/src/index.ts"]
+    }
+  }
+}

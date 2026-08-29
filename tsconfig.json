@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/protocol" },
+    { "path": "packages/hostd" },
+    { "path": "packages/dsh-gateway" },
+    { "path": "packages/dsh-client" },
+    { "path": "tsconfig.plugin.json" }
+  ]
+}

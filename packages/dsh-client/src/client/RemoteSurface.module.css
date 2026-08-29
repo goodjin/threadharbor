@@ -1,0 +1,477 @@
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-specific-sidebar-fill);
+}
+
+.sidebarHeader,
+.conversationHeader,
+.hostHeading,
+.projectHeading,
+.sessionRow,
+.composerActions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.sidebarHeader {
+  min-height: 60px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+
+.sidebarHeader > div,
+.hostHeading > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebarHeader span,
+.hostHeading span,
+.conversationHeader p,
+.muted,
+.cwd,
+.composerActions > span {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+}
+
+.sidebarHeader button,
+.hostHeading button,
+.rail button {
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.addPanel {
+  margin: 8px 10px 0;
+  padding: 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+}
+
+.addPanel summary {
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.addPanel input,
+.addPanel select,
+.inlineCreate input,
+.inlineCreate select,
+.inlineCreate button {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 7px;
+  padding: 7px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 7px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-base);
+}
+
+.directoryList {
+  display: grid;
+  max-height: 180px;
+  gap: 2px;
+  margin-top: 6px;
+  overflow: auto;
+}
+
+.directoryList button {
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--dsw-alias-label-primary);
+  background: transparent;
+  text-align: start;
+  cursor: pointer;
+}
+
+.directoryList button:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.tree {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px;
+}
+
+.hostTabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+  overflow-x: auto;
+}
+
+.hostTabs button {
+  padding: 5px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 7px;
+  color: var(--dsw-alias-label-secondary);
+  background: transparent;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.hostTabs button[data-current] {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-specific-sidebar-nav-item-active);
+}
+
+.hostSection {
+  margin-bottom: 16px;
+}
+
+.hostHeading {
+  gap: 8px;
+}
+
+.inventory {
+  display: flex;
+  gap: 10px;
+  padding: 7px 0;
+}
+
+.inventory span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+}
+
+.projectSection {
+  margin: 6px 0 0 10px;
+  padding-left: 10px;
+  border-left: 1px solid var(--dsw-alias-border-l2);
+}
+
+.projectHeading {
+  gap: 8px;
+  padding: 5px 0;
+}
+
+.cwd {
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inlineCreate {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 74px 52px;
+  gap: 4px;
+}
+
+.inlineCreate input,
+.inlineCreate select,
+.inlineCreate button {
+  margin: 0;
+  padding: 5px;
+  font-size: 12px;
+}
+
+.sessionList,
+.childList {
+  margin-top: 5px;
+}
+
+.childList {
+  margin-left: 14px;
+  padding-left: 6px;
+  border-left: 1px dashed var(--dsw-alias-border-l2);
+}
+
+.sessionRow {
+  border-radius: 7px;
+}
+
+.sessionRow[data-current] {
+  background: var(--dsw-specific-sidebar-nav-item-active);
+}
+
+.sessionOpen {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px;
+  border: 0;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.sessionTitle {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backendBadge {
+  padding: 2px 5px;
+  border-radius: 5px;
+  color: var(--dsw-alias-label-tertiary);
+  background: var(--dsw-alias-bg-layer-2);
+  font-size: 10px;
+}
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding-top: 12px;
+}
+
+.rail button {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+}
+
+.rail button:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.empty,
+.emptyTranscript,
+.error,
+.globalError,
+.composerError {
+  font-size: 13px;
+}
+
+.error,
+.globalError,
+.composerError {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.globalError {
+  max-height: 90px;
+  overflow: auto;
+  padding: 9px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+
+.conversation {
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  color: var(--dsw-alias-label-primary);
+}
+
+.conversationHeader {
+  min-height: 62px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+
+.conversationHeader h1,
+.conversationHeader p {
+  margin: 0;
+}
+
+.conversationHeader h1 {
+  font-size: 16px;
+}
+
+.sessionState {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+}
+
+.transcript {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 26px max(24px, calc((100% - 820px) / 2));
+}
+
+.userMessage,
+.assistantMessage,
+.reasoningMessage,
+.toolMessage,
+.permissionCard {
+  max-width: 760px;
+  box-sizing: border-box;
+  margin: 0 auto 16px;
+  padding: 12px 14px;
+  border-radius: 12px;
+}
+
+.userMessage {
+  width: fit-content;
+  max-width: min(760px, 85%);
+  margin-right: 0;
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.assistantMessage {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.reasoningMessage,
+.toolMessage {
+  border: 1px solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.permissionCard {
+  border: 1px solid var(--dsw-alias-state-warn-secondary);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.permissionActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.rowLabel {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.statusRow {
+  width: fit-content;
+  margin: 12px auto;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+}
+
+.composer {
+  width: min(820px, calc(100% - 40px));
+  margin: 0 auto 20px;
+  padding: 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 14px;
+  background: var(--dsw-alias-bg-layer-1);
+  box-shadow: var(--dsw-shadow-lv2);
+}
+
+.composer textarea {
+  width: 100%;
+  min-height: 72px;
+  resize: vertical;
+  box-sizing: border-box;
+  padding: 8px;
+  border: 0;
+  outline: none;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+}
+
+.composerActions {
+  gap: 8px;
+}
+
+.composerActions > span {
+  flex: 1;
+}
+
+.hero {
+  height: 100%;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  padding: 40px;
+  text-align: center;
+  color: var(--dsw-alias-label-primary);
+}
+
+.hero p {
+  max-width: 620px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.heroMark {
+  width: 58px;
+  height: 58px;
+  display: grid;
+  place-items: center;
+  border-radius: 18px;
+  color: var(--dsw-alias-label-primary-foreground);
+  background: var(--dsw-alias-button-primary-fill);
+  font-size: 24px;
+}
+
+.agentSetup {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 12px;
+}
+
+.agentRow {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+}
+
+.agentRow > small {
+  grid-column: 1 / -1;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.agentActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+}
+
+.agentActions button,
+.setupCard button,
+.setupCard a {
+  color: var(--dsw-alias-label-primary);
+}
+
+.setupCard {
+  display: grid;
+  gap: 7px;
+  padding: 9px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 9px;
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.setupCard code {
+  display: block;
+  overflow-wrap: anywhere;
+  padding: 6px;
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-2);
+  font-size: 11px;
+  user-select: all;
+}

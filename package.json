@@ -1,0 +1,51 @@
+{
+  "name": "threadharbor",
+  "version": "0.1.0",
+  "description": "Persistent remote coding-agent sessions in DeepSeek Harness Web",
+  "repository": { "type": "git", "url": "git+https://github.com/goodjin/threadharbor.git" },
+  "homepage": "https://github.com/goodjin/threadharbor#readme",
+  "bugs": { "url": "https://github.com/goodjin/threadharbor/issues" },
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": { "types": "./lib/types/index.d.ts", "default": "./lib/index.js" },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": ["lib/index.js", "lib/types/**/*.d.ts", "cordis.patch.yml", "README.md", "LICENSE"],
+  "license": "MIT",
+  "publishConfig": { "access": "public" },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "dependencies": {
+    "@threadharbor/dsh-client": "workspace:^",
+    "@threadharbor/dsh-gateway": "workspace:^"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "scripts": {
+    "reference:checkout": "bash scripts/checkout-reference.sh",
+    "clean": "node scripts/clean.mjs",
+    "typecheck": "tsc -b tsconfig.json",
+    "build": "bash scripts/build.sh",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run test && npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "~18.3.1",
+    "@types/ws": "^8.18.1",
+    "@deepseek-ai/cordis": "^4.0.1",
+    "lightningcss": "^1.30.1",
+    "react": "^18.2.0",
+    "tsdown": "^0.15.0",
+    "tsx": "^4.22.4",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

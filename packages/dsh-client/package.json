@@ -1,0 +1,40 @@
+{
+  "name": "@threadharbor/dsh-client",
+  "version": "0.1.0",
+  "description": "ThreadHarbor sidebar and conversation surfaces for DeepSeek Harness Web",
+  "repository": { "type": "git", "url": "git+https://github.com/goodjin/threadharbor.git", "directory": "packages/dsh-client" },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": { "types": "./lib/types/index.d.ts", "default": "./lib/index.js" },
+    "./client": { "types": "./lib/types/client/index.d.ts", "default": "./lib/client.js" },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": ["@deepseek-ai/dsh-client-runtime", "@deepseek-ai/dsh-client-ui-layout"],
+      "platform": "web"
+    }
+  },
+  "files": ["lib/index.js", "lib/client.js", "lib/types/**/*.d.ts"],
+  "license": "MIT",
+  "publishConfig": { "access": "public" },
+  "dependencies": { "@threadharbor/protocol": "workspace:^" },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-client-runtime": ">=0.1.1-rc.2 <0.2",
+    "@deepseek-ai/dsh-client-ui-layout": ">=0.1.1-rc.2 <0.2",
+    "@deepseek-ai/dsh-client-ui-primitives": ">=0.1.1-rc.2 <0.2",
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.1.1-rc.2 <0.2",
+    "react": "^18.2.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-client-runtime": ">=0.1.1-rc.2 <0.2",
+    "@deepseek-ai/dsh-client-ui-layout": ">=0.1.1-rc.2 <0.2",
+    "@deepseek-ai/dsh-client-ui-primitives": ">=0.1.1-rc.2 <0.2",
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.1.1-rc.2 <0.2",
+    "react": "^18.2.0"
+  }
+}
