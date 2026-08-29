@@ -37,11 +37,13 @@ Gateway 把已安装包中的自包含 hostd artifact 上传到普通用户目�
 
 ## Agent adapter
 
-Agent manager 把四类操作放在一个可扩展接口后面：inventory、install plan、install、auth。浏览器不能提交命令；它只能指定已知 backend。每个安装操作先返回准确的 package spec 和显示命令，只有 `confirm: true` 才会执行。
+Agent manager 把 inventory、install plan、install、auth 和 config 操作放在可扩展 adapter 后面。浏览器不能提交安装命令、package spec、参数或配置路径；它只能指定已知 backend。每个安装操作先返回准确的固定计划，只有 `confirm: true` 才会执行。
 
 - Codex：安装 `@openai/codex` 与 `@agentclientprotocol/codex-acp`，登录运行 `codex login --device-auth`。
-- Grok：登录运行 `grok login --device-auth`；安装命令由部署管理员设置，因为当前参照使用的 Grok CLI 没有可核实的公开标准发行地址。
+- Grok：固定安装 `@xai-official/grok`，登录运行 `grok login --device-auth`。
 - Claude Code：安装 `@anthropic-ai/claude-code`，登录运行 `claude auth login`。登录可用，但 session transport 要等独立 adapter 接入。
 - DSH：复用目标主机已有安装与凭据，不从 ThreadHarbor 交互登录。
 
 Auth worker 与浏览器生命周期无关。它只解析 HTTPS URL、一次性代码和终态，不向浏览器转发 CLI 原始输出或 token。Claude 等需要回填返回码的流程只能写入一行、最多 2048 字符，并拒绝换行。
+
+Config adapter 只读写 Codex、Grok 和 Claude Code 各自官方的用户配置路径。TOML/JSON 在 hostd 解析后才以 owner-only 临时文件原子替换；读取结果带内容 revision，陈旧页面不能覆盖更新后的远程文件。它不读取 Agent 的 auth 文件或 keyring。

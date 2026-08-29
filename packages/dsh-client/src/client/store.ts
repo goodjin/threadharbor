@@ -11,9 +11,12 @@ import {
   RemoteAuthFlowId,
   jsonObject,
   remoteAgentBackend,
+  remoteAgentConfigBackend,
   stringField,
   type JsonValue,
   type RemoteAgentBackend,
+  type RemoteAgentConfigBackend,
+  type RemoteAgentConfigDocument,
   type RemoteAgentState,
   type RemoteAuthChallenge,
   type RemoteBackendInventory,
@@ -163,6 +166,25 @@ function parseInstallPlan(value: JsonValue): RemoteInstallPlan {
       return { title: stringField(step, 'title'), command: stringField(step, 'command') }
     }),
     ...(unavailableReason === undefined ? {} : { unavailableReason }),
+  }
+}
+
+/** Validate one fixed-path Agent user configuration document from hostd.
+ * @param value - decoded gateway result.
+ * @returns browser-safe configuration editor state.
+ */
+export function parseAgentConfigDocument(value: JsonValue): RemoteAgentConfigDocument {
+  const record = jsonObject(value, 'Agent configuration')
+  const content = record['content']
+  if (typeof content !== 'string') throw new TypeError('Agent configuration content must be a string')
+  return {
+    backend: remoteAgentConfigBackend(record['backend']),
+    path: stringField(record, 'path'),
+    format: oneOf(record['format'], ['toml', 'json'] as const, 'config.format'),
+    exists: booleanField(record, 'exists'),
+    content,
+    revision: stringField(record, 'revision'),
+    maxBytes: integerField(record, 'maxBytes'),
   }
 }
 
@@ -364,6 +386,36 @@ export class RemoteAgentStore {
    */
   installAgent(hostId: ReturnType<typeof RemoteHostId>, backend: RemoteAgentBackend): Promise<void> {
     return this.mutate('agent.install', { hostId, backend, confirm: true })
+  }
+
+  /** Read one Agent's official user configuration file.
+   * @param hostId - target host.
+   * @param backend - Agent with a fixed configuration adapter.
+   * @returns editable content and concurrent-write revision.
+   */
+  readAgentConfig(
+    hostId: ReturnType<typeof RemoteHostId>,
+    backend: RemoteAgentConfigBackend,
+  ): Promise<RemoteAgentConfigDocument> {
+    return this.run(async () => parseAgentConfigDocument(await this.call('agent.config.get', { hostId, backend })))
+  }
+
+  /** Validate and atomically save one Agent user configuration file.
+   * @param hostId - target host.
+   * @param backend - Agent with a fixed configuration adapter.
+   * @param content - complete JSON or TOML document.
+   * @param expectedRevision - revision returned when editing began.
+   * @returns the saved document and its new revision.
+   */
+  writeAgentConfig(
+    hostId: ReturnType<typeof RemoteHostId>,
+    backend: RemoteAgentConfigBackend,
+    content: string,
+    expectedRevision: string,
+  ): Promise<RemoteAgentConfigDocument> {
+    return this.run(async () => parseAgentConfigDocument(await this.call('agent.config.set', {
+      hostId, backend, content, expectedRevision,
+    })))
   }
 
   /** Start a detached login command on hostd.

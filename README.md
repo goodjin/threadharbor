@@ -10,34 +10,34 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，用来创建、持有�
 - hostd 持有 Agent 原生连接、at-most-once prompt admission 和有界 journal，网页断线不终止会话。
 - 使用 Harness 的公开 slot 机制替换 `sidebar` 与 `conversation`，保留原生 Web runtime、layout、theme、settings 和本地会话服务；不修改 Harness 源码。
 - Web 内配置 SSH 主机，先展示并确认 SSH host-key 指纹，再以远程普通用户部署 hostd、安装 user service 并建立 loopback tunnel。
-- Web 内预览并确认 Agent 安装计划。Codex 安装 CLI 与 ACP adapter；Claude Code 使用官方 npm 包；Grok 接受部署管理员配置的发行命令。
+- Web 内预览并确认 Agent 安装计划。hostd 固定安装 Codex CLI 与 ACP adapter、官方 Grok Build 和 Claude Code；浏览器不能提交 package spec、命令或参数。
 - Web 内启动 detached 登录流程，展示授权链接和一次性代码。Codex、Grok 使用 `--device-auth`；Claude Code 使用 `claude auth login`，需要时可把浏览器返回码送回远程 CLI。
+- Web 内编辑 Codex、Grok 和 Claude Code 的官方用户配置文件；hostd 固定文件位置、限制大小、校验 TOML/JSON，并用 revision 防止覆盖其他编辑器的新修改。
 - 登录凭据始终保存在远程主机；Web 只看到链接、一次性代码与流程状态。
 
 Claude Code 的安装与登录已经支持，但当前没有配置 Claude 原生会话 adapter，因此不会出现在“新建会话”的可选后端中。这个限制会明确显示在主机库存里。
 
-## 安装
+## 安装到 DeepSeek Harness
 
-发布包可直接作为标准 DSH bundle 安装：
+完整安装、升级、卸载和首个远程主机操作见 [docs/install.zh.md](docs/install.zh.md)。npm 包发布后可直接作为标准 DSH bundle 安装：
 
 ```sh
 dsh plugin --profile web add threadharbor
-dsh web
+dsh --profile web
 ```
 
-从源码开发：
+当前仓库可直接从源码链接安装：
 
 ```sh
 git clone https://github.com/goodjin/threadharbor.git
 cd threadharbor
 corepack pnpm install
-npm run reference:checkout
-npm run check
-dsh plugin --profile web add .
-dsh web
+pnpm run build
+dsh plugin --profile web add link:.
+dsh --profile web
 ```
 
-`npm run reference:checkout` 只创建被忽略的 `reference/deepseek-harness/`，用于核对公开 API 和运行兼容性测试；构建产物不会把该目录打包。
+源码链接安装依赖这个 checkout 及其 `node_modules` 和 `lib`，不要在卸载前移动或删除目录。`npm run reference:checkout` 只创建被忽略的 `reference/deepseek-harness/`，用于开发时核对公开 API；运行和打包均不需要该参考目录。
 
 ## SSH 主机流程
 
@@ -49,7 +49,7 @@ dsh web
 4. Web 服务上传与自身版本一致的自包含 hostd artifact 到 `~/.local/share/threadharbor/current`，优先启用 `systemd --user`；没有 systemd 时使用 detached fallback。
 5. Web 服务持有 SSH loopback tunnel。网页断开不会关闭 tunnel、hostd、登录进程或 Agent hold。
 
-远程主机部署 hostd 需要 Node.js 22 或更新版本；安装 Codex 或 Claude Code 时还需要 npm。ThreadHarbor 不使用 `sudo`，也不会从浏览器接收任意 shell 命令。详细配置见 [docs/remote-hosts.zh.md](docs/remote-hosts.zh.md)。
+远程主机部署 hostd 需要 Node.js 22 或更新版本；安装 Codex、Grok 或 Claude Code 时还需要 npm。ThreadHarbor 不使用 `sudo`，也不会从浏览器接收任意 shell 命令。详细配置见 [docs/remote-hosts.zh.md](docs/remote-hosts.zh.md)。
 
 ## 仓库结构
 
@@ -80,6 +80,7 @@ npm run build
 - 新主机必须显式确认 host-key 指纹；后续连接使用固定的专用 `known_hosts`。
 - 安装命令由 hostd 配置中的 adapter 固定，网页只能选择 adapter 并确认计划。
 - OAuth/device token、API key 和 Agent auth 文件不通过 gateway 或浏览器。
+- 配置编辑器会传输用户主动打开的完整配置文件；不要在这些文件中保存明文密钥，优先使用远程环境变量或 Agent 自己的凭据存储。
 - hostd 只监听 `127.0.0.1`，远程访问必须经过 SSH tunnel。
 
 MIT License

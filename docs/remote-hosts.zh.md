@@ -34,13 +34,29 @@ Gateway 从自己已安装的 `@threadharbor/hostd` 包读取 `bin.js` 与 `hold
 ~/.config/systemd/user/threadharbor-hostd.service
 ```
 
-ThreadHarbor 不自动安装系统 Node.js，也不调用 sudo。缺少合格 Node.js 时会在部署阶段停止并返回明确错误。Codex 与 Claude Code 的 npm 安装另行要求远端已有 npm。
+ThreadHarbor 不自动安装系统 Node.js，也不调用 sudo。缺少合格 Node.js 时会在部署阶段停止并返回明确错误。Codex、Grok 与 Claude Code 的安装另行要求远端已有 npm。
 
 ## Agent 安装
 
 打开主机后，每个 backend 会显示 installed、authenticated、running 和 session-capable 状态。点击“安装”只获取计划；Web 显示 package spec 与命令，用户再次确认才执行。
 
-Codex 与 Claude Code 默认安装到 `~/.local`。hostd CLI 可覆盖 package spec、命令路径、超时和 npm prefix。Grok 的发行方式必须由 hostd 管理员通过 `--grok-install-command` 配置；这个配置不接受浏览器输入。
+三种安装方案都编译在 hostd adapter 中，浏览器请求只有 backend 和 `confirm: true`，不能提交命令、package spec 或参数：
+
+- Codex：`@openai/codex@latest` 与 `@agentclientprotocol/codex-acp@latest`；
+- Grok：`@xai-official/grok@latest`；
+- Claude Code：`@anthropic-ai/claude-code@latest`。
+
+它们通过 npm 安装到 hostd 的用户 prefix，默认为 `~/.local`。部署管理员可以改变 prefix、超时和已安装 executable 的查找位置，但不能替换安装包或安装命令。
+
+## Agent 配置
+
+每个 Codex、Grok 和 Claude Code 行都有“配置”入口。浏览器只提交 backend、完整内容和上次读取的 revision；不能提交路径。hostd 固定映射并遵循各产品官方 home 环境变量：
+
+- Codex：`${CODEX_HOME:-~/.codex}/config.toml`，TOML；
+- Grok：`${GROK_HOME:-~/.grok}/config.toml`，TOML；
+- Claude Code：`${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json`，JSON object。
+
+hostd 在写入前限制 UTF-8 字节数、解析 TOML/JSON，并比较 revision；文件在打开后被其他进程修改时拒绝覆盖。写入使用 owner-only 临时文件和原子 rename。配置编辑器传输的是完整用户配置内容，不应用来保存明文 API key；密钥应放在远程环境变量或 Agent 自己的凭据存储中。
 
 ## Web 登录
 

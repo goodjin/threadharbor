@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RemoteSessionId } from '@threadharbor/protocol'
-import { RemoteAgentStore, parseRemoteAgentState } from '../src/client/store.ts'
+import { RemoteAgentStore, parseAgentConfigDocument, parseRemoteAgentState } from '../src/client/store.ts'
 
 const EMPTY = { pollIntervalMs: 60_000, hosts: [], projects: [], sessions: [], transcript: [] }
 
@@ -25,6 +25,17 @@ describe('RemoteAgentStore', () => {
       transcript: [{ transcriptId: 't', sessionId: 's', seq: 0, role: 'assistant', kind: 'message', text: 'hi', createdAt: 'a' }],
     })).toMatchObject({ sessions: [{ sessionId: 's', backend: 'codex' }], transcript: [{ text: 'hi' }] })
     expect(() => parseRemoteAgentState({ ...EMPTY, sessions: [{ backend: 'other' }] })).toThrow()
+  })
+
+  it('validates fixed-path Agent configuration documents', () => {
+    expect(parseAgentConfigDocument({
+      backend: 'grok', path: '/home/user/.grok/config.toml', format: 'toml', exists: true,
+      content: '[models]\n', revision: 'revision', maxBytes: 4096,
+    })).toMatchObject({ backend: 'grok', format: 'toml', content: '[models]\n' })
+    expect(() => parseAgentConfigDocument({
+      backend: 'dsh', path: '/tmp/config', format: 'toml', exists: false,
+      content: '', revision: 'revision', maxBytes: 4096,
+    })).toThrow('config backend')
   })
 
   it('attaches and reads native journal state when a session is selected', async () => {

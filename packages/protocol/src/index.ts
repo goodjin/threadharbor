@@ -19,6 +19,10 @@ export const REMOTE_AGENT_HOSTD_PATH = '/v1/control'
 export const REMOTE_AGENT_BACKENDS = ['grok', 'codex', 'claude', 'dsh'] as const
 /** One immutable session backend. */
 export type RemoteAgentBackend = typeof REMOTE_AGENT_BACKENDS[number]
+/** Agents whose official user configuration file can be edited through hostd. */
+export const REMOTE_AGENT_CONFIG_BACKENDS = ['grok', 'codex', 'claude'] as const
+/** Backend with a hostd-owned user configuration adapter. */
+export type RemoteAgentConfigBackend = typeof REMOTE_AGENT_CONFIG_BACKENDS[number]
 
 /** Stable Web-catalog host identity. */
 export type RemoteHostId = Branded<'RemoteHostId'>
@@ -109,6 +113,18 @@ export interface RemoteInstallPlan {
   readonly requiresConfirmation: true
   readonly steps: readonly RemoteInstallStep[]
   readonly unavailableReason?: string
+}
+
+/** One fixed-path, syntax-validated Agent user configuration document. */
+export interface RemoteAgentConfigDocument {
+  readonly backend: RemoteAgentConfigBackend
+  readonly path: string
+  readonly format: 'toml' | 'json'
+  readonly exists: boolean
+  readonly content: string
+  /** Content revision required when saving, preventing concurrent overwrite. */
+  readonly revision: string
+  readonly maxBytes: number
 }
 
 /** Browser-safe view of a detached device/browser authorization flow. */
@@ -271,6 +287,8 @@ export type RemoteGatewayMethod =
   | 'host.ssh.deploy'
   | 'agent.install.plan'
   | 'agent.install'
+  | 'agent.config.get'
+  | 'agent.config.set'
   | 'auth.start'
   | 'auth.status'
   | 'auth.respond'
@@ -289,6 +307,8 @@ export type RemoteHostdMethod =
   | 'inventory'
   | 'agent.install.plan'
   | 'agent.install'
+  | 'agent.config.get'
+  | 'agent.config.set'
   | 'auth.start'
   | 'auth.status'
   | 'auth.respond'
@@ -356,6 +376,15 @@ export function stringField(record: Record<string, JsonValue>, key: string): str
 export function remoteAgentBackend(value: unknown): RemoteAgentBackend {
   if (value === 'grok' || value === 'codex' || value === 'claude' || value === 'dsh') return value
   throw new TypeError(`backend must be one of ${REMOTE_AGENT_BACKENDS.join(', ')}`)
+}
+
+/** Parse a configurable Agent backend at a wire boundary.
+ * @param value - candidate backend tag.
+ * @returns a backend with a fixed user configuration file.
+ */
+export function remoteAgentConfigBackend(value: unknown): RemoteAgentConfigBackend {
+  if (value === 'grok' || value === 'codex' || value === 'claude') return value
+  throw new TypeError(`config backend must be one of ${REMOTE_AGENT_CONFIG_BACKENDS.join(', ')}`)
 }
 
 /** Parse one control request at an HTTP or Unix-socket boundary.

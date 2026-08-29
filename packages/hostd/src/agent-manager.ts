@@ -7,26 +7,30 @@ import { delimiter, join } from 'node:path'
 import {
   RemoteAuthFlowId,
   type JsonValue,
+  type RemoteAgentConfigBackend,
+  type RemoteAgentConfigDocument,
   type RemoteAuthChallenge,
   type RemoteAgentBackend,
   type RemoteBackendInventory,
   type RemoteInstallPlan,
 } from '@threadharbor/protocol'
+import { AgentConfigManager } from './agent-config.ts'
+
+const CODEX_PACKAGES = ['@openai/codex@latest', '@agentclientprotocol/codex-acp@latest'] as const
+const GROK_PACKAGES = ['@xai-official/grok@latest'] as const
+const CLAUDE_PACKAGES = ['@anthropic-ai/claude-code@latest'] as const
 
 /** Resolved commands and bounded operation timings for agent management. */
 export interface AgentManagerOptions {
   readonly installPrefix: string
   readonly installTimeoutMs: number
   readonly authTimeoutMs: number
+  readonly agentConfigHome: string
+  readonly maxAgentConfigBytes: number
   readonly codexCliCommand: string
   readonly codexAcpCommand: string
-  readonly codexPackage: string
-  readonly codexAcpPackage: string
   readonly claudeCommand: string
-  readonly claudePackage: string
   readonly grokCommand: string
-  /** Administrator-owned command and arguments, never supplied by a browser request. */
-  readonly grokInstall?: readonly [command: string, ...args: string[]]
   readonly dshCommand: string
 }
 
@@ -136,9 +140,15 @@ function deviceCode(text: string): string | undefined {
 /** Owns safe, predeclared installers and authentication subprocesses. */
 export class AgentManager {
   private readonly flows = new Map<string, AuthFlow>()
+  private readonly configs: AgentConfigManager
 
   /** @param options - administrator-resolved commands and timings. */
-  constructor(private readonly options: AgentManagerOptions) {}
+  constructor(private readonly options: AgentManagerOptions) {
+    this.configs = new AgentConfigManager({
+      homeDir: options.agentConfigHome,
+      maxBytes: options.maxAgentConfigBytes,
+    })
+  }
 
   /** Detect all supported agents and authentication state.
    * @param running - agents with a live native session transport.
@@ -178,7 +188,7 @@ export class AgentManager {
     const npm = 'npm'
     switch (backend) {
       case 'codex': {
-        const packages = [this.options.codexPackage, this.options.codexAcpPackage]
+        const packages = CODEX_PACKAGES
         return {
           component: backend,
           version: packages.join(' + '),
@@ -191,23 +201,21 @@ export class AgentManager {
       case 'claude':
         return {
           component: backend,
-          version: this.options.claudePackage,
+          version: CLAUDE_PACKAGES.join(' + '),
           alreadyInstalled: commandExists(this.options.claudeCommand),
           requiresConfirmation: true,
           steps: [planStep('Install Claude Code into the user prefix',
-            [npm, 'install', '--global', '--prefix', this.options.installPrefix, this.options.claudePackage].map(quoteDisplay).join(' '))],
+            [npm, 'install', '--global', '--prefix', this.options.installPrefix, ...CLAUDE_PACKAGES].map(quoteDisplay).join(' '))],
         }
-      case 'grok': {
-        const recipe = this.options.grokInstall
+      case 'grok':
         return {
           component: backend,
-          version: 'administrator-configured distribution',
+          version: GROK_PACKAGES.join(' + '),
           alreadyInstalled: commandExists(this.options.grokCommand),
           requiresConfirmation: true,
-          steps: recipe === undefined ? [] : [planStep('Install the configured Grok CLI distribution', recipe.map(quoteDisplay).join(' '))],
-          ...(recipe === undefined ? { unavailableReason: 'Set --grok-install-command to the canonical Grok distribution for this deployment.' } : {}),
+          steps: [planStep('Install the official Grok Build CLI into the user prefix',
+            [npm, 'install', '--global', '--prefix', this.options.installPrefix, ...GROK_PACKAGES].map(quoteDisplay).join(' '))],
         }
-      }
       case 'dsh':
         return {
           component: backend,
@@ -228,16 +236,43 @@ export class AgentManager {
     const plan = this.installPlan(backend)
     if (plan.unavailableReason !== undefined) throw new Error(plan.unavailableReason)
     if (plan.alreadyInstalled) return plan
-    const recipe = backend === 'codex'
-      ? ['npm', 'install', '--global', '--prefix', this.options.installPrefix, this.options.codexPackage, this.options.codexAcpPackage] as const
-      : backend === 'claude'
-        ? ['npm', 'install', '--global', '--prefix', this.options.installPrefix, this.options.claudePackage] as const
-        : this.options.grokInstall
+    const packages = backend === 'codex'
+      ? CODEX_PACKAGES
+      : backend === 'grok'
+        ? GROK_PACKAGES
+        : backend === 'claude'
+          ? CLAUDE_PACKAGES
+          : undefined
+    const recipe = packages === undefined
+      ? undefined
+      : ['npm', 'install', '--global', '--prefix', this.options.installPrefix, ...packages] as const
     if (recipe === undefined) throw new Error('no installer is configured')
     const [command, ...args] = recipe
     const result = await run(command, args, this.options.installTimeoutMs)
     if (result.code !== 0) throw new Error(`installer exited with status ${result.code}`)
     return this.installPlan(backend)
+  }
+
+  /** Read one fixed-path Agent user configuration document.
+   * @param backend - backend with a configuration adapter.
+   * @returns current validated configuration content and revision.
+   */
+  readConfig(backend: RemoteAgentConfigBackend): RemoteAgentConfigDocument {
+    return this.configs.read(backend)
+  }
+
+  /** Validate and save one fixed-path Agent user configuration document.
+   * @param backend - backend with a configuration adapter.
+   * @param content - complete JSON or TOML document.
+   * @param expectedRevision - revision returned when the document was opened.
+   * @returns the saved document.
+   */
+  writeConfig(
+    backend: RemoteAgentConfigBackend,
+    content: string,
+    expectedRevision: string,
+  ): RemoteAgentConfigDocument {
+    return this.configs.write(backend, content, expectedRevision)
   }
 
   /** Start a detached browser/device authorization flow.

@@ -5,7 +5,8 @@ import { Button, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SidebarOwnerProps } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {
-  RemoteAgentBackend, RemoteAuthChallenge, RemoteDirectoryListing, RemoteHostView, RemoteInstallPlan,
+  RemoteAgentBackend, RemoteAgentConfigBackend, RemoteAgentConfigDocument, RemoteAuthChallenge,
+  RemoteDirectoryListing, RemoteHostView, RemoteInstallPlan,
   RemoteProjectView, RemoteSessionId, RemoteSessionView, RemoteSshInspection,
 } from '@threadharbor/protocol'
 import { RemoteHostId } from '@threadharbor/protocol'
@@ -31,6 +32,9 @@ function availableBackends(host: RemoteHostView): RemoteAgentBackend[] {
 function AgentSetup({ host, store }: { host: RemoteHostView; store: RemoteAgentStore }) {
   const [plan, setPlan] = useState<RemoteInstallPlan>()
   const [auth, setAuth] = useState<RemoteAuthChallenge>()
+  const [config, setConfig] = useState<RemoteAgentConfigDocument>()
+  const [configContent, setConfigContent] = useState('')
+  const [configSaved, setConfigSaved] = useState(false)
   const [response, setResponse] = useState('')
   useEffect(() => {
     if (auth === undefined || !['starting', 'waiting-user'].includes(auth.status)) return
@@ -49,8 +53,18 @@ function AgentSetup({ host, store }: { host: RemoteHostView; store: RemoteAgentS
   }
   const login = (backend: RemoteAgentBackend): void => {
     setPlan(undefined)
+    setConfig(undefined)
     void store.startAuth(host.hostId, backend).then(setAuth)
       .catch(() => { /* RemoteAgentStore owns the visible request failure. */ })
+  }
+  const configure = (backend: RemoteAgentConfigBackend): void => {
+    setPlan(undefined)
+    setAuth(undefined)
+    setConfigSaved(false)
+    void store.readAgentConfig(host.hostId, backend).then((document) => {
+      setConfig(document)
+      setConfigContent(document.content)
+    }).catch(() => { /* RemoteAgentStore owns the visible request failure. */ })
   }
 
   return (
@@ -66,6 +80,9 @@ function AgentSetup({ host, store }: { host: RemoteHostView; store: RemoteAgentS
                 <button type="button" onClick={() => { login(backend) }}>登录</button>
               )}
               {entry?.installed && entry.authenticated && <span>已登录</span>}
+              {backend !== 'dsh' && (
+                <button type="button" onClick={() => { configure(backend) }}>配置</button>
+              )}
             </span>
             {entry?.detail !== undefined && <small>{entry.detail}</small>}
           </div>
@@ -110,6 +127,44 @@ function AgentSetup({ host, store }: { host: RemoteHostView; store: RemoteAgentS
             <button type="button" onClick={() => { void store.cancelAuth(host.hostId, auth.flowId).then(() => { setAuth(undefined) }) }}>取消登录</button>
           )}
           {!['starting', 'waiting-user'].includes(auth.status) && <button type="button" onClick={() => { setAuth(undefined) }}>关闭</button>}
+        </div>
+      )}
+      {config !== undefined && (
+        <div className={css.setupCard}>
+          <strong>{config.backend} 配置</strong>
+          <small>{config.path} · {config.format.toUpperCase()} · 最大 {config.maxBytes} 字节</small>
+          <p>这里编辑的是远程主机上的完整用户配置。不要写入明文密钥；优先引用远程环境变量。</p>
+          <textarea
+            className={css.configEditor}
+            aria-label={`${config.backend} 配置内容`}
+            spellCheck={false}
+            value={configContent}
+            onChange={(event) => {
+              setConfigContent(event.target.value)
+              setConfigSaved(false)
+            }}
+          />
+          {new TextEncoder().encode(configContent).length > config.maxBytes && (
+            <p className={css.error}>配置超过 {config.maxBytes} 字节限制。</p>
+          )}
+          {configSaved && <p>已保存并通过 {config.format.toUpperCase()} 语法校验。</p>}
+          <div className={css.configActions}>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={configContent === config.content || new TextEncoder().encode(configContent).length > config.maxBytes}
+              onClick={() => {
+                void store.writeAgentConfig(
+                  host.hostId, config.backend, configContent, config.revision,
+                ).then((saved) => {
+                  setConfig(saved)
+                  setConfigContent(saved.content)
+                  setConfigSaved(true)
+                })
+              }}
+            >保存配置</Button>
+            <button type="button" onClick={() => { setConfig(undefined) }}>关闭</button>
+          </div>
         </div>
       )}
     </div>

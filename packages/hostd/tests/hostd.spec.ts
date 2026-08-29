@@ -20,13 +20,12 @@ function options(dataDir: string, overrides: Partial<HostdOptions> = {}): HostdO
     installPrefix: join(dataDir, 'install'),
     installTimeoutMs: 100,
     authTimeoutMs: 100,
+    agentConfigHome: dataDir,
+    maxAgentConfigBytes: 4096,
     codexCliCommand: '/missing/codex',
     codexCommand: '/missing/codex-acp',
     codexArgs: [],
-    codexPackage: '@openai/codex@test',
-    codexAcpPackage: '@agentclientprotocol/codex-acp@test',
     claudeCommand: '/missing/claude',
-    claudePackage: '@anthropic-ai/claude-code@test',
     dshCommand: '/missing/dsh-jsonrpc-agent',
     dshArgs: [],
     dshProvider: 'deepseek-official',
@@ -87,5 +86,20 @@ describe('RemoteAgentHostd inventory', () => {
     } finally {
       await Promise.all([owner.close(), retrying.close()])
     }
+  })
+
+  it('routes fixed Agent configuration reads and validated writes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'threadharbor-hostd-config-'))
+    roots.push(root)
+    const hostd = new RemoteAgentHostd(options(root))
+    const opened = await hostd.dispatch({
+      id: 'config-get', method: 'agent.config.get', params: { backend: 'grok' },
+    }) as unknown as { revision: string; path: string }
+    expect(opened.path).toBe(join(root, '.grok', 'config.toml'))
+    const saved = await hostd.dispatch({
+      id: 'config-set', method: 'agent.config.set',
+      params: { backend: 'grok', content: '[models]\ndefault = "grok-build"\n', expectedRevision: opened.revision },
+    })
+    expect(saved).toMatchObject({ exists: true, format: 'toml' })
   })
 })

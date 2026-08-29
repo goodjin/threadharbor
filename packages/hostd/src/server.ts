@@ -16,6 +16,7 @@ import {
   jsonObject,
   parseRemoteControlRequest,
   remoteAgentBackend,
+  remoteAgentConfigBackend,
   stringField,
   type JsonValue,
   type RemoteControlRequest,
@@ -46,13 +47,12 @@ export interface HostdOptions {
   readonly installPrefix: string
   readonly installTimeoutMs: number
   readonly authTimeoutMs: number
+  readonly agentConfigHome: string
+  readonly maxAgentConfigBytes: number
   readonly codexCliCommand: string
   readonly codexCommand: string
   readonly codexArgs: readonly string[]
-  readonly codexPackage: string
-  readonly codexAcpPackage: string
   readonly claudeCommand: string
-  readonly claudePackage: string
   readonly dshCommand: string
   readonly dshArgs: readonly string[]
   readonly dshProvider: string
@@ -61,7 +61,6 @@ export interface HostdOptions {
   readonly grokServeHost: '127.0.0.1'
   readonly grokServePort: number
   readonly grokArgs: readonly string[]
-  readonly grokInstall?: readonly [command: string, ...args: string[]]
   /** Built worker entry; injectable for packaged runtimes and tests. */
   readonly workerScript: string
 }
@@ -159,14 +158,12 @@ export class RemoteAgentHostd {
       installPrefix: options.installPrefix,
       installTimeoutMs: options.installTimeoutMs,
       authTimeoutMs: options.authTimeoutMs,
+      agentConfigHome: options.agentConfigHome,
+      maxAgentConfigBytes: options.maxAgentConfigBytes,
       codexCliCommand: options.codexCliCommand,
       codexAcpCommand: options.codexCommand,
-      codexPackage: options.codexPackage,
-      codexAcpPackage: options.codexAcpPackage,
       claudeCommand: options.claudeCommand,
-      claudePackage: options.claudePackage,
       grokCommand: options.grokCommand,
-      ...(options.grokInstall === undefined ? {} : { grokInstall: options.grokInstall }),
       dshCommand: options.dshCommand,
     })
     this.loadSessions()
@@ -243,6 +240,17 @@ export class RemoteAgentHostd {
       case 'agent.install':
         requireInstallConfirmation(request.params['confirm'])
         return await this.agentManager.install(remoteAgentBackend(request.params['backend'])) as unknown as JsonValue
+      case 'agent.config.get':
+        return this.agentManager.readConfig(remoteAgentConfigBackend(request.params['backend'])) as unknown as JsonValue
+      case 'agent.config.set': {
+        const content = request.params['content']
+        if (typeof content !== 'string') throw new TypeError('content must be a string')
+        return this.agentManager.writeConfig(
+          remoteAgentConfigBackend(request.params['backend']),
+          content,
+          stringField(request.params, 'expectedRevision'),
+        ) as unknown as JsonValue
+      }
       case 'auth.start':
         return this.agentManager.startAuth(remoteAgentBackend(request.params['backend'])) as unknown as JsonValue
       case 'auth.status':

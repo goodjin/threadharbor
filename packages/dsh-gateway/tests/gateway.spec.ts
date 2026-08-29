@@ -62,6 +62,14 @@ async function harness(events: JsonValue[] = []) {
       case 'fs.list':
         result = { path: paramString(request, 'path'), entries: [], truncated: false }
         break
+      case 'agent.config.get':
+      case 'agent.config.set':
+        result = {
+          backend: paramString(request, 'backend'), path: '/remote/.grok/config.toml', format: 'toml',
+          exists: true, content: typeof request.params['content'] === 'string' ? request.params['content'] : '',
+          revision: 'revision', maxBytes: 4096,
+        }
+        break
       case 'session.start':
       case 'session.attach':
         result = { holdId: `hold-${url.port}-${sessionId}`, nativeSessionId: `native-${url.port}-${sessionId}`, generation: 'g1', latestSeq: 0 }
@@ -106,6 +114,21 @@ describe('RemoteAgentGateway', () => {
       await expect(gateway.dispatch(request('host.add', {
         title: 'bad', endpoint: 'http://user:secret@127.0.0.1:4101',
       }))).rejects.toThrow('must not contain credentials')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('forwards Agent configuration operations without forwarding the Web catalog host id', async () => {
+    const { ctx, gateway, calls } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4101',
+      })) as unknown as { hostId: string }
+      await gateway.dispatch(request('agent.config.get', { hostId: host.hostId, backend: 'grok' }))
+      const forwarded = calls.at(-1)?.request
+      expect(forwarded).toMatchObject({ method: 'agent.config.get', params: { backend: 'grok' } })
+      expect(forwarded?.params).not.toHaveProperty('hostId')
     } finally {
       await ctx.fiber.dispose()
     }

@@ -21,6 +21,7 @@
     "@agentclientprotocol/sdk": "0.25.1",
     "@threadharbor/protocol": "workspace:^",
     "commander": "^15.0.0",
+    "smol-toml": "^1.7.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {

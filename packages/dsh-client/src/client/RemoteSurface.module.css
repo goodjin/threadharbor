@@ -475,3 +475,28 @@
   font-size: 11px;
   user-select: all;
 }
+
+.configEditor {
+  width: 100%;
+  min-height: 220px;
+  resize: vertical;
+  box-sizing: border-box;
+  padding: 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 7px;
+  outline: none;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-2);
+  font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  tab-size: 2;
+}
+
+.configEditor:focus {
+  border-color: var(--dsw-alias-label-primary);
+}
+
+.configActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

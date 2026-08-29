@@ -11,12 +11,11 @@ function options(root: string, command: string): AgentManagerOptions {
     installPrefix: join(root, 'install'),
     installTimeoutMs: 1000,
     authTimeoutMs: 3000,
+    agentConfigHome: root,
+    maxAgentConfigBytes: 4096,
     codexCliCommand: command,
     codexAcpCommand: command,
-    codexPackage: '@openai/codex@test',
-    codexAcpPackage: '@agentclientprotocol/codex-acp@test',
     claudeCommand: command,
-    claudePackage: '@anthropic-ai/claude-code@test',
     grokCommand: command,
     dshCommand: '/missing/dsh',
   }
@@ -27,16 +26,21 @@ afterEach(async () => {
 })
 
 describe('AgentManager', () => {
-  it('returns fixed reviewable recipes and refuses an unconfigured Grok distribution', async () => {
+  it('returns fixed reviewable recipes for every independently installable Agent', async () => {
     const root = await mkdtemp(join(tmpdir(), 'threadharbor-agent-plan-'))
     roots.push(root)
     const manager = new AgentManager(options(root, '/missing/agent'))
 
     expect(manager.installPlan('codex')).toMatchObject({
       component: 'codex', requiresConfirmation: true, alreadyInstalled: false,
-      steps: [{ command: expect.stringContaining('@openai/codex@test') }],
+      steps: [{ command: expect.stringContaining('@openai/codex@latest') }],
     })
-    expect(manager.installPlan('grok')).toMatchObject({ steps: [], unavailableReason: expect.any(String) })
+    expect(manager.installPlan('grok')).toMatchObject({
+      steps: [{ command: expect.stringContaining('@xai-official/grok@latest') }],
+    })
+    expect(manager.installPlan('claude')).toMatchObject({
+      steps: [{ command: expect.stringContaining('@anthropic-ai/claude-code@latest') }],
+    })
     expect(() => requireInstallConfirmation(false)).toThrow('confirm: true')
   })
 

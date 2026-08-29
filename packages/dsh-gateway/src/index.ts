@@ -257,6 +257,8 @@ export class RemoteAgentGateway extends Service {
         return await this.enqueue(() => this.deploySshHost(request.params)) as unknown as JsonValue
       case 'agent.install.plan':
       case 'agent.install':
+      case 'agent.config.get':
+      case 'agent.config.set':
       case 'auth.start':
       case 'auth.status':
       case 'auth.respond':

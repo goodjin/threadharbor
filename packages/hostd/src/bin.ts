@@ -19,13 +19,11 @@ interface CliOptions {
   installPrefix: string
   installTimeoutMs: string
   authTimeoutMs: string
+  maxAgentConfigBytes: string
   codexCliCommand: string
   codexCommand: string
   codexArg: string[]
-  codexPackage: string
-  codexAcpPackage: string
   claudeCommand: string
-  claudePackage: string
   dshCommand: string
   dshArg: string[]
   dshProvider: string
@@ -33,7 +31,6 @@ interface CliOptions {
   grokCommand: string
   grokServePort: string
   grokArg: string[]
-  grokInstallCommand: string[]
   workerScript: string
 }
 
@@ -62,13 +59,11 @@ export async function runHostd(argv: readonly string[] = process.argv): Promise<
     .option('--install-prefix <path>', 'user-owned npm installation prefix', join(homedir(), '.local'))
     .option('--install-timeout-ms <ms>', 'agent installation timeout', '600000')
     .option('--auth-timeout-ms <ms>', 'detached login timeout', '900000')
+    .option('--max-agent-config-bytes <bytes>', 'maximum Agent user configuration size', '262144')
     .option('--codex-cli-command <path>', 'Codex CLI executable', join(homedir(), '.local', 'bin', 'codex'))
     .option('--codex-command <path>', 'Codex ACP executable', join(homedir(), '.local', 'bin', 'codex-acp'))
     .option('--codex-arg <arg...>', 'Codex ACP arguments', [])
-    .option('--codex-package <spec>', 'npm package spec installed for Codex', '@openai/codex@latest')
-    .option('--codex-acp-package <spec>', 'npm package spec installed for the Codex ACP adapter', '@agentclientprotocol/codex-acp@latest')
     .option('--claude-command <path>', 'Claude Code executable', join(homedir(), '.local', 'bin', 'claude'))
-    .option('--claude-package <spec>', 'npm package spec installed for Claude Code', '@anthropic-ai/claude-code@latest')
     .option('--dsh-command <path>', 'Harness JSON-RPC executable', 'dsh-jsonrpc-agent')
     .option('--dsh-arg <arg...>', 'Harness JSON-RPC arguments; include the cordis.yml path', [])
     .option('--dsh-provider <name>', 'Harness SDK provider route', 'deepseek-official')
@@ -76,7 +71,6 @@ export async function runHostd(argv: readonly string[] = process.argv): Promise<
     .option('--grok-command <path>', 'Grok executable', 'grok')
     .option('--grok-serve-port <port>', 'loopback Grok agent server port', '2419')
     .option('--grok-arg <arg...>', 'arguments prepended before `agent serve`', [])
-    .option('--grok-install-command <command...>', 'administrator-owned Grok installer command and arguments', [])
     .option('--worker-script <path>', 'detached hold-worker JavaScript entry', defaultHoldWorkerScript())
   command.parse([...argv])
   const cli = command.opts<CliOptions>()
@@ -94,13 +88,12 @@ export async function runHostd(argv: readonly string[] = process.argv): Promise<
     installPrefix: resolve(cli.installPrefix),
     installTimeoutMs: integer(cli.installTimeoutMs, 'install-timeout-ms', 1),
     authTimeoutMs: integer(cli.authTimeoutMs, 'auth-timeout-ms', 1),
+    agentConfigHome: homedir(),
+    maxAgentConfigBytes: integer(cli.maxAgentConfigBytes, 'max-agent-config-bytes', 1),
     codexCliCommand: cli.codexCliCommand,
     codexCommand: cli.codexCommand,
     codexArgs: cli.codexArg,
-    codexPackage: cli.codexPackage,
-    codexAcpPackage: cli.codexAcpPackage,
     claudeCommand: cli.claudeCommand,
-    claudePackage: cli.claudePackage,
     dshCommand: cli.dshCommand,
     dshArgs: cli.dshArg,
     dshProvider: cli.dshProvider,
@@ -109,9 +102,6 @@ export async function runHostd(argv: readonly string[] = process.argv): Promise<
     grokServeHost: '127.0.0.1',
     grokServePort: integer(cli.grokServePort, 'grok-serve-port', 1),
     grokArgs: cli.grokArg,
-    ...(cli.grokInstallCommand.length === 0
-      ? {}
-      : { grokInstall: cli.grokInstallCommand as [string, ...string[]] }),
     workerScript: resolve(cli.workerScript),
   }
   const hostd = new RemoteAgentHostd(options)
