@@ -115,7 +115,11 @@ export class HostdConnection {
   }
 
   /** Issue one RPC and await its result. Throws on timeout or remote error. */
-  async request(method: RemoteHostdMethod, params: Record<string, JsonValue>): Promise<JsonValue> {
+  async request(
+    method: RemoteHostdMethod,
+    params: Record<string, JsonValue>,
+    timeoutMs = this.options.requestTimeoutMs,
+  ): Promise<JsonValue> {
     if (this.closed) throw new Error('hostd connection is closed')
     if (this.state === 'closed') this.open()
     const id = this.allocateId()
@@ -124,7 +128,7 @@ export class HostdConnection {
       const timer = setTimeout(() => {
         this.pending.delete(id)
         reject(new Error(`hostd request ${method} timed out`))
-      }, this.options.requestTimeoutMs)
+      }, timeoutMs)
       this.pending.set(id, { resolve, reject, timer, method, params })
       this.send(frame)
     })

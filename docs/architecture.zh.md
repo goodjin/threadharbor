@@ -37,12 +37,12 @@ Gateway 把已安装包中的自包含 hostd artifact 上传到普通用户目�
 
 ## Agent adapter
 
-Agent manager 把 inventory、auth 和 config 操作放在可扩展 adapter 后面。Agent 由远端管理员安装，hostd 从部署服务的受控 `PATH` 发现已知命令；浏览器不能提交可执行文件、shell 参数或配置路径。
+Agent manager 把 inventory、auth、config 和部署操作放在可扩展 adapter 后面。未安装时，浏览器只能确认一份 hostd 预声明的官方安装计划；实际命令在目标主机上执行，浏览器不能提交可执行文件、shell 参数或配置路径。安装走 npm/pip 官方路径：`npm install -g` 写入该 Node 的 global prefix，`pip install --user` 写入 Python user scripts。hostd 从这些目录和 `PATH` 发现已知命令。
 
 - Codex：发现 `codex` 与 `codex-acp`，登录运行 `codex login --device-auth`。
 - Grok：发现 `grok`，登录运行 `grok login --device-auth`。
 - Claude Code：发现 `claude` 与 `claude-agent-acp`，登录运行 `claude auth login`。
-- DSH：发现 `dsh-jsonrpc-agent`，使用远端已有配置与凭据，不从 ThreadHarbor 交互登录。
+- DSH：发现 `dsh-jsonrpc-agent`；未安装时在主机上执行 `python3 -m pip install --user deepseek-harness-runtime-bin`。使用远端已有配置与凭据，不从 ThreadHarbor 交互登录。
 
 Auth worker 与浏览器生命周期无关。它只解析 HTTPS URL、一次性代码和终态，不向浏览器转发 CLI 原始输出或 token。Claude 等需要回填返回码的流程只能写入一行、最多 2048 字符，并拒绝换行。
 

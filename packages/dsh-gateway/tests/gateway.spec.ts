@@ -236,6 +236,18 @@ function request(method: RemoteControlRequest['method'], params: Record<string, 
 // finishes talking to hostd in the background. Tests that need the binding
 // (or a failed terminal state) before issuing session.prompt / events.read
 // must wait for the inflight completion to settle first.
+async function readTranscript(gateway: RemoteAgentGateway, sessionId: string, extra: Record<string, JsonValue> = {}) {
+  return await gateway.dispatch(request('transcript.read', { sessionId, ...extra })) as {
+    sessionId: string
+    entries: Array<{ sessionId: string; role: string; kind: string; text: string; seq: number }>
+    latestSeq: number
+    fromSeq: number
+    toSeq: number
+    hasMore: boolean
+    afterSeq: number
+  }
+}
+
 async function waitForSessionBinding(
   gateway: RemoteAgentGateway,
   sessionId: string,
@@ -268,6 +280,30 @@ describe('RemoteAgentGateway', () => {
       await expect(gateway.dispatch(request('host.add', {
         title: 'bad', endpoint: 'http://user:secret@127.0.0.1:4101',
       }))).rejects.toThrow('must not contain credentials')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('starts an agent-install operation and forwards agent.install to hostd', async () => {
+    const { ctx, gateway, calls } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4101',
+      })) as unknown as { hostId: string }
+      const started = await gateway.dispatch(request('operation.start', {
+        kind: 'agent-install', hostId: host.hostId, backend: 'dsh', confirm: true,
+      })) as unknown as { operationId: string; kind: string; backend?: string }
+      expect(started).toMatchObject({ kind: 'agent-install', backend: 'dsh' })
+      await vi.waitFor(() => {
+        const latest = gateway.state().operations.find(operation => operation.operationId === started.operationId)
+        if (latest?.status !== 'succeeded') throw new Error(`install status ${latest?.status ?? 'missing'}`)
+        return latest
+      }, { timeout: 2000, interval: 10 })
+      expect(calls.some(call => call.request.method === 'agent.install')).toBe(true)
+      const forwarded = calls.find(call => call.request.method === 'agent.install')?.request
+      expect(forwarded?.params).toMatchObject({ backend: 'dsh', confirm: true })
+      expect(forwarded?.params).not.toHaveProperty('hostId')
     } finally {
       await ctx.fiber.dispose()
     }
@@ -334,7 +370,8 @@ describe('RemoteAgentGateway', () => {
       const promptCalls = calls.filter(call => call.request.method === 'session.prompt')
       expect(promptCalls).toHaveLength(2)
       expect(promptCalls[0]?.request.params['admission']).toEqual(promptCalls[1]?.request.params['admission'])
-      const transcript = gateway.state().transcript.filter(entry => entry.sessionId === RemoteSessionId(session.sessionId))
+      expect(gateway.state().transcript).toEqual([])
+      const transcript = (await readTranscript(gateway, session.sessionId)).entries
       expect(transcript.filter(entry => entry.role === 'user')).toHaveLength(1)
       expect(transcript.map(entry => [entry.role, entry.kind, entry.text])).toEqual([
         ['user', 'message', 'hello'],
@@ -342,6 +379,36 @@ describe('RemoteAgentGateway', () => {
         ['assistant', 'message', 'answer'],
         ['system', 'status', '远程轮次完成'],
       ])
+      expect(gateway.state().sessions.find(entry => entry.sessionId === RemoteSessionId(session.sessionId))?.latestTranscriptSeq)
+        .toBe(transcript.at(-1)?.seq)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('pages transcript.read from the tail and older cursor without dumping the catalog', async () => {
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', id: 9, method: 'session/request_permission', params: { title: 'Allow?', options: [] } },
+      { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { text: 'answer' } } } },
+      { jsonrpc: '2.0', method: '_x.ai/session/prompt_complete', params: { stopReason: 'end_turn' } },
+    ]
+    const { ctx, gateway } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4210' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'page-1', text: 'hello',
+      }))
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      expect(gateway.state().transcript).toEqual([])
+      const tail = await readTranscript(gateway, session.sessionId, { limit: 2 })
+      expect(tail.hasMore).toBe(true)
+      expect(tail.entries.map(entry => entry.text)).toEqual(['answer', '远程轮次完成'])
+      const older = await readTranscript(gateway, session.sessionId, { beforeSeq: tail.fromSeq, limit: 2 })
+      expect(older.entries.map(entry => entry.text)).toEqual(['hello', 'Allow?'])
+      expect(older.hasMore).toBe(false)
     } finally {
       await ctx.fiber.dispose()
     }
@@ -407,8 +474,7 @@ describe('RemoteAgentGateway', () => {
       await vi.waitFor(() => {
         expect(gateway.state().sessions.find(candidate => candidate.sessionId === session.sessionId)?.turnState).toBe('idle')
       })
-      expect(gateway.state().transcript.some(entry => entry.sessionId === session.sessionId
-        && entry.text === 'late answer')).toBe(true)
+      expect((await readTranscript(gateway, session.sessionId)).entries.some(entry => entry.text === 'late answer')).toBe(true)
     } finally {
       await ctx.fiber.dispose()
     }
@@ -506,10 +572,11 @@ describe('RemoteAgentGateway', () => {
       expect(child).toMatchObject({ backend: 'codex', title: 'Inspect tests' })
       expect(calls.some(call => call.request.method === 'session.adopt'
         && call.request.params['nativeSessionId'] === 'native-child')).toBe(true)
-      expect(gateway.state().transcript).toHaveLength(0)
+      expect(gateway.state().transcript).toEqual([])
+      expect((await readTranscript(gateway, parent.sessionId)).entries).toEqual([])
 
       await gateway.dispatch(request('events.read', { sessionId: child!.sessionId }))
-      expect(gateway.state().transcript.map(entry => [entry.sessionId, entry.text]))
+      expect((await readTranscript(gateway, child!.sessionId)).entries.map(entry => [entry.sessionId, entry.text]))
         .toEqual([[child!.sessionId, 'child answer']])
     } finally {
       await ctx.fiber.dispose()

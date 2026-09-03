@@ -3,6 +3,8 @@
 import type { JsonValue } from '@threadharbor/protocol'
 
 const MAX_MERGED_CHARS = 240
+/** Idle window before a buffered thought/message chunk is journaled. */
+export const CHUNK_COALESCE_IDLE_MS = 40
 
 interface PendingChunk {
   frame: Record<string, JsonValue>

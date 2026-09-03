@@ -12,7 +12,7 @@ import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConvOwnerProps } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {
   JsonValue, RemoteAgentBackend, RemoteAgentConfigBackend, RemoteAgentConfigDocument, RemoteAuthChallenge,
-  RemoteDirectoryListing, RemoteHostView, RemoteOperationView, RemoteProjectView, RemoteSshConfig,
+  RemoteDirectoryListing, RemoteHostView, RemoteInstallPlan, RemoteOperationView, RemoteProjectView, RemoteSshConfig,
   RemoteSessionView, RemoteSshInspection, RemoteTranscriptEntry,
 } from '@threadharbor/protocol'
 import { RemoteHostId, RemoteProjectId, RemoteSessionId, isRemoteBackendSessionReady } from '@threadharbor/protocol'
@@ -594,9 +594,9 @@ function HostPanel({ host, store, operations, onClose, artifactVersion }: {
         <section className={css.settingsSection}>
           <header className={css.settingsSectionHeader}>
             <h2>Agent</h2>
-            <p>查看、登录或编辑这台主机上已安装的 Agent。</p>
+            <p>查看、部署、登录或编辑这台主机上的 Agent。</p>
           </header>
-          <AgentSetupPanel host={host} store={store} embedded />
+          <AgentSetupPanel host={host} store={store} operations={operations} embedded />
         </section>
       )}
     </PanelShell>
@@ -908,9 +908,10 @@ function SessionControls({ backend, preferences, disabled, onChange }: {
   )
 }
 
-function AgentSetupPanel({ host, store, onClose, embedded = false }: {
+function AgentSetupPanel({ host, store, operations = [], onClose, embedded = false }: {
   host: RemoteHostView
   store: RemoteAgentStore
+  operations?: readonly RemoteOperationView[]
   onClose?: () => void
   embedded?: boolean
 }) {
@@ -923,6 +924,8 @@ function AgentSetupPanel({ host, store, onClose, embedded = false }: {
   const [dshApiKey, setDshApiKey] = useState('')
   const [dshSaved, setDshSaved] = useState(false)
   const [dshEditing, setDshEditing] = useState(false)
+  const [plan, setPlan] = useState<RemoteInstallPlan>()
+  const [operationId, setOperationId] = useState<string>()
   const [response, setResponse] = useState('')
   const [localError, setLocalError] = useState('')
   const [busyAction, setBusyAction] = useState<string>()
@@ -938,6 +941,15 @@ function AgentSetupPanel({ host, store, onClose, embedded = false }: {
     void store.refreshInventory(host.hostId).catch(() => undefined)
   }, [host.hostId, store])
   useEffect(() => {
+    if (operationId === undefined) return
+    const finished = operations.find(operation => operation.operationId === operationId)
+    if (finished?.status !== 'succeeded' && finished?.status !== 'failed') return
+    if (finished.status === 'succeeded') {
+      setPlan(undefined)
+      void store.refreshInventory(host.hostId).catch(() => undefined)
+    }
+  }, [operations, operationId, host.hostId, store])
+  useEffect(() => {
     if (auth === undefined || !['starting', 'waiting-user'].includes(auth.status)) return
     const timer = window.setTimeout(() => {
       void store.authStatus(host.hostId, auth.flowId).then((next) => {
@@ -951,6 +963,7 @@ function AgentSetupPanel({ host, store, onClose, embedded = false }: {
   const clearOther = (backend: RemoteAgentBackend): void => {
     setLocalError('')
     if (auth !== undefined && auth.backend !== backend) setAuth(undefined)
+    if (plan !== undefined && plan.component !== backend) setPlan(undefined)
     if (config !== undefined && config.backend !== backend) {
       setConfig(undefined)
       setConfigOpen(true)
@@ -964,6 +977,7 @@ function AgentSetupPanel({ host, store, onClose, embedded = false }: {
       setConfig(undefined)
       setConfigOpen(true)
       setConfigSaved(false)
+      setPlan(undefined)
       setDshApiKey('')
       setDshSaved(false)
       setDshEditing(false)
@@ -1007,6 +1021,20 @@ function AgentSetupPanel({ host, store, onClose, embedded = false }: {
     setDshEditing(!configured)
     setLocalError('')
   }
+  const loadPlan = (backend: RemoteAgentBackend): void => {
+    setOpenBackend(backend)
+    setAuth(undefined)
+    setConfig(undefined)
+    setLocalError('')
+    void tracked(`${backend}:plan`, () => store.installPlan(host.hostId, backend)).then(setPlan)
+      .catch((error: unknown) => { setLocalError(String(error)) })
+  }
+  const deployAgent = (backend: RemoteAgentBackend): void => {
+    setLocalError('')
+    void tracked(`${backend}:install-start`, () => store.installAgent(host.hostId, backend)).then((operation) => {
+      setOperationId(operation.operationId)
+    }).catch((error: unknown) => { setLocalError(String(error)) })
+  }
 
   const content = (
     <div className={css.agentSetupWide}>
@@ -1016,9 +1044,16 @@ function AgentSetupPanel({ host, store, onClose, embedded = false }: {
           const backendAuth = auth !== undefined && auth.backend === backend ? auth : undefined
           const backendConfig = config !== undefined && config.backend === backend ? config : undefined
           const backendBusy = busyAction?.startsWith(`${backend}:`) === true
+          const backendPlan = plan !== undefined && plan.component === backend ? plan : undefined
+          const deployOperation = operations.find(operation => operation.operationId === operationId && operation.backend === backend)
+            ?? operations.find(operation => operation.kind === 'agent-install'
+              && operation.hostId === host.hostId
+              && operation.backend === backend
+              && (operation.status === 'queued' || operation.status === 'running'))
+          const deploying = deployOperation?.status === 'queued' || deployOperation?.status === 'running'
           const statusText = entry?.detail
             ?? (!entry?.installed
-              ? '未安装，请在远端主机配置'
+              ? '未安装'
               : backend === 'claude'
                 ? '已安装，可通过配置提供凭据'
                 : backend === 'dsh'
@@ -1037,6 +1072,11 @@ function AgentSetupPanel({ host, store, onClose, embedded = false }: {
                   </span>
                 </button>
                 <div className={css.panelActions}>
+                  {entry !== undefined && entry.installed !== true && (
+                    <Button size="sm" variant="outline" disabled={backendBusy || deploying} onClick={() => { loadPlan(backend) }}>
+                      {busyAction === `${backend}:plan` ? '读取中…' : deploying ? '部署中…' : '部署'}
+                    </Button>
+                  )}
                   {entry?.installed && !entry.authenticated && (backend === 'grok' || backend === 'codex') && (
                     <Button size="sm" variant="outline" disabled={backendBusy} onClick={() => { login(backend) }}>{busyAction === `${backend}:login` ? '启动登录…' : '登录'}</Button>
                   )}
@@ -1044,12 +1084,32 @@ function AgentSetupPanel({ host, store, onClose, embedded = false }: {
               </div>
               {open && (
                 <div className={css.agentRowBody}>
-                  {!entry?.installed && localError === '' && (
-                    <p className={css.muted}>请在远端主机安装 {backend}，并确保其命令可从 PATH 访问，然后刷新状态。</p>
+                  {!entry?.installed && backendPlan === undefined && localError === '' && (
+                    <p className={css.muted}>
+                      {busyAction === `${backend}:plan` ? '正在读取部署计划…' : '点击部署后会在这台主机上执行官方安装命令。'}
+                    </p>
                   )}
                   {entry?.installed && backend !== 'dsh' && backendAuth === undefined && backendConfig === undefined && localError === '' && (
                     <p className={css.muted}>{busyAction === `${backend}:config-load` ? '正在读取配置…' : '正在打开配置文件。'}</p>
                   )}
+                  {backendPlan !== undefined && (
+                    <div className={css.setupCard}>
+                      <strong>部署 {backendPlan.component}</strong>
+                      <span>{backendPlan.version}</span>
+                      {backendPlan.steps.map(step => <code key={step.command} title={step.title}>{step.command}</code>)}
+                      {backendPlan.unavailableReason !== undefined
+                        ? <p className={css.error}>{backendPlan.unavailableReason}</p>
+                        : backendPlan.alreadyInstalled
+                          ? <p>目标已经安装。</p>
+                          : (
+                            <Button size="sm" variant="primary" disabled={backendBusy || deploying} onClick={() => {
+                              if (backendPlan.component === 'hostd') return
+                              deployAgent(backendPlan.component)
+                            }}>{busyAction === `${backend}:install-start` || deploying ? '部署中…' : '确认部署'}</Button>
+                          )}
+                    </div>
+                  )}
+                  {deployOperation !== undefined && <OperationProgress operation={deployOperation} />}
                   {entry?.installed && backend === 'dsh' && localError === '' && (
                     dshSaved && !dshEditing
                       ? (

@@ -6,6 +6,9 @@ describe('remote-agent control protocol', () => {
     expect(parseRemoteControlRequest({ id: 'r1', method: 'state', params: {} })).toEqual({
       id: 'r1', method: 'state', params: {},
     })
+    expect(parseRemoteControlRequest({ id: 'r2', method: 'transcript.read', params: { sessionId: 's1', limit: 100 } })).toEqual({
+      id: 'r2', method: 'transcript.read', params: { sessionId: 's1', limit: 100 },
+    })
     expect(remoteAgentBackend('codex')).toBe('codex')
     expect(remoteAgentBackend('claude')).toBe('claude')
     expect(remoteAgentConfigBackend('grok')).toBe('grok')

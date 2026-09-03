@@ -242,6 +242,51 @@ describe('HoldWorker', () => {
       await worker.close()
     }
   })
+
+  it('merges consecutive thought chunks across the 40ms idle window', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-hold-coalesce-'))
+    roots.push(root)
+    const socketPath = join(root, 'control.sock')
+    const config: HoldWorkerConfig = {
+      version: 1,
+      holdId: 'hold',
+      generation: 'generation',
+      backend: 'claude',
+      cwd: root,
+      socketPath,
+      journalPath: join(root, 'journal.jsonl'),
+      statePath: join(root, 'state.json'),
+      maxJournalEvents: 20,
+      maxJournalBytes: 100_000,
+      transport: {
+        kind: 'stdio', command: process.execPath,
+        args: [new URL('./fixtures/fake-acp-thoughts.mjs', import.meta.url).pathname],
+      },
+    }
+    const worker = new HoldWorker(config)
+    await worker.start()
+    try {
+      expect(await send(socketPath, admission('think'))).toMatchObject({ ok: true, result: { duplicate: false } })
+      await vi.waitFor(async () => {
+        const page = await send(socketPath, { operation: 'read', afterSeq: 0, generation: 'generation' })
+        if (!page.ok) throw new Error(page.error)
+        const thoughts = (page.result as { events: readonly { frame: Record<string, unknown> }[] }).events.filter((event) => {
+          const frame = event.frame
+          if (frame === null || typeof frame !== 'object') return false
+          const params = Reflect.get(frame, 'params')
+          if (params === null || typeof params !== 'object') return false
+          const update = Reflect.get(params, 'update')
+          if (update === null || typeof update !== 'object') return false
+          return Reflect.get(update, 'sessionUpdate') === 'agent_thought_chunk'
+        })
+        expect(thoughts).toHaveLength(1)
+        const update = Reflect.get(Reflect.get(thoughts[0]!.frame, 'params') as object, 'update') as { content: { text: string } }
+        expect(update.content.text).toBe('The user wants to add outline')
+      }, { timeout: 1000, interval: 20 })
+    } finally {
+      await worker.close()
+    }
+  })
 })
 
 describe('parseConfig', () => {

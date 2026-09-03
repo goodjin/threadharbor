@@ -19,6 +19,8 @@ import {
   RemoteProjectId,
   RemoteSessionId,
   RemoteTranscriptId,
+  REMOTE_TRANSCRIPT_PAGE_MAX,
+  REMOTE_TRANSCRIPT_PAGE_SIZE,
   isRemoteBackendSessionReady,
   isJsonValue,
   jsonObject,
@@ -41,6 +43,7 @@ import {
   type RemoteSessionView,
   type RemoteSshConfig,
   type RemoteTranscriptEntry,
+  type RemoteTranscriptPage,
 } from '@threadharbor/protocol'
 import { projectNativeFrame } from './projection.ts'
 import { remoteAgentDomainSpec, type RemoteAgentCatalogState } from './spec.ts'
@@ -159,6 +162,13 @@ function optionalString(record: Record<string, JsonValue>, key: string): string 
   return value
 }
 
+function optionalNonNegativeInteger(record: Record<string, JsonValue>, key: string): number | undefined {
+  const value = record[key]
+  if (value === undefined) return undefined
+  if (!Number.isSafeInteger(value) || (value as number) < 0) throw new TypeError(`${key} must be a non-negative integer`)
+  return value as number
+}
+
 function requiredName(record: Record<string, JsonValue>, key: string): string {
   const value = stringField(record, key).trim()
   if (value === '') throw new Error(`${key} must not be blank`)
@@ -229,6 +239,7 @@ function displayError(error: unknown): string {
 function operationFailureDetail(kind: RemoteOperationView['kind'], error: unknown): string {
   const message = errorMessage(error)
   if (/timed out|timeout/i.test(message)) return '操作超时，请检查远端主机状态后重试。'
+  if (kind === 'agent-install') return displayError(error) || 'Agent 部署失败，请检查远端主机的 npm/python 和网络后重试。'
   if (/host key changed|approved fingerprint/i.test(message)) return 'SSH 主机密钥与已批准的指纹不一致。'
   if (/Node\.js 22/i.test(message)) return '远端主机需要 Node.js 22 或更高版本。'
   if (/configured SSH credentials/i.test(message)) return '无法使用当前 SSH 配置连接远端主机。'
@@ -338,9 +349,7 @@ export class RemoteAgentGateway extends Service {
     }
   }
 
-  /** Complete current browser projection in durable order.
-   * @returns the current catalog and transcript projection.
-   */
+  /** Complete current browser catalog projection. Transcript bodies are loaded per session. */
   state(): RemoteAgentState {
     const state = this.requireGlobal().get()
     const tables = this.requireTables()
@@ -354,9 +363,9 @@ export class RemoteAgentGateway extends Service {
         .filter(project => project.hiddenAt === undefined && tables.hosts.get(project.hostId)?.hiddenAt === undefined),
       sessions: state.sessionIds
         .map(id => this.requireRecord(tables.sessions, id, 'session'))
-        .filter(session => this.sessionIsVisible(session)),
-      transcript: [...tables.transcript.entries()].map(([, entry]) => entry)
-        .sort((left, right) => left.sessionId.localeCompare(right.sessionId) || left.seq - right.seq),
+        .filter(session => this.sessionIsVisible(session))
+        .map(session => this.withTranscriptHead(session, state)),
+      transcript: [],
       operations: [...this.operations.values()].sort((left, right) => right.startedAt.localeCompare(left.startedAt)),
       hostdArtifactVersion: hostdArtifactVersion(),
       browserId: 'gateway',
@@ -392,6 +401,8 @@ export class RemoteAgentGateway extends Service {
         return this.startOperation(request.params) as unknown as JsonValue
       case 'operation.list':
         return [...this.operations.values()].sort((left, right) => right.startedAt.localeCompare(left.startedAt)) as unknown as JsonValue
+      case 'agent.install.plan':
+      case 'agent.install':
       case 'agent.config.get':
       case 'agent.config.set':
       case 'agent.credential.status':
@@ -431,6 +442,8 @@ export class RemoteAgentGateway extends Service {
         return await this.enqueue(() => this.cancel(request.params))
       case 'session.permission':
         return await this.enqueue(() => this.permission(request.params))
+      case 'transcript.read':
+        return this.readTranscript(request.params) as unknown as JsonValue
       case 'events.read':
         return await this.enqueue(() => this.syncEvents(request.params)) as unknown as JsonValue
       case 'session.follow':
@@ -597,13 +610,37 @@ export class RemoteAgentGateway extends Service {
         return { hostId: host.hostId }
       })
     }
-    throw new Error('operation kind must be host-ssh-deploy')
+    if (kind === 'agent-install') {
+      const hostId = RemoteHostId(stringField(params, 'hostId'))
+      const host = this.requireHost(hostId)
+      const backend = remoteAgentBackend(params['backend'])
+      return this.launchOperation({
+        kind,
+        title: `部署 ${backend}`,
+        detail: `已在 ${host.title} 上排队部署 ${backend}。`,
+        target: `host:${hostId}:agent:${backend}`,
+        hostId,
+        backend,
+      }, async (report) => {
+        report({ phase: 'installing', detail: `正在 ${host.title} 上执行 ${backend} 的官方安装命令。` })
+        await this.callHostd(host, 'agent.install', { backend, confirm: true }, this.config.sshInstallTimeoutMs)
+        report({ phase: 'verifying', detail: `正在验证 ${backend} 安装结果。` })
+        report({ phase: 'refreshing', detail: '正在刷新 Agent 库存状态。' })
+        const refreshed = await this.refreshHostInventory(this.requireHost(hostId))
+        const installed = refreshed.inventory?.backends.find(candidate => candidate.backend === backend)?.installed === true
+        if (refreshed.inventoryError !== undefined || !installed) {
+          throw new Error('installed Agent did not pass inventory verification')
+        }
+        return { hostId }
+      })
+    }
+    throw new Error('operation kind must be host-ssh-deploy or agent-install')
   }
 
   /** Register one background task, serialize its mutation, and retain a safe result summary. */
   private launchOperation(
     input: Pick<RemoteOperationView, 'kind' | 'title' | 'detail' | 'target'>
-      & Partial<Pick<RemoteOperationView, 'hostId'>>,
+      & Partial<Pick<RemoteOperationView, 'hostId' | 'backend'>>,
     work: (report: (progress: SshDeploymentProgress | { phase: RemoteOperationPhase; detail: string }) => void) => Promise<{ hostId?: ReturnType<typeof RemoteHostId> }>,
   ): RemoteOperationView {
     const duplicate = [...this.operations.values()].find(operation =>
@@ -621,6 +658,7 @@ export class RemoteAgentGateway extends Service {
       target: input.target,
       cancellable: false,
       ...(input.hostId === undefined ? {} : { hostId: input.hostId }),
+      ...(input.backend === undefined ? {} : { backend: input.backend }),
       startedAt: now,
       updatedAt: now,
     }
@@ -888,7 +926,7 @@ export class RemoteAgentGateway extends Service {
     // Persist and announce the connecting-state row immediately so the caller
     // (and any future re-attach from a refreshed browser) sees the session
     // before the remote hold exists. The hostd call runs after we return.
-    this.wsBroadcaster.broadcast({ type: 'session.view.changed', session })
+    this.broadcastSessionView(session)
     const completion = this.completeStart(host, session, parent?.binding?.nativeSessionId)
     this.inflightStarts.set(sessionId, completion)
     void completion.finally(() => { this.inflightStarts.delete(sessionId) })
@@ -919,7 +957,7 @@ export class RemoteAgentGateway extends Service {
       }) as unknown as RemoteSessionAttachResult
       const ready = this.withAttachment(initial, attached)
       await tables.sessions.put(initial.sessionId, ready)
-      this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: ready })
+      this.broadcastSessionView(ready)
     } catch (error) {
       const failed: RemoteSessionView = {
         ...initial,
@@ -928,7 +966,7 @@ export class RemoteAgentGateway extends Service {
         updatedAt: new Date().toISOString(),
       }
       await tables.sessions.put(initial.sessionId, failed)
-      this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: failed })
+      this.broadcastSessionView(failed)
       this.wsBroadcaster.broadcast({
         type: 'operation.progress',
         operationId: `session-start-${initial.sessionId}`,
@@ -967,7 +1005,7 @@ export class RemoteAgentGateway extends Service {
     }
     const ready = this.withAttachment(session, attached)
     await this.requireTables().sessions.put(session.sessionId, ready)
-    this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: ready })
+    this.broadcastSessionView(ready)
     return ready
   }
 
@@ -1115,7 +1153,7 @@ export class RemoteAgentGateway extends Service {
       ...session, turnState: 'running', channelState: 'open', updatedAt: new Date().toISOString(),
     }
     await this.requireTables().sessions.put(session.sessionId, running)
-    this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: running })
+    this.broadcastSessionView(running)
     // A running turn must keep projecting its journal even when the browser
     // disconnects or hostd push delivery is temporarily silent.
     this.ensureFollowedSync(session.sessionId)
@@ -1129,7 +1167,7 @@ export class RemoteAgentGateway extends Service {
         ...running, turnState: 'failed', updatedAt: new Date().toISOString(),
       }
       await this.requireTables().sessions.put(session.sessionId, failed)
-      this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: failed })
+      this.broadcastSessionView(failed)
       const failureId = RemoteTranscriptId(`delivery:${session.sessionId}:${clientId}:${requestId}`)
       if (this.requireTables().transcript.get(failureId) === undefined) {
         await this.appendTranscript(session.sessionId, {
@@ -1158,7 +1196,7 @@ export class RemoteAgentGateway extends Service {
           ...current, turnState: 'idle', updatedAt: new Date().toISOString(),
         }
         await this.requireTables().sessions.put(session.sessionId, stopped)
-        this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: stopped })
+        this.broadcastSessionView(stopped)
       }
       return result
     } catch (error) {
@@ -1173,7 +1211,7 @@ export class RemoteAgentGateway extends Service {
           updatedAt: new Date().toISOString(),
         }
         await this.requireTables().sessions.put(session.sessionId, failed)
-        this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: failed })
+        this.broadcastSessionView(failed)
       }
       throw error
     }
@@ -1226,7 +1264,7 @@ export class RemoteAgentGateway extends Service {
         binding: { ...binding, state: 'lost' }, updatedAt: new Date().toISOString(),
       }
       await this.requireTables().sessions.put(session.sessionId, lost)
-      this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: lost })
+      this.broadcastSessionView(lost)
       throw new Error('remote hold generation changed; in-flight outcome is unknown')
     }
     const transcript: TranscriptInput[] = []
@@ -1272,7 +1310,7 @@ export class RemoteAgentGateway extends Service {
     }
     await this.requireTables().sessions.put(session.sessionId, updated)
     if (turnState !== session.turnState || processedThrough !== binding.lastSeq) {
-      this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: updated })
+      this.broadcastSessionView(updated)
     }
     return processedThrough
   }
@@ -1325,6 +1363,58 @@ export class RemoteAgentGateway extends Service {
     await tables.sessions.put(sessionId, child)
     const state = this.requireGlobal().get()
     await this.requireGlobal().set({ ...state, sessionIds: [...state.sessionIds, sessionId] })
+  }
+
+  private withTranscriptHead(
+    session: RemoteSessionView,
+    state = this.requireGlobal().get(),
+  ): RemoteSessionView {
+    return { ...session, latestTranscriptSeq: (state.nextTranscriptSeq[session.sessionId] ?? 0) - 1 }
+  }
+
+  private broadcastSessionView(session: RemoteSessionView): void {
+    this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: this.withTranscriptHead(session) })
+  }
+
+  private sessionTranscriptEntries(sessionId: ReturnType<typeof RemoteSessionId>): RemoteTranscriptEntry[] {
+    return [...this.requireTables().transcript.entries()]
+      .map(([, entry]) => entry)
+      .filter(entry => entry.sessionId === sessionId)
+      .sort((left, right) => left.seq - right.seq)
+  }
+
+  private readTranscript(params: Record<string, JsonValue>): RemoteTranscriptPage {
+    const sessionId = RemoteSessionId(stringField(params, 'sessionId'))
+    this.requireSession(sessionId)
+    const afterSeq = optionalNonNegativeInteger(params, 'afterSeq')
+    const beforeSeq = optionalNonNegativeInteger(params, 'beforeSeq')
+    if (afterSeq !== undefined && beforeSeq !== undefined) {
+      throw new TypeError('transcript.read accepts afterSeq or beforeSeq, not both')
+    }
+    const requested = optionalNonNegativeInteger(params, 'limit') ?? REMOTE_TRANSCRIPT_PAGE_SIZE
+    const limit = Math.min(Math.max(requested, 1), REMOTE_TRANSCRIPT_PAGE_MAX)
+    const entries = this.sessionTranscriptEntries(sessionId)
+    const latestSeq = entries.at(-1)?.seq ?? -1
+    const page = afterSeq !== undefined
+      ? entries.filter(entry => entry.seq > afterSeq).slice(0, limit)
+      : beforeSeq !== undefined
+        ? entries.filter(entry => entry.seq < beforeSeq).slice(-limit)
+        : entries.slice(-limit)
+    const remaining = afterSeq !== undefined
+      ? entries.filter(entry => entry.seq > afterSeq).length
+      : beforeSeq !== undefined
+        ? entries.filter(entry => entry.seq < beforeSeq).length
+        : entries.length
+    return {
+      sessionId,
+      entries: page,
+      afterSeq: afterSeq ?? -1,
+      ...(beforeSeq === undefined ? {} : { beforeSeq }),
+      fromSeq: page.at(0)?.seq ?? -1,
+      toSeq: page.at(-1)?.seq ?? -1,
+      latestSeq,
+      hasMore: remaining > page.length,
+    }
   }
 
   private async listDirectory(params: Record<string, JsonValue>): Promise<RemoteDirectoryListing> {
@@ -1468,7 +1558,7 @@ export class RemoteAgentGateway extends Service {
               updatedAt: new Date().toISOString(),
             }
             void this.requireTables().sessions.put(sessionId, next)
-            this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: next })
+            this.broadcastSessionView(next)
             lost = true
           }
         },
@@ -1525,8 +1615,13 @@ export class RemoteAgentGateway extends Service {
     return await this.callHostd(this.requireHost(project.hostId), method, params)
   }
 
-  private async callHostd(host: RemoteHostView, method: RemoteControlRequest['method'], params: Record<string, JsonValue>): Promise<JsonValue> {
-    return await this.hostdConnections.request(host, method, params)
+  private async callHostd(
+    host: RemoteHostView,
+    method: RemoteControlRequest['method'],
+    params: Record<string, JsonValue>,
+    timeoutMs?: number,
+  ): Promise<JsonValue> {
+    return await this.hostdConnections.request(host, method, params, timeoutMs)
   }
 
   private requireHost(id: ReturnType<typeof RemoteHostId>): RemoteHostView {

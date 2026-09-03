@@ -51,9 +51,10 @@ export class HostdConnectionPool {
     host: RemoteHostView,
     method: string,
     params: Record<string, JsonValue>,
+    timeoutMs?: number,
   ): Promise<JsonValue> {
     const conn = await this.ensureConnection(host)
-    return await conn.request(method as Parameters<HostdConnection['request']>[0], params)
+    return await conn.request(method as Parameters<HostdConnection['request']>[0], params, timeoutMs)
   }
 
   /** Subscribe to journal events for one session. Returns an unsubscribe fn. */

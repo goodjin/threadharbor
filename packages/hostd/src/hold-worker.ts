@@ -13,7 +13,7 @@ import {
   isJsonValue, jsonObject, type JsonValue, type RemoteJournalEvent, type RemoteJournalPage,
 } from '@threadharbor/protocol'
 import type { HoldRequest, HoldResponse, HoldWorkerConfig, HoldWorkerState } from './hold-protocol.ts'
-import { ChunkCoalescer } from './chunk-coalescer.ts'
+import { ChunkCoalescer, CHUNK_COALESCE_IDLE_MS } from './chunk-coalescer.ts'
 
 const JOURNAL_COMPACT_APPEND_INTERVAL = 512
 const JOURNAL_LOG_APPEND_INTERVAL = 128
@@ -337,7 +337,7 @@ export class HoldWorker {
   }
 
   private scheduleCoalesceFlush(): void {
-    if (this.coalesceTimer !== undefined) return
+    this.clearCoalesceTimer()
     this.coalesceTimer = setTimeout(() => {
       this.coalesceTimer = undefined
       const journaled = this.journalFrames(this.coalescer.flush())
@@ -345,7 +345,7 @@ export class HoldWorker {
       this.resolveWaiters(journaled[journaled.length - 1]!)
       this.resolveSeqWaiters()
       this.writeState(true)
-    }, 40)
+    }, CHUNK_COALESCE_IDLE_MS)
   }
 
   private clearCoalesceTimer(): void {

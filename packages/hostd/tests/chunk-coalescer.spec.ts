@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ChunkCoalescer } from '../src/chunk-coalescer.ts'
+import { ChunkCoalescer, CHUNK_COALESCE_IDLE_MS } from '../src/chunk-coalescer.ts'
 
 function messageChunk(text: string, messageId = 'm1'): object {
   return {
@@ -29,6 +29,10 @@ function toolCall(): object {
 }
 
 describe('ChunkCoalescer', () => {
+  it('exposes a 40ms idle flush window for hold workers', () => {
+    expect(CHUNK_COALESCE_IDLE_MS).toBe(40)
+  })
+
   it('merges consecutive ACP message tokens and flushes before a tool call', () => {
     const coalescer = new ChunkCoalescer()
     expect(coalescer.push(messageChunk('虚'))).toEqual([])

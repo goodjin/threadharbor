@@ -8,16 +8,19 @@ import {
 import { delimiter, dirname, join } from 'node:path'
 import {
   RemoteAuthFlowId,
+  type JsonValue,
   type RemoteAgentConfigBackend,
   type RemoteAgentConfigDocument,
   type RemoteAuthChallenge,
   type RemoteAgentBackend,
   type RemoteBackendInventory,
+  type RemoteInstallPlan,
 } from '@threadharbor/protocol'
 import { AgentConfigManager } from './agent-config.ts'
 
 /** Resolved commands and bounded operation timings for agent management. */
 export interface AgentManagerOptions {
+  readonly installTimeoutMs: number
   readonly authTimeoutMs: number
   readonly agentConfigHome: string
   readonly maxAgentConfigBytes: number
@@ -27,7 +30,16 @@ export interface AgentManagerOptions {
   readonly claudeAcpCommand: string
   readonly grokCommand: string
   readonly dshCommand: string
+  /** Test seam; production resolves npm next to the hostd Node executable. */
+  readonly npmCommand?: readonly [command: string, ...args: string[]]
+  /** Test seam; production uses python3, then python. */
+  readonly pythonCommand?: string
 }
+
+const CODEX_PACKAGES = ['@openai/codex@0.150.1', '@agentclientprotocol/codex-acp@1.6.2'] as const
+const GROK_PACKAGES = ['@xai-official/grok@1.0.5'] as const
+const CLAUDE_PACKAGES = ['@anthropic-ai/claude-code@2.1.251', '@agentclientprotocol/claude-agent-acp@0.69.0'] as const
+const DSH_PIP_SPEC = 'deepseek-harness-runtime-bin==0.1.1rc1'
 
 interface AuthFlow {
   challenge: RemoteAuthChallenge
@@ -43,7 +55,7 @@ function chunkText(chunk: unknown): string {
   return String(chunk)
 }
 
-function commandExists(command: string): boolean {
+function commandExists(command: string, extraBins: readonly string[] = []): boolean {
   if (command.includes('/') || command.includes('\\')) {
     try {
       accessSync(command, constants.X_OK)
@@ -55,7 +67,8 @@ function commandExists(command: string): boolean {
   const extensions = process.platform === 'win32'
     ? (process.env['PATHEXT'] ?? '.EXE;.CMD;.BAT;.COM').split(';')
     : ['']
-  for (const directory of (process.env['PATH'] ?? '').split(delimiter)) {
+  const directories = [...extraBins, dirname(process.execPath), ...(process.env['PATH'] ?? '').split(delimiter)]
+  for (const directory of directories) {
     if (directory === '') continue
     for (const extension of extensions) {
       try {
@@ -69,13 +82,46 @@ function commandExists(command: string): boolean {
   return false
 }
 
+function quoteDisplay(value: string): string {
+  if (/^[A-Za-z0-9_@./:=+-]+$/.test(value)) return value
+  return `'${value.replaceAll("'", "'\\''")}'`
+}
+
+function planStep(title: string, command: string): { readonly title: string; readonly command: string } {
+  return { title, command }
+}
+
+function resolveNpm(): { readonly command: string; readonly args: readonly string[] } {
+  const npm = join(dirname(process.execPath), process.platform === 'win32' ? 'npm.cmd' : 'npm')
+  if (commandExists(npm)) {
+    return process.platform === 'win32'
+      ? { command: npm, args: [] }
+      : { command: process.execPath, args: [npm] }
+  }
+  return { command: 'npm', args: [] }
+}
+
+function resolvePython(): string | undefined {
+  if (commandExists('python3')) return 'python3'
+  if (commandExists('python')) return 'python'
+  return undefined
+}
+
+function npmPackages(backend: RemoteAgentBackend): readonly string[] | undefined {
+  if (backend === 'codex') return CODEX_PACKAGES
+  if (backend === 'grok') return GROK_PACKAGES
+  if (backend === 'claude') return CLAUDE_PACKAGES
+  return undefined
+}
+
 async function run(
   command: string,
   args: readonly string[],
   timeoutMs: number,
+  extraBins: readonly string[] = [],
 ): Promise<{ readonly code: number; readonly output: string }> {
   return await new Promise((resolveRun, rejectRun) => {
-    const child = spawn(command, [...args], { stdio: ['ignore', 'pipe', 'pipe'], env: childEnv() })
+    const child = spawn(command, [...args], { stdio: ['ignore', 'pipe', 'pipe'], env: childEnv(extraBins) })
     let output = ''
     const append = (chunk: unknown): void => {
       output = `${output}${chunkText(chunk)}`.slice(-16_384)
@@ -102,10 +148,10 @@ async function run(
   })
 }
 
-function childEnv(): NodeJS.ProcessEnv {
-  const nodeDir = dirname(process.execPath)
+function childEnv(extraBins: readonly string[] = []): NodeJS.ProcessEnv {
+  const prefix = [...extraBins, dirname(process.execPath)].filter(directory => directory !== '').join(delimiter)
   const path = process.env['PATH'] ?? ''
-  return { ...process.env, PATH: path === '' ? nodeDir : `${nodeDir}${delimiter}${path}` }
+  return { ...process.env, PATH: path === '' ? prefix : `${prefix}${delimiter}${path}` }
 }
 
 function safeUrl(text: string): string | undefined {
@@ -135,6 +181,7 @@ function deviceCode(text: string): string | undefined {
 export class AgentManager {
   private readonly flows = new Map<string, AuthFlow>()
   private readonly configs: AgentConfigManager
+  private extraBinDirs: readonly string[] = []
 
   /** @param options - administrator-resolved commands and timings. */
   constructor(private readonly options: AgentManagerOptions) {
@@ -144,16 +191,21 @@ export class AgentManager {
     })
   }
 
+  private hasCommand(command: string): boolean {
+    return commandExists(command, this.extraBinDirs)
+  }
+
   /** Detect all supported agents and authentication state.
    * @param running - agents with a live native session transport.
    * @returns the current inventory.
    */
   async inventory(running: ReadonlySet<RemoteAgentBackend>): Promise<readonly RemoteBackendInventory[]> {
-    const codexInstalled = commandExists(this.options.codexCliCommand) && commandExists(this.options.codexAcpCommand)
-    const grokInstalled = commandExists(this.options.grokCommand)
-    const claudeAcpInstalled = commandExists(this.options.claudeAcpCommand)
-    const claudeInstalled = commandExists(this.options.claudeCommand) && claudeAcpInstalled
-    const dshInstalled = commandExists(this.options.dshCommand)
+    await this.refreshExtraBins()
+    const codexInstalled = this.hasCommand(this.options.codexCliCommand) && this.hasCommand(this.options.codexAcpCommand)
+    const grokInstalled = this.hasCommand(this.options.grokCommand)
+    const claudeAcpInstalled = this.hasCommand(this.options.claudeAcpCommand)
+    const claudeInstalled = this.hasCommand(this.options.claudeCommand) && claudeAcpInstalled
+    const dshInstalled = this.hasCommand(this.options.dshCommand)
     const [codexAuth, grokAuth] = await Promise.all([
       codexInstalled ? this.check(this.options.codexCliCommand, ['login', 'status']) : Promise.resolve(false),
       grokInstalled ? this.check(this.options.grokCommand, ['models']) : Promise.resolve(false),
@@ -164,7 +216,7 @@ export class AgentManager {
       {
         backend: 'claude', installed: claudeInstalled, authenticated: claudeInstalled,
         running: running.has('claude'), sessionCapable: claudeAcpInstalled,
-        ...(!claudeAcpInstalled && commandExists(this.options.claudeCommand)
+        ...(!claudeAcpInstalled && this.hasCommand(this.options.claudeCommand)
           ? { detail: 'Claude Code is installed but claude-agent-acp is missing.' } : {}),
       },
       {
@@ -173,6 +225,93 @@ export class AgentManager {
         running: running.has('dsh'), sessionCapable: true,
       },
     ]
+  }
+
+  /** Return the exact host-owned install recipe before mutation.
+   * @param backend - requested agent.
+   * @returns a reviewable plan.
+   */
+  installPlan(backend: RemoteAgentBackend): RemoteInstallPlan {
+    const alreadyInstalled = this.backendInstalled(backend)
+    if (backend === 'dsh') {
+      const python = this.options.pythonCommand ?? resolvePython()
+      if (python === undefined) {
+        return {
+          component: backend,
+          version: DSH_PIP_SPEC,
+          alreadyInstalled,
+          requiresConfirmation: true,
+          steps: [],
+          unavailableReason: 'This host needs python3 to install DeepSeek Harness JSON-RPC runtime from PyPI.',
+        }
+      }
+      return {
+        component: backend,
+        version: DSH_PIP_SPEC,
+        alreadyInstalled,
+        requiresConfirmation: true,
+        steps: [planStep(
+          'Install the official DeepSeek Harness JSON-RPC runtime from PyPI',
+          [python, '-m', 'pip', 'install', '--user', '--upgrade', DSH_PIP_SPEC].map(quoteDisplay).join(' '),
+        )],
+      }
+    }
+    const packages = npmPackages(backend)
+    const npm = this.npmInstaller()
+    if (packages === undefined) {
+      return {
+        component: backend,
+        version: backend,
+        alreadyInstalled,
+        requiresConfirmation: true,
+        steps: [],
+        unavailableReason: 'no installer is configured',
+      }
+    }
+    const title = backend === 'codex'
+      ? 'Install Codex CLI and its ACP adapter from npm'
+      : backend === 'claude'
+        ? 'Install Claude Code and its ACP adapter from npm'
+        : 'Install the official Grok Build CLI from npm'
+    return {
+      component: backend,
+      version: packages.join(' + '),
+      alreadyInstalled,
+      requiresConfirmation: true,
+      steps: [planStep(title, ['npm', 'install', '-g', ...packages].map(quoteDisplay).join(' '))],
+    }
+  }
+
+  /** Execute a previously reviewable built-in recipe on this host.
+   * @param backend - requested agent.
+   * @returns the completed plan.
+   */
+  async install(backend: RemoteAgentBackend): Promise<RemoteInstallPlan> {
+    const plan = this.installPlan(backend)
+    if (plan.unavailableReason !== undefined) throw new Error(plan.unavailableReason)
+    if (plan.alreadyInstalled) return plan
+    if (backend === 'dsh') {
+      await this.installDshRuntime()
+    } else {
+      const packages = npmPackages(backend)
+      if (packages === undefined) throw new Error('no installer is configured')
+      const npm = this.npmInstaller()
+      const result = await run(
+        npm.command,
+        [...npm.args, 'install', '-g', ...packages],
+        this.options.installTimeoutMs,
+        this.extraBinDirs,
+      )
+      if (result.code !== 0) {
+        throw new Error(`installer exited with status ${result.code}: ${result.output.trim().slice(-2000) || 'no output'}`)
+      }
+    }
+    await this.refreshExtraBins(true)
+    const installed = this.installPlan(backend)
+    if (!installed.alreadyInstalled) {
+      throw new Error(`${backend} installer finished but the command is not on PATH or in the official npm/pip location`)
+    }
+    return installed
   }
 
   /** Read one fixed-path Agent user configuration document.
@@ -203,10 +342,10 @@ export class AgentManager {
    */
   startAuth(backend: RemoteAgentBackend): RemoteAuthChallenge {
     const [command, args] = this.authCommand(backend)
-    if (!commandExists(command)) throw new Error(`${backend} is not installed`)
+    if (!this.hasCommand(command)) throw new Error(`${backend} is not installed`)
     const flowId = RemoteAuthFlowId(randomUUID())
     const expiresAt = new Date(Date.now() + this.options.authTimeoutMs).toISOString()
-    const child = spawn(command, [...args], { stdio: ['pipe', 'pipe', 'pipe'], env: childEnv() })
+    const child = spawn(command, [...args], { stdio: ['pipe', 'pipe', 'pipe'], env: childEnv(this.extraBinDirs) })
     const challenge: RemoteAuthChallenge = {
       flowId, backend, status: 'starting', message: 'Waiting for the agent to provide an authorization link.', expiresAt,
     }
@@ -314,9 +453,67 @@ export class AgentManager {
     return { configured: true }
   }
 
+  private backendInstalled(backend: RemoteAgentBackend): boolean {
+    if (backend === 'codex') return this.hasCommand(this.options.codexCliCommand) && this.hasCommand(this.options.codexAcpCommand)
+    if (backend === 'claude') return this.hasCommand(this.options.claudeCommand) && this.hasCommand(this.options.claudeAcpCommand)
+    if (backend === 'grok') return this.hasCommand(this.options.grokCommand)
+    return this.hasCommand(this.options.dshCommand)
+  }
+
+  private npmInstaller(): { readonly command: string; readonly args: readonly string[] } {
+    const override = this.options.npmCommand
+    if (override !== undefined) return { command: override[0], args: override.slice(1) }
+    return resolveNpm()
+  }
+
+  private async refreshExtraBins(force = false): Promise<void> {
+    if (!force && this.extraBinDirs.length > 0) return
+    const dirs: string[] = []
+    const npm = this.npmInstaller()
+    try {
+      const prefix = await run(npm.command, [...npm.args, 'prefix', '-g'], 5_000, this.extraBinDirs)
+      const value = prefix.output.trim().split(/\r?\n/).at(-1)?.trim()
+      if (prefix.code === 0 && value !== undefined && value !== '') {
+        dirs.push(process.platform === 'win32' ? value : join(value, 'bin'))
+      }
+    } catch {
+      // npm may be missing; PATH and the hostd Node directory remain.
+    }
+    const python = this.options.pythonCommand ?? resolvePython()
+    if (python !== undefined) {
+      try {
+        const scripts = await run(
+          python,
+          ['-c', "import os,sysconfig; print(sysconfig.get_path('scripts', 'nt_user' if os.name=='nt' else 'posix_user'))"],
+          5_000,
+          this.extraBinDirs,
+        )
+        const value = scripts.output.trim().split(/\r?\n/).at(-1)?.trim()
+        if (scripts.code === 0 && value !== undefined && value !== '') dirs.push(value)
+      } catch {
+        // python/pip may be missing; DSH install will fail with a clear reason.
+      }
+    }
+    this.extraBinDirs = [...new Set(dirs.filter(directory => directory !== ''))]
+  }
+
+  private async installDshRuntime(): Promise<void> {
+    const python = this.options.pythonCommand ?? resolvePython()
+    if (python === undefined) throw new Error('python3 is not available on this host')
+    const result = await run(
+      python,
+      ['-m', 'pip', 'install', '--user', '--upgrade', DSH_PIP_SPEC],
+      this.options.installTimeoutMs,
+      this.extraBinDirs,
+    )
+    if (result.code !== 0) {
+      throw new Error(`DSH installer exited with status ${result.code}: ${result.output.trim().slice(-2000) || 'no output'}`)
+    }
+  }
+
   private async check(command: string, args: readonly string[]): Promise<boolean> {
     try {
-      return (await run(command, args, 10_000)).code === 0
+      return (await run(command, args, 10_000, this.extraBinDirs)).code === 0
     } catch {
       return false
     }
@@ -350,4 +547,9 @@ export class AgentManager {
       ...(userCode === undefined ? {} : { userCode }),
     }
   }
+}
+
+/** Reject browser install requests that omitted the required confirmation flag. */
+export function requireInstallConfirmation(value: JsonValue | undefined): void {
+  if (value !== true) throw new Error('installation requires confirm: true')
 }

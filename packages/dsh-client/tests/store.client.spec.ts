@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RemoteHostId, RemoteProjectId, RemoteSessionId } from '@threadharbor/protocol'
-import { RemoteAgentStore, backendInventoryState, describeHostConnectFailure, hostConnectionLabel, hostDeployment, parseAgentConfigDocument, parseHiddenItems, parseOperation, parseRemoteAgentState } from '../src/client/store.ts'
+import { RemoteAgentStore, backendInventoryState, describeHostConnectFailure, hostConnectionLabel, hostDeployment, parseAgentConfigDocument, parseHiddenItems, parseInstallPlan, parseOperation, parseRemoteAgentState } from '../src/client/store.ts'
 
 const EMPTY = { pollIntervalMs: 60_000, hosts: [], projects: [], sessions: [], transcript: [], operations: [] }
 
@@ -64,6 +64,11 @@ describe('RemoteAgentStore', () => {
       title: '部署 hostd', detail: '正在上传 hostd。', target: 'host/h', cancellable: false, hostId: 'h',
       startedAt: 'a', updatedAt: 'b',
     })).toMatchObject({ operationId: 'op', status: 'running', hostId: 'h' })
+    expect(parseOperation({
+      operationId: 'op-agent', kind: 'agent-install', status: 'running', phase: 'installing',
+      title: '部署 dsh', detail: '正在执行官方安装命令。', target: 'host:h:agent:dsh', cancellable: false,
+      hostId: 'h', backend: 'dsh', startedAt: 'a', updatedAt: 'b',
+    })).toMatchObject({ kind: 'agent-install', backend: 'dsh', phase: 'installing' })
     expect(() => parseOperation({
       operationId: 'op', kind: 'host-ssh-deploy', status: 'running', phase: 'shell-output',
       title: '部署', detail: 'raw', target: 'host/h', cancellable: false, startedAt: 'a', updatedAt: 'b',
@@ -99,7 +104,8 @@ describe('RemoteAgentStore', () => {
     try {
       await store.start()
       await store.selectSession(RemoteSessionId('s'))
-      expect(calls).toEqual(['state'])
+      expect(calls.filter(method => method !== 'transcript.read')).toEqual(['state'])
+      expect(calls).toContain('transcript.read')
       expect(store.getSnapshot()).toMatchObject({ phase: 'ready', currentSessionId: 's', pending: false })
       expect(store.getSnapshot().attachingSessionId).toBeUndefined()
     } finally {
@@ -125,6 +131,64 @@ describe('RemoteAgentStore', () => {
       await store.selectSession(RemoteSessionId('s'))
       expect(store.getSnapshot().currentSessionId).toBe('s')
       expect(store.getSnapshot().attachingSessionId).toBeUndefined()
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('loads the opened session in pages and does not let catalog reloads replace transcript', async () => {
+    const session = {
+      sessionId: 's-page', projectId: 'p', title: 'work', backend: 'codex',
+      channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+      latestTranscriptSeq: 3,
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+    }
+    const entries = [
+      { transcriptId: 't0', sessionId: 's-page', seq: 0, role: 'user', kind: 'message', text: 'q', createdAt: 'a' },
+      { transcriptId: 't1', sessionId: 's-page', seq: 1, role: 'assistant', kind: 'message', text: 'a1', createdAt: 'a' },
+      { transcriptId: 't2', sessionId: 's-page', seq: 2, role: 'assistant', kind: 'message', text: 'a2', createdAt: 'a' },
+      { transcriptId: 't3', sessionId: 's-page', seq: 3, role: 'assistant', kind: 'message', text: 'a3', createdAt: 'a' },
+    ]
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string; params: Record<string, unknown> }
+      if (body.method === 'transcript.read') {
+        const afterSeq = typeof body.params.afterSeq === 'number' ? body.params.afterSeq : undefined
+        const beforeSeq = typeof body.params.beforeSeq === 'number' ? body.params.beforeSeq : undefined
+        const pageSize = 2
+        const page = afterSeq !== undefined
+          ? entries.filter(entry => entry.seq > afterSeq).slice(0, pageSize)
+          : beforeSeq !== undefined
+            ? entries.filter(entry => entry.seq < beforeSeq).slice(-pageSize)
+            : entries.slice(-pageSize)
+        const remaining = afterSeq !== undefined
+          ? entries.filter(entry => entry.seq > afterSeq).length
+          : beforeSeq !== undefined
+            ? entries.filter(entry => entry.seq < beforeSeq).length
+            : entries.length
+        return Response.json({
+          id: body.id, ok: true,
+          result: {
+            sessionId: 's-page', entries: page, afterSeq: afterSeq ?? -1,
+            ...(beforeSeq === undefined ? {} : { beforeSeq }),
+            fromSeq: page[0]?.seq ?? -1, toSeq: page.at(-1)?.seq ?? -1,
+            latestSeq: 3, hasMore: remaining > page.length,
+          },
+        })
+      }
+      return Response.json({ id: body.id, ok: true, result: { ...EMPTY, sessions: [session] } })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      expect(store.getSnapshot().state.transcript.map(entry => entry.seq)).toEqual([2, 3])
+      await store.selectSession(RemoteSessionId('s-page'))
+      await vi.waitFor(() => {
+        expect(store.getSnapshot().state.transcript.map(entry => entry.seq)).toEqual([0, 1, 2, 3])
+      })
+      store.consume({ type: 'host.changed' })
+      await vi.waitFor(() => {
+        expect(store.getSnapshot().state.transcript.map(entry => entry.seq)).toEqual([0, 1, 2, 3])
+      })
     } finally {
       store.dispose()
     }
@@ -198,6 +262,48 @@ describe('RemoteAgentStore', () => {
     }
   })
 
+  it('parses a reviewable agent install plan', () => {
+    expect(parseInstallPlan({
+      component: 'dsh', version: 'deepseek-harness-runtime-bin==0.1.1rc1', alreadyInstalled: false,
+      requiresConfirmation: true,
+      steps: [{ title: 'Install DSH', command: 'python3 -m pip install --user --upgrade deepseek-harness-runtime-bin==0.1.1rc1' }],
+    })).toMatchObject({ component: 'dsh', requiresConfirmation: true, steps: [{ command: expect.stringContaining('pip install') }] })
+    expect(() => parseInstallPlan({
+      component: 'dsh', version: 'x', alreadyInstalled: false, requiresConfirmation: false, steps: [],
+    })).toThrow('require confirmation')
+  })
+
+  it('starts agent install as a confirmed background operation', async () => {
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = []
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string; params: Record<string, unknown> }
+      calls.push({ method: body.method, params: body.params })
+      const result = body.method === 'state' ? EMPTY : body.method === 'operation.start' ? {
+        operationId: 'op-dsh', kind: 'agent-install', status: 'queued', phase: 'queued',
+        title: '部署 dsh', detail: '已排队。', target: 'host:h:agent:dsh', cancellable: false,
+        hostId: 'h', backend: 'dsh', startedAt: 'a', updatedAt: 'a',
+      } : body.method === 'agent.install.plan' ? {
+        component: 'dsh', version: 'deepseek-harness-runtime-bin==0.1.1rc1', alreadyInstalled: false,
+        requiresConfirmation: true, steps: [{ title: 'Install DSH', command: 'python3 -m pip install --user x' }],
+      } : {}
+      return Response.json({ id: body.id, ok: true, result })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      const plan = await store.installPlan(RemoteHostId('h'), 'dsh')
+      expect(plan.component).toBe('dsh')
+      const operation = await store.installAgent(RemoteHostId('h'), 'dsh')
+      expect(operation).toMatchObject({ kind: 'agent-install', backend: 'dsh' })
+      expect(calls.find(call => call.method === 'operation.start')).toEqual({
+        method: 'operation.start',
+        params: { kind: 'agent-install', hostId: 'h', backend: 'dsh', confirm: true },
+      })
+    } finally {
+      store.dispose()
+    }
+  })
+
   it('sets a DSH API key without requesting the saved value back', async () => {
     const calls: Array<{ method: string; params: Record<string, unknown> }> = []
     vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
@@ -237,8 +343,9 @@ describe('RemoteAgentStore', () => {
       await store.start()
       await store.renameSession(RemoteSessionId('s-rename'), '新名称')
 
-      expect(calls.map(call => call.method)).toEqual(['state', 'session.rename', 'state'])
-      expect(calls[1]?.params).toEqual({ sessionId: 's-rename', title: '新名称' })
+      expect(calls.map(call => call.method).filter(method => method !== 'transcript.read'))
+        .toEqual(['state', 'session.rename', 'state'])
+      expect(calls.find(call => call.method === 'session.rename')?.params).toEqual({ sessionId: 's-rename', title: '新名称' })
       expect(store.getSnapshot()).toMatchObject({
         phase: 'ready', pending: false, state: { sessions: [{ sessionId: 's-rename', title: '新名称' }] },
       })
@@ -282,7 +389,8 @@ describe('RemoteAgentStore', () => {
 
       expect(store.getSnapshot().draftSession).toBeUndefined()
       expect(store.getSnapshot().currentSessionId).toBe('s-new')
-      expect(calls.map(call => call.method)).toEqual(['state', 'session.start', 'state', 'session.prompt', 'state'])
+      expect(calls.map(call => call.method).filter(method => method !== 'transcript.read'))
+        .toEqual(['state', 'session.start', 'state', 'session.prompt', 'state'])
       expect(calls[1]?.params).toMatchObject({ projectId: 'p', backend: 'grok', title: 'first question' })
     } finally {
       store.dispose()
@@ -579,7 +687,7 @@ describe('RemoteAgentStore', () => {
         projects: [],
         sessions: [],
       }).hosts[0]?.hiddenAt).toBe('2026-08-31T00:00:00.000Z')
-      expect(calls.map(call => call.method).filter(method => method !== 'state' && method !== 'inventory')).toEqual([
+      expect(calls.map(call => call.method).filter(method => method !== 'state' && method !== 'inventory' && method !== 'transcript.read')).toEqual([
         'host.hide',
         'host.unhide',
         'host.delete',

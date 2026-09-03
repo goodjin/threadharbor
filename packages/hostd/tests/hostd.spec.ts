@@ -18,6 +18,7 @@ function options(dataDir: string, overrides: Partial<HostdOptions> = {}): HostdO
     maxJournalBytes: 100_000,
     maxDirectoryEntries: 20,
     authTimeoutMs: 100,
+    installTimeoutMs: 100,
     agentConfigHome: dataDir,
     maxAgentConfigBytes: 4096,
     codexCliCommand: '/missing/codex',
@@ -125,5 +126,18 @@ describe('RemoteAgentHostd inventory', () => {
       params: { backend: 'grok', content: '[models]\ndefault = "grok-build"\n', expectedRevision: opened.revision },
     })
     expect(saved).toMatchObject({ exists: true, format: 'toml' })
+  })
+
+  it('returns an agent install plan and requires confirm: true before mutation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'threadharbor-hostd-install-'))
+    roots.push(root)
+    const hostd = new RemoteAgentHostd(options(root))
+    const plan = await hostd.dispatch({
+      id: 'plan', method: 'agent.install.plan', params: { backend: 'dsh' },
+    }) as { component: string; requiresConfirmation: boolean }
+    expect(plan).toMatchObject({ component: 'dsh', requiresConfirmation: true })
+    await expect(hostd.dispatch({
+      id: 'install', method: 'agent.install', params: { backend: 'dsh' },
+    })).rejects.toThrow('confirm')
   })
 })

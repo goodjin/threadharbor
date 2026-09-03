@@ -65,6 +65,7 @@ describe('RemoteAgentHostd session control', () => {
       maxRequestBytes: 1024 * 1024, operationTimeoutMs: 1000, workerStartupTimeoutMs: 3000,
       maxJournalEvents: 100, maxJournalBytes: 100_000, maxDirectoryEntries: 100,
       authTimeoutMs: 1000,
+      installTimeoutMs: 1000,
       agentConfigHome: root, maxAgentConfigBytes: 4096,
       codexCliCommand: process.execPath,
       codexCommand: process.execPath, codexArgs: [],

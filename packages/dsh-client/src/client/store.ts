@@ -10,6 +10,7 @@ import {
   RemoteSessionId,
   RemoteTranscriptId,
   RemoteAuthFlowId,
+  REMOTE_TRANSCRIPT_PAGE_SIZE,
   isRemoteBackendSessionReady,
   jsonObject,
   remoteAgentBackend,
@@ -26,10 +27,12 @@ import {
   type RemoteHiddenItems,
   type RemoteHostInventory,
   type RemoteHostView,
+  type RemoteInstallPlan,
   type RemoteOperationView,
   type RemoteProjectView,
   type RemoteSessionView,
   type RemoteTranscriptEntry,
+  type RemoteTranscriptPage,
   type RemoteSshConfig,
   type RemoteSshInspection,
 } from '@threadharbor/protocol'
@@ -203,6 +206,12 @@ function integerField(record: Record<string, JsonValue>, key: string): number {
   return value as number
 }
 
+function seqField(record: Record<string, JsonValue>, key: string): number {
+  const value = record[key]
+  if (!Number.isSafeInteger(value) || (value as number) < -1) throw new TypeError(`${key} must be an integer >= -1`)
+  return value as number
+}
+
 function optionalText(record: Record<string, JsonValue>, key: string): string | undefined {
   const value = record[key]
   if (value === undefined) return undefined
@@ -358,6 +367,7 @@ function parseSession(value: JsonValue): RemoteSessionView {
     turnState: oneOf(record['turnState'], ['idle', 'running', 'waiting-permission', 'failed'] as const, 'turnState'),
     createdAt: stringField(record, 'createdAt'),
     updatedAt: stringField(record, 'updatedAt'),
+    ...(record['latestTranscriptSeq'] === undefined ? {} : { latestTranscriptSeq: seqField(record, 'latestTranscriptSeq') }),
     ...(archivedAt === undefined ? {} : { archivedAt }),
     ...(binding === undefined ? {} : {
       binding: {
@@ -388,6 +398,21 @@ function parseTranscript(value: JsonValue): RemoteTranscriptEntry {
   }
 }
 
+function parseTranscriptPage(value: JsonValue): RemoteTranscriptPage {
+  const record = jsonObject(value, 'transcript page')
+  const beforeSeq = record['beforeSeq'] === undefined ? undefined : integerField(record, 'beforeSeq')
+  return {
+    sessionId: RemoteSessionId(stringField(record, 'sessionId')),
+    entries: array(record['entries'], 'entries').map(parseTranscript),
+    afterSeq: seqField(record, 'afterSeq'),
+    ...(beforeSeq === undefined ? {} : { beforeSeq }),
+    fromSeq: seqField(record, 'fromSeq'),
+    toSeq: seqField(record, 'toSeq'),
+    latestSeq: seqField(record, 'latestSeq'),
+    hasMore: booleanField(record, 'hasMore'),
+  }
+}
+
 function parseDirectoryListing(value: JsonValue): RemoteDirectoryListing {
   const record = jsonObject(value, 'directory listing')
   const parent = optionalText(record, 'parent')
@@ -406,6 +431,28 @@ function parseDirectoryListing(value: JsonValue): RemoteDirectoryListing {
   }
 }
 
+/** Validate a reviewable Agent installation plan. */
+export function parseInstallPlan(value: JsonValue): RemoteInstallPlan {
+  const record = jsonObject(value, 'install plan')
+  const unavailableReason = optionalText(record, 'unavailableReason')
+  const component = stringField(record, 'component')
+  if (component !== 'hostd' && !REMOTE_AGENT_BACKENDS.includes(component as RemoteAgentBackend)) {
+    throw new Error('install plan has an invalid component')
+  }
+  if (record['requiresConfirmation'] !== true) throw new Error('install plan must require confirmation')
+  return {
+    component: component as RemoteInstallPlan['component'],
+    version: stringField(record, 'version'),
+    alreadyInstalled: booleanField(record, 'alreadyInstalled'),
+    requiresConfirmation: true,
+    steps: array(record['steps'], 'install steps').map((value) => {
+      const step = jsonObject(value, 'install step')
+      return { title: stringField(step, 'title'), command: stringField(step, 'command') }
+    }),
+    ...(unavailableReason === undefined ? {} : { unavailableReason }),
+  }
+}
+
 /** Validate one browser-safe long-running management operation. */
 export function parseOperation(value: JsonValue): RemoteOperationView {
   const record = jsonObject(value, 'operation')
@@ -415,17 +462,18 @@ export function parseOperation(value: JsonValue): RemoteOperationView {
   const finishedAt = optionalText(record, 'finishedAt')
   return {
     operationId: RemoteOperationId(stringField(record, 'operationId')),
-    kind: oneOf(record['kind'], ['host-ssh-deploy'] as const, 'operation.kind'),
+    kind: oneOf(record['kind'], ['host-ssh-deploy', 'agent-install'] as const, 'operation.kind'),
     status: oneOf(record['status'], ['queued', 'running', 'succeeded', 'failed'] as const, 'operation.status'),
     phase: oneOf(record['phase'], [
       'queued', 'connecting', 'preparing', 'uploading-hostd', 'starting-hostd',
-      'opening-tunnel', 'refreshing', 'completed', 'failed',
+      'opening-tunnel', 'installing', 'verifying', 'refreshing', 'completed', 'failed',
     ] as const, 'operation.phase'),
     title: stringField(record, 'title'),
     detail: stringField(record, 'detail'),
     target: stringField(record, 'target'),
     cancellable: booleanField(record, 'cancellable'),
     ...(hostId === undefined ? {} : { hostId: RemoteHostId(hostId) }),
+    ...(record['backend'] === undefined ? {} : { backend: remoteAgentBackend(record['backend']) }),
     ...(current === undefined ? {} : { current }),
     ...(total === undefined ? {} : { total }),
     startedAt: stringField(record, 'startedAt'),
@@ -445,7 +493,7 @@ export function parseRemoteAgentState(value: JsonValue): RemoteAgentState {
     hosts: array(record['hosts'], 'hosts').map(parseHost),
     projects: array(record['projects'], 'projects').map(parseProject),
     sessions: array(record['sessions'], 'sessions').map(parseSession),
-    transcript: array(record['transcript'], 'transcript').map(parseTranscript),
+    transcript: record['transcript'] === undefined ? [] : array(record['transcript'], 'transcript').map(parseTranscript),
     operations: record['operations'] === undefined ? [] : array(record['operations'], 'operations').map(parseOperation),
     hostdArtifactVersion: optionalText(record, 'hostdArtifactVersion') ?? 'unknown',
     browserId: optionalText(record, 'browserId') ?? 'unknown',
@@ -487,6 +535,9 @@ export class RemoteAgentStore {
   private connectionPhase: 'ready' | 'reconnecting' = 'ready'
   private transport: { call(method: string, params: Record<string, JsonValue>): Promise<JsonValue> } | undefined
   private rebuildInFlight = false
+  private transcriptWork = 0
+  private backgroundQueue: string[] = []
+  private backgroundBusy = false
 
   /** Read the stable current snapshot. */
   getSnapshot = (): RemoteAgentSnapshot => this.snapshot
@@ -542,9 +593,15 @@ export class RemoteAgentStore {
         const promptProgress = this.reconcilePromptProgress(nextState, { ...this.snapshot, state: nextState })
         const { promptProgress: _cleared, ...rest } = { ...withoutError(this.snapshot), state: nextState }
         this.publish(promptProgress === undefined ? rest : { ...rest, promptProgress })
+        const priority = session.sessionId === this.snapshot.currentSessionId ? 'high' : 'low'
+        void this.catchupTranscript(session.sessionId, priority)
         return
       }
-      case 'session.followed':
+      case 'session.followed': {
+        const sessionId = RemoteSessionId(stringField(record, 'sessionId'))
+        void this.catchupTranscript(sessionId, 'high')
+        return
+      }
       case 'session.unfollowed':
       case 'transcript.gap':
       case 'host.changed':
@@ -559,22 +616,23 @@ export class RemoteAgentStore {
   private applyTranscriptEntries(
     sessionId: ReturnType<typeof RemoteSessionId>,
     entries: readonly RemoteTranscriptEntry[],
+    options?: { readonly countUnread?: boolean },
   ): void {
     if (entries.length === 0) return
     const current = this.snapshot.state
     const existingIds = new Set(current.transcript.map(entry => entry.transcriptId))
     const freshEntries = entries.filter(entry => !existingIds.has(entry.transcriptId))
     if (freshEntries.length === 0) return
-    const firstSeq = freshEntries.reduce((min, entry) => Math.min(min, entry.seq), Number.POSITIVE_INFINITY)
-    const nextTranscript = [
-      ...current.transcript.filter(item => item.sessionId !== sessionId || item.seq < firstSeq),
-      ...freshEntries,
-    ].sort((a, b) => a.sessionId.localeCompare(b.sessionId) || a.seq - b.seq)
+    const nextTranscript = [...current.transcript, ...freshEntries]
+      .sort((left, right) => left.sessionId.localeCompare(right.sessionId) || left.seq - right.seq)
+    const countUnread = options?.countUnread === true && sessionId !== this.snapshot.currentSessionId
     const unread = current.unreadCounts[sessionId] ?? 0
     const nextState = {
       ...current,
       transcript: nextTranscript,
-      unreadCounts: { ...current.unreadCounts, [sessionId]: unread + freshEntries.length },
+      unreadCounts: countUnread
+        ? { ...current.unreadCounts, [sessionId]: unread + freshEntries.length }
+        : current.unreadCounts,
     }
     const nextSnapshot = { ...withoutError(this.snapshot), state: nextState }
     const promptProgress = this.reconcilePromptProgress(nextState, { ...this.snapshot, state: nextState })
@@ -618,6 +676,9 @@ export class RemoteAgentStore {
       if (hosts.length > 0) {
         await Promise.all(hosts.map(host => this.refreshInventory(host.hostId).catch(() => undefined)))
       }
+      const current = this.snapshot.currentSessionId
+      if (current !== undefined) await this.catchupTranscript(current, 'high')
+      this.queueBackgroundTranscripts()
     } catch (error) {
       this.publish({ ...this.snapshot, phase: 'error', error: String(error) })
     }
@@ -626,6 +687,8 @@ export class RemoteAgentStore {
   /** Stop timers and ignore later in-flight completions. */
   dispose(): void {
     this.disposed = true
+    this.transcriptWork += 1
+    this.backgroundQueue = []
     if (this.operationTimer !== undefined) window.clearTimeout(this.operationTimer)
     this.operationTimer = undefined
     this.listeners.clear()
@@ -637,6 +700,7 @@ export class RemoteAgentStore {
    */
   async selectSession(sessionId: ReturnType<typeof RemoteSessionId>): Promise<void> {
     this.attachSerial += 1
+    this.transcriptWork += 1
     const { draftSession: _draftSession, panel: _panel, attachingSessionId: _attaching, ...snapshot } = withoutError(this.snapshot)
     this.publish({ ...snapshot, currentSessionId: sessionId })
     this.markRead(sessionId)
@@ -645,6 +709,9 @@ export class RemoteAgentStore {
       const { promptProgress: _cleared, ...rest } = this.snapshot
       this.publish(promptProgress === undefined ? rest : { ...rest, promptProgress })
     }
+    await this.catchupTranscript(sessionId, 'high')
+    void this.backfillOpenedTranscript(sessionId, this.transcriptWork)
+    this.queueBackgroundTranscripts()
   }
 
   /** Open an unsaved conversation placeholder. The Agent is chosen at first send. */
@@ -718,6 +785,23 @@ export class RemoteAgentStore {
    */
   updateSshHost(hostId: ReturnType<typeof RemoteHostId>, title: string, ssh: RemoteSshConfig): Promise<RemoteOperationView> {
     return this.startOperation({ kind: 'host-ssh-deploy', hostId, title, ssh: ssh as unknown as JsonValue, confirm: true })
+  }
+
+  /** Fetch a non-mutating agent installation plan.
+   * @param hostId - target host.
+   * @param backend - agent to install.
+   * @returns exact configured plan.
+   */
+  installPlan(hostId: ReturnType<typeof RemoteHostId>, backend: RemoteAgentBackend): Promise<RemoteInstallPlan> {
+    return this.run(async () => parseInstallPlan(await this.call('agent.install.plan', { hostId, backend })))
+  }
+
+  /** Execute a confirmed predeclared agent installer on the target host.
+   * @param hostId - target host.
+   * @param backend - agent to install.
+   */
+  installAgent(hostId: ReturnType<typeof RemoteHostId>, backend: RemoteAgentBackend): Promise<RemoteOperationView> {
+    return this.startOperation({ kind: 'agent-install', hostId, backend, confirm: true })
   }
 
   /** Read one Agent's official user configuration file.
@@ -890,6 +974,7 @@ export class RemoteAgentStore {
           await this.call('session.prompt', { sessionId: session.sessionId, clientId, requestId, text })
         } finally {
           await this.reload(session.sessionId)
+          void this.catchupTranscript(session.sessionId, 'high')
         }
         const current = this.snapshot.state.sessions.find(candidate => candidate.sessionId === session.sessionId)
         if (current?.turnState === 'running') {
@@ -968,6 +1053,7 @@ export class RemoteAgentStore {
           await this.call('session.prompt', { sessionId, clientId, requestId, text })
         } finally {
           await this.reload(sessionId)
+          void this.catchupTranscript(sessionId, 'high')
         }
         const current = this.snapshot.state.sessions.find(candidate => candidate.sessionId === sessionId)
         if (current?.turnState === 'running') {
@@ -1073,8 +1159,100 @@ export class RemoteAgentStore {
     })
   }
 
+  private sessionHasTranscript(sessionId: string): boolean {
+    return this.snapshot.state.transcript.some(entry => entry.sessionId === sessionId)
+  }
+
+  private async readTranscriptPage(params: Record<string, JsonValue>): Promise<RemoteTranscriptPage | undefined> {
+    try {
+      return parseTranscriptPage(await this.call('transcript.read', params))
+    } catch {
+      return undefined
+    }
+  }
+
+  private async catchupTranscript(
+    sessionId: ReturnType<typeof RemoteSessionId>,
+    priority: 'high' | 'low',
+  ): Promise<void> {
+    if (this.disposed) return
+    const hasLocal = this.sessionHasTranscript(sessionId)
+    const afterSeq = hasLocal ? lastTranscriptSeq(this.snapshot.state, sessionId) : undefined
+    const page = await this.readTranscriptPage({
+      sessionId,
+      ...(afterSeq === undefined ? {} : { afterSeq }),
+      limit: REMOTE_TRANSCRIPT_PAGE_SIZE,
+    })
+    if (page === undefined || this.disposed) return
+    if (page.entries.length === 0) return
+    this.applyTranscriptEntries(sessionId, page.entries, { countUnread: priority === 'low' && hasLocal })
+    const latest = page.latestSeq
+    const localLast = lastTranscriptSeq(this.snapshot.state, sessionId)
+    if (priority === 'high' && latest > localLast) {
+      await this.catchupTranscript(sessionId, priority)
+      return
+    }
+    if (priority === 'low' && latest > localLast) this.enqueueBackgroundTranscript(sessionId)
+  }
+
+  private async backfillOpenedTranscript(
+    sessionId: ReturnType<typeof RemoteSessionId>,
+    work: number,
+  ): Promise<void> {
+    while (!this.disposed && work === this.transcriptWork && this.snapshot.currentSessionId === sessionId) {
+      const oldest = this.snapshot.state.transcript
+        .filter(entry => entry.sessionId === sessionId)
+        .at(0)?.seq
+      if (oldest === undefined || oldest <= 0) return
+      const page = await this.readTranscriptPage({
+        sessionId, beforeSeq: oldest, limit: REMOTE_TRANSCRIPT_PAGE_SIZE,
+      })
+      if (page === undefined || this.disposed || work !== this.transcriptWork) return
+      if (page.entries.length === 0) return
+      this.applyTranscriptEntries(sessionId, page.entries)
+      if (!page.hasMore) return
+    }
+  }
+
+  private queueBackgroundTranscripts(): void {
+    const current = this.snapshot.currentSessionId
+    for (const session of this.snapshot.state.sessions) {
+      if (session.sessionId === current) continue
+      const remoteLatest = session.latestTranscriptSeq ?? -1
+      const localLast = lastTranscriptSeq(this.snapshot.state, session.sessionId)
+      if (remoteLatest > localLast || !this.sessionHasTranscript(session.sessionId)) {
+        this.enqueueBackgroundTranscript(session.sessionId)
+      }
+    }
+  }
+
+  private enqueueBackgroundTranscript(sessionId: string): void {
+    if (this.disposed || sessionId === this.snapshot.currentSessionId) return
+    if (this.backgroundQueue.includes(sessionId)) return
+    this.backgroundQueue.push(sessionId)
+    this.pumpBackgroundTranscripts()
+  }
+
+  private pumpBackgroundTranscripts(): void {
+    if (this.disposed || this.backgroundBusy) return
+    const sessionId = this.backgroundQueue.shift()
+    if (sessionId === undefined) return
+    if (sessionId === this.snapshot.currentSessionId) {
+      this.pumpBackgroundTranscripts()
+      return
+    }
+    this.backgroundBusy = true
+    void this.catchupTranscript(RemoteSessionId(sessionId), 'low')
+      .catch(() => undefined)
+      .finally(() => {
+        this.backgroundBusy = false
+        this.pumpBackgroundTranscripts()
+      })
+  }
+
   private async reload(currentSessionId = this.snapshot.currentSessionId): Promise<void> {
-    const state = parseRemoteAgentState(await this.call('state', {}))
+    const catalog = parseRemoteAgentState(await this.call('state', {}))
+    const state = { ...catalog, transcript: this.snapshot.state.transcript }
     const current = this.snapshot.draftSession !== undefined
       ? undefined
       : currentSessionId !== undefined && state.sessions.some(session => session.sessionId === currentSessionId)

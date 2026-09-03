@@ -31,7 +31,7 @@ import {
   type RemoteSessionStartSpec,
   type RemoteAgentBackend,
 } from '@threadharbor/protocol'
-import { AgentManager } from './agent-manager.ts'
+import { AgentManager, requireInstallConfirmation } from './agent-manager.ts'
 import type { HoldRequest, HoldResponse, HoldWorkerConfig } from './hold-protocol.ts'
 import { HostdWsHub } from './ws-hub.ts'
 
@@ -47,6 +47,7 @@ export interface HostdOptions {
   readonly maxJournalBytes: number
   readonly maxDirectoryEntries: number
   readonly authTimeoutMs: number
+  readonly installTimeoutMs: number
   readonly agentConfigHome: string
   readonly maxAgentConfigBytes: number
   readonly codexCliCommand: string
@@ -178,6 +179,7 @@ export class RemoteAgentHostd {
     this.hostId = readFileSync(identityPath, 'utf8').trim()
     this.sessionsPath = join(options.dataDir, 'sessions.json')
     this.agentManager = new AgentManager({
+      installTimeoutMs: options.installTimeoutMs,
       authTimeoutMs: options.authTimeoutMs,
       agentConfigHome: options.agentConfigHome,
       maxAgentConfigBytes: options.maxAgentConfigBytes,
@@ -264,6 +266,11 @@ export class RemoteAgentHostd {
     switch (request.method) {
       case 'inventory':
         return await this.inventory() as unknown as JsonValue
+      case 'agent.install.plan':
+        return this.agentManager.installPlan(remoteAgentBackend(request.params['backend'])) as unknown as JsonValue
+      case 'agent.install':
+        requireInstallConfirmation(request.params['confirm'])
+        return await this.agentManager.install(remoteAgentBackend(request.params['backend'])) as unknown as JsonValue
       case 'agent.config.get':
         return this.agentManager.readConfig(remoteAgentConfigBackend(request.params['backend'])) as unknown as JsonValue
       case 'agent.config.set': {

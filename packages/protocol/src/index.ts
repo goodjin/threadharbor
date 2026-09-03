@@ -116,6 +116,22 @@ export interface RemoteSshInspection {
   readonly algorithm: string
 }
 
+/** Fixed, reviewable installation operation. No browser-provided shell is accepted. */
+export interface RemoteInstallStep {
+  readonly title: string
+  readonly command: string
+}
+
+/** Installation plan returned before a mutating operation. */
+export interface RemoteInstallPlan {
+  readonly component: 'hostd' | RemoteAgentBackend
+  readonly version: string
+  readonly alreadyInstalled: boolean
+  readonly requiresConfirmation: true
+  readonly steps: readonly RemoteInstallStep[]
+  readonly unavailableReason?: string
+}
+
 /** One fixed-path, syntax-validated Agent user configuration document. */
 export interface RemoteAgentConfigDocument {
   readonly backend: RemoteAgentConfigBackend
@@ -147,7 +163,7 @@ export interface RemoteAuthChallenge {
 }
 
 /** Long-running management actions whose progress remains visible outside the initiating panel. */
-export type RemoteOperationKind = 'host-ssh-deploy'
+export type RemoteOperationKind = 'host-ssh-deploy' | 'agent-install'
 /** Safe, finite operation lifecycle exposed to the browser. */
 export type RemoteOperationStatus = 'queued' | 'running' | 'succeeded' | 'failed'
 /** Predeclared progress stages; raw process output never crosses this boundary. */
@@ -158,6 +174,8 @@ export type RemoteOperationPhase =
   | 'uploading-hostd'
   | 'starting-hostd'
   | 'opening-tunnel'
+  | 'installing'
+  | 'verifying'
   | 'refreshing'
   | 'completed'
   | 'failed'
@@ -173,6 +191,7 @@ export interface RemoteOperationView {
   readonly target: string
   readonly cancellable: boolean
   readonly hostId?: RemoteHostId
+  readonly backend?: RemoteAgentBackend
   readonly current?: number
   readonly total?: number
   readonly startedAt: string
@@ -242,6 +261,8 @@ export interface RemoteSessionView {
   readonly turnState: RemoteTurnState
   readonly createdAt: string
   readonly updatedAt: string
+  /** Highest projected transcript seq for this session; `-1` when none exist. */
+  readonly latestTranscriptSeq?: number
   /** Archived sessions stay durable but are omitted from the normal browser projection. */
   readonly archivedAt?: string
   readonly binding?: RemoteSessionBinding
@@ -260,6 +281,25 @@ export interface RemoteTranscriptEntry {
   readonly requestId?: string
 }
 
+/** Default number of projected transcript entries returned by one `transcript.read`. */
+export const REMOTE_TRANSCRIPT_PAGE_SIZE = 100
+/** Hard ceiling for one `transcript.read` page. */
+export const REMOTE_TRANSCRIPT_PAGE_MAX = 256
+
+/** One cursor page of a session's projected transcript. */
+export interface RemoteTranscriptPage {
+  readonly sessionId: RemoteSessionId
+  readonly entries: readonly RemoteTranscriptEntry[]
+  /** Exclusive catchup cursor used for this page; `-1` for a tail read. */
+  readonly afterSeq: number
+  /** Exclusive history cursor used for this page; omitted for tail/catchup. */
+  readonly beforeSeq?: number
+  readonly fromSeq: number
+  readonly toSeq: number
+  readonly latestSeq: number
+  readonly hasMore: boolean
+}
+
 /** Complete browser bootstrap projection. */
 export interface RemoteAgentState {
   /** Host-configured browser refresh cadence. */
@@ -267,6 +307,7 @@ export interface RemoteAgentState {
   readonly hosts: readonly RemoteHostView[]
   readonly projects: readonly RemoteProjectView[]
   readonly sessions: readonly RemoteSessionView[]
+  /** Always empty. Session messages are loaded through `transcript.read`. */
   readonly transcript: readonly RemoteTranscriptEntry[]
   /** Active and recent gateway-owned management operations. */
   readonly operations: readonly RemoteOperationView[]
@@ -355,6 +396,8 @@ export type RemoteGatewayMethod =
   | 'host.ssh.deploy'
   | 'operation.start'
   | 'operation.list'
+  | 'agent.install.plan'
+  | 'agent.install'
   | 'agent.config.get'
   | 'agent.config.set'
   | 'agent.credential.status'
@@ -377,6 +420,7 @@ export type RemoteGatewayMethod =
   | 'session.prompt'
   | 'session.cancel'
   | 'session.permission'
+  | 'transcript.read'
   | 'events.read'
   | 'session.follow'
   | 'session.unfollow'
@@ -387,6 +431,8 @@ export type RemoteGatewayMethod =
 /** Control methods accepted directly by hostd. */
 export type RemoteHostdMethod =
   | 'inventory'
+  | 'agent.install.plan'
+  | 'agent.install'
   | 'agent.config.get'
   | 'agent.config.set'
   | 'agent.credential.status'

@@ -42,9 +42,16 @@ hostd 和 detached hold-worker 的运行日志进入同一个服务日志流。s
 
 hold-worker 会输出低频 JSON line 指标，前缀为 `threadharbor-hold-journal`，用于实际运行后分析 journal IO 行为。当前记录恢复、追加采样和 compact 事件，包含 backend、holdId、journalEvents、journalBytes、latestSeq、droppedThrough、appendsSinceCompact 和写入耗时。设置 `THREADHARBOR_HOLD_JOURNAL_METRICS=0` 可以关闭这类指标日志。
 
-## Agent 发现
+## Agent 发现与部署
 
-ThreadHarbor 不安装或升级 Agent。远端管理员按各 Agent 的官方方式安装后，hostd 从服务 `PATH` 发现下面的命令：
+hostd 从服务 `PATH`、当前 Node 的 `npm prefix -g`/bin，以及 Python user scripts 发现下面的命令。未安装时，主机设置会显示部署按钮；确认后 hostd 在该主机上执行官方安装命令，安装到 npm/pip 自己的目录，而不是 ThreadHarbor 另开前缀：
+
+- Codex：`npm install -g @openai/codex@0.150.1 @agentclientprotocol/codex-acp@1.6.2`
+- Grok：`npm install -g @xai-official/grok@1.0.5`
+- Claude Code：`npm install -g @anthropic-ai/claude-code@2.1.251 @agentclientprotocol/claude-agent-acp@0.69.0`
+- DSH：`python3 -m pip install --user --upgrade deepseek-harness-runtime-bin==0.1.1rc1`
+
+远端管理员也可以按各 Agent 的官方方式自行安装。hostd 发现的命令：
 
 - Codex：`codex` 与 `codex-acp`；
 - Grok：`grok`；

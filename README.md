@@ -10,7 +10,7 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，用来创建、持有�
 - hostd 持有 Agent 原生连接、at-most-once prompt admission 和有界 journal，网页断线不终止会话。
 - 使用 Harness 的公开 slot 机制替换 `sidebar` 与 `conversation`，保留原生 Web runtime、layout、theme、settings 和本地会话服务；不修改 Harness 源码。
 - Web 内配置 SSH 主机，先展示并确认 SSH host-key 指纹，再以远程普通用户部署 hostd、安装 user service 并建立 loopback tunnel。
-- hostd 从远端主机的通用 `PATH` 发现已有 Codex、Grok、Claude Code、ACP adapter 与 DSH runtime；ThreadHarbor 不安装或升级 Agent。
+- hostd 从远端主机的通用 `PATH` 发现已有 Codex、Grok、Claude Code、ACP adapter 与 DSH runtime。未安装时，主机设置提供部署按钮；确认后在该主机上执行官方安装命令，ThreadHarbor 不打包这些 Agent。
 - Web 内启动 detached 登录流程，展示授权链接和一次性代码。Codex、Grok 使用 `--device-auth`；Claude Code 使用 `claude auth login`，需要时可把浏览器返回码送回远程 CLI。
 - Web 内编辑 Codex、Grok 和 Claude Code 的官方用户配置文件；hostd 固定文件位置、限制大小、校验 TOML/JSON，并用 revision 防止覆盖其他编辑器的新修改。
 - 登录凭据始终保存在远程主机；Web 只看到链接、一次性代码与流程状态。
@@ -49,7 +49,7 @@ dsh --profile web
 4. Web 服务上传与自身版本一致的自包含 hostd artifact 到 `~/.local/share/threadharbor/current`，优先启用 `systemd --user`；没有 systemd 时使用 detached fallback。
 5. Web 服务持有 SSH loopback tunnel。网页断开不会关闭 tunnel、hostd、登录进程或 Agent hold。
 
-远程主机部署 hostd 需要 Node.js 22 或更新版本，并应由管理员预先安装所需 Agent，使其命令可从通用 `PATH` 访问。ThreadHarbor 不使用 `sudo`，也不负责安装或升级 Agent。详细配置见 [docs/remote-hosts.zh.md](docs/remote-hosts.zh.md)。
+远程主机部署 hostd 需要 Node.js 22 或更新版本。未安装的 Agent 可在主机设置中点部署，由 hostd 在该主机上执行官方 `npm install -g` / `pip install --user`，安装到 npm 与 pip 自己的目录。ThreadHarbor 不使用 `sudo`，也不再打包 Agent 二进制。详细配置见 [docs/remote-hosts.zh.md](docs/remote-hosts.zh.md)。
 
 ## 仓库结构
 
@@ -78,7 +78,7 @@ npm run build
 
 - SSH 私钥只以 Web 服务上的文件路径引用，默认不上传、不持久化密钥内容。
 - 新主机必须显式确认 host-key 指纹；后续连接使用固定的专用 `known_hosts`。
-- Agent 由远端管理员安装；hostd 只从受控 `PATH` 发现并启动已知命令。
+- Agent 部署只执行 hostd 内置的官方安装命令，安装到 npm/pip 的默认位置；浏览器不能提交可执行文件、shell 或配置路径。hostd 从 `PATH` 以及 npm global bin、pip user scripts 发现并启动已知命令。
 - OAuth/device token、API key 和 Agent auth 文件不通过 gateway 或浏览器。
 - 配置编辑器会传输用户主动打开的完整配置文件；不要在这些文件中保存明文密钥，优先使用远程环境变量或 Agent 自己的凭据存储。
 - hostd 只监听 `127.0.0.1`，远程访问必须经过 SSH tunnel。
