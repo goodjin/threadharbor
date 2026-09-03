@@ -122,40 +122,12 @@ async function harness(events: JsonValue[] = []) {
     },
   })
   const calls: HostdCall[] = []
-
-  function socketFactory(url: string): MockSocket {
-    const portMatch = /:(\d+)/.exec(url)
-    const port = portMatch?.[1] ?? '0'
-    let socket!: MockSocket
-    socket = makeMockSocket((text: string) => {
-      if (text === '') return undefined
-      let frame: { direction: string } & Record<string, unknown>
-      try { frame = JSON.parse(text) as { direction: string } & Record<string, unknown> } catch { return undefined }
-      if (frame.direction === 'ping') return JSON.stringify({ direction: 'pong' })
-      if (frame.direction === 'request') {
-        const request = {
-          id: String(frame['id']),
-          method: String(frame['method']) as RemoteControlRequest['method'],
-          params: (frame['params'] as Record<string, JsonValue>) ?? {},
-        }
-        calls.push({ port, request })
-        const result = respondToRequest(request, port, events)
-        return JSON.stringify({ direction: 'response', id: request.id, ok: true, result })
-      }
-      if (frame.direction === 'subscribe') return undefined
-      if (frame.direction === 'unsubscribe') return undefined
-      return undefined
-    })
-    sockets.push(socket)
-    queueMicrotask(() => {
-      socket.readyState = OPEN
-      socket.emit('open')
-    })
-    void url
-    return socket
-  }
+  const subscribeEvents: { port: string; sessionId: string; generation: string }[] = []
 
   let failing = false
+  /** Per-socket map of subscribed sessions for the WS push fan-out. */
+  const subscriptionsBySocket = new WeakMap<MockSocket, Map<string, { generation: string; lastSeq: number }>>()
+  let pushSeq = 0
   function socketFactory(url: string): MockSocket {
     const portMatch = /:(\d+)/.exec(url)
     const port = portMatch?.[1] ?? '0'
@@ -176,8 +148,21 @@ async function harness(events: JsonValue[] = []) {
         const result = respondToRequest(request, port, events)
         return JSON.stringify({ direction: 'response', id: request.id, ok: true, result })
       }
-      if (frame.direction === 'subscribe') return undefined
-      if (frame.direction === 'unsubscribe') return undefined
+      if (frame.direction === 'subscribe') {
+        const subs = subscriptionsBySocket.get(socket) ?? new Map<string, { generation: string; lastSeq: number }>()
+        const sessionId = String(frame['sessionId'] ?? '')
+        subs.set(sessionId, {
+          generation: String(frame['generation'] ?? 'g1'),
+          lastSeq: Number(frame['lastSeq'] ?? 0),
+        })
+        subscriptionsBySocket.set(socket, subs)
+        subscribeEvents.push({ port, sessionId, generation: String(frame['generation'] ?? 'g1') })
+        return undefined
+      }
+      if (frame.direction === 'unsubscribe') {
+        subscriptionsBySocket.get(socket)?.delete(String(frame['sessionId'] ?? ''))
+        return undefined
+      }
       return undefined
     })
     sockets.push(socket)
@@ -189,11 +174,43 @@ async function harness(events: JsonValue[] = []) {
     return socket
   }
 
+  /** Push one journal page to every socket subscribed to this session. */
+  function pushJournalPage(sessionId: string, frames: readonly JsonValue[]): void {
+    if (frames.length === 0) return
+    for (const socket of sockets) {
+      const subs = subscriptionsBySocket.get(socket)
+      if (subs === undefined) continue
+      const sub = subs.get(sessionId)
+      if (sub === undefined) continue
+      const page = {
+        generation: sub.generation,
+        latestSeq: sub.lastSeq + frames.length,
+        droppedThrough: 0,
+        gap: false,
+        events: frames.map((frame, index) => ({
+          seq: sub.lastSeq + index + 1,
+          generation: sub.generation,
+          timestamp: '2026-08-28T00:00:00.000Z',
+          frame,
+        })),
+      }
+      const wsFrame = {
+        direction: 'push',
+        seq: ++pushSeq,
+        event: { type: 'journal.page', sessionId, page, subscribers: 1 },
+      }
+      socket.emit('message', JSON.stringify(wsFrame))
+      sub.lastSeq = page.latestSeq
+    }
+  }
+
   await ctx.plugin(RemoteAgentGateway, CONFIG).await()
   ctx.remoteAgentGateway.setHostdSocketFactory(socketFactory as unknown as (url: string) => import('ws').WebSocket)
   return {
     ctx, gateway: ctx.remoteAgentGateway, calls,
     failNext: () => { failing = true },
+    pushJournalPage,
+    subscribeEvents,
     upgradePath,
   }
 }
@@ -357,9 +374,9 @@ describe('RemoteAgentGateway', () => {
     }
   })
 
-  it('periodically catches up a running turn when hostd push delivery is silent', async () => {
+  it('projects journal events pushed via the hostd WebSocket into the local transcript', async () => {
     const events: JsonValue[] = []
-    const { ctx, gateway, calls } = await harness(events)
+    const { ctx, gateway, calls, pushJournalPage, subscribeEvents } = await harness(events)
     try {
       const host = await gateway.dispatch(request('host.add', {
         title: 'host', endpoint: 'http://127.0.0.1:4204',
@@ -374,14 +391,18 @@ describe('RemoteAgentGateway', () => {
       await gateway.dispatch(request('session.prompt', {
         sessionId: session.sessionId, clientId: 'browser', requestId: 'request-poll', text: 'hello',
       }))
+      // The catchup `events.read` runs before the gateway subscribes; wait
+      // until the WS subscribe frame has been observed so we know the push
+      // listener is wired up before we start emitting frames.
       await vi.waitFor(() => {
         expect(calls.some(call => call.request.method === 'events.read')).toBe(true)
+        expect(subscribeEvents.some(entry => entry.sessionId === session.sessionId)).toBe(true)
       })
 
-      events.push(
+      pushJournalPage(session.sessionId, [
         { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { text: 'late answer' } } } },
         { jsonrpc: '2.0', method: '_x.ai/session/prompt_complete', params: { stopReason: 'end_turn' } },
-      )
+      ])
 
       await vi.waitFor(() => {
         expect(gateway.state().sessions.find(candidate => candidate.sessionId === session.sessionId)?.turnState).toBe('idle')

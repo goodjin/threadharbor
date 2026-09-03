@@ -1405,7 +1405,9 @@ export class RemoteAgentGateway extends Service {
       const project = this.requireProject(session.projectId)
       const host = this.requireHost(project.hostId)
 
-      // Drain any backlog accumulated before we subscribed.
+      // One-time catchup via the WS-multiplexed `events.read`. After this we
+      // stay subscribed to hostd's push until the session is unbound or the
+      // host reports a generation gap — no more per-second HTTP polling.
       try {
         const catchup = await this.callSessionHostd(session, 'events.read', {
           sessionId: session.sessionId,
@@ -1414,16 +1416,19 @@ export class RemoteAgentGateway extends Service {
           limit: MAX_JOURNAL_EVENTS_PER_SYNC,
         }) as unknown as RemoteJournalPage
         await this.applyJournalPage(session, binding, catchup)
-        if (catchup.events.length >= MAX_JOURNAL_EVENTS_PER_SYNC || catchup.latestSeq > binding.lastSeq) continue
+        if (catchup.events.length >= MAX_JOURNAL_EVENTS_PER_SYNC) continue
       } catch {
         // Catchup failed; rely on the WS push once it lands.
       }
+
+      if (!this.sessionNeedsSync(sessionId)) break
 
       const live = this.requireSession(sessionId)
       const liveBinding = this.requireBinding(live)
 
       const queue: RemoteJournalPage[] = []
       let flushing = false
+      let lost = false
       const flushQueue = async (): Promise<void> => {
         if (flushing) return
         flushing = true
@@ -1455,26 +1460,40 @@ export class RemoteAgentGateway extends Service {
             if (current === undefined) return
             const cb = current.binding
             if (cb === undefined) return
-            const lost: RemoteSessionView = {
+            const next: RemoteSessionView = {
               ...current,
               channelState: 'lost',
               turnState: current.turnState === 'running' ? 'failed' : current.turnState,
               binding: { ...cb, state: 'lost' },
               updatedAt: new Date().toISOString(),
             }
-            void this.requireTables().sessions.put(sessionId, lost)
-            this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: lost })
+            void this.requireTables().sessions.put(sessionId, next)
+            this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: next })
+            lost = true
           }
         },
       )
 
       try {
-        if (this.sessionNeedsSync(sessionId) && queue.length === 0) {
-          await new Promise(resolveWait => setTimeout(resolveWait, this.config.pollIntervalMs))
+        // Stay subscribed until the session stops needing projection, a gap
+        // is reported, or hostd's WS gives up. The tick is local-only — no
+        // HTTP traffic — so it just wakes us to re-evaluate session state.
+        while (this.sessionNeedsSync(sessionId) && !lost) {
+          await new Promise<void>((resolveWait) => {
+            const timer = setTimeout(resolveWait, this.config.pollIntervalMs)
+            timer.unref?.()
+          })
+          await flushQueue()
         }
-        await flushQueue()
       } finally {
         unsubscribe()
+      }
+
+      if (lost) {
+        // Mark the session as recoverable once hostd reconnects; the next
+        // prompt or follow will trigger another `runFollowedLoop` that
+        // re-catchups against the fresh generation.
+        break
       }
     }
   }
