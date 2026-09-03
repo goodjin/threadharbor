@@ -9,6 +9,9 @@ for (const external of ['react', 'react/jsx-runtime', '@deepseek-ai/dsh-client-u
     throw new Error(`DSH browser artifact omitted its ${external} module-table request`)
   }
 }
+if (client.includes('@threadharbor/protocol')) {
+  throw new Error('DSH browser artifact leaked @threadharbor/protocol into the module table; it must be inlined')
+}
 
 for (const path of ['packages/hostd/lib/bin.js', 'packages/hostd/lib/hold-worker.js']) {
   const artifact = readFileSync(path, 'utf8')

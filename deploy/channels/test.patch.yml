@@ -1,0 +1,12 @@
+# Test channel overrides. Remote port 3092 is separate from stable's 3091.
+- id: threadharbor-gateway
+  config:
+    maxRequestBytes: 1048576
+    hostdRequestTimeoutMs: 45000
+    pollIntervalMs: 1000
+    maxTranscriptEntriesPerSession: 10000
+    sshConnectTimeoutMs: 15000
+    sshInstallTimeoutMs: 600000
+    deploymentChannel: test
+    hostdRemotePort: 3092
+    sshKnownHostsPath: !!js process.env.DSH_HOME + '/threadharbor/known_hosts'

@@ -1,0 +1,13 @@
+# Stable channel overrides. DSH_HOME is intentionally evaluated at boot so
+# stable and test never share the gateway-owned SSH trust database.
+- id: threadharbor-gateway
+  config:
+    maxRequestBytes: 1048576
+    hostdRequestTimeoutMs: 45000
+    pollIntervalMs: 1000
+    maxTranscriptEntriesPerSession: 10000
+    sshConnectTimeoutMs: 15000
+    sshInstallTimeoutMs: 600000
+    deploymentChannel: stable
+    hostdRemotePort: 3091
+    sshKnownHostsPath: !!js process.env.DSH_HOME + '/threadharbor/known_hosts'

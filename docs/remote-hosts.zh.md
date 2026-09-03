@@ -1,4 +1,4 @@
-# 远程主机、Agent 安装与登录
+# 远程主机、Agent 发现与登录
 
 ## Web profile 配置
 
@@ -34,19 +34,26 @@ Gateway 从自己已安装的 `@threadharbor/hostd` 包读取 `bin.js` 与 `hold
 ~/.config/systemd/user/threadharbor-hostd.service
 ```
 
-ThreadHarbor 不自动安装系统 Node.js，也不调用 sudo。缺少合格 Node.js 时会在部署阶段停止并返回明确错误。Codex、Grok 与 Claude Code 的安装另行要求远端已有 npm。
+ThreadHarbor 不自动安装系统 Node.js，也不调用 sudo。缺少合格 Node.js 时会在部署阶段停止并返回明确错误。
 
-## Agent 安装
+## 运行日志
 
-打开主机后，每个 backend 会显示 installed、authenticated、running 和 session-capable 状态。点击“安装”只获取计划；Web 显示 package spec 与命令，用户再次确认才执行。
+hostd 和 detached hold-worker 的运行日志进入同一个服务日志流。systemd user service 下使用 `journalctl --user -u threadharbor-hostd-<channel>.service` 查看；没有 systemd、使用 detached fallback 时查看 `~/.local/state/threadharbor/<channel>/hostd.log`。
 
-三种安装方案都编译在 hostd adapter 中，浏览器请求只有 backend 和 `confirm: true`，不能提交命令、package spec 或参数：
+hold-worker 会输出低频 JSON line 指标，前缀为 `threadharbor-hold-journal`，用于实际运行后分析 journal IO 行为。当前记录恢复、追加采样和 compact 事件，包含 backend、holdId、journalEvents、journalBytes、latestSeq、droppedThrough、appendsSinceCompact 和写入耗时。设置 `THREADHARBOR_HOLD_JOURNAL_METRICS=0` 可以关闭这类指标日志。
 
-- Codex：`@openai/codex@latest` 与 `@agentclientprotocol/codex-acp@latest`；
-- Grok：`@xai-official/grok@latest`；
-- Claude Code：`@anthropic-ai/claude-code@latest`。
+## Agent 发现
 
-它们通过 npm 安装到 hostd 的用户 prefix，默认为 `~/.local`。部署管理员可以改变 prefix、超时和已安装 executable 的查找位置，但不能替换安装包或安装命令。
+ThreadHarbor 不安装或升级 Agent。远端管理员按各 Agent 的官方方式安装后，hostd 从服务 `PATH` 发现下面的命令：
+
+- Codex：`codex` 与 `codex-acp`；
+- Grok：`grok`；
+- Claude Code：`claude` 与 `claude-agent-acp`；
+- DSH：`dsh-jsonrpc-agent`。
+
+SSH 自动部署为 hostd 配置以下通用路径：Node.js 可执行文件所在目录、`~/.local/bin`、`~/bin`、`/opt/homebrew/bin`、`/usr/local/bin`、`/usr/bin` 和 `/bin`。使用其他位置时，应把命令链接到这些目录之一；直接启动 hostd 时也可以通过 `--codex-cli-command`、`--codex-command`、`--grok-command`、`--claude-command`、`--claude-acp-command` 和 `--dsh-command` 指定绝对路径。
+
+`dsh-jsonrpc-agent` 还需要配置文件路径。远端可设置 `DSH_CORDIS_CONFIG`，或在直接启动 hostd 时传入 `--dsh-arg <cordis.yml>`。打开主机后，每个 backend 会显示 installed、authenticated、running 和 session-capable 状态；重新安装或调整 `PATH` 后刷新库存即可。
 
 ## Agent 配置
 

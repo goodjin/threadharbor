@@ -1,35 +1,30 @@
-/** Agent installation, inventory, and detached authentication workers. */
+/** Agent discovery, inventory, configuration, and detached authentication workers. */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { accessSync, constants } from 'node:fs'
-import { delimiter, join } from 'node:path'
+import {
+  accessSync, chmodSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync,
+} from 'node:fs'
+import { delimiter, dirname, join } from 'node:path'
 import {
   RemoteAuthFlowId,
-  type JsonValue,
   type RemoteAgentConfigBackend,
   type RemoteAgentConfigDocument,
   type RemoteAuthChallenge,
   type RemoteAgentBackend,
   type RemoteBackendInventory,
-  type RemoteInstallPlan,
 } from '@threadharbor/protocol'
 import { AgentConfigManager } from './agent-config.ts'
 
-const CODEX_PACKAGES = ['@openai/codex@latest', '@agentclientprotocol/codex-acp@latest'] as const
-const GROK_PACKAGES = ['@xai-official/grok@latest'] as const
-const CLAUDE_PACKAGES = ['@anthropic-ai/claude-code@latest'] as const
-
 /** Resolved commands and bounded operation timings for agent management. */
 export interface AgentManagerOptions {
-  readonly installPrefix: string
-  readonly installTimeoutMs: number
   readonly authTimeoutMs: number
   readonly agentConfigHome: string
   readonly maxAgentConfigBytes: number
   readonly codexCliCommand: string
   readonly codexAcpCommand: string
   readonly claudeCommand: string
+  readonly claudeAcpCommand: string
   readonly grokCommand: string
   readonly dshCommand: string
 }
@@ -38,6 +33,7 @@ interface AuthFlow {
   challenge: RemoteAuthChallenge
   readonly child: ChildProcessWithoutNullStreams
   readonly timer: ReturnType<typeof setTimeout>
+  readonly linkHintTimer: ReturnType<typeof setTimeout>
   output: string
 }
 
@@ -79,7 +75,7 @@ async function run(
   timeoutMs: number,
 ): Promise<{ readonly code: number; readonly output: string }> {
   return await new Promise((resolveRun, rejectRun) => {
-    const child = spawn(command, [...args], { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(command, [...args], { stdio: ['ignore', 'pipe', 'pipe'], env: childEnv() })
     let output = ''
     const append = (chunk: unknown): void => {
       output = `${output}${chunkText(chunk)}`.slice(-16_384)
@@ -106,12 +102,10 @@ async function run(
   })
 }
 
-function planStep(title: string, command: string): { readonly title: string; readonly command: string } {
-  return { title, command }
-}
-
-function quoteDisplay(value: string): string {
-  return /^[a-zA-Z0-9_@./:+~-]+$/.test(value) ? value : JSON.stringify(value)
+function childEnv(): NodeJS.ProcessEnv {
+  const nodeDir = dirname(process.execPath)
+  const path = process.env['PATH'] ?? ''
+  return { ...process.env, PATH: path === '' ? nodeDir : `${nodeDir}${delimiter}${path}` }
 }
 
 function safeUrl(text: string): string | undefined {
@@ -137,7 +131,7 @@ function deviceCode(text: string): string | undefined {
   return undefined
 }
 
-/** Owns safe, predeclared installers and authentication subprocesses. */
+/** Discovers administrator-installed Agents and owns authentication subprocesses. */
 export class AgentManager {
   private readonly flows = new Map<string, AuthFlow>()
   private readonly configs: AgentConfigManager
@@ -157,100 +151,28 @@ export class AgentManager {
   async inventory(running: ReadonlySet<RemoteAgentBackend>): Promise<readonly RemoteBackendInventory[]> {
     const codexInstalled = commandExists(this.options.codexCliCommand) && commandExists(this.options.codexAcpCommand)
     const grokInstalled = commandExists(this.options.grokCommand)
-    const claudeInstalled = commandExists(this.options.claudeCommand)
+    const claudeAcpInstalled = commandExists(this.options.claudeAcpCommand)
+    const claudeInstalled = commandExists(this.options.claudeCommand) && claudeAcpInstalled
     const dshInstalled = commandExists(this.options.dshCommand)
-    const [codexAuth, grokAuth, claudeAuth] = await Promise.all([
+    const [codexAuth, grokAuth] = await Promise.all([
       codexInstalled ? this.check(this.options.codexCliCommand, ['login', 'status']) : Promise.resolve(false),
       grokInstalled ? this.check(this.options.grokCommand, ['models']) : Promise.resolve(false),
-      claudeInstalled ? this.check(this.options.claudeCommand, ['auth', 'status', '--json']) : Promise.resolve(false),
     ])
     return [
       { backend: 'grok', installed: grokInstalled, authenticated: grokAuth, running: running.has('grok'), sessionCapable: true },
       { backend: 'codex', installed: codexInstalled, authenticated: codexAuth, running: running.has('codex'), sessionCapable: true },
       {
-        backend: 'claude', installed: claudeInstalled, authenticated: claudeAuth,
-        running: false, sessionCapable: false,
-        detail: 'Claude Code installation and login are supported; a native session adapter is not configured yet.',
+        backend: 'claude', installed: claudeInstalled, authenticated: claudeInstalled,
+        running: running.has('claude'), sessionCapable: claudeAcpInstalled,
+        ...(!claudeAcpInstalled && commandExists(this.options.claudeCommand)
+          ? { detail: 'Claude Code is installed but claude-agent-acp is missing.' } : {}),
       },
       {
         backend: 'dsh', installed: dshInstalled,
-        authenticated: dshInstalled && (process.env['DEEPSEEK_API_KEY'] ?? '') !== '',
+        authenticated: dshInstalled && this.dshApiKey() !== undefined,
         running: running.has('dsh'), sessionCapable: true,
       },
     ]
-  }
-
-  /** Return the exact administrator-owned install recipe before mutation.
-   * @param backend - requested agent.
-   * @returns a reviewable plan.
-   */
-  installPlan(backend: RemoteAgentBackend): RemoteInstallPlan {
-    const npm = 'npm'
-    switch (backend) {
-      case 'codex': {
-        const packages = CODEX_PACKAGES
-        return {
-          component: backend,
-          version: packages.join(' + '),
-          alreadyInstalled: commandExists(this.options.codexCliCommand) && commandExists(this.options.codexAcpCommand),
-          requiresConfirmation: true,
-          steps: [planStep('Install Codex CLI and its ACP adapter into the user prefix',
-            [npm, 'install', '--global', '--prefix', this.options.installPrefix, ...packages].map(quoteDisplay).join(' '))],
-        }
-      }
-      case 'claude':
-        return {
-          component: backend,
-          version: CLAUDE_PACKAGES.join(' + '),
-          alreadyInstalled: commandExists(this.options.claudeCommand),
-          requiresConfirmation: true,
-          steps: [planStep('Install Claude Code into the user prefix',
-            [npm, 'install', '--global', '--prefix', this.options.installPrefix, ...CLAUDE_PACKAGES].map(quoteDisplay).join(' '))],
-        }
-      case 'grok':
-        return {
-          component: backend,
-          version: GROK_PACKAGES.join(' + '),
-          alreadyInstalled: commandExists(this.options.grokCommand),
-          requiresConfirmation: true,
-          steps: [planStep('Install the official Grok Build CLI into the user prefix',
-            [npm, 'install', '--global', '--prefix', this.options.installPrefix, ...GROK_PACKAGES].map(quoteDisplay).join(' '))],
-        }
-      case 'dsh':
-        return {
-          component: backend,
-          version: 'managed by the DeepSeek Harness installation',
-          alreadyInstalled: commandExists(this.options.dshCommand),
-          requiresConfirmation: true,
-          steps: [],
-          unavailableReason: 'Install or update DeepSeek Harness from its own distribution.',
-        }
-    }
-  }
-
-  /** Execute a previously reviewable built-in recipe.
-   * @param backend - requested agent.
-   * @returns the completed plan.
-   */
-  async install(backend: RemoteAgentBackend): Promise<RemoteInstallPlan> {
-    const plan = this.installPlan(backend)
-    if (plan.unavailableReason !== undefined) throw new Error(plan.unavailableReason)
-    if (plan.alreadyInstalled) return plan
-    const packages = backend === 'codex'
-      ? CODEX_PACKAGES
-      : backend === 'grok'
-        ? GROK_PACKAGES
-        : backend === 'claude'
-          ? CLAUDE_PACKAGES
-          : undefined
-    const recipe = packages === undefined
-      ? undefined
-      : ['npm', 'install', '--global', '--prefix', this.options.installPrefix, ...packages] as const
-    if (recipe === undefined) throw new Error('no installer is configured')
-    const [command, ...args] = recipe
-    const result = await run(command, args, this.options.installTimeoutMs)
-    if (result.code !== 0) throw new Error(`installer exited with status ${result.code}`)
-    return this.installPlan(backend)
   }
 
   /** Read one fixed-path Agent user configuration document.
@@ -284,27 +206,40 @@ export class AgentManager {
     if (!commandExists(command)) throw new Error(`${backend} is not installed`)
     const flowId = RemoteAuthFlowId(randomUUID())
     const expiresAt = new Date(Date.now() + this.options.authTimeoutMs).toISOString()
-    const child = spawn(command, [...args], { stdio: ['pipe', 'pipe', 'pipe'] })
+    const child = spawn(command, [...args], { stdio: ['pipe', 'pipe', 'pipe'], env: childEnv() })
     const challenge: RemoteAuthChallenge = {
       flowId, backend, status: 'starting', message: 'Waiting for the agent to provide an authorization link.', expiresAt,
     }
     const timer = setTimeout(() => {
       const flow = this.flows.get(flowId)
       if (flow === undefined) return
+      clearTimeout(flow.linkHintTimer)
       flow.challenge = { ...flow.challenge, status: 'expired', message: 'Authorization expired. Start a new login.' }
       flow.child.kill('SIGTERM')
     }, this.options.authTimeoutMs)
-    const flow: AuthFlow = { challenge, child, timer, output: '' }
+    const linkHintTimer = setTimeout(() => {
+      const current = this.flows.get(flowId)
+      if (current === undefined || current.challenge.status !== 'starting') return
+      current.challenge = {
+        ...current.challenge,
+        message: '仍在等待授权链接。Grok/Codex 需要访问 auth.x.ai；若这台主机上网需要代理，请确认 hostd 已继承 https_proxy 后重试。',
+      }
+    }, 8_000)
+    const flow: AuthFlow = { challenge, child, timer, linkHintTimer, output: '' }
     this.flows.set(flowId, flow)
     const append = (chunk: unknown): void => this.acceptAuthOutput(flowId, chunkText(chunk))
     child.stdout.on('data', append)
     child.stderr.on('data', append)
     child.once('error', () => {
       const current = this.flows.get(flowId)
-      if (current !== undefined) current.challenge = { ...current.challenge, status: 'failed', message: 'Unable to start the authentication command.' }
+      if (current === undefined) return
+      clearTimeout(current.timer)
+      clearTimeout(current.linkHintTimer)
+      current.challenge = { ...current.challenge, status: 'failed', message: 'Unable to start the authentication command.' }
     })
     child.once('exit', (code) => {
       clearTimeout(timer)
+      clearTimeout(linkHintTimer)
       const current = this.flows.get(flowId)
       if (current === undefined || current.challenge.status === 'cancelled' || current.challenge.status === 'expired') return
       current.challenge = code === 0
@@ -343,13 +278,45 @@ export class AgentManager {
     const flow = this.flows.get(flowId)
     if (flow === undefined) throw new Error('authentication flow not found')
     clearTimeout(flow.timer)
+    clearTimeout(flow.linkHintTimer)
     flow.challenge = { ...flow.challenge, status: 'cancelled', message: 'Authentication was cancelled.' }
     flow.child.kill('SIGTERM')
   }
 
+  /** Path of the owner-only DSH API key file. */
+  dshCredentialPath(): string {
+    return join(this.options.agentConfigHome, 'threadharbor', 'dsh-api-key')
+  }
+
+  /** Return the configured DSH API key from the environment or the private file. */
+  dshApiKey(): string | undefined {
+    const fromEnv = process.env['DEEPSEEK_API_KEY']
+    if (fromEnv !== undefined && fromEnv.trim() !== '') return fromEnv.trim()
+    const path = this.dshCredentialPath()
+    if (!existsSync(path)) return undefined
+    const value = readFileSync(path, 'utf8').trim()
+    return value === '' ? undefined : value
+  }
+
+  /** Report whether a DSH API key is configured without returning the secret. */
+  dshCredentialStatus(): { readonly configured: boolean } {
+    return { configured: this.dshApiKey() !== undefined }
+  }
+
+  /** Persist a DSH API key with owner-only permissions. Never read back into responses. */
+  setDshApiKey(apiKey: string): { readonly configured: true } {
+    const value = apiKey.trim()
+    if (value === '') throw new Error('apiKey must be a non-empty string')
+    const path = this.dshCredentialPath()
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+    writeFileSync(path, `${value}\n`, { mode: 0o600 })
+    chmodSync(path, 0o600)
+    return { configured: true }
+  }
+
   private async check(command: string, args: readonly string[]): Promise<boolean> {
     try {
-      return (await run(command, args, Math.min(this.options.installTimeoutMs, 10_000))).code === 0
+      return (await run(command, args, 10_000)).code === 0
     } catch {
       return false
     }
@@ -368,9 +335,11 @@ export class AgentManager {
     const flow = this.flows.get(flowId)
     if (flow === undefined) return
     flow.output = `${flow.output}${chunk}`.slice(-16_384)
-    const verificationUri = safeUrl(flow.output)
-    const userCode = deviceCode(flow.output)
+    const text = flow.output.replaceAll(/\x1b\[[0-9;]*m/g, '')
+    const verificationUri = safeUrl(text)
+    const userCode = deviceCode(text)
     if (verificationUri === undefined && userCode === undefined) return
+    clearTimeout(flow.linkHintTimer)
     flow.challenge = {
       ...flow.challenge,
       status: 'waiting-user',
@@ -381,11 +350,4 @@ export class AgentManager {
       ...(userCode === undefined ? {} : { userCode }),
     }
   }
-}
-
-/** Require a boolean confirmation at a wire boundary.
- * @param value - JSON request field.
- */
-export function requireInstallConfirmation(value: JsonValue | undefined): void {
-  if (value !== true) throw new Error('installation requires confirm: true')
 }

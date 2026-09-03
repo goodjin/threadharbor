@@ -1,19 +1,23 @@
-/** Remote host → project → session tree and creation controls. */
+/** DSH-style remote host → project → session → child-session browser. */
 
-import { useEffect, useState, useSyncExternalStore } from 'react'
-import { Button, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useId, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import {
+  Button, IconEllipsisOutline16, IconFolderClose16,
+  IconFolderOpen16, IconNewChatOutline16, IconPanelLeftOutline16,
+  IconPlusOutline16, IconProjectAddOutline16, IconSearchOutline16, Input, Modal,
+  IconSettingsOutline16, IconTreeCorner8x10, StateDot,
+  useDismissOnOutsidePointer,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SidebarOwnerProps } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {
-  RemoteAgentBackend, RemoteAgentConfigBackend, RemoteAgentConfigDocument, RemoteAuthChallenge,
-  RemoteDirectoryListing, RemoteHostView, RemoteInstallPlan,
-  RemoteProjectView, RemoteSessionId, RemoteSessionView, RemoteSshInspection,
+  RemoteHostView, RemoteOperationView, RemoteProjectView, RemoteSessionId, RemoteSessionView,
 } from '@threadharbor/protocol'
-import { RemoteHostId } from '@threadharbor/protocol'
-import { BACKEND_ORDER, type RemoteAgentStore } from './store.ts'
+import type { RemoteAgentStore } from './store.ts'
+import { describeHostConnectFailure, hostConnectionLabel, hostDeploymentBadge, hostIpLabel } from './store.ts'
 import css from './RemoteSurface.module.css'
 
-/** Props injected by the slot registration. */
+/** Props injected by the sidebar slot registration. */
 export interface RemoteSidebarInjected {
   readonly store: RemoteAgentStore
   readonly toggleSidebar: () => void
@@ -22,282 +26,717 @@ export interface RemoteSidebarInjected {
 /** Full sidebar component props. */
 export type RemoteSidebarProps = PropsRuntime<'sidebar'> & SidebarOwnerProps & RemoteSidebarInjected
 
-function availableBackends(host: RemoteHostView): RemoteAgentBackend[] {
-  return BACKEND_ORDER.filter((backend) => {
-    const entry = host.inventory?.backends.find(candidate => candidate.backend === backend)
-    return Boolean(entry?.installed && entry.authenticated && entry.sessionCapable)
-  })
+function sessionState(session: RemoteSessionView): 'done' | 'warning' | 'ongoing' | 'error' {
+  if (session.channelState === 'connecting') return 'ongoing'
+  if (session.turnState === 'waiting-permission') return 'warning'
+  if (session.turnState === 'running') return 'ongoing'
+  if (session.channelState === 'lost' || session.turnState === 'failed') return 'error'
+  return 'done'
 }
 
-function AgentSetup({ host, store }: { host: RemoteHostView; store: RemoteAgentStore }) {
-  const [plan, setPlan] = useState<RemoteInstallPlan>()
-  const [auth, setAuth] = useState<RemoteAuthChallenge>()
-  const [config, setConfig] = useState<RemoteAgentConfigDocument>()
-  const [configContent, setConfigContent] = useState('')
-  const [configSaved, setConfigSaved] = useState(false)
-  const [response, setResponse] = useState('')
-  useEffect(() => {
-    if (auth === undefined || !['starting', 'waiting-user'].includes(auth.status)) return
-    const timer = window.setTimeout(() => {
-      void store.authStatus(host.hostId, auth.flowId).then((next) => {
-        setAuth(next)
-        if (next.status === 'succeeded') void store.refreshInventory(host.hostId)
-      }).catch(() => { /* RemoteAgentStore owns the visible request failure. */ })
-    }, 1000)
-    return () => { window.clearTimeout(timer) }
-  }, [auth, host.hostId, store])
-
-  const install = (backend: RemoteAgentBackend): void => {
-    void store.installPlan(host.hostId, backend).then(setPlan)
-      .catch(() => { /* RemoteAgentStore owns the visible request failure. */ })
-  }
-  const login = (backend: RemoteAgentBackend): void => {
-    setPlan(undefined)
-    setConfig(undefined)
-    void store.startAuth(host.hostId, backend).then(setAuth)
-      .catch(() => { /* RemoteAgentStore owns the visible request failure. */ })
-  }
-  const configure = (backend: RemoteAgentConfigBackend): void => {
-    setPlan(undefined)
-    setAuth(undefined)
-    setConfigSaved(false)
-    void store.readAgentConfig(host.hostId, backend).then((document) => {
-      setConfig(document)
-      setConfigContent(document.content)
-    }).catch(() => { /* RemoteAgentStore owns the visible request failure. */ })
-  }
-
-  return (
-    <div className={css.agentSetup}>
-      {BACKEND_ORDER.map((backend) => {
-        const entry = host.inventory?.backends.find(candidate => candidate.backend === backend)
-        return (
-          <div key={backend} className={css.agentRow}>
-            <span><StateDot state={backendState(host, backend)} />{backend}</span>
-            <span className={css.agentActions}>
-              {!entry?.installed && <button type="button" onClick={() => { install(backend) }}>安装</button>}
-              {entry?.installed && !entry.authenticated && backend !== 'dsh' && (
-                <button type="button" onClick={() => { login(backend) }}>登录</button>
-              )}
-              {entry?.installed && entry.authenticated && <span>已登录</span>}
-              {backend !== 'dsh' && (
-                <button type="button" onClick={() => { configure(backend) }}>配置</button>
-              )}
-            </span>
-            {entry?.detail !== undefined && <small>{entry.detail}</small>}
-          </div>
-        )
-      })}
-      {plan !== undefined && (
-        <div className={css.setupCard}>
-          <strong>安装 {plan.component}</strong>
-          <span>{plan.version}</span>
-          {plan.steps.map(step => <code key={step.command} title={step.title}>{step.command}</code>)}
-          {plan.unavailableReason !== undefined
-            ? <p className={css.error}>{plan.unavailableReason}</p>
-            : plan.alreadyInstalled
-              ? <p>目标已经安装。</p>
-              : <Button size="sm" variant="outline" onClick={() => {
-                  if (plan.component === 'hostd') return
-                  void store.installAgent(host.hostId, plan.component).then(() => {
-                    setPlan(undefined)
-                    void store.refreshInventory(host.hostId)
-                  })
-                }}>确认安装</Button>}
-          <button type="button" onClick={() => { setPlan(undefined) }}>关闭</button>
-        </div>
-      )}
-      {auth !== undefined && (
-        <div className={css.setupCard}>
-          <strong>{auth.backend} 登录</strong>
-          <p>{auth.message}</p>
-          {(auth.verificationUriComplete ?? auth.verificationUri) !== undefined && (
-            <a href={auth.verificationUriComplete ?? auth.verificationUri} target="_blank" rel="noreferrer">打开登录授权页面</a>
-          )}
-          {auth.userCode !== undefined && <code>{auth.userCode}</code>}
-          {auth.status === 'waiting-user' && auth.userCode === undefined && (
-            <div className={css.inlineCreate}>
-              <input aria-label="登录返回码" value={response} placeholder="需要时粘贴返回码" onChange={(event) => { setResponse(event.target.value) }} />
-              <button type="button" disabled={response === ''} onClick={() => {
-                void store.respondAuth(host.hostId, auth.flowId, response).then(() => { setResponse('') })
-              }}>提交</button>
-            </div>
-          )}
-          {['starting', 'waiting-user'].includes(auth.status) && (
-            <button type="button" onClick={() => { void store.cancelAuth(host.hostId, auth.flowId).then(() => { setAuth(undefined) }) }}>取消登录</button>
-          )}
-          {!['starting', 'waiting-user'].includes(auth.status) && <button type="button" onClick={() => { setAuth(undefined) }}>关闭</button>}
-        </div>
-      )}
-      {config !== undefined && (
-        <div className={css.setupCard}>
-          <strong>{config.backend} 配置</strong>
-          <small>{config.path} · {config.format.toUpperCase()} · 最大 {config.maxBytes} 字节</small>
-          <p>这里编辑的是远程主机上的完整用户配置。不要写入明文密钥；优先引用远程环境变量。</p>
-          <textarea
-            className={css.configEditor}
-            aria-label={`${config.backend} 配置内容`}
-            spellCheck={false}
-            value={configContent}
-            onChange={(event) => {
-              setConfigContent(event.target.value)
-              setConfigSaved(false)
-            }}
-          />
-          {new TextEncoder().encode(configContent).length > config.maxBytes && (
-            <p className={css.error}>配置超过 {config.maxBytes} 字节限制。</p>
-          )}
-          {configSaved && <p>已保存并通过 {config.format.toUpperCase()} 语法校验。</p>}
-          <div className={css.configActions}>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={configContent === config.content || new TextEncoder().encode(configContent).length > config.maxBytes}
-              onClick={() => {
-                void store.writeAgentConfig(
-                  host.hostId, config.backend, configContent, config.revision,
-                ).then((saved) => {
-                  setConfig(saved)
-                  setConfigContent(saved.content)
-                  setConfigSaved(true)
-                })
-              }}
-            >保存配置</Button>
-            <button type="button" onClick={() => { setConfig(undefined) }}>关闭</button>
-          </div>
-        </div>
-      )}
-    </div>
-  )
+/** Short status label shown next to the backend badge so users see lifecycle transitions. */
+function sessionBadge(session: RemoteSessionView, attaching: boolean): string {
+  if (attaching) return '连接中…'
+  if (session.channelState === 'connecting') return '建立远端…'
+  if (session.channelState === 'lost' || session.turnState === 'failed') return '建立失败'
+  if (session.channelState === 'reconnecting') return '重连中…'
+  return session.backend
 }
 
-function backendState(host: RemoteHostView, backend: RemoteAgentBackend): 'done' | 'warning' | 'ongoing' | 'error' {
-  const entry = host.inventory?.backends.find(candidate => candidate.backend === backend)
+function hostState(host: RemoteHostView): 'done' | 'warning' | 'error' {
   if (host.inventoryError !== undefined) return 'error'
-  if (entry?.running) return 'ongoing'
-  if (entry?.installed && entry.authenticated) return 'done'
+  if (host.inventory?.healthy === true) return 'done'
   return 'warning'
 }
 
+function operationState(operation: RemoteOperationView): 'done' | 'ongoing' | 'error' {
+  if (operation.status === 'failed') return 'error'
+  if (operation.status === 'succeeded') return 'done'
+  return 'ongoing'
+}
+
+function OperationTray({ operations, hosts, store }: {
+  operations: readonly RemoteOperationView[]
+  hosts: readonly RemoteHostView[]
+  store: RemoteAgentStore
+}) {
+  const active = operations.filter(operation => operation.status === 'queued' || operation.status === 'running')
+  const latestFinished = operations.find(operation => operation.status === 'failed' || operation.status === 'succeeded')
+  const visible = [...active, ...(latestFinished === undefined ? [] : [latestFinished])].slice(0, 3)
+  if (visible.length === 0) return null
+  return (
+    <section className={css.operationTray} aria-label="后台操作" aria-live="polite">
+      {visible.map(operation => {
+        const hostExists = operation.hostId !== undefined && hosts.some(host => host.hostId === operation.hostId)
+        return (
+          <button
+            key={operation.operationId}
+            type="button"
+            disabled={!hostExists}
+            onClick={() => {
+              if (operation.hostId !== undefined && hostExists) store.showPanel({ kind: 'host-settings', hostId: operation.hostId })
+            }}
+          >
+            <StateDot state={operationState(operation)} />
+            <span><strong>{operation.title}</strong><small>{operation.detail}</small></span>
+          </button>
+        )
+      })}
+    </section>
+  )
+}
+
+function includesQuery(value: string, query: string): boolean {
+  return value.toLocaleLowerCase().includes(query)
+}
+
+function sessionMatches(session: RemoteSessionView, sessions: readonly RemoteSessionView[], query: string): boolean {
+  if (query === '' || includesQuery(session.title, query) || includesQuery(session.backend, query)) return true
+  return sessions.some(candidate => candidate.parentSessionId === session.sessionId && sessionMatches(candidate, sessions, query))
+}
+
+function TreeToggle({ open }: { open: boolean }) {
+  return <span className={css.treeBar} data-open={open || undefined} aria-hidden="true" />
+}
+
 function SessionRows({
-  parentSessionId, sessions, currentSessionId, onOpen,
+  parentSessionId, sessions, currentSessionId, attachingSessionId, query, depth = 0, onOpen, onRename, store,
 }: {
   parentSessionId?: RemoteSessionId
   sessions: readonly RemoteSessionView[]
   currentSessionId: RemoteSessionId | undefined
+  attachingSessionId: RemoteSessionId | undefined
+  query: string
+  depth?: number
   onOpen: (session: RemoteSessionView) => void
+  onRename: (session: RemoteSessionView) => void
+  store: RemoteAgentStore
 }) {
-  const rows = sessions.filter(session => session.parentSessionId === parentSessionId)
+  const rows = sessions.filter(session => session.parentSessionId === parentSessionId && sessionMatches(session, sessions, query))
+  const [menuSessionId, setMenuSessionId] = useState<RemoteSessionId>()
+  const [archivingSessionId, setArchivingSessionId] = useState<RemoteSessionId>()
   if (rows.length === 0) return null
   return (
-    <div className={parentSessionId === undefined ? css.sessionList : css.childList}>
+    <div className={depth === 0 ? css.sessionList : css.childList} role="group">
       {rows.map(session => (
-        <div key={session.sessionId}>
-          <div className={css.sessionRow} data-current={session.sessionId === currentSessionId || undefined}>
-            <button type="button" className={css.sessionOpen} onClick={() => { onOpen(session) }}>
-              <StateDot state={session.turnState === 'running' ? 'ongoing' : session.channelState === 'lost' ? 'error' : 'done'} />
-              <span className={css.sessionTitle}>{session.title}</span>
-              <span className={css.backendBadge}>{session.backend}</span>
-            </button>
-          </div>
-          <SessionRows
-            parentSessionId={session.sessionId}
-            sessions={sessions}
-            currentSessionId={currentSessionId}
-            onOpen={onOpen}
-          />
-        </div>
+        <SessionRow
+          key={session.sessionId}
+          session={session}
+          currentSessionId={currentSessionId}
+          attachingSessionId={attachingSessionId}
+          depth={depth}
+          onOpen={onOpen}
+          onRename={onRename}
+          store={store}
+          menuOpen={menuSessionId === session.sessionId}
+          setMenuOpen={(open) => { setMenuSessionId(open ? session.sessionId : undefined) }}
+          archiving={archivingSessionId === session.sessionId}
+          setArchiving={(value) => { setArchivingSessionId(value ? session.sessionId : undefined) }}
+          sessions={sessions}
+          query={query}
+        />
       ))}
     </div>
   )
 }
 
-function ProjectSection({
-  project, host, sessions, currentSessionId, store,
+function SessionRow({
+  session, currentSessionId, attachingSessionId, depth, onOpen, onRename, store,
+  menuOpen, setMenuOpen, archiving, setArchiving, sessions, query,
 }: {
-  project: RemoteProjectView
-  host: RemoteHostView
-  sessions: readonly RemoteSessionView[]
+  session: RemoteSessionView
   currentSessionId: RemoteSessionId | undefined
+  attachingSessionId: RemoteSessionId | undefined
+  depth: number
+  onOpen: (session: RemoteSessionView) => void
+  onRename: (session: RemoteSessionView) => void
   store: RemoteAgentStore
+  menuOpen: boolean
+  setMenuOpen: (open: boolean) => void
+  archiving: boolean
+  setArchiving: (archiving: boolean) => void
+  sessions: readonly RemoteSessionView[]
+  query: string
 }) {
-  const backends = availableBackends(host)
-  const [backend, setBackend] = useState<RemoteAgentBackend | ''>(backends[0] ?? '')
-  const [title, setTitle] = useState('')
-  useEffect(() => {
-    if (backend === '' || !backends.includes(backend)) setBackend(backends[0] ?? '')
-  }, [backend, backends])
-  const createRoot = (): void => {
-    if (backend === '') return
-    void store.createSession({ projectId: project.projectId, title: title || '新会话', backend })
-    setTitle('')
-  }
+  const menuRef = useRef<HTMLDivElement>(null)
+  useDismissOnOutsidePointer(menuRef, menuOpen, () => { setMenuOpen(false) })
   return (
-    <section className={css.projectSection}>
-      <div className={css.projectHeading}>
-        <span>{project.title}</span>
-        <span className={css.cwd} title={project.cwd}>{project.cwd}</span>
-      </div>
-      <div className={css.inlineCreate}>
-        <input aria-label="会话标题" value={title} placeholder="新会话" onChange={(event) => { setTitle(event.target.value) }} />
-        <select aria-label="后端" value={backend} onChange={(event) => { setBackend(event.target.value as RemoteAgentBackend) }}>
-          {backends.map(value => <option key={value} value={value}>{value}</option>)}
-        </select>
-        <button type="button" disabled={backend === ''} onClick={createRoot}>新建</button>
-      </div>
-      {backends.length === 0 && <p className={css.muted}>这台主机没有已安装且已认证的后端。</p>}
+    <div ref={menuRef} className={css.sessionItem}>
+      <button
+        type="button"
+        className={css.sessionRow}
+        data-current={session.sessionId === currentSessionId || undefined}
+        aria-current={session.sessionId === currentSessionId ? 'page' : undefined}
+        title={session.title}
+        onClick={() => { onOpen(session) }}
+      >
+        <span className={css.sessionLeading} aria-hidden="true">
+          {depth > 0 && <IconTreeCorner8x10 />}
+          <StateDot state={session.sessionId === attachingSessionId ? 'ongoing' : sessionState(session)} />
+        </span>
+        <span className={css.sessionTitle}>{session.title}</span>
+        <span
+          className={css.backendBadge}
+          data-state={session.channelState === 'lost' || session.turnState === 'failed'
+            ? 'failed' : session.channelState === 'connecting' ? 'connecting' : undefined}
+        >{sessionBadge(session, session.sessionId === attachingSessionId)}</span>
+      </button>
+      <button
+        type="button"
+        className={css.sessionMenuButton}
+        aria-label={`${session.title} 操作`}
+        aria-expanded={menuOpen}
+        title="会话操作"
+        onClick={(event) => {
+          event.stopPropagation()
+          setMenuOpen(!menuOpen)
+        }}
+      >
+        <IconEllipsisOutline16 />
+      </button>
+      {menuOpen && (
+        <div className={css.sessionMenu} role="menu">
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setMenuOpen(false)
+              onRename(session)
+            }}
+          >重命名</button>
+          <button
+            type="button"
+            role="menuitem"
+            className={css.rowMenuDanger}
+            disabled={archiving}
+            onClick={() => {
+              setArchiving(true)
+              void store.archiveSession(session.sessionId)
+                .then(() => { setMenuOpen(false) })
+                .catch(() => undefined)
+                .finally(() => { setArchiving(false) })
+            }}
+          >{archiving ? '归档中…' : '归档'}</button>
+        </div>
+      )}
       <SessionRows
+        parentSessionId={session.sessionId}
         sessions={sessions}
         currentSessionId={currentSessionId}
-        onOpen={(session) => { void store.selectSession(session.sessionId) }}
+        attachingSessionId={attachingSessionId}
+        query={query}
+        depth={depth + 1}
+        onOpen={onOpen}
+        onRename={onRename}
+        store={store}
       />
+    </div>
+  )
+}
+
+function ProjectSection({
+  project, sessions, currentSessionId, attachingSessionId, draftCurrent, query, open, onToggle, onRename, store, onHideProject, onRenameProject, active,
+}: {
+  project: RemoteProjectView
+  sessions: readonly RemoteSessionView[]
+  currentSessionId: RemoteSessionId | undefined
+  attachingSessionId: RemoteSessionId | undefined
+  draftCurrent: boolean
+  query: string
+  open: boolean
+  onToggle: () => void
+  onRename: (session: RemoteSessionView) => void
+  onRenameProject: (project: RemoteProjectView) => void
+  onHideProject: (project: RemoteProjectView) => void
+  store: RemoteAgentStore
+  active: boolean
+}) {
+  const queryMatchesProject = query === '' || includesQuery(project.title, query) || includesQuery(project.cwd, query)
+  const visibleSessions = queryMatchesProject ? sessions : sessions.filter(session => sessionMatches(session, sessions, query))
+  if (query !== '' && !queryMatchesProject && visibleSessions.length === 0) return null
+  const expanded = query === '' ? open : true
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+  useDismissOnOutsidePointer(menuRef, menuOpen, () => { setMenuOpen(false) })
+  return (
+    <section className={css.projectSection} data-active={active || undefined}>
+      <div className={css.treeRow} data-level="project">
+        <button
+          type="button"
+          className={css.treeRowMain}
+          aria-expanded={expanded}
+          aria-current={active ? 'page' : undefined}
+          title={project.cwd}
+          onClick={onToggle}
+        >
+          <span className={css.treeBarCell}><TreeToggle open={expanded} /></span>
+          <span className={css.folderIcon} aria-hidden="true">{expanded ? <IconFolderOpen16 /> : <IconFolderClose16 />}</span>
+          <span className={css.treeLabel}>{project.title}</span>
+        </button>
+        <div className={css.treeRowActions}>
+          <button
+            type="button"
+            aria-label={`在 ${project.title} 中新建会话`}
+            title="新建会话"
+            onClick={() => { store.startSessionDraft(project.projectId) }}
+          >
+            <IconNewChatOutline16 />
+          </button>
+          <div ref={menuRef} className={css.rowMenuAnchor}>
+            <button
+              type="button"
+              className={css.menuButton}
+              aria-label={`项目 ${project.title} 操作`}
+              aria-expanded={menuOpen}
+              title="项目操作"
+              onClick={(event) => { event.stopPropagation(); setMenuOpen(value => !value) }}
+            >
+              <IconEllipsisOutline16 />
+            </button>
+            {menuOpen && (
+              <div className={css.rowMenu} role="menu">
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false)
+                    onRenameProject(project)
+                  }}
+                >重命名</button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className={css.rowMenuDanger}
+                  onClick={() => {
+                    setMenuOpen(false)
+                    onHideProject(project)
+                  }}
+                >隐藏</button>
+              </div>
+            )}
+          </div>
+        </div>
+        <span className={css.projectPathTooltip} role="tooltip">{project.cwd}</span>
+      </div>
+      {expanded && (
+        <div className={css.projectChildren}>
+          {draftCurrent && (
+            <button type="button" className={css.sessionRow} data-current aria-current="page" onClick={() => { store.startSessionDraft(project.projectId) }}>
+              <span className={css.sessionLeading}><span className={css.draftDot} aria-hidden="true" /></span>
+              <span className={css.sessionTitle}>新会话</span>
+              <span className={css.backendBadge}>待选择</span>
+            </button>
+          )}
+          <SessionRows
+            sessions={visibleSessions}
+            currentSessionId={currentSessionId}
+            attachingSessionId={attachingSessionId}
+            query={queryMatchesProject ? '' : query}
+            onOpen={(session) => { void store.selectSession(session.sessionId).catch(() => undefined) }}
+            onRename={onRename}
+            store={store}
+          />
+          {!draftCurrent && visibleSessions.filter(session => session.parentSessionId === undefined).length === 0 && (
+            <button type="button" className={css.emptyTreeAction} onClick={() => { store.startSessionDraft(project.projectId) }}>
+              <IconPlusOutline16 /> 新建会话
+            </button>
+          )}
+        </div>
+      )}
     </section>
   )
+}
+
+function HostSection({
+  host, projects, sessions, currentSessionId, attachingSessionId, draftProjectId, query,
+  open, onToggle, projectOpen, onToggleProject, onRename, store, artifactVersion, active,
+  activeProjectId, onRenameHost, onHideHost, onRenameProject, onHideProject,
+}: {
+  host: RemoteHostView
+  projects: readonly RemoteProjectView[]
+  sessions: readonly RemoteSessionView[]
+  currentSessionId: RemoteSessionId | undefined
+  attachingSessionId: RemoteSessionId | undefined
+  draftProjectId: string | undefined
+  query: string
+  open: boolean
+  onToggle: () => void
+  projectOpen: (projectId: string) => boolean
+  onToggleProject: (projectId: string) => void
+  onRename: (session: RemoteSessionView) => void
+  onRenameHost: (host: RemoteHostView) => void
+  onHideHost: (host: RemoteHostView) => void
+  onRenameProject: (project: RemoteProjectView) => void
+  onHideProject: (project: RemoteProjectView) => void
+  store: RemoteAgentStore
+  artifactVersion: string | undefined
+  active: boolean
+  activeProjectId: string | undefined
+}) {
+  const hostMatchesQuery = query === '' || includesQuery(host.title, query) || includesQuery(host.endpoint, query)
+  const visibleProjects = hostMatchesQuery ? projects : projects.filter(project => {
+    if (includesQuery(project.title, query) || includesQuery(project.cwd, query)) return true
+    return sessions.some(session => session.projectId === project.projectId && sessionMatches(session, sessions, query))
+  })
+  if (query !== '' && !hostMatchesQuery && visibleProjects.length === 0) return null
+  const expanded = query === '' ? open : true
+  const badge = hostDeploymentBadge(host, artifactVersion)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [connecting, setConnecting] = useState(false)
+  const [connectError, setConnectError] = useState<string>()
+  const menuRef = useRef<HTMLDivElement>(null)
+  useDismissOnOutsidePointer(menuRef, menuOpen, () => { setMenuOpen(false) })
+  const offline = host.inventoryError !== undefined
+  const connect = (): void => {
+    setConnecting(true)
+    setConnectError(undefined)
+    void store.reconnectHost(host.hostId)
+      .then(() => { setConnectError(undefined) })
+      .catch((error: unknown) => { setConnectError(describeHostConnectFailure(error)) })
+      .finally(() => { setConnecting(false) })
+  }
+  return (
+    <section className={css.hostSection} data-active={active || undefined}>
+      <div className={css.treeRow} data-level="host">
+        <button
+          type="button"
+          className={css.treeRowMain}
+          aria-expanded={expanded}
+          aria-current={active ? 'page' : undefined}
+          title={host.endpoint}
+          onClick={onToggle}
+        >
+          <span className={css.treeBarCell}><TreeToggle open={expanded} /></span>
+          <StateDot state={hostState(host)} />
+          <span className={css.treeLabel}>
+            <span>
+              {host.title}
+              {badge !== undefined && (
+                <span className={`${css.hostBadge} ${badge.tone === 'warn' ? css.hostBadgeWarn : badge.tone === 'error' ? css.hostBadgeError : css.hostBadgeMuted}`}
+                  aria-label={badge.label}
+                  title={badge.label}
+                >{badge.label}</span>
+              )}
+            </span>
+            <small className={css.hostEndpoint}>
+              {hostIpLabel(host)} · {hostConnectionLabel(host, artifactVersion)}
+            </small>
+          </span>
+        </button>
+        <div className={css.treeRowActions}>
+          <button
+            type="button"
+            aria-label={`设置主机 ${host.title}`}
+            title="主机设置"
+            onClick={() => {
+              void store.refreshInventory(host.hostId).catch(() => undefined)
+              store.showPanel({ kind: 'host-settings', hostId: host.hostId })
+            }}
+          ><IconSettingsOutline16 /></button>
+          <button
+            type="button"
+            aria-label={`在 ${host.title} 添加项目`}
+            title="添加项目"
+            onClick={() => { store.showPanel({ kind: 'add-project', hostId: host.hostId }) }}
+          ><IconProjectAddOutline16 /></button>
+          <div ref={menuRef} className={css.rowMenuAnchor}>
+            <button
+              type="button"
+              className={css.menuButton}
+              aria-label={`主机 ${host.title} 操作`}
+              aria-expanded={menuOpen}
+              title="主机操作"
+              onClick={(event) => { event.stopPropagation(); setMenuOpen(value => !value) }}
+            >
+              <IconEllipsisOutline16 />
+            </button>
+            {menuOpen && (
+              <div className={css.rowMenu} role="menu">
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false)
+                    onRenameHost(host)
+                  }}
+                >重命名</button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className={css.rowMenuDanger}
+                  onClick={() => {
+                    setMenuOpen(false)
+                    onHideHost(host)
+                  }}
+                >隐藏</button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+      {offline && (
+        <div className={css.hostOffline}>
+          <Button size="sm" variant="outline" disabled={connecting} onClick={connect}>
+            {connecting ? '连接中…' : '连接'}
+          </Button>
+          {connectError !== undefined && <p className={css.treeError}>{connectError}</p>}
+        </div>
+      )}
+      {expanded && (
+        <div className={css.hostChildren}>
+          {visibleProjects.map(project => (
+            <ProjectSection
+              key={project.projectId}
+              project={project}
+              sessions={sessions.filter(session => session.projectId === project.projectId)}
+              currentSessionId={currentSessionId}
+              attachingSessionId={attachingSessionId}
+              draftCurrent={draftProjectId === project.projectId}
+              query={hostMatchesQuery ? '' : query}
+              open={projectOpen(project.projectId)}
+              onToggle={() => { onToggleProject(project.projectId) }}
+              onRename={onRename}
+              onRenameProject={onRenameProject}
+              onHideProject={onHideProject}
+              active={activeProjectId === project.projectId}
+              store={store}
+            />
+          ))}
+          {visibleProjects.length === 0 && (
+            <button type="button" className={css.emptyTreeAction} onClick={() => { store.showPanel({ kind: 'add-project', hostId: host.hostId }) }}>
+              <IconPlusOutline16 /> 添加项目
+            </button>
+          )}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function RenameSessionDialog({ session, store, onClose }: {
+  session: RemoteSessionView
+  store: RemoteAgentStore
+  onClose: () => void
+}) {
+  return (
+    <RenameDialog
+      title="重命名会话"
+      description="输入一个便于识别的会话名称。"
+      label="会话名称"
+      closeLabel="关闭重命名会话"
+      initial={session.title}
+      onClose={onClose}
+      onSubmit={(next) => { return store.renameSession(session.sessionId, next) }}
+    />
+  )
+}
+
+function RenameHostDialog({ host, store, onClose }: {
+  host: RemoteHostView
+  store: RemoteAgentStore
+  onClose: () => void
+}) {
+  return (
+    <RenameDialog
+      title="重命名主机"
+      description="主机名称只影响 Web 端的展示，不会重命名远端服务器。"
+      label="主机名称"
+      closeLabel="关闭重命名主机"
+      initial={host.title}
+      onClose={onClose}
+      onSubmit={(next) => { return store.updateHostTitle(host.hostId, next) }}
+    />
+  )
+}
+
+function RenameProjectDialog({ project, store, onClose }: {
+  project: RemoteProjectView
+  store: RemoteAgentStore
+  onClose: () => void
+}) {
+  return (
+    <RenameDialog
+      title="重命名项目"
+      description="项目名称只影响 Web 端的展示，不会重命名远端目录。"
+      label="项目名称"
+      closeLabel="关闭重命名项目"
+      initial={project.title}
+      onClose={onClose}
+      onSubmit={(next) => { return store.renameProject(project.projectId, next) }}
+    />
+  )
+}
+
+function RenameDialog({ title, description, label, closeLabel, initial, onSubmit, onClose }: {
+  title: string
+  description: string
+  label: string
+  closeLabel: string
+  initial: string
+  onSubmit: (next: string) => Promise<unknown>
+  onClose: () => void
+}) {
+  const formId = useId()
+  const [value, setValue] = useState(initial)
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState('')
+  const close = (): void => {
+    if (!pending) onClose()
+  }
+  const submit = (): void => {
+    const next = value.trim()
+    if (next === '') {
+      setError('名称不能为空。')
+      return
+    }
+    if (next === initial) {
+      onClose()
+      return
+    }
+    setPending(true)
+    setError('')
+    void onSubmit(next)
+      .then(() => { setPending(false); onClose() })
+      .catch((reason: unknown) => { setError(String(reason)); setPending(false) })
+  }
+  return (
+    <Modal
+      open
+      title={title}
+      closeLabel={closeLabel}
+      description={description}
+      onClose={close}
+      footer={(
+        <>
+          <Button type="button" size="sm" variant="ghost" disabled={pending} onClick={close}>取消</Button>
+          <Button type="submit" form={formId} size="sm" variant="primary" disabled={pending || value.trim() === ''}>
+            {pending ? '保存中…' : '保存'}
+          </Button>
+        </>
+      )}
+    >
+      <form id={formId} className={css.renameForm} onSubmit={(event) => { event.preventDefault(); submit() }}>
+        <label htmlFor={`${formId}-value`}>{label}</label>
+        <Input
+          id={`${formId}-value`}
+          className={css.renameInput ?? ''}
+          value={value}
+          autoFocus
+          disabled={pending}
+          aria-invalid={error !== '' || undefined}
+          aria-describedby={error === '' ? undefined : `${formId}-error`}
+          onChange={(event) => { setValue(event.target.value); setError('') }}
+        />
+        {error !== '' && <p id={`${formId}-error`} className={css.renameError}>{error}</p>}
+      </form>
+    </Modal>
+  )
+}
+
+type HideTarget =
+  | { readonly kind: 'host'; readonly host: RemoteHostView }
+  | { readonly kind: 'project'; readonly project: RemoteProjectView }
+
+function HideConfirmDialog({ target, store, onClose }: {
+  target: HideTarget
+  store: RemoteAgentStore
+  onClose: () => void
+}) {
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState('')
+  const isHost = target.kind === 'host'
+  const host = isHost ? target.host : undefined
+  const project = isHost ? undefined : target.project
+  const title = isHost ? `隐藏主机 ${host?.title}` : `隐藏项目 ${project?.title}`
+  const body = isHost
+    ? `隐藏后，主机 ${host?.title} 及其所有项目与会话会从侧栏消失；可在"隐藏的主机与项目"中恢复或永久删除。`
+    : `隐藏后，项目 ${project?.title} 的会话会归档，主机 ${host?.title ?? ''} 仍可见；可在"隐藏的主机与项目"中恢复或永久删除。`
+  const confirm = (): void => {
+    setPending(true)
+    setError('')
+    const task = isHost
+      ? store.hideHost(host!.hostId)
+      : store.hideProject(project!.projectId)
+    void task
+      .then(() => { setPending(false); onClose() })
+      .catch((reason: unknown) => { setError(String(reason)); setPending(false) })
+  }
+  return (
+    <Modal
+      open
+      title={title}
+      closeLabel="关闭隐藏确认"
+      description={body}
+      onClose={() => { if (!pending) onClose() }}
+      footer={(
+        <>
+          <Button type="button" size="sm" variant="ghost" disabled={pending} onClick={() => { if (!pending) onClose() }}>取消</Button>
+          <Button type="button" size="sm" variant="primary" disabled={pending} onClick={confirm}>
+            {pending ? '隐藏中…' : '隐藏'}
+          </Button>
+        </>
+      )}
+    >
+      {error !== '' && <p className={css.renameError}>{error}</p>}
+    </Modal>
+  )
+}
+
+function toggleSet(current: ReadonlySet<string>, key: string): Set<string> {
+  const next = new Set(current)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  return next
 }
 
 /** Render the complete remote navigation column. */
 export function RemoteSidebar({ collapsed, store, toggleSidebar }: RemoteSidebarProps) {
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
-  const [hostTitle, setHostTitle] = useState('本机')
-  const [endpoint, setEndpoint] = useState('http://127.0.0.1:3091')
-  const [hostMode, setHostMode] = useState<'ssh' | 'endpoint'>('ssh')
-  const [sshTarget, setSshTarget] = useState('')
-  const [sshPort, setSshPort] = useState('22')
-  const [sshUser, setSshUser] = useState('')
-  const [identityFile, setIdentityFile] = useState('')
-  const [proxyJump, setProxyJump] = useState('')
-  const [sshInspection, setSshInspection] = useState<RemoteSshInspection>()
-  const [projectHost, setProjectHost] = useState('')
-  const [projectTitle, setProjectTitle] = useState('')
-  const [cwd, setCwd] = useState('')
-  const [listing, setListing] = useState<RemoteDirectoryListing>()
   const state = snapshot.state
-  const [selectedHostId, setSelectedHostId] = useState('')
-  useEffect(() => {
-    if (!state.hosts.some(host => host.hostId === selectedHostId)) {
-      const first = state.hosts[0]?.hostId ?? ''
-      setSelectedHostId(first)
-      setProjectHost(first)
+  const [query, setQuery] = useState('')
+  const [closedHosts, setClosedHosts] = useState<ReadonlySet<string>>(() => new Set())
+  const [closedProjects, setClosedProjects] = useState<ReadonlySet<string>>(() => new Set())
+  const [renameSession, setRenameSession] = useState<RemoteSessionView>()
+  const [renameHost, setRenameHost] = useState<RemoteHostView>()
+  const [renameProject, setRenameProject] = useState<RemoteProjectView>()
+  const [hideTarget, setHideTarget] = useState<HideTarget>()
+  const normalizedQuery = query.trim().toLocaleLowerCase()
+  const currentSession = state.sessions.find(session => session.sessionId === snapshot.currentSessionId)
+  const newSessionProject = snapshot.draftSession?.projectId ?? currentSession?.projectId ?? state.projects[0]?.projectId
+  const panel = snapshot.panel
+  const activeHostId = panel === undefined
+    ? undefined
+    : panel.kind === 'host-settings'
+      ? panel.hostId
+      : panel.kind === 'add-project' && panel.hostId !== undefined
+        ? panel.hostId
+        : undefined
+  const activeProjectId = undefined
+  const startNewSession = (): void => {
+    if (newSessionProject !== undefined) {
+      store.startSessionDraft(newSessionProject)
+      return
     }
-  }, [selectedHostId, state.hosts])
-  const selectedHost = state.hosts.find(host => host.hostId === selectedHostId)
-  const browse = (path: string): void => {
-    if (projectHost === '') return
-    void store.listDirectory(RemoteHostId(projectHost), path).then((value) => {
-      setListing(value)
-      setCwd(value.path)
-    }).catch(() => { /* RemoteAgentStore owns the visible request failure. */ })
+    const firstHost = state.hosts[0]
+    store.showPanel(firstHost === undefined ? { kind: 'add-host' } : { kind: 'add-project', hostId: firstHost.hostId })
   }
+
+  const visibleHostCount = useMemo(() => state.hosts.filter(host => {
+    if (normalizedQuery === '' || includesQuery(host.title, normalizedQuery) || includesQuery(host.endpoint, normalizedQuery)) return true
+    return state.projects.some(project => project.hostId === host.hostId && (
+      includesQuery(project.title, normalizedQuery)
+      || includesQuery(project.cwd, normalizedQuery)
+      || state.sessions.some(session => session.projectId === project.projectId && sessionMatches(session, state.sessions, normalizedQuery))
+    ))
+  }).length, [normalizedQuery, state.hosts, state.projects, state.sessions])
 
   if (collapsed) {
     return (
       <div className={css.rail}>
-        <button type="button" title="展开远程 Agent" onClick={toggleSidebar}>远</button>
-        {state.sessions.filter(session => session.parentSessionId === undefined).map(session => (
-          <button key={session.sessionId} type="button" title={session.title} onClick={() => { void store.selectSession(session.sessionId) }}>
-            <StateDot state={session.turnState === 'running' ? 'ongoing' : session.channelState === 'lost' ? 'error' : 'done'} />
-          </button>
-        ))}
+        <button type="button" className={css.railBrand} title="展开 ThreadHarbor" onClick={toggleSidebar}>TH</button>
+        <button type="button" title="新建会话" onClick={startNewSession}><IconNewChatOutline16 /></button>
+        <span className={css.railSpacer} />
+        <button type="button" title="添加主机" onClick={() => { store.showPanel({ kind: 'add-host' }) }}><IconPlusOutline16 /></button>
       </div>
     )
   }
@@ -305,131 +744,76 @@ export function RemoteSidebar({ collapsed, store, toggleSidebar }: RemoteSidebar
   return (
     <aside className={css.sidebar}>
       <header className={css.sidebarHeader}>
-        <div><strong>远程 Agent</strong><span>hostd 会话</span></div>
-        <button type="button" aria-label="收起侧栏" onClick={toggleSidebar}>‹</button>
+        <button type="button" className={css.brand} title="新建会话" onClick={startNewSession}>
+          <span className={css.brandMark}>TH</span>
+          <span className={css.brandText}><strong>ThreadHarbor</strong><small>Remote Agents</small></span>
+        </button>
+        <button type="button" className={css.iconButton} aria-label="收起侧栏" onClick={toggleSidebar}><IconPanelLeftOutline16 /></button>
       </header>
 
-      <details className={css.addPanel}>
-        <summary>添加主机</summary>
-        <input aria-label="主机名称" value={hostTitle} onChange={(event) => { setHostTitle(event.target.value) }} />
-        <select aria-label="主机连接方式" value={hostMode} onChange={(event) => { setHostMode(event.target.value as 'ssh' | 'endpoint') }}>
-          <option value="ssh">SSH 自动部署</option>
-          <option value="endpoint">已有 hostd 地址</option>
-        </select>
-        {hostMode === 'endpoint' ? (
-          <>
-            <input aria-label="hostd 地址" value={endpoint} onChange={(event) => { setEndpoint(event.target.value) }} />
-            <Button size="sm" variant="outline" disabled={snapshot.pending} onClick={() => { void store.addHost(hostTitle, endpoint) }}>连接</Button>
-          </>
-        ) : (
-          <>
-            <input aria-label="SSH 主机" value={sshTarget} placeholder="host.example.com" onChange={(event) => { setSshTarget(event.target.value); setSshInspection(undefined) }} />
-            <div className={css.inlineCreate}>
-              <input aria-label="SSH 用户" value={sshUser} placeholder="user" onChange={(event) => { setSshUser(event.target.value); setSshInspection(undefined) }} />
-              <input aria-label="SSH 端口" value={sshPort} inputMode="numeric" onChange={(event) => { setSshPort(event.target.value); setSshInspection(undefined) }} />
-            </div>
-            <input aria-label="SSH 私钥路径" value={identityFile} placeholder="Web 服务主机上的私钥绝对路径（可选）" onChange={(event) => { setIdentityFile(event.target.value); setSshInspection(undefined) }} />
-            <input aria-label="SSH 跳板机" value={proxyJump} placeholder="ProxyJump（可选）" onChange={(event) => { setProxyJump(event.target.value); setSshInspection(undefined) }} />
-            {sshInspection === undefined ? (
-              <Button size="sm" variant="ghost" disabled={sshTarget === '' || snapshot.pending} onClick={() => {
-                const port = Number(sshPort)
-                void store.inspectSsh({
-                  target: sshTarget,
-                  ...(Number.isSafeInteger(port) ? { port } : {}),
-                  ...(sshUser === '' ? {} : { user: sshUser }),
-                  ...(identityFile === '' ? {} : { identityFile }),
-                  ...(proxyJump === '' ? {} : { proxyJump }),
-                }).then(setSshInspection)
-              }}>检查主机密钥</Button>
-            ) : (
-              <div className={css.setupCard}>
-                <strong>确认 SSH 主机密钥</strong>
-                <code>{sshInspection.algorithm} {sshInspection.hostKeyFingerprint}</code>
-                <p>请与主机管理员提供的指纹核对。确认后会部署并启动 threadharbor-hostd。</p>
-                <Button size="sm" variant="outline" disabled={snapshot.pending} onClick={() => {
-                  const port = Number(sshPort)
-                  void store.deploySshHost(hostTitle, {
-                    target: sshTarget,
-                    ...(Number.isSafeInteger(port) ? { port } : {}),
-                    ...(sshUser === '' ? {} : { user: sshUser }),
-                    ...(identityFile === '' ? {} : { identityFile }),
-                    ...(proxyJump === '' ? {} : { proxyJump }),
-                    hostKeyFingerprint: sshInspection.hostKeyFingerprint,
-                  }).then(() => { setSshInspection(undefined) })
-                }}>指纹正确，部署 hostd</Button>
-              </div>
-            )}
-          </>
-        )}
-      </details>
-
-      {state.hosts.length > 0 && (
-        <details className={css.addPanel}>
-          <summary>添加项目</summary>
-          <select aria-label="项目主机" value={projectHost} onChange={(event) => { setProjectHost(event.target.value) }}>
-            <option value="">选择主机</option>
-            {state.hosts.map(host => <option key={host.hostId} value={host.hostId}>{host.title}</option>)}
-          </select>
-          <input aria-label="项目名称" value={projectTitle} placeholder="项目名称" onChange={(event) => { setProjectTitle(event.target.value) }} />
-          <input aria-label="远程目录" value={cwd} placeholder="/path/to/project" onChange={(event) => { setCwd(event.target.value) }} />
-          <Button size="sm" variant="ghost" disabled={projectHost === '' || snapshot.pending} onClick={() => { browse(cwd || '/') }}>浏览</Button>
-          {listing !== undefined && (
-            <div className={css.directoryList}>
-              {listing.parent !== undefined && <button type="button" onClick={() => { browse(listing.parent ?? listing.path) }}>..</button>}
-              {listing.entries.filter(entry => entry.kind === 'directory').map(entry => (
-                <button key={entry.path} type="button" onClick={() => { browse(entry.path) }}>{entry.name}/</button>
-              ))}
-            </div>
-          )}
-          <Button size="sm" variant="outline" disabled={projectHost === '' || cwd === '' || snapshot.pending} onClick={() => {
-            void store.createProject(RemoteHostId(projectHost), projectTitle || cwd.split('/').at(-1) || cwd, cwd)
-          }}>登记</Button>
-        </details>
+      {(state.projects.length > 0 || state.sessions.length > 0) && (
+        <label className={css.sidebarSearch}>
+          <IconSearchOutline16 aria-hidden="true" />
+          <input value={query} placeholder="搜索项目和会话" aria-label="搜索项目和会话" onChange={(event) => { setQuery(event.target.value) }} />
+        </label>
       )}
 
       <div className={css.tree}>
-        <div className={css.hostTabs}>
-          {state.hosts.map(host => (
-            <button
-              key={host.hostId}
-              type="button"
-              data-current={host.hostId === selectedHostId || undefined}
-              onClick={() => {
-                setSelectedHostId(host.hostId)
-                setProjectHost(host.hostId)
-                setListing(undefined)
-              }}
-            >{host.title}</button>
-          ))}
-        </div>
-        {selectedHost !== undefined && (
-          <section key={selectedHost.hostId} className={css.hostSection}>
-            <div className={css.hostHeading}>
-              <div><strong>{selectedHost.title}</strong><span>{selectedHost.endpoint}</span></div>
-              <button type="button" aria-label="刷新库存" onClick={() => { void store.refreshInventory(selectedHost.hostId) }}>↻</button>
-            </div>
-            <div className={css.inventory}>
-              {BACKEND_ORDER.map(backend => (
-                <span key={backend}><StateDot state={backendState(selectedHost, backend)} />{backend}</span>
-              ))}
-            </div>
-            <AgentSetup host={selectedHost} store={store} />
-            {selectedHost.inventoryError !== undefined && <p className={css.error}>{selectedHost.inventoryError}</p>}
-            {state.projects.filter(project => project.hostId === selectedHost.hostId).map(project => (
-              <ProjectSection
-                key={project.projectId}
-                project={project}
-                host={selectedHost}
-                sessions={state.sessions.filter(session => session.projectId === project.projectId)}
-                currentSessionId={snapshot.currentSessionId}
-                store={store}
-              />
-            ))}
-          </section>
-        )}
-        {state.hosts.length === 0 && <p className={css.empty}>添加 SSH 主机后，ThreadHarbor 会自动部署并通过隧道连接 hostd。</p>}
+        {state.hosts.map(host => (
+          <HostSection
+            key={host.hostId}
+            host={host}
+            projects={state.projects.filter(project => project.hostId === host.hostId)}
+            sessions={state.sessions}
+            currentSessionId={snapshot.currentSessionId}
+            attachingSessionId={snapshot.attachingSessionId}
+            draftProjectId={snapshot.draftSession?.projectId}
+            query={normalizedQuery}
+            open={!closedHosts.has(host.hostId)}
+            onToggle={() => { setClosedHosts(current => toggleSet(current, host.hostId)) }}
+            projectOpen={(projectId) => !closedProjects.has(projectId)}
+            onToggleProject={(projectId) => { setClosedProjects(current => toggleSet(current, projectId)) }}
+            onRename={setRenameSession}
+            onRenameHost={setRenameHost}
+            onHideHost={(target) => { setHideTarget({ kind: 'host', host: target }) }}
+            onRenameProject={setRenameProject}
+            onHideProject={(target) => { setHideTarget({ kind: 'project', project: target }) }}
+            store={store}
+            artifactVersion={state.hostdArtifactVersion}
+            active={activeHostId === host.hostId}
+            activeProjectId={activeProjectId}
+          />
+        ))}
+        {state.hosts.length === 0 && <p className={css.empty}>添加一台已命名的主机，然后选择项目目录开始会话。</p>}
+        {state.hosts.length > 0 && normalizedQuery !== '' && visibleHostCount === 0 && <p className={css.empty}>没有匹配的项目或会话。</p>}
       </div>
+
+      <OperationTray operations={state.operations} hosts={state.hosts} store={store} />
       {snapshot.error !== undefined && <div className={css.globalError}>{snapshot.error}</div>}
+      <footer className={css.sidebarFooter}>
+        <button type="button" className={css.sidebarFooterPrimary} onClick={() => { store.showPanel({ kind: 'add-host' }) }}>
+          <IconPlusOutline16 /><span>添加主机</span>
+        </button>
+        <button
+          type="button"
+          className={css.sidebarFooterIcon}
+          aria-label="设置：查看全部主机、项目和会话"
+          title="设置：查看全部主机、项目和会话"
+          onClick={() => { store.showPanel({ kind: 'hidden' }) }}
+        ><IconSettingsOutline16 /></button>
+      </footer>
+      {renameSession !== undefined && (
+        <RenameSessionDialog session={renameSession} store={store} onClose={() => { setRenameSession(undefined) }} />
+      )}
+      {renameHost !== undefined && (
+        <RenameHostDialog host={renameHost} store={store} onClose={() => { setRenameHost(undefined) }} />
+      )}
+      {renameProject !== undefined && (
+        <RenameProjectDialog project={renameProject} store={store} onClose={() => { setRenameProject(undefined) }} />
+      )}
+      {hideTarget !== undefined && (
+        <HideConfirmDialog target={hideTarget} store={store} onClose={() => { setHideTarget(undefined) }} />
+      )}
     </aside>
   )
 }

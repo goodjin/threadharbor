@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -20,6 +21,7 @@ describe('SshManager configuration', () => {
       connectTimeoutMs: 100,
       installTimeoutMs: 100,
       hostdRemotePort: 3091,
+      deploymentChannel: 'test',
       hostdArtifactDirectory: join(root, 'hostd'),
     })
     try {
@@ -32,5 +34,15 @@ describe('SshManager configuration', () => {
     } finally {
       manager.close()
     }
+  })
+
+  it('starts hostd with common user-level Agent directories on PATH', () => {
+    const source = readFileSync(new URL('../src/ssh-manager.ts', import.meta.url), 'utf8')
+    expect(source).toContain('node_dir="$(dirname "$node")"')
+    expect(source).toContain('$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin')
+    expect(source).toContain('PATH="$common_path" nohup')
+    expect(source).toContain('EnvironmentFile=-$state/hostd.env')
+    expect(source).toContain('https_proxy')
+    expect(source).not.toContain('agent-bundle')
   })
 })

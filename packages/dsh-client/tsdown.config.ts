@@ -39,10 +39,11 @@ export default defineConfig([
     sourcemap: true,
     minify: true,
     clean: false,
-    deps: {
-      neverBundle: (specifier: string) => externals.has(specifier),
-      alwaysBundle: (specifier: string) => !externals.has(specifier),
-    },
+    // DSH Web only materializes the platform allowlist below. Workspace
+    // packages such as @threadharbor/protocol are production deps and would
+    // otherwise stay as require() against a missing module-table entry.
+    external: [...externals],
+    noExternal: (specifier: string) => !externals.has(specifier),
     plugins: [{
       name: 'threadharbor-css-modules',
       resolveId(source: string, importer?: string) {

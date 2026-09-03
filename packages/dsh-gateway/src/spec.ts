@@ -53,15 +53,17 @@ const hostRecord = z.object({
   updatedAt: z.string(),
   inventory: inventory.optional(),
   inventoryError: z.string().optional(),
+  hiddenAt: z.string().optional(),
 }) as unknown as z.ZodType<RemoteHostView>
-const projectRecord: z.ZodType<RemoteProjectView> = z.object({
+const projectRecord = z.object({
   projectId,
   hostId,
   title: z.string(),
   cwd: z.string(),
   createdAt: z.string(),
   updatedAt: z.string(),
-})
+  hiddenAt: z.string().optional(),
+}) as unknown as z.ZodType<RemoteProjectView>
 const binding = z.object({
   holdId: z.string().transform(RemoteHoldId),
   nativeSessionId: z.string().optional(),
@@ -79,6 +81,7 @@ const sessionRecord = z.object({
   turnState: z.enum(['idle', 'running', 'waiting-permission', 'failed']),
   createdAt: z.string(),
   updatedAt: z.string(),
+  archivedAt: z.string().optional(),
   binding: binding.optional(),
 }) as unknown as z.ZodType<RemoteSessionView>
 const transcriptRecord: z.ZodType<RemoteTranscriptEntry> = z.object({

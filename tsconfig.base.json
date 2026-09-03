@@ -19,7 +19,7 @@
     "types": ["node"],
     "rewriteRelativeImportExtensions": true,
     "baseUrl": ".",
-    "ignoreDeprecations": "6.0",
+    "ignoreDeprecations": "5.0",
     "paths": {
       "@threadharbor/protocol": ["packages/protocol/src/index.ts"],
       "@threadharbor/hostd": ["packages/hostd/src/server.ts"],

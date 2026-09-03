@@ -2,11 +2,12 @@
 
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { connect, createConnection } from 'node:net'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { WebSocketServer } from 'ws'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import {
   REMOTE_AGENT_HOSTD_PATH,
@@ -30,8 +31,9 @@ import {
   type RemoteSessionStartSpec,
   type RemoteAgentBackend,
 } from '@threadharbor/protocol'
-import { AgentManager, requireInstallConfirmation } from './agent-manager.ts'
+import { AgentManager } from './agent-manager.ts'
 import type { HoldRequest, HoldResponse, HoldWorkerConfig } from './hold-protocol.ts'
+import { HostdWsHub } from './ws-hub.ts'
 
 /** Fully resolved hostd deployment configuration. */
 export interface HostdOptions {
@@ -44,8 +46,6 @@ export interface HostdOptions {
   readonly maxJournalEvents: number
   readonly maxJournalBytes: number
   readonly maxDirectoryEntries: number
-  readonly installPrefix: string
-  readonly installTimeoutMs: number
   readonly authTimeoutMs: number
   readonly agentConfigHome: string
   readonly maxAgentConfigBytes: number
@@ -53,6 +53,8 @@ export interface HostdOptions {
   readonly codexCommand: string
   readonly codexArgs: readonly string[]
   readonly claudeCommand: string
+  readonly claudeAcpCommand: string
+  readonly claudeAcpArgs: readonly string[]
   readonly dshCommand: string
   readonly dshArgs: readonly string[]
   readonly dshProvider: string
@@ -63,18 +65,26 @@ export interface HostdOptions {
   readonly grokArgs: readonly string[]
   /** Built worker entry; injectable for packaged runtimes and tests. */
   readonly workerScript: string
+  /**
+   * Whether to accept legacy `POST /v1/control` requests in addition to the
+   * WebSocket channel. Defaults to `false`: gateway now speaks WS-only and an
+   * older hostd should appear unreachable so SSH reconnect kicks in.
+   */
+  readonly hostdHttpFallback: boolean
 }
 
 interface HostdSessionRecord {
   readonly sessionId: string
   readonly holdId: string
   readonly generation: string
-  readonly backend: 'grok' | 'codex' | 'dsh'
+  readonly backend: 'grok' | 'codex' | 'claude' | 'dsh'
   readonly cwd: string
   readonly nativeSessionId?: string
   readonly createdAt: string
   readonly updatedAt: string
 }
+
+export type { HostdSessionRecord }
 
 interface HostdSessionsFile {
   readonly version: 1
@@ -84,7 +94,6 @@ interface HostdSessionsFile {
 function parseSessionRecord(value: JsonValue): HostdSessionRecord {
   const record = jsonObject(value, 'hostd session record')
   const backend = remoteAgentBackend(record['backend'])
-  if (backend === 'claude') throw new Error('Claude Code session records require a configured native adapter')
   const nativeSessionId = optionalString(record, 'nativeSessionId')
   return {
     sessionId: stringField(record, 'sessionId'),
@@ -108,6 +117,19 @@ function optionalString(record: Record<string, JsonValue>, key: string): string 
   if (value === undefined) return undefined
   if (typeof value !== 'string') throw new TypeError(`${key} must be a string`)
   return value
+}
+
+function ownerSuffix(): string {
+  return typeof process.getuid === 'function' ? String(process.getuid()) : 'nouid'
+}
+
+function ensureOwnerOnlyDirectory(path: string): void {
+  mkdirSync(path, { recursive: true, mode: 0o700 })
+  const stats = statSync(path)
+  if (!stats.isDirectory()) throw new Error(`${path} is not a directory`)
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+  if (uid !== undefined && stats.uid !== uid) throw new Error(`${path} is not owned by the current user`)
+  if ((stats.mode & 0o077) !== 0) chmodSync(path, 0o700)
 }
 
 function writeJsonAtomic(path: string, value: unknown): void {
@@ -146,6 +168,7 @@ export class RemoteAgentHostd {
   private server: Server | undefined
   private listenedPort: number | undefined
   private readonly agentManager: AgentManager
+  private readonly wsHub: HostdWsHub
 
   /** @param options - fully resolved deployment configuration. */
   constructor(readonly options: HostdOptions) {
@@ -155,18 +178,22 @@ export class RemoteAgentHostd {
     this.hostId = readFileSync(identityPath, 'utf8').trim()
     this.sessionsPath = join(options.dataDir, 'sessions.json')
     this.agentManager = new AgentManager({
-      installPrefix: options.installPrefix,
-      installTimeoutMs: options.installTimeoutMs,
       authTimeoutMs: options.authTimeoutMs,
       agentConfigHome: options.agentConfigHome,
       maxAgentConfigBytes: options.maxAgentConfigBytes,
       codexCliCommand: options.codexCliCommand,
       codexAcpCommand: options.codexCommand,
       claudeCommand: options.claudeCommand,
+      claudeAcpCommand: options.claudeAcpCommand,
       grokCommand: options.grokCommand,
       dshCommand: options.dshCommand,
     })
     this.loadSessions()
+    this.wsHub = new HostdWsHub(this, {
+      heartbeatMs: 15_000,
+      waitTimeoutMs: 15_000,
+      maxEventsPerPage: 100,
+    })
   }
 
   /** Actual listen port, including an OS-assigned port when configured with zero. */
@@ -204,6 +231,7 @@ export class RemoteAgentHostd {
           resolveStart()
         })
       })
+      this.wsHub.attach(server)
     } catch (error) {
       this.server = undefined
       this.listenedPort = undefined
@@ -219,6 +247,7 @@ export class RemoteAgentHostd {
     const server = this.server
     if (server === undefined) return
     this.server = undefined
+    await this.wsHub.close()
     await new Promise<void>((resolveClose, reject) => {
       server.close((error) => {
         if (error === undefined) resolveClose()
@@ -235,11 +264,6 @@ export class RemoteAgentHostd {
     switch (request.method) {
       case 'inventory':
         return await this.inventory() as unknown as JsonValue
-      case 'agent.install.plan':
-        return this.agentManager.installPlan(remoteAgentBackend(request.params['backend'])) as unknown as JsonValue
-      case 'agent.install':
-        requireInstallConfirmation(request.params['confirm'])
-        return await this.agentManager.install(remoteAgentBackend(request.params['backend'])) as unknown as JsonValue
       case 'agent.config.get':
         return this.agentManager.readConfig(remoteAgentConfigBackend(request.params['backend'])) as unknown as JsonValue
       case 'agent.config.set': {
@@ -250,6 +274,13 @@ export class RemoteAgentHostd {
           content,
           stringField(request.params, 'expectedRevision'),
         ) as unknown as JsonValue
+      }
+      case 'agent.credential.status':
+        return this.agentManager.dshCredentialStatus() as unknown as JsonValue
+      case 'agent.credential.set': {
+        const apiKey = request.params['apiKey']
+        if (typeof apiKey !== 'string') throw new TypeError('apiKey must be a string')
+        return this.agentManager.setDshApiKey(apiKey) as unknown as JsonValue
       }
       case 'auth.start':
         return this.agentManager.startAuth(remoteAgentBackend(request.params['backend'])) as unknown as JsonValue
@@ -281,8 +312,8 @@ export class RemoteAgentHostd {
     }
   }
 
-  /** Current installation/authentication/runtime inventory.
-   * @returns independent installation, authentication, and running facts.
+  /** Current discovery/authentication/runtime inventory.
+   * @returns independent discovery, authentication, and running facts.
    */
   async inventory(): Promise<RemoteHostInventory> {
     const running = new Set<RemoteAgentBackend>()
@@ -308,6 +339,13 @@ export class RemoteAgentHostd {
     if (req.method !== 'POST' || new URL(req.url ?? '/', 'http://hostd').pathname !== REMOTE_AGENT_HOSTD_PATH) {
       res.writeHead(404)
       res.end()
+      return
+    }
+    if (!this.options.hostdHttpFallback) {
+      this.respond(res, 410, {
+        id: 'invalid', ok: false,
+        error: { code: 'HTTP_FALLBACK_DISABLED', message: 'POST /v1/control is disabled; use /v1/ws' },
+      })
       return
     }
     let bytes = 0
@@ -347,7 +385,6 @@ export class RemoteAgentHostd {
       cwd: realpathSync(stringField(params, 'cwd')),
       ...(parentNativeSessionId === undefined ? {} : { parentNativeSessionId }),
     }
-    if (spec.backend === 'claude') throw new Error('Claude Code session transport is not configured; install and login are available')
     const existing = this.sessions.get(spec.sessionId)
     if (existing !== undefined) {
       if (existing.backend !== spec.backend || existing.cwd !== spec.cwd) {
@@ -486,9 +523,25 @@ export class RemoteAgentHostd {
   private async readEvents(params: Record<string, JsonValue>): Promise<RemoteJournalPage> {
     const record = this.requireSession(params)
     const generation = optionalString(params, 'generation')
+    const afterSeq = safeInteger(params['afterSeq'], 'afterSeq')
+    const waitMs = params['waitMs']
+    if (typeof waitMs === 'number' && Number.isFinite(waitMs) && waitMs > 0) {
+      try {
+        const response = await this.holdRequest(record, {
+          operation: 'wait-page',
+          afterSeq,
+          timeoutMs: Math.min(Math.floor(waitMs), 15_000),
+          ...(generation === undefined ? {} : { generation }),
+        })
+        if (!response.ok) throw new Error(response.error)
+        return response.result as unknown as RemoteJournalPage
+      } catch {
+        // Older hold workers do not implement wait-page; fall through to a plain read.
+      }
+    }
     const response = await this.holdRequest(record, {
       operation: 'read',
-      afterSeq: safeInteger(params['afterSeq'], 'afterSeq'),
+      afterSeq,
       ...(generation === undefined ? {} : { generation }),
     })
     if (!response.ok) throw new Error(response.error)
@@ -526,12 +579,20 @@ export class RemoteAgentHostd {
     return record
   }
 
+  /** Look up a persisted session record by its sessionId; used by the WS hub.
+   * @param sessionId - hostd session identifier.
+   * @returns the matching record.
+   */
+  findSessionRecord(sessionId: string): HostdSessionRecord {
+    const record = this.sessions.get(sessionId)
+    if (record === undefined) throw new Error(`unknown hostd session ${sessionId}`)
+    return record
+  }
+
   private async spawnHold(record: HostdSessionRecord): Promise<void> {
     const directory = join(this.options.dataDir, 'holds', record.holdId)
     mkdirSync(directory, { recursive: true, mode: 0o700 })
-    const socketPath = process.platform === 'win32'
-      ? `\\\\.\\pipe\\threadharbor-hostd-${record.holdId}`
-      : join(directory, 'control.sock')
+    const socketPath = this.createHoldSocket(record)
     const configPath = join(directory, 'config.json')
     const config: HoldWorkerConfig = {
       version: 1,
@@ -545,17 +606,27 @@ export class RemoteAgentHostd {
       maxJournalEvents: this.options.maxJournalEvents,
       maxJournalBytes: this.options.maxJournalBytes,
       transport: record.backend === 'grok'
-        ? { kind: 'websocket', url: `ws://${this.options.grokServeHost}:${this.options.grokServePort}/ws` }
+        ? {
+          kind: 'websocket',
+          url: `ws://${this.options.grokServeHost}:${this.options.grokServePort}/ws`,
+          ...(typeof process.env['GROK_AGENT_SECRET'] === 'string'
+            && process.env['GROK_AGENT_SECRET'] !== ''
+            ? { secret: process.env['GROK_AGENT_SECRET'] }
+            : {}),
+        }
         : record.backend === 'codex'
           ? { kind: 'stdio', command: this.options.codexCommand, args: this.options.codexArgs }
-          : { kind: 'stdio', command: this.options.dshCommand, args: this.options.dshArgs },
+          : record.backend === 'claude'
+            ? { kind: 'stdio', command: this.options.claudeAcpCommand, args: this.options.claudeAcpArgs }
+            : { kind: 'stdio', command: this.options.dshCommand, args: this.options.dshArgs },
     }
     writeJsonAtomic(configPath, config)
+    const dshKey = record.backend === 'dsh' ? this.agentManager.dshApiKey() : undefined
     const child = spawn(process.execPath, [this.options.workerScript, configPath], {
       cwd: record.cwd,
       detached: process.platform !== 'win32',
-      env: process.env,
-      stdio: 'ignore',
+      env: dshKey === undefined ? process.env : { ...process.env, DEEPSEEK_API_KEY: dshKey },
+      stdio: ['ignore', 'ignore', 'inherit'],
       windowsHide: true,
     })
     child.unref()
@@ -574,12 +645,43 @@ export class RemoteAgentHostd {
   }
 
   private holdSocket(record: HostdSessionRecord): string {
-    return process.platform === 'win32'
-      ? `\\\\.\\pipe\\threadharbor-hostd-${record.holdId}`
-      : join(this.options.dataDir, 'holds', record.holdId, 'control.sock')
+    if (process.platform === 'win32') return `\\\\.\\pipe\\threadharbor-hostd-${record.holdId}`
+    const current = this.shortHoldSocket(record.holdId)
+    if (existsSync(current)) return current
+    const legacy = join(this.options.dataDir, 'holds', record.holdId, 'control.sock')
+    return existsSync(legacy) ? legacy : current
   }
 
-  private async holdRequest(record: HostdSessionRecord, request: HoldRequest, socketPath = this.holdSocket(record)): Promise<HoldResponse> {
+  private createHoldSocket(record: HostdSessionRecord): string {
+    if (process.platform === 'win32') return `\\\\.\\pipe\\threadharbor-hostd-${record.holdId}`
+    const socketPath = this.shortHoldSocket(record.holdId)
+    ensureOwnerOnlyDirectory(dirname(socketPath))
+    return socketPath
+  }
+
+  private shortHoldSocket(holdId: string): string {
+    return join('/tmp', `threadharbor-hostd-${ownerSuffix()}`, `h-${holdId}.sock`)
+  }
+
+  /** Issue one hold-worker control request; used by the WS hub.
+   *  The optional `signal` aborts the underlying socket immediately so a closed
+   *  subscription tears down its `wait-seq` without waiting for `timeoutMs`. */
+  async holdRequest(
+    record: HostdSessionRecord,
+    request: HoldRequest,
+    socketPath?: string,
+    signal?: AbortSignal,
+  ): Promise<HoldResponse> {
+    const path = socketPath ?? this.holdSocket(record)
+    return await this.holdRequestInner(record, request, path, signal)
+  }
+
+  private async holdRequestInner(
+    record: HostdSessionRecord,
+    request: HoldRequest,
+    socketPath: string,
+    signal: AbortSignal | undefined,
+  ): Promise<HoldResponse> {
     return await new Promise<HoldResponse>((resolveResponse, reject) => {
       const socket = createConnection(socketPath)
       let settled = false
@@ -587,12 +689,24 @@ export class RemoteAgentHostd {
       const finishError = (error: unknown): void => {
         if (settled) return
         settled = true
+        clearTimeout(timer)
+        signal?.removeEventListener('abort', onAbort)
         socket.destroy()
         reject(error instanceof Error ? error : new Error(String(error)))
       }
+      const onAbort = (): void => {
+        finishError(new Error(`hold ${record.holdId} request aborted`))
+      }
+      if (signal?.aborted === true) {
+        onAbort()
+        return
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
       const timer = setTimeout(() => {
         finishError(new Error(`hold ${record.holdId} request timed out`))
-      }, request.operation === 'wait' ? request.timeoutMs + 500 : this.options.operationTimeoutMs)
+      }, request.operation === 'wait' || request.operation === 'wait-seq' || request.operation === 'wait-page'
+        ? request.timeoutMs + 500
+        : this.options.operationTimeoutMs)
       socket.setEncoding('utf8')
       socket.once('connect', () => { socket.write(`${JSON.stringify(request)}\n`) })
       socket.on('data', (chunk: string) => { text += chunk })
@@ -600,6 +714,7 @@ export class RemoteAgentHostd {
       socket.once('end', () => {
         if (settled) return
         clearTimeout(timer)
+        signal?.removeEventListener('abort', onAbort)
         settled = true
         try {
           resolveResponse(JSON.parse(text) as HoldResponse)

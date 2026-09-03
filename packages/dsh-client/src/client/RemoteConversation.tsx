@@ -1,11 +1,30 @@
 /** Active remote transcript, permissions, prompt, and cancel controls. */
 
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import { Button, MarkdownText, MessageText, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import type { ReactNode } from 'react'
+import {
+  Button, IconAgentPresetOutline16, IconCheckOutline16, IconChevronDownOutline14,
+  IconChevronRightOutline14, IconCodeOutline16, IconCopyOutline16, IconEnhanceOutline16,
+  IconLinkOutline16, IconSendOutline16, IconStopFill16, IconThinkOutline16, IconTrashOutline16,
+  MarkdownText, MessageText, StateDot, writeClipboard,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConvOwnerProps } from '@deepseek-ai/dsh-client-ui-layout/client'
-import type { JsonValue, RemoteTranscriptEntry } from '@threadharbor/protocol'
-import type { RemoteAgentStore } from './store.ts'
+import type {
+  JsonValue, RemoteAgentBackend, RemoteAgentConfigBackend, RemoteAgentConfigDocument, RemoteAuthChallenge,
+  RemoteDirectoryListing, RemoteHostView, RemoteOperationView, RemoteProjectView, RemoteSshConfig,
+  RemoteSessionView, RemoteSshInspection, RemoteTranscriptEntry,
+} from '@threadharbor/protocol'
+import { RemoteHostId, RemoteProjectId, RemoteSessionId, isRemoteBackendSessionReady } from '@threadharbor/protocol'
+import {
+  BACKEND_ORDER, backendInventoryState, describeHostConnectFailure, hostConnectionLabel, hostDeployment, hostIpLabel,
+  type RemoteAgentPanel, type RemoteAgentStore, type RemotePromptProgress,
+} from './store.ts'
+import {
+  browsableDirectories, buildTranscriptNodes, conversationStage, isNearScrollBottom, preferredProjectBackend,
+  shouldAutoApprovePermissions, toolDisclosurePresentation,
+  type ConversationStage, type RemoteTranscriptNode,
+} from './conversation-model.ts'
 import css from './RemoteSurface.module.css'
 
 /** Props injected by the conversation slot registration. */
@@ -34,10 +53,163 @@ function permissionOptions(entry: RemoteTranscriptEntry): readonly { id: string;
   })
 }
 
-function TranscriptRow({ entry, onPermission }: {
-  entry: RemoteTranscriptEntry
+function ReasoningNode({ entry, active }: { entry: RemoteTranscriptEntry; active: boolean }) {
+  const [pinnedOpen, setPinnedOpen] = useState(false)
+  const open = active || pinnedOpen
+  const summary = active ? latestLine(entry.text) : firstLine(entry.text)
+  const summaryRef = useRef<HTMLSpanElement>(null)
+  useLayoutEffect(() => {
+    const element = summaryRef.current
+    if (element === null) return
+    element.scrollLeft = active ? element.scrollWidth - element.clientWidth : 0
+  }, [active, summary])
+  return (
+    <div className={css.reasoningMessage} data-state={active ? 'running' : 'ok'}>
+      <button
+        type="button"
+        className={css.reasoningRow}
+        aria-expanded={open}
+        disabled={!active && entry.text === ''}
+        onClick={() => { if (active || entry.text !== '') setPinnedOpen(value => !value) }}
+      >
+        <span className={css.reasoningLeading} aria-hidden><IconThinkOutline16 /></span>
+        <span className={css.reasoningTitle}>{active ? '正在思考' : '思考过程'}</span>
+        <span className={css.reasoningSeparator} aria-hidden />
+        <span
+          ref={summaryRef}
+          className={css.nodeHint}
+          data-follow-end={active || undefined}
+          title={summary}
+        >
+          {summary === '' ? ' ' : summary}
+        </span>
+        <IconChevronDownOutline14 className={css.reasoningChevron} data-open={open || undefined} aria-hidden />
+      </button>
+      {open && <div className={css.reasoningBody}><MarkdownText text={entry.text} streaming={active} /></div>}
+    </div>
+  )
+}
+
+/** Format an ISO timestamp as the local HH:MM (with seconds once it crosses a minute). */
+function formatEntryTime(iso: string): string {
+  const parsed = Date.parse(iso)
+  if (!Number.isFinite(parsed)) return ''
+  const date = new Date(parsed)
+  const hh = String(date.getHours()).padStart(2, '0')
+  const mm = String(date.getMinutes()).padStart(2, '0')
+  return `${hh}:${mm}`
+}
+
+function ToolNode({ node, active }: { node: Extract<RemoteTranscriptNode, { kind: 'tool' }>; active: boolean }) {
+  const hasResult = node.entries.some(entry => entry.kind === 'tool-result')
+  const presentation = toolDisclosurePresentation(hasResult, active)
+  const [pinnedOpen, setPinnedOpen] = useState(false)
+  // running => open, finished without result => open, finished with result => collapsed unless pinned
+  const open = active || !hasResult || pinnedOpen
+  const liveText = node.entries.at(-1)?.text ?? ''
+  const summary = active ? latestLine(liveText) : firstLine(node.title)
+  const summaryRef = useRef<HTMLSpanElement>(null)
+  useLayoutEffect(() => {
+    const element = summaryRef.current
+    if (element === null) return
+    element.scrollLeft = active ? element.scrollWidth - element.clientWidth : 0
+  }, [active, summary])
+  return (
+    <div className={css.toolMessage} data-state={active ? 'running' : hasResult ? 'ok' : 'pending'}>
+      <button
+        type="button"
+        className={css.toolRow}
+        aria-expanded={open}
+        onClick={() => { setPinnedOpen(value => !value) }}
+      >
+        <span className={css.toolLeading} aria-hidden><IconCodeOutline16 /></span>
+        <span className={css.toolTitle}>{node.title}</span>
+        <span className={css.toolSeparator} aria-hidden />
+        <span
+          ref={summaryRef}
+          className={css.nodeHint}
+          data-follow-end={active || undefined}
+          title={summary}
+        >
+          {summary === '' ? presentation.status : summary}
+        </span>
+        <IconChevronDownOutline14 className={css.toolChevron} data-open={open || undefined} aria-hidden />
+      </button>
+      {open && (
+        <div className={css.toolBody}>
+          {node.entries.map(entry => (
+            <div key={entry.transcriptId} className={css.toolPart}>
+              <span>{entry.kind === 'tool-call' ? '调用' : '结果'}</span>
+              <pre>{entry.text}</pre>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** First line of `text`, or the whole thing if there's no newline. */
+function firstLine(text: string): string {
+  const newline = text.indexOf('\n')
+  return newline === -1 ? text : text.slice(0, newline)
+}
+
+/** Last non-empty line of `text`, used while streaming so the chip follows the
+ *  latest output rather than the first sentence. */
+function latestLine(text: string): string {
+  const visible = text.trimEnd()
+  if (visible === '') return ''
+  const newline = visible.lastIndexOf('\n')
+  return newline === -1 ? visible : visible.slice(newline + 1)
+}
+
+/** Show the current session id with a copy-to-clipboard affordance. */
+function SessionIdChip({ sessionId }: { sessionId: string }) {
+  const [copied, setCopied] = useState(false)
+  const timerRef = useRef<number | undefined>(undefined)
+  useEffect(() => () => {
+    if (timerRef.current !== undefined) window.clearTimeout(timerRef.current)
+  }, [])
+  const onCopy = () => {
+    void writeClipboard(sessionId).then((ok) => {
+      if (!ok) return
+      setCopied(true)
+      if (timerRef.current !== undefined) window.clearTimeout(timerRef.current)
+      timerRef.current = window.setTimeout(() => { setCopied(false) }, 1000)
+    })
+  }
+  return (
+    <span
+      className={css.sessionIdChip}
+      role="group"
+      aria-label="会话 ID"
+      title={sessionId}
+    >
+      <IconLinkOutline16 className={css.sessionIdIcon} aria-hidden />
+      <span className={css.sessionIdLabel}>会话 ID</span>
+      <code>{sessionId}</code>
+      <button
+        type="button"
+        className={css.sessionIdCopy}
+        data-copied={copied || undefined}
+        aria-label={copied ? '已复制' : '复制会话 ID'}
+        onClick={(event) => { event.stopPropagation(); onCopy() }}
+      >
+        {copied ? <IconCheckOutline16 /> : <IconCopyOutline16 />}
+      </button>
+    </span>
+  )
+}
+
+function TranscriptRow({ node, active, onPermission, permissionPending = false }: {
+  node: RemoteTranscriptNode
+  active: boolean
   onPermission: (requestId: string, outcome: JsonValue) => void
+  permissionPending?: boolean
 }) {
+  if (node.kind === 'tool') return <ToolNode node={node} active={active} />
+  const entry = node.entry
   if (entry.role === 'permission') {
     const options = permissionOptions(entry)
     return (
@@ -46,108 +218,1604 @@ function TranscriptRow({ entry, onPermission }: {
         <p>{entry.text}</p>
         <div className={css.permissionActions}>
           {options.map(option => (
-            <Button key={option.id} size="sm" variant="outline" onClick={() => {
+            <Button key={option.id} size="sm" variant="outline" disabled={permissionPending} onClick={() => {
               if (entry.requestId !== undefined) onPermission(entry.requestId, option.outcome)
-            }}>{option.label}</Button>
+            }}>{permissionPending ? '提交中…' : option.label}</Button>
           ))}
-          <Button size="sm" variant="ghost" onClick={() => {
+          <Button size="sm" variant="ghost" disabled={permissionPending} onClick={() => {
             if (entry.requestId !== undefined) onPermission(entry.requestId, { outcome: 'cancelled' })
-          }}>拒绝</Button>
+          }}>{permissionPending ? '提交中…' : '拒绝'}</Button>
         </div>
       </article>
     )
   }
   if (entry.role === 'user') {
-    return <article className={css.userMessage}><MessageText text={entry.text} /></article>
-  }
-  if (entry.role === 'assistant') {
     return (
-      <article className={entry.kind === 'reasoning' ? css.reasoningMessage : css.assistantMessage}>
-        {entry.kind === 'reasoning' && <span className={css.rowLabel}>思考</span>}
-        <MarkdownText text={entry.text} streaming />
+      <article className={css.userMessage}>
+        <span className={css.entryTimestamp} title={entry.createdAt}>
+          {formatEntryTime(entry.createdAt)}
+        </span>
+        <MessageText text={entry.text} />
       </article>
     )
   }
-  if (entry.role === 'tool') {
-    return <article className={css.toolMessage}><span className={css.rowLabel}>{entry.kind === 'tool-call' ? '工具调用' : '工具结果'}</span>{entry.text}</article>
+  if (entry.role === 'assistant') {
+    if (entry.kind === 'reasoning') return <ReasoningNode entry={entry} active={active} />
+    return (
+      <article className={css.assistantMessage}>
+        <span className={css.entryTimestamp} title={entry.createdAt}>
+          {formatEntryTime(entry.createdAt)}
+        </span>
+        <MarkdownText text={entry.text} streaming={active} />
+      </article>
+    )
   }
   return <div className={css.statusRow}>{entry.text}</div>
+}
+
+function ConversationActivity({ stage }: { stage: ConversationStage }) {
+  if (!stage.visible) return null
+  return (
+    <div className={css.conversationActivity} data-state={stage.state} role="status" aria-live="polite">
+      <StateDot state={stage.state} />
+      <div>
+        <strong>{stage.label}</strong>
+        <p>{stage.detail}</p>
+      </div>
+    </div>
+  )
+}
+
+function OperationProgress({ operation }: { operation: RemoteOperationView }) {
+  const state = operation.status === 'failed' ? 'error'
+    : operation.status === 'succeeded' ? 'done' : 'ongoing'
+  return (
+    <div className={css.operationProgress} data-status={operation.status} role="status" aria-live="polite">
+      <StateDot state={state} />
+      <div>
+        <strong>{operation.title}</strong>
+        <p>{operation.detail}</p>
+        {operation.current !== undefined && operation.total !== undefined && (
+          <progress value={operation.current} max={operation.total} aria-label={`${operation.title}进度`} />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function useActivityClock(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!active) return
+    setNow(Date.now())
+    const timer = window.setInterval(() => { setNow(Date.now()) }, 1000)
+    return () => { window.clearInterval(timer) }
+  }, [active])
+  return now
+}
+
+function PanelShell({ title, subtitle, children, onClose }: {
+  title: string
+  subtitle: string
+  children: ReactNode
+  onClose: () => void
+}) {
+  return (
+    <main className={css.operationSurface}>
+      <section className={css.operationPanel}>
+        <header className={css.operationHeader}>
+          <div>
+            <h1>{title}</h1>
+            <p>{subtitle}</p>
+          </div>
+          <Button size="sm" variant="ghost" onClick={onClose}>关闭</Button>
+        </header>
+        {children}
+      </section>
+    </main>
+  )
+}
+
+function parseOptionalPort(value: string): number | undefined {
+  if (value.trim() === '') return undefined
+  const port = Number(value)
+  return Number.isSafeInteger(port) && port > 0 && port <= 65535 ? port : undefined
+}
+
+function sshInput(target: string, portText: string, user: string, identityFile: string, proxyJump: string): Omit<RemoteSshConfig, 'hostKeyFingerprint'> {
+  const port = parseOptionalPort(portText)
+  return {
+    target,
+    ...(port === undefined ? {} : { port }),
+    ...(user.trim() === '' ? {} : { user: user.trim() }),
+    ...(identityFile.trim() === '' ? {} : { identityFile: identityFile.trim() }),
+    ...(proxyJump.trim() === '' ? {} : { proxyJump: proxyJump.trim() }),
+  }
+}
+
+function HostPanel({ host, store, operations, onClose, artifactVersion }: {
+  host?: RemoteHostView
+  store: RemoteAgentStore
+  operations: readonly RemoteOperationView[]
+  onClose: () => void
+  artifactVersion: string | undefined
+}) {
+  const [hostTitle, setHostTitle] = useState(host?.title ?? '')
+  const [endpoint, setEndpoint] = useState(host?.endpoint ?? 'http://127.0.0.1:3091')
+  const [hostMode, setHostMode] = useState<'ssh' | 'endpoint'>(host?.ssh === undefined && host !== undefined ? 'endpoint' : 'ssh')
+  const [sshTarget, setSshTarget] = useState(host?.ssh?.target ?? '')
+  const [sshPort, setSshPort] = useState(host?.ssh?.port === undefined ? '' : String(host.ssh.port))
+  const [sshUser, setSshUser] = useState(host?.ssh?.user ?? '')
+  const [identityFile, setIdentityFile] = useState(host?.ssh?.identityFile ?? '')
+  const [proxyJump, setProxyJump] = useState(host?.ssh?.proxyJump ?? '')
+  const [sshInspection, setSshInspection] = useState<RemoteSshInspection>()
+  const [localError, setLocalError] = useState('')
+  const [success, setSuccess] = useState('')
+  const [operationId, setOperationId] = useState<string>()
+  const [busy, setBusy] = useState<'inspect' | 'deploy' | 'save-title' | 'save-host' | 'connect'>()
+  const [connectionOpen, setConnectionOpen] = useState(host === undefined)
+  const deploymentState = host === undefined ? 'checking' : hostDeployment(host, artifactVersion)
+  const ipLabel = host === undefined ? '' : hostIpLabel(host)
+  const statusLabel = host === undefined ? '' : hostConnectionLabel(host, artifactVersion)
+  const live = host !== undefined && host.inventoryError === undefined
+  const versionLabel = live ? host.inventory?.hostdVersion : undefined
+  const artifactLabel = artifactVersion === undefined || artifactVersion === '' || artifactVersion === 'unknown'
+    ? undefined
+    : artifactVersion
+  const showHostdAction = host !== undefined && (deploymentState === 'missing' || deploymentState === 'outdated')
+  const hostdActionLabel = deploymentState === 'outdated' ? '升级 hostd' : '部署 hostd'
+  const hostdActionDetail = deploymentState === 'outdated'
+    ? `远端 hostd ${versionLabel ?? '未知版本'} 落后于当前 ${artifactLabel ?? 'gateway'}，升级后会重启服务并重建隧道。`
+    : 'hostd 未在运行或无法连通。部署会上传当前 ThreadHarbor hostd，并重建本机隧道。'
+  const deployOperation = operations.find(operation => operation.operationId === operationId)
+    ?? operations.find(operation => operation.kind === 'host-ssh-deploy'
+      && operation.hostId === host?.hostId
+      && (operation.status === 'queued' || operation.status === 'running'))
+  const deploying = deployOperation?.status === 'queued' || deployOperation?.status === 'running'
+  const resetInspection = (): void => {
+    setSshInspection(undefined)
+    setLocalError('')
+    setSuccess('')
+  }
+  const inspect = (): void => {
+    setBusy('inspect')
+    setLocalError('')
+    setSuccess('')
+    void store.inspectSsh(sshInput(sshTarget.trim(), sshPort, sshUser, identityFile, proxyJump))
+      .then(setSshInspection)
+      .catch((error: unknown) => { setLocalError(String(error)) })
+      .finally(() => { setBusy(undefined) })
+  }
+  const connectionMatchesHost = host?.ssh !== undefined
+    && hostMode === 'ssh'
+    && sshTarget.trim() === host.ssh.target
+    && parseOptionalPort(sshPort) === host.ssh.port
+    && (sshUser.trim() || undefined) === host.ssh.user
+    && (identityFile.trim() || undefined) === host.ssh.identityFile
+    && (proxyJump.trim() || undefined) === host.ssh.proxyJump
+  const deploy = (): void => {
+    const fingerprint = sshInspection?.hostKeyFingerprint
+      ?? (connectionMatchesHost ? host.ssh?.hostKeyFingerprint : undefined)
+    if (fingerprint === undefined) return
+    setBusy('deploy')
+    const approved = {
+      ...sshInput(sshTarget.trim(), sshPort, sshUser, identityFile, proxyJump),
+      hostKeyFingerprint: fingerprint,
+    }
+    setLocalError('')
+    setSuccess('')
+    const task = host === undefined
+      ? store.deploySshHost(hostTitle.trim(), approved)
+      : store.updateSshHost(host.hostId, hostTitle.trim(), approved)
+    void task
+      .then((operation) => { setOperationId(operation.operationId) })
+      .catch((error: unknown) => { setLocalError(String(error)) })
+      .finally(() => { setBusy(undefined) })
+  }
+  const reconnect = (): void => {
+    if (host === undefined) return
+    setBusy('connect')
+    setLocalError('')
+    setSuccess('')
+    void store.reconnectHost(host.hostId)
+      .then(() => { setSuccess('已连接到 hostd') })
+      .catch((error: unknown) => { setLocalError(describeHostConnectFailure(error)) })
+      .finally(() => { setBusy(undefined) })
+  }
+  const saveTitle = (): void => {
+    if (host === undefined) return
+    setBusy('save-title')
+    setLocalError('')
+    setSuccess('')
+    void store.updateHostTitle(host.hostId, hostTitle.trim())
+      .then(() => { setSuccess(`已保存主机名称：${hostTitle.trim()}`) })
+      .catch((error: unknown) => { setLocalError(String(error)) })
+      .finally(() => { setBusy(undefined) })
+  }
+  return (
+    <PanelShell
+      title={host === undefined ? '添加主机' : '主机设置'}
+      subtitle={host === undefined ? '为每台主机设置可辨认的名称，再选择已有 hostd 地址或 SSH 自动部署。' : `编辑 ${host.title} 的名称与连接方式。`}
+      onClose={onClose}
+    >
+      <section id={host === undefined ? undefined : `host-panel-${host.hostId}`} className={css.connectionSection} data-open={connectionOpen || undefined}>
+        {host !== undefined && (
+          <button type="button" className={css.connectionHeader} aria-expanded={connectionOpen} onClick={() => { setConnectionOpen(value => !value) }}>
+            <span className={css.agentRowChevron} aria-hidden="true">
+              {connectionOpen ? <IconChevronDownOutline14 /> : <IconChevronRightOutline14 />}
+            </span>
+            <span>
+              <strong>{host.title}</strong>
+              <small>
+                {ipLabel || (hostMode === 'ssh' ? (sshTarget.trim() || 'SSH 自动部署') : (endpoint.trim() || '已有 hostd 地址'))}
+                {statusLabel === '' ? '' : ` · ${statusLabel}`}
+                {versionLabel === undefined ? '' : ` · hostd ${versionLabel}`}
+              </small>
+            </span>
+          </button>
+        )}
+        {connectionOpen && (
+          <div className={css.formGrid}>
+            <label>
+              <span>主机名称</span>
+              <input value={hostTitle} placeholder="例如：工作室 Mac" onChange={(event) => { setHostTitle(event.target.value) }} />
+            </label>
+            <label>
+              <span>连接方式</span>
+              <select value={hostMode} onChange={(event) => {
+                const nextMode = event.target.value as 'ssh' | 'endpoint'
+                setHostMode(nextMode)
+                if (nextMode === 'endpoint' && host?.ssh !== undefined && endpoint === host.endpoint) {
+                  setEndpoint('http://127.0.0.1:3091')
+                }
+                resetInspection()
+              }}>
+                <option value="ssh">SSH 自动部署</option>
+                <option value="endpoint">已有 hostd 地址</option>
+              </select>
+            </label>
+            {hostMode === 'endpoint' ? (
+              <>
+                <label className={css.fullWidth}>
+                  <span>hostd 地址</span>
+                  <input value={endpoint} placeholder="http://127.0.0.1:3091" onChange={(event) => { setEndpoint(event.target.value) }} />
+                </label>
+                <div className={css.panelActions}>
+                  <Button size="sm" variant="primary" disabled={busy !== undefined || hostTitle.trim() === '' || endpoint.trim() === ''} onClick={() => {
+                    setBusy('save-host')
+                    setLocalError('')
+                    setSuccess('')
+                    const task = host === undefined
+                      ? store.addHost(hostTitle.trim(), endpoint.trim())
+                      : store.updateHost(host.hostId, hostTitle.trim(), endpoint.trim())
+                    void task
+                      .then(() => { setSuccess(host === undefined ? `已添加 ${hostTitle.trim()}` : `已保存 ${hostTitle.trim()}`) })
+                      .catch((error: unknown) => { setLocalError(String(error)) })
+                      .finally(() => { setBusy(undefined) })
+                  }}>{busy === 'save-host' ? (host === undefined ? '连接中…' : '保存中…') : '确认'}</Button>
+                </div>
+                {host !== undefined && (
+                  <div className={`${css.setupCard} ${css.fullWidth}`}>
+                    <strong>hostd 状态：{statusLabel}</strong>
+                    <p>
+                      {live && deploymentState === 'deployed'
+                        ? `远端 hostd 正在运行${versionLabel === undefined ? '' : `（${versionLabel}）`}，与当前版本一致。`
+                        : live && deploymentState === 'outdated'
+                          ? `远端 hostd ${versionLabel ?? '未知版本'} 落后于当前 ${artifactLabel ?? 'gateway'}。`
+                          : '当前连不上 hostd。请先点连接再探测；失败后会显示原因。'}
+                    </p>
+                    {host.inventoryError !== undefined && (
+                      <Button size="sm" variant="outline" disabled={busy !== undefined} onClick={reconnect}>
+                        {busy === 'connect' ? '连接中…' : '连接'}
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                <label className={css.fullWidth}>
+                  <span>SSH 主机</span>
+                  <input value={sshTarget} placeholder="us-box 或 host.example.com" onChange={(event) => { setSshTarget(event.target.value); resetInspection() }} />
+                </label>
+                <label>
+                  <span>SSH 用户</span>
+                  <input value={sshUser} placeholder="留空则使用 ssh config" onChange={(event) => { setSshUser(event.target.value); resetInspection() }} />
+                </label>
+                <label>
+                  <span>SSH 端口</span>
+                  <input value={sshPort} inputMode="numeric" placeholder="留空或 22" onChange={(event) => { setSshPort(event.target.value); resetInspection() }} />
+                </label>
+                <label className={css.fullWidth}>
+                  <span>SSH 私钥路径</span>
+                  <input value={identityFile} placeholder="Web 服务主机上的绝对路径，可选" onChange={(event) => { setIdentityFile(event.target.value); resetInspection() }} />
+                </label>
+                <label className={css.fullWidth}>
+                  <span>ProxyJump</span>
+                  <input value={proxyJump} placeholder="可选，例如 bastion" onChange={(event) => { setProxyJump(event.target.value); resetInspection() }} />
+                </label>
+                <div className={css.panelActions}>
+                  {host !== undefined && (
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={busy !== undefined || hostTitle.trim() === '' || hostTitle.trim() === host.title}
+                      onClick={saveTitle}
+                    >{busy === 'save-title' ? '保存中…' : '保存名称'}</Button>
+                  )}
+                  {!connectionMatchesHost && (
+                    <Button size="sm" variant="outline" disabled={busy !== undefined || sshTarget.trim() === ''} onClick={inspect}>{busy === 'inspect' ? '检查中…' : '1. 检查主机密钥'}</Button>
+                  )}
+                </div>
+                {host !== undefined && connectionMatchesHost && sshInspection === undefined && (
+                  <div className={`${css.setupCard} ${css.fullWidth}`}>
+                    <strong>hostd 状态：{statusLabel}</strong>
+                    <p>
+                      {live && deploymentState === 'deployed'
+                        ? `远端 hostd 正在运行${versionLabel === undefined ? '' : `（${versionLabel}）`}，与当前版本一致。`
+                        : live && deploymentState === 'outdated'
+                          ? hostdActionDetail
+                          : host.inventoryError !== undefined
+                            ? '当前连不上 hostd。请先点连接再探测；失败后会显示原因。'
+                            : hostdActionDetail}
+                    </p>
+                    {host.inventoryError !== undefined && (
+                      <Button size="sm" variant="outline" disabled={busy !== undefined || deploying} onClick={reconnect}>
+                        {busy === 'connect' ? '连接中…' : '连接'}
+                      </Button>
+                    )}
+                    {showHostdAction && (
+                      <Button size="sm" variant="outline" disabled={busy !== undefined || deploying || hostTitle.trim() === ''} onClick={deploy}>
+                        {busy === 'deploy' || deploying ? '部署中…' : hostdActionLabel}
+                      </Button>
+                    )}
+                  </div>
+                )}
+                {sshInspection !== undefined && (
+                  <div className={`${css.setupCard} ${css.fullWidth}`}>
+                    <strong>检查结果：请确认 SSH 主机密钥</strong>
+                    <p>目标：{sshInspection.target}</p>
+                    <code>{sshInspection.algorithm} {sshInspection.hostKeyFingerprint}</code>
+                    <p>确认后会上传并启动远端 threadharbor-hostd，同时建立本机 loopback tunnel。</p>
+                    <Button size="sm" variant="primary" disabled={busy !== undefined || deploying || hostTitle.trim() === ''} onClick={deploy}>
+                      {busy === 'deploy' || deploying ? '部署中…' : '确认'}
+                    </Button>
+                  </div>
+                )}
+                {deployOperation !== undefined && <div className={css.fullWidth}><OperationProgress operation={deployOperation} /></div>}
+              </>
+            )}
+            {localError !== '' && <p className={`${css.error} ${css.fullWidth}`}>{localError}</p>}
+            {success !== '' && <p className={`${css.success} ${css.fullWidth}`}>{success}</p>}
+          </div>
+        )}
+      </section>
+      {host !== undefined && (
+        <section className={css.settingsSection}>
+          <header className={css.settingsSectionHeader}>
+            <h2>Agent</h2>
+            <p>查看、登录或编辑这台主机上已安装的 Agent。</p>
+          </header>
+          <AgentSetupPanel host={host} store={store} embedded />
+        </section>
+      )}
+    </PanelShell>
+  )
+}
+
+function AddProjectPanel({ store, hosts, initialHostId, onClose }: {
+  store: RemoteAgentStore
+  hosts: readonly RemoteHostView[]
+  initialHostId: string | undefined
+  onClose: () => void
+}) {
+  const [projectHost, setProjectHost] = useState(initialHostId ?? hosts[0]?.hostId ?? '')
+  const [projectTitle, setProjectTitle] = useState('')
+  const [cwd, setCwd] = useState('')
+  const [listing, setListing] = useState<RemoteDirectoryListing>()
+  const [localError, setLocalError] = useState('')
+  const [success, setSuccess] = useState('')
+  const [browsing, setBrowsing] = useState(false)
+  const [creating, setCreating] = useState(false)
+  const browseSerialRef = useRef(0)
+  const browse = (path: string, hostId = projectHost): void => {
+    if (hostId === '') return
+    const serial = ++browseSerialRef.current
+    setBrowsing(true)
+    setLocalError('')
+    setSuccess('')
+    void store.listDirectory(RemoteHostId(hostId), path)
+      .then((value) => {
+        if (serial !== browseSerialRef.current) return
+        setListing(value)
+        setCwd(value.path)
+      })
+      .catch((error: unknown) => {
+        if (serial === browseSerialRef.current) setLocalError(String(error))
+      })
+      .finally(() => {
+        if (serial === browseSerialRef.current) setBrowsing(false)
+      })
+  }
+  useEffect(() => {
+    if (projectHost === '') return
+    setListing(undefined)
+    setCwd('')
+    setLocalError('')
+    browse('', projectHost)
+    return () => { browseSerialRef.current += 1 }
+  }, [projectHost, store])
+  return (
+    <PanelShell title="添加项目" subtitle="项目目录是目标主机上的绝对路径；可先浏览远端目录再登记。" onClose={onClose}>
+      <div className={css.formGrid}>
+        <label>
+          <span>目标主机</span>
+          <select value={projectHost} onChange={(event) => {
+            setProjectHost(event.target.value)
+          }}>
+            <option value="">选择主机</option>
+            {hosts.map(host => <option key={host.hostId} value={host.hostId}>{host.title}</option>)}
+          </select>
+        </label>
+        <label>
+          <span>项目名称</span>
+          <input value={projectTitle} placeholder="默认使用目录名" onChange={(event) => { setProjectTitle(event.target.value) }} />
+        </label>
+        <label className={css.fullWidth}>
+          <span>远端目录</span>
+          <input value={cwd} placeholder="/path/to/project" onChange={(event) => { setCwd(event.target.value) }} />
+        </label>
+        <div className={css.panelActions}>
+          <Button size="sm" variant="outline" disabled={projectHost === '' || browsing} onClick={() => { browse(cwd) }}>{browsing ? '浏览中…' : '浏览目录'}</Button>
+          <Button size="sm" variant="primary" disabled={projectHost === '' || cwd.trim() === '' || creating} onClick={() => {
+            const title = projectTitle.trim() || cwd.split('/').filter(Boolean).at(-1) || cwd
+            setCreating(true)
+            setLocalError('')
+            setSuccess('')
+            void store.createProject(RemoteHostId(projectHost), title, cwd.trim())
+              .then(() => { setSuccess(`已登记项目 ${title}`) })
+              .catch((error: unknown) => { setLocalError(String(error)) })
+              .finally(() => { setCreating(false) })
+          }}>{creating ? '登记中…' : '登记项目'}</Button>
+        </div>
+        {listing !== undefined && (
+          <div className={`${css.directoryList} ${css.fullWidth}`}>
+            {listing.parent !== undefined && <button type="button" disabled={browsing} onClick={() => { browse(listing.parent ?? listing.path) }}>..</button>}
+            {browsableDirectories(listing.entries).map(entry => (
+              <button key={entry.path} type="button" disabled={browsing} onClick={() => { browse(entry.path) }}>{entry.name}/</button>
+            ))}
+            {browsing && <p className={css.muted} role="status">正在读取远端目录…</p>}
+            {listing.truncated && <p className={css.muted}>结果已截断，请输入更具体的路径。</p>}
+          </div>
+        )}
+        {localError !== '' && <p className={`${css.error} ${css.fullWidth}`}>{localError}</p>}
+        {success !== '' && <p className={`${css.success} ${css.fullWidth}`}>{success}</p>}
+      </div>
+    </PanelShell>
+  )
+}
+
+function availableBackends(host: RemoteHostView): RemoteAgentBackend[] {
+  return BACKEND_ORDER.filter((backend) => {
+    const entry = host.inventory?.backends.find(candidate => candidate.backend === backend)
+    return entry !== undefined && isRemoteBackendSessionReady(entry)
+  })
+}
+
+type SessionOptionKey = 'permissionMode' | 'collaborationMode' | 'model' | 'thinking' | 'acceleration' | 'approvalChoice'
+type SessionPreferences = Record<SessionOptionKey, string>
+
+interface SessionOptionSpec {
+  readonly key: SessionOptionKey
+  readonly label: string
+  readonly title: string
+  readonly options: readonly { readonly value: string; readonly label: string }[]
+}
+
+const SESSION_OPTION_SPECS: Record<RemoteAgentBackend, readonly SessionOptionSpec[]> = {
+  codex: [
+    {
+      key: 'permissionMode', label: '权限', title: '权限模式',
+      options: [
+        { value: 'ask', label: '询问' },
+        { value: 'read-only', label: '只读' },
+        { value: 'workspace-write', label: '工作区' },
+        { value: 'full-access', label: '完全访问' },
+      ],
+    },
+    {
+      key: 'collaborationMode', label: '协作', title: '协作模式',
+      options: [{ value: 'default', label: '默认' }, { value: 'plan', label: '计划' }],
+    },
+    {
+      key: 'model', label: '模型', title: '模型',
+      options: [
+        { value: 'default', label: '默认' },
+        { value: 'gpt-5.6-sol', label: 'gpt-5.6-sol' },
+        { value: 'gpt-5.6-terra', label: 'gpt-5.6-terra' },
+        { value: 'gpt-5.6-luna', label: 'gpt-5.6-luna' },
+        { value: 'gpt-5.5', label: 'gpt-5.5' },
+        { value: 'gpt-5.4', label: 'gpt-5.4' },
+      ],
+    },
+    {
+      key: 'thinking', label: '思考', title: '思考强度',
+      options: [
+        { value: 'auto', label: '自动' },
+        { value: 'none', label: '无' },
+        { value: 'low', label: '低' },
+        { value: 'medium', label: '中' },
+        { value: 'high', label: '高' },
+        { value: 'xhigh', label: '极高' },
+        { value: 'max', label: '最大' },
+      ],
+    },
+    {
+      key: 'acceleration', label: '加速', title: '加速',
+      options: [{ value: 'standard', label: '标准' }, { value: 'fast', label: '快速' }],
+    },
+    {
+      key: 'approvalChoice', label: '批准', title: '批准选择',
+      options: [{ value: 'ask', label: '每次询问' }, { value: 'on-failure', label: '失败时询问' }, { value: 'auto', label: '自动批准' }],
+    },
+  ],
+  claude: [
+    {
+      key: 'permissionMode', label: '权限', title: '权限模式',
+      options: [{ value: 'ask', label: '询问' }, { value: 'edit', label: '可编辑' }, { value: 'bypass', label: '跳过确认' }],
+    },
+    {
+      key: 'collaborationMode', label: '协作', title: '协作模式',
+      options: [{ value: 'default', label: '默认' }, { value: 'plan', label: '计划' }],
+    },
+    {
+      key: 'model', label: '模型', title: '模型',
+      options: [
+        { value: 'default', label: '默认' },
+        { value: 'sonnet', label: 'sonnet' },
+        { value: 'opus', label: 'opus' },
+        { value: 'claude-sonnet-4-6', label: 'claude-sonnet-4-6' },
+        { value: 'claude-opus-4-6', label: 'claude-opus-4-6' },
+        { value: 'claude-sonnet-4-5-20250929', label: 'claude-sonnet-4-5' },
+        { value: 'claude-haiku-4-5-20251001', label: 'claude-haiku-4-5' },
+      ],
+    },
+    {
+      key: 'thinking', label: '思考', title: '思考',
+      options: [{ value: 'auto', label: '自动' }, { value: 'on', label: '开启' }, { value: 'off', label: '关闭' }],
+    },
+    {
+      key: 'approvalChoice', label: '批准', title: '批准选择',
+      options: [{ value: 'ask', label: '每次询问' }, { value: 'trusted', label: '信任编辑' }, { value: 'auto', label: '自动批准' }],
+    },
+  ],
+  grok: [
+    {
+      key: 'permissionMode', label: '权限', title: '权限模式',
+      options: [{ value: 'ask', label: '询问' }, { value: 'workspace-write', label: '工作区' }],
+    },
+    {
+      key: 'model', label: '模型', title: '模型',
+      options: [
+        { value: 'default', label: '默认' },
+        { value: 'grok-build', label: 'grok-build' },
+        { value: 'grok-build-0.1', label: 'grok-build-0.1' },
+        { value: 'grok-4.6', label: 'grok-4.6' },
+      ],
+    },
+    {
+      key: 'thinking', label: '思考', title: '思考',
+      options: [{ value: 'auto', label: '自动' }, { value: 'none', label: '无' }, { value: 'low', label: '低' }, { value: 'medium', label: '中' }, { value: 'high', label: '高' }],
+    },
+    {
+      key: 'acceleration', label: '加速', title: '加速',
+      options: [{ value: 'standard', label: '标准' }, { value: 'fast', label: '快速' }],
+    },
+    {
+      key: 'approvalChoice', label: '批准', title: '批准选择',
+      options: [{ value: 'ask', label: '每次询问' }, { value: 'auto', label: '自动批准' }],
+    },
+  ],
+  dsh: [
+    {
+      key: 'model', label: '模型', title: '模型',
+      options: [{ value: 'default', label: '默认' }, { value: 'deepseek-v4-flash', label: 'deepseek-v4-flash' }, { value: 'deepseek-v4-pro', label: 'deepseek-v4-pro' }],
+    },
+    {
+      key: 'thinking', label: '思考', title: '思考',
+      options: [{ value: 'auto', label: '自动' }, { value: 'off', label: '关闭' }, { value: 'max', label: '最大' }],
+    },
+    {
+      key: 'acceleration', label: '加速', title: '加速',
+      options: [{ value: 'standard', label: '标准' }, { value: 'fast', label: '快速' }],
+    },
+  ],
+}
+
+function defaultSessionPreferences(backend: RemoteAgentBackend): SessionPreferences {
+  const values: SessionPreferences = {
+    permissionMode: 'default',
+    collaborationMode: 'default',
+    model: 'default',
+    thinking: 'auto',
+    acceleration: 'standard',
+    approvalChoice: 'ask',
+  }
+  for (const spec of SESSION_OPTION_SPECS[backend]) values[spec.key] = spec.options[0]?.value ?? values[spec.key]
+  return values
+}
+
+function normalizeSessionPreferences(backend: RemoteAgentBackend, current: SessionPreferences): SessionPreferences {
+  const next = { ...current }
+  for (const spec of SESSION_OPTION_SPECS[backend]) {
+    if (!spec.options.some(option => option.value === next[spec.key])) next[spec.key] = spec.options[0]?.value ?? 'default'
+  }
+  return next
+}
+
+const SESSION_PREFERENCES_STORAGE_KEY = 'dsh.remote-agent.session-preferences'
+
+function readPersistedSessionPreferences(): Record<string, SessionPreferences> {
+  if (typeof window === 'undefined') return {}
+  try {
+    const raw = window.localStorage.getItem(SESSION_PREFERENCES_STORAGE_KEY)
+    if (raw === null) return {}
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
+    return parsed as Record<string, SessionPreferences>
+  } catch {
+    return {}
+  }
+}
+
+function writePersistedSessionPreferences(map: Record<string, SessionPreferences>): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(SESSION_PREFERENCES_STORAGE_KEY, JSON.stringify(map))
+  } catch {
+    // ignore quota / disabled storage
+  }
+}
+
+function sessionPreferencesKey(hostId: string, backend: RemoteAgentBackend): string {
+  return `${hostId}-${backend}`
+}
+
+function SessionControls({ backend, preferences, disabled, onChange }: {
+  backend: RemoteAgentBackend
+  preferences: SessionPreferences
+  disabled?: boolean
+  onChange: (preferences: SessionPreferences) => void
+}) {
+  const specs = SESSION_OPTION_SPECS[backend]
+  if (specs.length === 0) return null
+  return (
+    <div className={css.sessionControls} aria-label={`${backend} 会话选项`}>
+      <span className={css.sessionControlsIcon} title="会话选项"><IconEnhanceOutline16 /></span>
+      {specs.map(spec => (
+        <label key={spec.key} className={css.sessionControl} title={spec.title}>
+          <span>{spec.label}</span>
+          <select
+            value={preferences[spec.key]}
+            disabled={disabled}
+            onChange={(event) => { onChange({ ...preferences, [spec.key]: event.target.value }) }}
+          >
+            {spec.options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+        </label>
+      ))}
+    </div>
+  )
+}
+
+function AgentSetupPanel({ host, store, onClose, embedded = false }: {
+  host: RemoteHostView
+  store: RemoteAgentStore
+  onClose?: () => void
+  embedded?: boolean
+}) {
+  const [openBackend, setOpenBackend] = useState<RemoteAgentBackend>()
+  const [auth, setAuth] = useState<RemoteAuthChallenge>()
+  const [config, setConfig] = useState<RemoteAgentConfigDocument>()
+  const [configContent, setConfigContent] = useState('')
+  const [configOpen, setConfigOpen] = useState(true)
+  const [configSaved, setConfigSaved] = useState(false)
+  const [dshApiKey, setDshApiKey] = useState('')
+  const [dshSaved, setDshSaved] = useState(false)
+  const [dshEditing, setDshEditing] = useState(false)
+  const [response, setResponse] = useState('')
+  const [localError, setLocalError] = useState('')
+  const [busyAction, setBusyAction] = useState<string>()
+  const tracked = async <T,>(action: string, work: () => Promise<T>): Promise<T> => {
+    setBusyAction(action)
+    try {
+      return await work()
+    } finally {
+      setBusyAction(current => current === action ? undefined : current)
+    }
+  }
+  useEffect(() => {
+    void store.refreshInventory(host.hostId).catch(() => undefined)
+  }, [host.hostId, store])
+  useEffect(() => {
+    if (auth === undefined || !['starting', 'waiting-user'].includes(auth.status)) return
+    const timer = window.setTimeout(() => {
+      void store.authStatus(host.hostId, auth.flowId).then((next) => {
+        setAuth(next)
+        if (next.status === 'succeeded') void store.refreshInventory(host.hostId).catch(() => undefined)
+      }).catch((error: unknown) => { setLocalError(String(error)) })
+    }, 1000)
+    return () => { window.clearTimeout(timer) }
+  }, [auth, host.hostId, store])
+
+  const clearOther = (backend: RemoteAgentBackend): void => {
+    setLocalError('')
+    if (auth !== undefined && auth.backend !== backend) setAuth(undefined)
+    if (config !== undefined && config.backend !== backend) {
+      setConfig(undefined)
+      setConfigOpen(true)
+      setConfigSaved(false)
+    }
+  }
+  const selectBackend = (backend: RemoteAgentBackend): void => {
+    if (openBackend === backend) {
+      setOpenBackend(undefined)
+      setAuth(undefined)
+      setConfig(undefined)
+      setConfigOpen(true)
+      setConfigSaved(false)
+      setDshApiKey('')
+      setDshSaved(false)
+      setDshEditing(false)
+      setLocalError('')
+      return
+    }
+    setOpenBackend(backend)
+    clearOther(backend)
+    const entry = host.inventory?.backends.find(candidate => candidate.backend === backend)
+    if (entry?.installed !== true) return
+    if (backend === 'dsh') {
+      configureDsh(entry?.authenticated === true)
+      return
+    }
+    configure(backend)
+  }
+  const login = (backend: RemoteAgentBackend): void => {
+    setOpenBackend(backend)
+    setConfig(undefined)
+    setLocalError('')
+    void tracked(`${backend}:login`, () => store.startAuth(host.hostId, backend)).then(setAuth)
+      .catch((error: unknown) => { setLocalError(String(error)) })
+  }
+  const configure = (backend: RemoteAgentConfigBackend): void => {
+    setOpenBackend(backend)
+    setAuth(undefined)
+    setConfigSaved(false)
+    setConfigOpen(true)
+    setLocalError('')
+    void tracked(`${backend}:config-load`, () => store.readAgentConfig(host.hostId, backend)).then((document) => {
+      setConfig(document)
+      setConfigContent(document.content)
+    }).catch((error: unknown) => { setLocalError(String(error)) })
+  }
+  const configureDsh = (configured: boolean): void => {
+    setOpenBackend('dsh')
+    setAuth(undefined)
+    setConfig(undefined)
+    setDshApiKey('')
+    setDshSaved(configured)
+    setDshEditing(!configured)
+    setLocalError('')
+  }
+
+  const content = (
+    <div className={css.agentSetupWide}>
+        {BACKEND_ORDER.map((backend) => {
+          const entry = host.inventory?.backends.find(candidate => candidate.backend === backend)
+          const open = openBackend === backend
+          const backendAuth = auth !== undefined && auth.backend === backend ? auth : undefined
+          const backendConfig = config !== undefined && config.backend === backend ? config : undefined
+          const backendBusy = busyAction?.startsWith(`${backend}:`) === true
+          const statusText = entry?.detail
+            ?? (!entry?.installed
+              ? '未安装，请在远端主机配置'
+              : backend === 'claude'
+                ? '已安装，可通过配置提供凭据'
+                : backend === 'dsh'
+                  ? entry.authenticated ? '已安装，API Key 已配置' : '已安装，未配置 API Key'
+                  : entry.authenticated ? '已安装并已认证' : '已安装，未登录')
+          return (
+            <div key={backend} className={css.agentRowWide} data-open={open || undefined}>
+              <div className={css.agentRowHeader}>
+                <button type="button" className={css.agentRowToggle} onClick={() => { selectBackend(backend) }}>
+                  <span className={css.agentRowChevron} aria-hidden="true">
+                    {open ? <IconChevronDownOutline14 /> : <IconChevronRightOutline14 />}
+                  </span>
+                  <span>
+                    <strong><StateDot state={backendInventoryState(host, backend)} />{backend}</strong>
+                    <p>{statusText}</p>
+                  </span>
+                </button>
+                <div className={css.panelActions}>
+                  {entry?.installed && !entry.authenticated && (backend === 'grok' || backend === 'codex') && (
+                    <Button size="sm" variant="outline" disabled={backendBusy} onClick={() => { login(backend) }}>{busyAction === `${backend}:login` ? '启动登录…' : '登录'}</Button>
+                  )}
+                </div>
+              </div>
+              {open && (
+                <div className={css.agentRowBody}>
+                  {!entry?.installed && localError === '' && (
+                    <p className={css.muted}>请在远端主机安装 {backend}，并确保其命令可从 PATH 访问，然后刷新状态。</p>
+                  )}
+                  {entry?.installed && backend !== 'dsh' && backendAuth === undefined && backendConfig === undefined && localError === '' && (
+                    <p className={css.muted}>{busyAction === `${backend}:config-load` ? '正在读取配置…' : '正在打开配置文件。'}</p>
+                  )}
+                  {entry?.installed && backend === 'dsh' && localError === '' && (
+                    dshSaved && !dshEditing
+                      ? (
+                        <div className={`${css.setupCard} ${css.setupCardSuccess}`}>
+                          <strong>DSH API Key 已配置</strong>
+                          <p>密钥已保存在远程主机，不会回传到浏览器。之后新建的 DSH 会话会使用该密钥。</p>
+                          <Button size="sm" variant="outline" onClick={() => { setDshEditing(true); setDshApiKey('') }}>修改</Button>
+                        </div>
+                      )
+                      : (
+                        <div className={css.setupCard}>
+                          <strong>DSH API Key</strong>
+                          <p>密钥保存在远程主机的 hostd 私有凭据文件中，不会再回传到浏览器；对之后新建的 DSH 会话生效。</p>
+                          <div className={css.inlineCreate}>
+                            <input
+                              type="password"
+                              aria-label="DSH API Key"
+                              autoComplete="off"
+                              value={dshApiKey}
+                              placeholder={entry?.authenticated ? '输入新密钥以替换现有配置' : '输入 DeepSeek API Key'}
+                              onChange={(event) => { setDshApiKey(event.target.value) }}
+                            />
+                            <Button size="sm" variant="primary" disabled={backendBusy || dshApiKey.trim() === ''} onClick={() => {
+                              void tracked('dsh:credential-save', () => store.setDshApiKey(host.hostId, dshApiKey)).then(() => {
+                                setDshApiKey('')
+                                setDshSaved(true)
+                                setDshEditing(false)
+                                void store.refreshInventory(host.hostId).catch(() => undefined)
+                              }).catch((error: unknown) => { setLocalError(String(error)) })
+                            }}>{busyAction === 'dsh:credential-save' ? '保存中…' : '保存 API Key'}</Button>
+                            {entry?.authenticated === true && (
+                              <Button size="sm" variant="ghost" disabled={backendBusy} onClick={() => { setDshEditing(false); setDshApiKey('') }}>取消</Button>
+                            )}
+                          </div>
+                        </div>
+                      )
+                  )}
+                  {backendAuth !== undefined && (
+                    <div className={css.setupCard}>
+                      <strong>{backendAuth.backend} 登录</strong>
+                      <p>{backendAuth.message}</p>
+                      {(backendAuth.verificationUriComplete ?? backendAuth.verificationUri) !== undefined && (
+                        <a href={backendAuth.verificationUriComplete ?? backendAuth.verificationUri} target="_blank" rel="noreferrer">打开登录授权页面</a>
+                      )}
+                      {backendAuth.userCode !== undefined && <code>{backendAuth.userCode}</code>}
+                      {backendAuth.status === 'waiting-user' && backendAuth.userCode === undefined && (
+                        <div className={css.inlineCreate}>
+                          <input aria-label="登录返回码" value={response} placeholder="需要时粘贴返回码" onChange={(event) => { setResponse(event.target.value) }} />
+                          <button type="button" className={css.nativeButton} disabled={response === '' || backendBusy} onClick={() => {
+                            void tracked(`${backend}:auth-response`, () => store.respondAuth(host.hostId, backendAuth.flowId, response)).then(() => { setResponse('') })
+                              .catch((error: unknown) => { setLocalError(String(error)) })
+                          }}>{busyAction === `${backend}:auth-response` ? '提交中…' : '提交'}</button>
+                        </div>
+                      )}
+                      {['starting', 'waiting-user'].includes(backendAuth.status) && (
+                        <button type="button" className={css.nativeButton} disabled={backendBusy} onClick={() => {
+                          void tracked(`${backend}:auth-cancel`, () => store.cancelAuth(host.hostId, backendAuth.flowId)).then(() => { setAuth(undefined) })
+                            .catch((error: unknown) => { setLocalError(String(error)) })
+                        }}>{busyAction === `${backend}:auth-cancel` ? '取消中…' : '取消登录'}</button>
+                      )}
+                    </div>
+                  )}
+                  {backendConfig !== undefined && (
+                    <div className={`${css.setupCard} ${css.configCard}`} data-open={configOpen || undefined}>
+                      <button
+                        type="button"
+                        className={css.configCardHeader}
+                        aria-expanded={configOpen}
+                        onClick={() => { setConfigOpen(value => !value) }}
+                      >
+                        <span className={css.agentRowChevron} aria-hidden="true">
+                          {configOpen ? <IconChevronDownOutline14 /> : <IconChevronRightOutline14 />}
+                        </span>
+                        <span className={css.configCardTitle}>
+                          <strong>{backendConfig.backend} 配置</strong>
+                          <small>{backendConfig.path} · {backendConfig.format.toUpperCase()} · 最大 {backendConfig.maxBytes} 字节</small>
+                        </span>
+                      </button>
+                      {configOpen && (
+                        <>
+                          <p>这里编辑的是远程主机上的完整用户配置。不要写入明文密钥；优先引用远程环境变量。</p>
+                          <textarea
+                            className={css.configEditor}
+                            aria-label={`${backendConfig.backend} 配置内容`}
+                            spellCheck={false}
+                            value={configContent}
+                            onChange={(event) => {
+                              setConfigContent(event.target.value)
+                              setConfigSaved(false)
+                            }}
+                          />
+                          {new TextEncoder().encode(configContent).length > backendConfig.maxBytes && (
+                            <p className={css.error}>配置超过 {backendConfig.maxBytes} 字节限制。</p>
+                          )}
+                          {configSaved && <p className={css.success}>已保存并通过 {backendConfig.format.toUpperCase()} 语法校验。</p>}
+                          <div className={css.configActions}>
+                            <Button
+                              size="sm"
+                              variant="primary"
+                              disabled={configContent === backendConfig.content || new TextEncoder().encode(configContent).length > backendConfig.maxBytes || backendBusy}
+                              onClick={() => {
+                                void tracked(`${backend}:config-save`, () => store.writeAgentConfig(
+                                  host.hostId, backendConfig.backend, configContent, backendConfig.revision,
+                                )).then((saved) => {
+                                  setConfig(saved)
+                                  setConfigContent(saved.content)
+                                  setConfigSaved(true)
+                                }).catch((error: unknown) => { setLocalError(String(error)) })
+                              }}
+                            >{busyAction === `${backend}:config-save` ? '保存中…' : '保存配置'}</Button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+                  {localError !== '' && openBackend === backend && <p className={css.error}>{localError}</p>}
+                </div>
+              )}
+            </div>
+          )
+        })}
+    </div>
+  )
+  if (embedded) return content
+  return <PanelShell title={`管理 ${host.title} 的 Agent`} subtitle={host.endpoint} onClose={onClose ?? (() => undefined)}>{content}</PanelShell>
+}
+
+function OperationPanel({ panel, store, snapshot }: {
+  panel: RemoteAgentPanel
+  store: RemoteAgentStore
+  snapshot: ReturnType<RemoteAgentStore['getSnapshot']>
+}) {
+  const close = (): void => { store.closePanel() }
+  if (panel.kind === 'add-host') {
+    return <HostPanel store={store} operations={snapshot.state.operations} onClose={close} artifactVersion={snapshot.state.hostdArtifactVersion} />
+  }
+  if (panel.kind === 'add-project') {
+    return <AddProjectPanel store={store} hosts={snapshot.state.hosts} initialHostId={panel.hostId} onClose={close} />
+  }
+  if (panel.kind === 'host-settings') {
+    const host = snapshot.state.hosts.find(candidate => candidate.hostId === panel.hostId)
+    if (host !== undefined) {
+      return <HostPanel
+        key={host.hostId}
+        host={host}
+        store={store}
+        operations={snapshot.state.operations}
+        onClose={close}
+        artifactVersion={snapshot.state.hostdArtifactVersion}
+      />
+    }
+  }
+  if (panel.kind === 'hidden') {
+    return <CatalogPanel store={store} snapshot={snapshot} onClose={close} />
+  }
+  return (
+    <PanelShell title="操作不可用" subtitle="目标对象不存在，可能已被其他窗口删除或刷新。" onClose={close}>
+      <p className={css.error}>请关闭面板后重新选择主机或项目。</p>
+    </PanelShell>
+  )
+}
+
+function CatalogRow({ title, detail, badge, busy, onReveal, onHide, onDelete }: {
+  title: string
+  detail: string
+  badge?: string | undefined
+  busy: boolean
+  onReveal?: (() => void) | undefined
+  onHide?: (() => void) | undefined
+  onDelete: () => void
+}) {
+  return (
+    <div className={css.hiddenItem}>
+      <span className={css.hiddenItemMain}>
+        <strong>
+          {title}
+          {badge !== undefined && <span className={css.catalogBadge}>{badge}</span>}
+        </strong>
+        <small>{detail}</small>
+      </span>
+      <span className={css.hiddenItemActions}>
+        {onReveal !== undefined && (
+          <Button size="sm" variant="outline" disabled={busy} onClick={onReveal}>取消隐藏</Button>
+        )}
+        {onHide !== undefined && (
+          <Button size="sm" variant="outline" disabled={busy} onClick={onHide}>隐藏</Button>
+        )}
+        <Button size="sm" variant="ghost" disabled={busy} onClick={onDelete}><IconTrashOutline16 />删除</Button>
+      </span>
+    </div>
+  )
+}
+
+function CatalogSessionTree({
+  session, sessions, pending, onReveal, onHide, onDelete,
+}: {
+  session: RemoteSessionView
+  sessions: readonly RemoteSessionView[]
+  pending: string | undefined
+  onReveal: (session: RemoteSessionView) => void
+  onHide: (session: RemoteSessionView) => void
+  onDelete: (session: RemoteSessionView) => void
+}) {
+  const children = sessions.filter(candidate => candidate.parentSessionId === session.sessionId)
+  return (
+    <div className={css.catalogNode}>
+      <CatalogRow
+        title={session.title}
+        detail={`${session.backend}${session.archivedAt === undefined ? '' : ` · 归档于 ${session.archivedAt.slice(0, 10)}`}`}
+        badge={session.archivedAt === undefined ? undefined : '已归档'}
+        busy={pending !== undefined}
+        onReveal={session.archivedAt === undefined ? undefined : () => { onReveal(session) }}
+        onHide={session.archivedAt === undefined ? () => { onHide(session) } : undefined}
+        onDelete={() => { onDelete(session) }}
+      />
+      {children.length > 0 && (
+        <div className={css.catalogChildren}>
+          {children.map(child => (
+            <CatalogSessionTree
+              key={child.sessionId}
+              session={child}
+              sessions={sessions}
+              pending={pending}
+              onReveal={onReveal}
+              onHide={onHide}
+              onDelete={onDelete}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Settings catalog: visible + hidden hosts/projects and archived sessions as a tree. */
+function CatalogPanel({ store, snapshot, onClose }: {
+  store: RemoteAgentStore
+  snapshot: ReturnType<RemoteAgentStore['getSnapshot']>
+  onClose: () => void
+}) {
+  const hidden = snapshot.hiddenItems
+  const hosts = [
+    ...snapshot.state.hosts,
+    ...(hidden?.hosts ?? []).filter(host => !snapshot.state.hosts.some(visible => visible.hostId === host.hostId)),
+  ]
+  const projects = [
+    ...snapshot.state.projects,
+    ...(hidden?.projects ?? []).filter(project => !snapshot.state.projects.some(visible => visible.projectId === project.projectId)),
+  ]
+  const sessions = [
+    ...snapshot.state.sessions,
+    ...(hidden?.sessions ?? []).filter(session => !snapshot.state.sessions.some(visible => visible.sessionId === session.sessionId)),
+  ]
+  const [pending, setPending] = useState<string>()
+  const [error, setError] = useState('')
+  const [success, setSuccess] = useState('')
+  const refresh = (): void => {
+    void store.loadHiddenItems()
+      .then(() => { setError('') })
+      .catch((reason: unknown) => { setError(String(reason)) })
+  }
+  useEffect(() => { refresh() }, [])
+  const act = (key: string, action: () => Promise<void>, successMessage: string): void => {
+    setPending(key)
+    setError('')
+    setSuccess('')
+    void action()
+      .then(() => { setSuccess(successMessage); refresh() })
+      .catch((reason: unknown) => { setError(String(reason)) })
+      .finally(() => { setPending(undefined) })
+  }
+  const revealProject = async (project: RemoteProjectView): Promise<void> => {
+    const host = hosts.find(candidate => candidate.hostId === project.hostId)
+    if (host?.hiddenAt !== undefined) await store.unhideHost(host.hostId)
+    if (project.hiddenAt !== undefined) await store.unhideProject(RemoteProjectId(project.projectId))
+  }
+  const revealSession = async (session: RemoteSessionView): Promise<void> => {
+    const project = projects.find(candidate => candidate.projectId === session.projectId)
+    if (project !== undefined) await revealProject(project)
+    if (session.archivedAt !== undefined) await store.unarchiveSession(RemoteSessionId(session.sessionId))
+  }
+  return (
+    <PanelShell
+      title="设置"
+      subtitle="按主机 → 项目 → 会话查看全部条目，包括已隐藏的。取消隐藏会话时会一并恢复其所属主机和项目。"
+      onClose={onClose}
+    >
+      <section className={css.settingsSection}>
+        <header className={css.settingsSectionHeader}>
+          <h2>主机、项目和会话</h2>
+          <p>侧栏只显示未隐藏的层级。这里按树查看全部条目，并可以取消隐藏或永久删除。</p>
+        </header>
+        {hosts.length === 0
+          ? <p className={css.muted}>还没有主机。</p>
+          : (
+            <div className={css.catalogTree}>
+              {hosts.map(host => {
+                const hostProjects = projects.filter(project => project.hostId === host.hostId)
+                return (
+                  <div key={host.hostId} className={css.catalogNode}>
+                    <CatalogRow
+                      title={host.title}
+                      detail={`${hostIpLabel(host)}${host.hiddenAt === undefined ? '' : ` · 隐藏于 ${host.hiddenAt.slice(0, 10)}`}`}
+                      badge={host.hiddenAt === undefined ? undefined : '已隐藏'}
+                      busy={pending !== undefined}
+                      onReveal={host.hiddenAt === undefined ? undefined : () => {
+                        act(`host:${host.hostId}`, () => store.unhideHost(host.hostId), `已恢复主机 ${host.title}`)
+                      }}
+                      onHide={host.hiddenAt === undefined ? () => {
+                        act(`host:${host.hostId}`, () => store.hideHost(host.hostId), `已隐藏主机 ${host.title}`)
+                      } : undefined}
+                      onDelete={() => {
+                        act(`host:${host.hostId}`, () => store.deleteHost(host.hostId), `已删除主机 ${host.title}`)
+                      }}
+                    />
+                    {hostProjects.length > 0 && (
+                      <div className={css.catalogChildren}>
+                        {hostProjects.map(project => {
+                          const projectSessions = sessions.filter(session => session.projectId === project.projectId)
+                          const roots = projectSessions.filter(session => session.parentSessionId === undefined)
+                          return (
+                            <div key={project.projectId} className={css.catalogNode}>
+                              <CatalogRow
+                                title={project.title}
+                                detail={`${project.cwd}${project.hiddenAt === undefined ? '' : ` · 隐藏于 ${project.hiddenAt.slice(0, 10)}`}`}
+                                badge={project.hiddenAt === undefined ? undefined : '已隐藏'}
+                                busy={pending !== undefined}
+                                onReveal={project.hiddenAt === undefined && host.hiddenAt === undefined ? undefined : () => {
+                                  act(`project:${project.projectId}`, () => revealProject(project), `已恢复项目 ${project.title}`)
+                                }}
+                                onHide={project.hiddenAt === undefined ? () => {
+                                  act(`project:${project.projectId}`, () => store.hideProject(RemoteProjectId(project.projectId)), `已隐藏项目 ${project.title}`)
+                                } : undefined}
+                                onDelete={() => {
+                                  act(`project:${project.projectId}`, () => store.deleteProject(RemoteProjectId(project.projectId)), `已删除项目 ${project.title}`)
+                                }}
+                              />
+                              {roots.length > 0 && (
+                                <div className={css.catalogChildren}>
+                                  {roots.map(session => (
+                                    <CatalogSessionTree
+                                      key={session.sessionId}
+                                      session={session}
+                                      sessions={projectSessions}
+                                      pending={pending}
+                                      onReveal={(target) => {
+                                        act(`session:${target.sessionId}`, () => revealSession(target), `已恢复会话 ${target.title}`)
+                                      }}
+                                      onHide={(target) => {
+                                        act(`session:${target.sessionId}`, () => store.archiveSession(RemoteSessionId(target.sessionId)), `已归档会话 ${target.title}`)
+                                      }}
+                                      onDelete={(target) => {
+                                        act(`session:${target.sessionId}`, () => store.deleteSession(RemoteSessionId(target.sessionId)), `已删除会话 ${target.title}`)
+                                      }}
+                                    />
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+      </section>
+      {error !== '' && <p className={`${css.error} ${css.fullWidth}`}>{error}</p>}
+      {success !== '' && <p className={`${css.success} ${css.fullWidth}`}>{success}</p>}
+    </PanelShell>
+  )
+}
+
+function DraftConversation({ project, host, projectSessions, store, pending, error, promptProgress }: {
+  project: RemoteProjectView
+  host: RemoteHostView
+  projectSessions: readonly RemoteSessionView[]
+  store: RemoteAgentStore
+  pending: boolean
+  error: string | undefined
+  promptProgress: RemotePromptProgress | undefined
+}) {
+  const backends = availableBackends(host)
+  const preferredBackend = preferredProjectBackend(backends, projectSessions)
+  const backendSignature = backends.join(',')
+  const [backend, setBackend] = useState<RemoteAgentBackend | ''>(() => preferredBackend)
+  const [preferences, setPreferences] = useState<SessionPreferences>(() =>
+    preferredBackend === '' ? defaultSessionPreferences('codex') : defaultSessionPreferences(preferredBackend))
+  const [draft, setDraft] = useState('')
+  useEffect(() => {
+    setBackend(current => current !== '' && backends.includes(current) ? current : preferredBackend)
+  }, [backendSignature, preferredBackend])
+  useEffect(() => {
+    if (backends.length > 0 || host.inventory !== undefined) return
+    void store.refreshInventory(host.hostId).catch(() => undefined)
+  }, [backends.length, host.hostId, host.inventory, store])
+  useEffect(() => {
+    if (backend === '') return
+    setPreferences(current => normalizeSessionPreferences(backend, current))
+  }, [backend])
+  const progress = promptProgress?.projectId === project.projectId && promptProgress.sessionId === undefined
+    ? promptProgress
+    : undefined
+  const draftStage: ConversationStage = progress?.phase === 'failed'
+    ? {
+      kind: /timeout|timed out|超时/i.test(progress.message ?? '') ? 'timeout' : 'failed',
+      label: /timeout|timed out|超时/i.test(progress.message ?? '') ? '连接超时' : '会话创建失败',
+      detail: progress.message ?? error ?? '无法创建远程会话。', state: 'error', visible: true,
+    }
+    : progress === undefined
+      ? { kind: 'idle', label: '尚未发送', detail: '选择 Agent 后发送第一条消息。', state: 'done', visible: false }
+      : { kind: 'connecting', label: '正在连接 Agent', detail: '正在创建远程会话并建立通信通道。', state: 'ongoing', visible: true }
+  const send = (): void => {
+    const text = draft.trim()
+    if (text === '' || backend === '') return
+    void store.promptSessionDraft(backend, text).catch(() => undefined)
+  }
+  return (
+    <main className={css.conversation}>
+      <header className={css.conversationHeader}>
+        <div>
+          <h1>新会话</h1>
+          <p>{host.title}<span aria-hidden="true"> / </span>{project.title}</p>
+        </div>
+        <div className={css.sessionState}>
+          <StateDot state={draftStage.state} />
+          <span>{draftStage.label}</span>
+        </div>
+      </header>
+      <div className={css.transcriptShell}>
+        <div className={css.transcript}>
+          <div className={css.blankConversation}>
+            <span className={css.blankIcon}><IconAgentPresetOutline16 size={22} /></span>
+            <strong>开始一个新会话</strong>
+            <p>第一次发送时创建远程会话并锁定 Agent。</p>
+            <ConversationActivity stage={draftStage} />
+          </div>
+        </div>
+      </div>
+      <div className={css.composerDock}>
+        <div className={css.composer}>
+          {error !== undefined && <div className={css.composerError}>{error}</div>}
+          {backend !== '' && (
+            <SessionControls
+              backend={backend}
+              preferences={preferences}
+              disabled={pending}
+              onChange={(next) => {
+                setPreferences(next)
+                const updated = {
+                  ...readPersistedSessionPreferences(),
+                  [sessionPreferencesKey(host.hostId, backend)]: normalizeSessionPreferences(backend, next),
+                }
+                writePersistedSessionPreferences(updated)
+              }}
+            />
+          )}
+          <textarea
+            aria-label="发送给远程 Agent"
+            value={draft}
+            placeholder="输入第一条消息"
+            disabled={pending}
+            onChange={(event) => { setDraft(event.target.value) }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault()
+                send()
+              }
+            }}
+          />
+          <div className={css.composerActions}>
+            <label className={css.agentPicker}>
+              <IconAgentPresetOutline16 />
+              <select
+                aria-label="选择 Agent"
+                value={backend}
+                disabled={pending || backends.length === 0}
+                onChange={(event) => { setBackend(event.target.value as RemoteAgentBackend) }}
+              >
+                <option value="">{backends.length === 0 ? '没有可用 Agent，请检查远端安装和登录状态' : '选择 Agent'}</option>
+                {backends.map(value => <option key={value} value={value}>{value}</option>)}
+              </select>
+            </label>
+            <span>首次发送后不可更改</span>
+            <Button size="sm" variant="primary" icon={<IconSendOutline16 />} aria-label="发送" disabled={backend === '' || draft.trim() === '' || pending} onClick={send} />
+          </div>
+        </div>
+      </div>
+    </main>
+  )
 }
 
 /** Render the selected remote session. */
 export function RemoteConversation({ store }: RemoteConversationProps) {
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
   const [draft, setDraft] = useState('')
+  const [sessionAction, setSessionAction] = useState<string>()
+  const [sessionPreferences, setSessionPreferences] = useState<Record<string, SessionPreferences>>(readPersistedSessionPreferences)
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  const transcriptColumnRef = useRef<HTMLDivElement | null>(null)
+  const followBottomRef = useRef(true)
+  const observedTopRef = useRef(0)
+  const lastSessionIdRef = useRef<string>()
+  const followSignatureRef = useRef('')
+  const answeredPermissionsRef = useRef(new Set<string>())
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false)
   const session = snapshot.state.sessions.find(candidate => candidate.sessionId === snapshot.currentSessionId)
-  const transcript = useMemo(
+  const sessionProject = snapshot.state.projects.find(candidate => candidate.projectId === session?.projectId)
+  const sessionHost = snapshot.state.hosts.find(candidate => candidate.hostId === sessionProject?.hostId)
+  const sessionEntries = useMemo(
     () => snapshot.state.transcript.filter(entry => entry.sessionId === session?.sessionId),
     [snapshot.state.transcript, session?.sessionId],
   )
-  useEffect(() => {
+  const transcript = useMemo(() => buildTranscriptNodes(sessionEntries), [sessionEntries])
+  const activityClock = useActivityClock(snapshot.promptProgress !== undefined || session?.turnState === 'running')
+  const stage = session === undefined
+    ? undefined
+    : conversationStage({
+      session,
+      entries: sessionEntries,
+      ...(snapshot.promptProgress === undefined ? {} : { progress: snapshot.promptProgress }),
+      ...(snapshot.error === undefined ? {} : { error: snapshot.error }),
+      now: activityClock,
+    })
+  const lastNode = transcript.at(-1)
+  const nodeSignature = lastNode === undefined
+    ? 'empty'
+    : lastNode.kind === 'tool'
+      ? `${lastNode.id}:${lastNode.entries.length}:${lastNode.entries.at(-1)?.text.length ?? 0}`
+      : `${lastNode.id}:${lastNode.entry.text.length}`
+  const followSignature = `${nodeSignature}:${stage?.kind ?? 'none'}`
+  const scrollToBottom = (element: HTMLDivElement): void => {
+    element.scrollTop = element.scrollHeight
+    observedTopRef.current = element.scrollTop
+    followBottomRef.current = true
+    setShowJumpToLatest(false)
+  }
+  useLayoutEffect(() => {
     const element = scrollRef.current
-    if (element !== null) element.scrollTop = element.scrollHeight
-  }, [transcript.length, session?.sessionId])
+    const sessionChanged = lastSessionIdRef.current !== session?.sessionId
+    const tipMoved = followSignatureRef.current !== followSignature
+    lastSessionIdRef.current = session?.sessionId
+    followSignatureRef.current = followSignature
+    if (element !== null && (sessionChanged || (tipMoved && followBottomRef.current))) {
+      scrollToBottom(element)
+    } else if (element !== null && tipMoved && transcript.length > 0) {
+      setShowJumpToLatest(true)
+    }
+  }, [followSignature, session?.sessionId, transcript.length])
+  useEffect(() => {
+    const column = transcriptColumnRef.current
+    const element = scrollRef.current
+    if (column === null || element === null || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => {
+      if (followBottomRef.current) scrollToBottom(element)
+    })
+    observer.observe(column)
+    return () => { observer.disconnect() }
+  }, [session?.sessionId])
+  const preferences = session === undefined
+    ? undefined
+    : normalizeSessionPreferences(
+      session.backend,
+      sessionPreferences[session.sessionId]
+        ?? (sessionHost === undefined ? undefined : sessionPreferences[sessionPreferencesKey(sessionHost.hostId, session.backend)])
+        ?? defaultSessionPreferences(session.backend),
+    )
+  useEffect(() => {
+    if (session === undefined || !shouldAutoApprovePermissions(preferences?.approvalChoice)) return
+    for (const entry of sessionEntries) {
+      if (entry.role !== 'permission' || entry.requestId === undefined) continue
+      const action = `permission:${session.sessionId}:${entry.requestId}`
+      if (sessionAction !== undefined || answeredPermissionsRef.current.has(action)) continue
+      const options = permissionOptions(entry)
+      answeredPermissionsRef.current.add(action)
+      setSessionAction(action)
+      void store.permission(session.sessionId, entry.requestId, options[0]?.outcome ?? { outcome: 'selected' })
+        .catch(() => undefined)
+        .finally(() => { setSessionAction(current => current === action ? undefined : current) })
+      break
+    }
+  }, [session, sessionEntries, preferences?.approvalChoice, sessionAction, store])
+
+  if (snapshot.panel !== undefined) {
+    return <OperationPanel panel={snapshot.panel} store={store} snapshot={snapshot} />
+  }
+
+  if (snapshot.draftSession !== undefined) {
+    const project = snapshot.state.projects.find(candidate => candidate.projectId === snapshot.draftSession?.projectId)
+    const host = project === undefined ? undefined : snapshot.state.hosts.find(candidate => candidate.hostId === project.hostId)
+    if (project !== undefined && host !== undefined) {
+      return (
+        <DraftConversation
+          key={project.projectId}
+          project={project}
+          host={host}
+          projectSessions={snapshot.state.sessions.filter(candidate => candidate.projectId === project.projectId)}
+          store={store}
+          pending={snapshot.pending}
+          error={snapshot.error}
+          promptProgress={snapshot.promptProgress}
+        />
+      )
+    }
+  }
 
   if (session === undefined) {
+    const firstHost = snapshot.state.hosts[0]
+    const firstProject = snapshot.state.projects[0]
+    if (firstHost !== undefined && firstProject === undefined) {
+      return (
+        <main className={css.hero}>
+          <div className={css.heroMark}>项</div>
+          <h1>添加项目后开始 Grok 会话</h1>
+          <p>主机已经连接，Grok 也已就绪。接下来选择这台主机上的项目目录，之后就可以新建会话。</p>
+          <Button size="sm" variant="primary" onClick={() => { store.showPanel({ kind: 'add-project', hostId: firstHost.hostId }) }}>添加项目</Button>
+        </main>
+      )
+    }
+    if (firstProject !== undefined) {
+      return (
+        <main className={css.hero}>
+          <div className={css.heroMark}>话</div>
+          <h1>从项目新建 Agent 会话</h1>
+          <p>主机和项目已经准备好。先打开会话占位，首次发送前再选择 Agent。</p>
+          <Button size="sm" variant="primary" onClick={() => { store.startSessionDraft(firstProject.projectId) }}>新建会话</Button>
+        </main>
+      )
+    }
     return (
       <main className={css.hero}>
         <div className={css.heroMark}>远</div>
         <h1>连接一个远程 Agent 会话</h1>
-        <p>在左侧添加 hostd、登记项目，并从该主机的可用库存中选择 Grok、Codex 或 dsh。</p>
+        <p>在左侧点击“添加主机”开始。已有 hostd 可直接连接，远端主机也可通过 SSH 自动部署并建立隧道。</p>
+        <Button size="sm" variant="primary" onClick={() => { store.showPanel({ kind: 'add-host' }) }}>添加主机</Button>
       </main>
     )
   }
 
+  const visibleStage = stage ?? {
+    kind: 'idle', label: '已就绪', detail: '可以发送新的请求。', state: 'done', visible: false,
+  } satisfies ConversationStage
+  const setPreferences = (next: SessionPreferences): void => {
+    if (session === undefined) return
+    const normalized = normalizeSessionPreferences(session.backend, next)
+    setSessionPreferences((current) => {
+      const updated = {
+        ...current,
+        [session.sessionId]: normalized,
+        ...(sessionHost === undefined ? {} : { [sessionPreferencesKey(sessionHost.hostId, session.backend)]: normalized }),
+      }
+      writePersistedSessionPreferences(updated)
+      return updated
+    })
+  }
   const send = (): void => {
     const text = draft.trim()
     if (text === '') return
+    followBottomRef.current = true
     setDraft('')
     void store.prompt(session.sessionId, text).catch(() => { setDraft(text) })
+  }
+  const submitPermission = (requestId: string, outcome: JsonValue): void => {
+    if (sessionAction !== undefined) return
+    const action = `permission:${session.sessionId}:${requestId}`
+    answeredPermissionsRef.current.add(action)
+    setSessionAction(action)
+    void store.permission(session.sessionId, requestId, outcome)
+      .catch(() => undefined)
+      .finally(() => { setSessionAction(current => current === action ? undefined : current) })
+  }
+  const stop = (): void => {
+    if (sessionAction !== undefined) return
+    const action = `stop:${session.sessionId}`
+    setSessionAction(action)
+    void store.cancel(session.sessionId)
+      .catch(() => undefined)
+      .finally(() => { setSessionAction(current => current === action ? undefined : current) })
+  }
+  const jumpToLatest = (): void => {
+    const element = scrollRef.current
+    if (element === null) return
+    scrollToBottom(element)
   }
   return (
     <main className={css.conversation}>
       <header className={css.conversationHeader}>
         <div>
           <h1>{session.title}</h1>
-          <p>{session.backend} · {session.binding?.nativeSessionId ?? '正在建立远程会话'}</p>
+          <p>{sessionHost === undefined ? '' : `${sessionHost.title} / `}{sessionProject?.title ?? ''}<span className={css.headerBackend}>{session.backend}</span></p>
         </div>
-        <div className={css.sessionState}>
-          <StateDot state={session.turnState === 'running' ? 'ongoing' : session.channelState === 'lost' ? 'error' : 'done'} />
-          <span>{session.channelState} / {session.turnState}</span>
+        <div className={css.sessionMeta}>
+          <SessionIdChip sessionId={session.sessionId} />
+          <div className={css.sessionState}>
+            <StateDot state={visibleStage.state} />
+            <span>{visibleStage.label}</span>
+          </div>
         </div>
       </header>
-      <div ref={scrollRef} className={css.transcript}>
-        {transcript.map(entry => (
-          <TranscriptRow
-            key={entry.transcriptId}
-            entry={entry}
-            onPermission={(requestId, outcome) => { void store.permission(session.sessionId, requestId, outcome) }}
-          />
-        ))}
-        {transcript.length === 0 && <p className={css.emptyTranscript}>远程会话已连接。发送一条消息开始。</p>}
-      </div>
-      <div className={css.composer}>
-        {snapshot.error !== undefined && <div className={css.composerError}>{snapshot.error}</div>}
-        <textarea
-          aria-label="发送给远程 Agent"
-          value={draft}
-          placeholder={`发送给 ${session.backend}`}
-          disabled={session.channelState !== 'open' || session.parentSessionId !== undefined}
-          onChange={(event) => { setDraft(event.target.value) }}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey) {
-              event.preventDefault()
-              send()
-            }
+      <div className={css.transcriptShell}>
+        <div
+          ref={scrollRef}
+          className={css.transcript}
+          onScroll={(event) => {
+            const element = event.currentTarget
+            const floor = Math.max(0, element.scrollHeight - element.clientHeight)
+            const deliveredTop = Math.min(observedTopRef.current, floor)
+            const movedByReader = Math.abs(element.scrollTop - deliveredTop) > 0.5
+            const follows = movedByReader ? isNearScrollBottom(element) : followBottomRef.current
+            followBottomRef.current = follows
+            setShowJumpToLatest(!follows)
+            observedTopRef.current = element.scrollTop
           }}
-        />
-        <div className={css.composerActions}>
-          <span>{session.parentSessionId === undefined ? '后端在创建后不可更改' : '子会话由远端产品管理'}</span>
-          {session.turnState === 'running' && (
-            <Button size="sm" variant="outline" onClick={() => { void store.cancel(session.sessionId) }}>停止</Button>
+        >
+          <div ref={transcriptColumnRef} className={css.transcriptColumn}>
+            {transcript.map((node, index) => (
+              <TranscriptRow
+                key={node.id}
+                node={node}
+                active={index === transcript.length - 1 && session.turnState === 'running'}
+                permissionPending={node.kind === 'entry' && node.entry.requestId !== undefined
+                  && sessionAction === `permission:${session.sessionId}:${node.entry.requestId}`}
+                onPermission={submitPermission}
+              />
+            ))}
+            <ConversationActivity stage={visibleStage} />
+            {transcript.length === 0 && !visibleStage.visible && <p className={css.emptyTranscript}>远程会话已连接。发送一条消息开始。</p>}
+          </div>
+        </div>
+        {showJumpToLatest && (
+          <button type="button" className={css.jumpToLatest} aria-label="回到最新消息" title="回到最新" onClick={jumpToLatest}><IconChevronDownOutline14 /></button>
+        )}
+      </div>
+      <div className={css.composerDock}>
+        <div className={css.composer}>
+          {snapshot.error !== undefined && <div className={css.composerError}>{snapshot.error}</div>}
+          {preferences !== undefined && session.parentSessionId === undefined && (
+            <SessionControls
+              backend={session.backend}
+              preferences={preferences}
+              disabled={session.channelState !== 'open' || snapshot.pending}
+              onChange={setPreferences}
+            />
           )}
-          <Button size="sm" variant="primary" disabled={session.parentSessionId !== undefined || draft.trim() === '' || snapshot.pending} onClick={send}>发送</Button>
+          <textarea
+            aria-label="发送给远程 Agent"
+            value={draft}
+            placeholder={`发送给 ${session.backend}`}
+            disabled={session.channelState !== 'open' || session.parentSessionId !== undefined}
+            onChange={(event) => { setDraft(event.target.value) }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault()
+                send()
+              }
+            }}
+          />
+          <div className={css.composerActions}>
+            <span>{session.parentSessionId === undefined ? `${session.backend} · Enter 发送，Shift+Enter 换行` : '子会话由远端 Agent 管理'}</span>
+            {session.turnState === 'running' && (
+              <Button size="sm" variant="toolbar" icon={<IconStopFill16 />} disabled={sessionAction !== undefined} onClick={stop}>{sessionAction === `stop:${session.sessionId}` ? '停止中…' : '停止'}</Button>
+            )}
+            <Button size="sm" variant="primary" icon={<IconSendOutline16 />} aria-label="发送" disabled={session.parentSessionId !== undefined || draft.trim() === '' || snapshot.pending} onClick={send} />
+          </div>
         </div>
       </div>
     </main>

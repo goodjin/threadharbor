@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { createConnection, createServer, type Server } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -28,7 +28,12 @@ async function listenLoopback(): Promise<{ server: Server; port: number }> {
 async function shutdownHolds(dataDir: string): Promise<void> {
   const holdsDir = join(dataDir, 'holds')
   for (const holdId of await readdir(holdsDir)) {
-    const socketPath = process.platform === 'win32' ? `\\\\.\\pipe\\threadharbor-hostd-${holdId}` : join(holdsDir, holdId, 'control.sock')
+    const config = JSON.parse(await readFile(join(holdsDir, holdId, 'config.json'), 'utf8')) as { socketPath?: unknown }
+    const socketPath = typeof config.socketPath === 'string'
+      ? config.socketPath
+      : process.platform === 'win32'
+        ? `\\\\.\\pipe\\threadharbor-hostd-${holdId}`
+        : join(holdsDir, holdId, 'control.sock')
     await new Promise<void>((resolve, reject) => {
       const socket = createConnection(socketPath)
       socket.once('connect', () => { socket.write('{"operation":"shutdown"}\n') })
@@ -59,14 +64,16 @@ describe('RemoteAgentHostd session control', () => {
       host: '127.0.0.1', port: 0, dataDir: root,
       maxRequestBytes: 1024 * 1024, operationTimeoutMs: 1000, workerStartupTimeoutMs: 3000,
       maxJournalEvents: 100, maxJournalBytes: 100_000, maxDirectoryEntries: 100,
-      installPrefix: join(root, 'install'), installTimeoutMs: 1000, authTimeoutMs: 1000,
+      authTimeoutMs: 1000,
       agentConfigHome: root, maxAgentConfigBytes: 4096,
       codexCliCommand: process.execPath,
       codexCommand: process.execPath, codexArgs: [],
       claudeCommand: '/missing/claude',
+      claudeAcpCommand: '/missing/claude-agent-acp', claudeAcpArgs: [],
       dshCommand: process.execPath, dshArgs: [], dshProvider: 'deepseek-official', dshModel: 'test',
       grokCommand: process.execPath, grokServeHost: '127.0.0.1', grokServePort: grok.port, grokArgs: [],
       workerScript: new URL('./fixtures/fake-hold-worker.mjs', import.meta.url).pathname,
+      hostdHttpFallback: false,
     }
     const first = new RemoteAgentHostd(options)
     await first.start()

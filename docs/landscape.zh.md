@@ -25,4 +25,4 @@ SessionPort 所称的 session/context transfer 是模型生成的上下文交接
 | 控制能力 | 配置部署、备份、漂移检查 | 捕获、注入、历史与 diff | prompt admission、取消、权限、目录、子会话 |
 | 数据所有权 | 本机 local-only | 浏览器 IndexedDB/用户 Drive | 每个 Web 部署独立 catalog；凭据留在远程主机 |
 
-可以借鉴但不应混淆的能力：AgentHarbor 的 adapter registry、部署 diff 与 drift detection 适合用于 ThreadHarbor 的 Agent 安装层；SessionPort 的可移植 snapshot 与跨模型 handoff 适合作为以后独立功能。它们都不能替代 ThreadHarbor 的 detached execution、原生连接所有权和日志恢复。
+可以借鉴但不应混淆的能力：AgentHarbor 的 adapter registry、配置 diff 与 drift detection 适合用于 ThreadHarbor 的远端 Agent 发现和配置治理；SessionPort 的可移植 snapshot 与跨模型 handoff 适合作为以后独立功能。它们都不能替代 ThreadHarbor 的 detached execution、原生连接所有权和日志恢复。

@@ -2,6 +2,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -11,11 +12,14 @@ import type { DomainGlobal, KvTable } from '@deepseek-ai/dsh-storage-domain'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import {
   REMOTE_AGENT_GATEWAY_PATH,
+  REMOTE_AGENT_GATEWAY_WS_PATH,
   REMOTE_AGENT_HOSTD_PATH,
   RemoteHostId,
+  RemoteOperationId,
   RemoteProjectId,
   RemoteSessionId,
   RemoteTranscriptId,
+  isRemoteBackendSessionReady,
   isJsonValue,
   jsonObject,
   parseRemoteControlRequest,
@@ -27,16 +31,22 @@ import {
   type RemoteControlResponse,
   type RemoteDirectoryListing,
   type RemoteHostInventory,
+  type RemoteHiddenItems,
   type RemoteHostView,
   type RemoteJournalPage,
+  type RemoteOperationPhase,
+  type RemoteOperationView,
   type RemoteProjectView,
   type RemoteSessionAttachResult,
   type RemoteSessionView,
+  type RemoteSshConfig,
   type RemoteTranscriptEntry,
 } from '@threadharbor/protocol'
 import { projectNativeFrame } from './projection.ts'
 import { remoteAgentDomainSpec, type RemoteAgentCatalogState } from './spec.ts'
-import { SshManager } from './ssh-manager.ts'
+import { SshManager, type SshDeploymentProgress } from './ssh-manager.ts'
+import { WsBroadcaster } from './ws-broadcaster.ts'
+import { HostdConnectionPool } from './hostd-connection-pool.ts'
 
 export { remoteAgentDomainSpec } from './spec.ts'
 export { projectNativeFrame } from './projection.ts'
@@ -67,6 +77,8 @@ export interface Config {
   sshInstallTimeoutMs: number
   /** Loopback port used by hostd on every managed SSH host. */
   hostdRemotePort: number
+  /** Safe deployment namespace that isolates remote releases, state, services, and Agent binaries. */
+  deploymentChannel: string
 }
 
 interface Tables {
@@ -83,6 +95,11 @@ interface NativeChildUpdate {
   readonly finished: boolean
   readonly failed: boolean
 }
+
+type TranscriptInput = Omit<RemoteTranscriptEntry, 'sessionId' | 'seq' | 'createdAt'>
+
+/** Bound each durability slice so a large recovered journal cannot starve the Web event loop. */
+const MAX_JOURNAL_EVENTS_PER_SYNC = 100
 
 function jsonRecord(value: JsonValue | undefined): Record<string, JsonValue> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : undefined
@@ -142,6 +159,12 @@ function optionalString(record: Record<string, JsonValue>, key: string): string 
   return value
 }
 
+function requiredName(record: Record<string, JsonValue>, key: string): string {
+  const value = stringField(record, key).trim()
+  if (value === '') throw new Error(`${key} must not be blank`)
+  return value
+}
+
 function loopbackEndpoint(value: string): string {
   const url = new URL(value)
   if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) {
@@ -154,6 +177,10 @@ function loopbackEndpoint(value: string): string {
   return url.href.replace(/\/$/, '')
 }
 
+function sameSshTunnel(left: RemoteSshConfig, right: RemoteSshConfig): boolean {
+  return left.target === right.target && left.port === right.port
+}
+
 function localPath(value: string): string {
   return resolve(value.startsWith('~/') ? `${homedir()}${value.slice(1)}` : value)
 }
@@ -162,8 +189,50 @@ function hostdArtifactDirectory(): string {
   return fileURLToPath(new URL('../../hostd/lib/', import.meta.url))
 }
 
+const HOSTD_VERSION_CACHE: { value?: string } = {}
+
+function hostdArtifactVersion(): string {
+  if (HOSTD_VERSION_CACHE.value !== undefined) return HOSTD_VERSION_CACHE.value
+  try {
+    const pkgPath = fileURLToPath(new URL('../../hostd/package.json', import.meta.url))
+    const parsed = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version?: unknown }
+    HOSTD_VERSION_CACHE.value = typeof parsed.version === 'string' ? parsed.version : 'unknown'
+  } catch {
+    HOSTD_VERSION_CACHE.value = 'unknown'
+  }
+  return HOSTD_VERSION_CACHE.value
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function inventoryFailure(error: unknown): string {
+  const message = errorMessage(error)
+  if (/fetch failed|Failed to fetch|ECONNREFUSED|ECONNRESET/i.test(message)) {
+    return '无法连接到 hostd。请确认远端服务已启动后再试。'
+  }
+  if (/timed out|timeout|TimeoutError|AbortError/i.test(message)) {
+    return '连接 hostd 超时。请检查网络或 SSH 隧道后再试。'
+  }
+  if (/ENOTFOUND|getaddrinfo|EAI_AGAIN/i.test(message)) {
+    return '找不到主机地址。请检查主机名或网络。'
+  }
+  return message
+}
+
+function displayError(error: unknown): string {
+  const message = errorMessage(error).replaceAll(/[\r\n\0]+/g, ' ').trim()
+  return message.length <= 500 ? message : `${message.slice(0, 499)}…`
+}
+
+function operationFailureDetail(kind: RemoteOperationView['kind'], error: unknown): string {
+  const message = errorMessage(error)
+  if (/timed out|timeout/i.test(message)) return '操作超时，请检查远端主机状态后重试。'
+  if (/host key changed|approved fingerprint/i.test(message)) return 'SSH 主机密钥与已批准的指纹不一致。'
+  if (/Node\.js 22/i.test(message)) return '远端主机需要 Node.js 22 或更高版本。'
+  if (/configured SSH credentials/i.test(message)) return '无法使用当前 SSH 配置连接远端主机。'
+  return 'SSH 部署失败，请检查主机连接和远端服务日志。'
 }
 
 function responseJson(res: ServerResponse, status: number, response: RemoteControlResponse): void {
@@ -188,12 +257,18 @@ export class RemoteAgentGateway extends Service {
     sshConnectTimeoutMs: z.natural().min(1).required(),
     sshInstallTimeoutMs: z.natural().min(1).required(),
     hostdRemotePort: z.natural().min(1).max(65535).required(),
+    deploymentChannel: z.string().required(),
   })
 
   private tables?: Tables
   private global?: DomainGlobal<RemoteAgentCatalogState>
   private operationTail: Promise<void> = Promise.resolve()
+  private readonly operations = new Map<ReturnType<typeof RemoteOperationId>, RemoteOperationView>()
   private readonly sshManager: SshManager
+  private readonly wsBroadcaster = new WsBroadcaster()
+  private readonly followedSyncing = new Set<string>()
+  private hostdConnections!: HostdConnectionPool
+  private syncStopped = false
 
   /** @param ctx - Host context carrying storage-domain and webserver. @param config - validated bounds. */
   constructor(ctx: Context, private readonly config: Config) {
@@ -203,9 +278,28 @@ export class RemoteAgentGateway extends Service {
       connectTimeoutMs: config.sshConnectTimeoutMs,
       installTimeoutMs: config.sshInstallTimeoutMs,
       hostdRemotePort: config.hostdRemotePort,
+      deploymentChannel: config.deploymentChannel,
       hostdArtifactDirectory: hostdArtifactDirectory(),
     })
+    this.hostdConnections = new HostdConnectionPool(this.sshManager, {
+      requestTimeoutMs: config.hostdRequestTimeoutMs,
+    })
     ctx.effect(() => () => { this.sshManager.close() }, 'threadharbor.sshClose')
+    ctx.effect(() => () => { void this.hostdConnections.closeAll() }, 'remoteAgent.hostdConnectionsClose')
+    ctx.effect(() => () => { this.syncStopped = true }, 'remoteAgent.sessionSyncClose')
+  }
+
+  /** Replace the WebSocket factory (test-only seam). */
+  setHostdSocketFactory(factory: (url: string) => import('ws').WebSocket): void {
+    this.hostdConnections = new HostdConnectionPool(this.sshManager, {
+      requestTimeoutMs: this.config.hostdRequestTimeoutMs,
+      socketFactory: factory,
+    })
+  }
+
+  /** Attach a mock browser socket so tests can observe gateway WS pushes. */
+  registerBrowserForTesting(ws: import('ws').WebSocket, browserId: string): void {
+    this.wsBroadcaster.registerForTesting(ws, browserId)
   }
 
   /** Open the independent catalog domain and register its exact control route. */
@@ -223,6 +317,25 @@ export class RemoteAgentGateway extends Service {
     this.ctx.effect(() => this.ctx.webServer.register({
       kind: 'exact', path: REMOTE_AGENT_GATEWAY_PATH, handler: (req, res) => this.handleHttp(req, res),
     }), 'remoteAgent.controlRoute')
+    this.ctx.effect(() => {
+      this.wsBroadcaster.setRequestHandler(async (request) => await this.dispatch({
+        id: request.id,
+        method: request.method as RemoteControlRequest['method'],
+        params: request.params,
+      }))
+      return this.ctx.webServer.registerUpgrade({
+        path: REMOTE_AGENT_GATEWAY_WS_PATH,
+        handler: (req, socket, head) => {
+          this.wsBroadcaster.handleUpgrade(req, socket, head)
+        },
+      })
+    }, 'remoteAgent.wsRoute')
+    for (const sessionId of this.requireGlobal().get().sessionIds) {
+      const session = this.requireTables().sessions.get(sessionId)
+      if (session?.turnState === 'running' || session?.turnState === 'waiting-permission') {
+        this.ensureFollowedSync(sessionId)
+      }
+    }
   }
 
   /** Complete current browser projection in durable order.
@@ -233,11 +346,21 @@ export class RemoteAgentGateway extends Service {
     const tables = this.requireTables()
     return {
       pollIntervalMs: this.config.pollIntervalMs,
-      hosts: state.hostIds.map(id => this.requireRecord(tables.hosts, id, 'host')),
-      projects: state.projectIds.map(id => this.requireRecord(tables.projects, id, 'project')),
-      sessions: state.sessionIds.map(id => this.requireRecord(tables.sessions, id, 'session')),
+      hosts: state.hostIds
+        .map(id => this.requireRecord(tables.hosts, id, 'host'))
+        .filter(host => host.hiddenAt === undefined),
+      projects: state.projectIds
+        .map(id => this.requireRecord(tables.projects, id, 'project'))
+        .filter(project => project.hiddenAt === undefined && tables.hosts.get(project.hostId)?.hiddenAt === undefined),
+      sessions: state.sessionIds
+        .map(id => this.requireRecord(tables.sessions, id, 'session'))
+        .filter(session => this.sessionIsVisible(session)),
       transcript: [...tables.transcript.entries()].map(([, entry]) => entry)
         .sort((left, right) => left.sessionId.localeCompare(right.sessionId) || left.seq - right.seq),
+      operations: [...this.operations.values()].sort((left, right) => right.startedAt.localeCompare(left.startedAt)),
+      hostdArtifactVersion: hostdArtifactVersion(),
+      browserId: 'gateway',
+      unreadCounts: {},
     }
   }
 
@@ -251,14 +374,28 @@ export class RemoteAgentGateway extends Service {
         return this.state() as unknown as JsonValue
       case 'host.add':
         return await this.enqueue(() => this.addHost(request.params)) as unknown as JsonValue
+      case 'host.update':
+        return await this.enqueue(() => this.updateHost(request.params)) as unknown as JsonValue
+      case 'host.hide':
+        return await this.enqueue(() => this.hideHost(request.params)) as unknown as JsonValue
+      case 'host.unhide':
+        return await this.enqueue(() => this.unhideHost(request.params)) as unknown as JsonValue
+      case 'host.delete':
+        return await this.enqueue(() => this.deleteHost(request.params)) as unknown as JsonValue
+      case 'hidden.list':
+        return this.hiddenItems() as unknown as JsonValue
       case 'host.ssh.inspect':
         return await this.sshManager.inspect(this.sshManager.parseInspectionConfig(request.params['ssh'])) as unknown as JsonValue
       case 'host.ssh.deploy':
         return await this.enqueue(() => this.deploySshHost(request.params)) as unknown as JsonValue
-      case 'agent.install.plan':
-      case 'agent.install':
+      case 'operation.start':
+        return this.startOperation(request.params) as unknown as JsonValue
+      case 'operation.list':
+        return [...this.operations.values()].sort((left, right) => right.startedAt.localeCompare(left.startedAt)) as unknown as JsonValue
       case 'agent.config.get':
       case 'agent.config.set':
+      case 'agent.credential.status':
+      case 'agent.credential.set':
       case 'auth.start':
       case 'auth.status':
       case 'auth.respond':
@@ -268,10 +405,26 @@ export class RemoteAgentGateway extends Service {
         return await this.enqueue(() => this.refreshInventory(request.params)) as unknown as JsonValue
       case 'project.create':
         return await this.enqueue(() => this.createProject(request.params)) as unknown as JsonValue
+      case 'project.rename':
+        return await this.enqueue(() => this.renameProject(request.params)) as unknown as JsonValue
+      case 'project.hide':
+        return await this.enqueue(() => this.hideProject(request.params)) as unknown as JsonValue
+      case 'project.unhide':
+        return await this.enqueue(() => this.unhideProject(request.params)) as unknown as JsonValue
+      case 'project.delete':
+        return await this.enqueue(() => this.deleteProject(request.params)) as unknown as JsonValue
       case 'session.start':
         return await this.enqueue(() => this.startSession(request.params)) as unknown as JsonValue
       case 'session.attach':
         return await this.enqueue(() => this.attachSession(request.params)) as unknown as JsonValue
+      case 'session.rename':
+        return await this.enqueue(() => this.renameSession(request.params)) as unknown as JsonValue
+      case 'session.archive':
+        return await this.enqueue(() => this.archiveSession(request.params)) as unknown as JsonValue
+      case 'session.unarchive':
+        return await this.enqueue(() => this.unarchiveSession(request.params)) as unknown as JsonValue
+      case 'session.delete':
+        return await this.enqueue(() => this.deleteSession(request.params)) as unknown as JsonValue
       case 'session.prompt':
         return await this.enqueue(() => this.prompt(request.params))
       case 'session.cancel':
@@ -280,6 +433,14 @@ export class RemoteAgentGateway extends Service {
         return await this.enqueue(() => this.permission(request.params))
       case 'events.read':
         return await this.enqueue(() => this.syncEvents(request.params)) as unknown as JsonValue
+      case 'session.follow':
+        return await this.enqueue(() => this.handleFollow(request.params)) as unknown as JsonValue
+      case 'session.unfollow':
+        return await this.enqueue(() => this.handleUnfollow(request.params)) as unknown as JsonValue
+      case 'session.catchup':
+        return await this.enqueue(() => this.syncEvents(request.params)) as unknown as JsonValue
+      case 'browser.hello':
+        return await this.enqueue(() => this.handleHello(request.params)) as unknown as JsonValue
       case 'fs.list':
         return await this.listDirectory(request.params) as unknown as JsonValue
       default:
@@ -317,10 +478,14 @@ export class RemoteAgentGateway extends Service {
 
   private async addHost(params: Record<string, JsonValue>): Promise<RemoteHostView> {
     const endpoint = loopbackEndpoint(stringField(params, 'endpoint'))
-    const title = stringField(params, 'title')
+    const title = requiredName(params, 'title')
     const tables = this.requireTables()
     const duplicate = [...tables.hosts.entries()].find(([, host]) => host.endpoint === endpoint)
-    if (duplicate !== undefined) return duplicate[1]
+    if (duplicate !== undefined) {
+      const renamed = { ...duplicate[1], title, updatedAt: new Date().toISOString() }
+      await tables.hosts.put(duplicate[0], renamed)
+      return await this.refreshHostInventory(renamed)
+    }
     const hostId = RemoteHostId(randomUUID())
     const now = new Date().toISOString()
     const host: RemoteHostView = { hostId, title, endpoint, createdAt: now, updatedAt: now }
@@ -330,15 +495,68 @@ export class RemoteAgentGateway extends Service {
     return await this.refreshHostInventory(host)
   }
 
-  private async deploySshHost(params: Record<string, JsonValue>): Promise<RemoteHostView> {
+  private async updateHost(
+    params: Record<string, JsonValue>,
+    onProgress?: (progress: SshDeploymentProgress) => void,
+  ): Promise<RemoteHostView> {
+    const hostId = RemoteHostId(stringField(params, 'hostId'))
+    const current = this.requireHost(hostId)
+    const title = requiredName(params, 'title')
+    const hasEndpoint = params['endpoint'] !== undefined
+    const hasSsh = params['ssh'] !== undefined
+    if (hasEndpoint && hasSsh) throw new Error('host update cannot include both endpoint and ssh')
+    const tables = this.requireTables()
+
+    if (!hasEndpoint && !hasSsh) {
+      const updated: RemoteHostView = { ...current, title, updatedAt: new Date().toISOString() }
+      await tables.hosts.put(hostId, updated)
+      return updated
+    }
+
+    if (hasEndpoint) {
+      const endpoint = loopbackEndpoint(stringField(params, 'endpoint'))
+      const duplicate = [...tables.hosts.entries()].find(([candidateId, host]) =>
+        candidateId !== hostId && host.endpoint === endpoint)
+      if (duplicate !== undefined) throw new Error('another host already uses this endpoint')
+      const { ssh: _ssh, ...rest } = current
+      const updated: RemoteHostView = { ...rest, title, endpoint, updatedAt: new Date().toISOString() }
+      await tables.hosts.put(hostId, updated)
+      if (current.ssh !== undefined) this.sshManager.releaseTunnel(current.ssh)
+      return await this.refreshHostInventory(updated)
+    }
+
     if (params['confirm'] !== true) throw new Error('hostd deployment requires confirm: true')
-    const title = stringField(params, 'title')
+    const ssh = this.sshManager.parseApprovedConfig(params['ssh'])
+    const duplicate = [...tables.hosts.entries()].find(([candidateId, host]) =>
+      candidateId !== hostId
+      && host.ssh?.target === ssh.target
+      && host.ssh.port === ssh.port
+      && host.ssh.user === ssh.user)
+    if (duplicate !== undefined) throw new Error('another host already uses this SSH connection')
+    const endpoint = await this.sshManager.deploy(ssh, onProgress)
+    const updated: RemoteHostView = { ...current, title, endpoint, ssh, updatedAt: new Date().toISOString() }
+    await tables.hosts.put(hostId, updated)
+    if (current.ssh !== undefined && !sameSshTunnel(current.ssh, ssh)) this.sshManager.releaseTunnel(current.ssh)
+    return await this.refreshHostInventory(updated)
+  }
+
+  private async deploySshHost(
+    params: Record<string, JsonValue>,
+    onProgress?: (progress: SshDeploymentProgress) => void,
+  ): Promise<RemoteHostView> {
+    if (params['confirm'] !== true) throw new Error('hostd deployment requires confirm: true')
+    const title = requiredName(params, 'title')
     const ssh = this.sshManager.parseApprovedConfig(params['ssh'])
     const tables = this.requireTables()
     const duplicate = [...tables.hosts.entries()].find(([, host]) =>
       host.ssh?.target === ssh.target && host.ssh.port === ssh.port && host.ssh.user === ssh.user)
-    if (duplicate !== undefined) return await this.refreshHostInventory(duplicate[1])
-    const endpoint = await this.sshManager.deploy(ssh)
+    if (duplicate !== undefined) {
+      const endpoint = await this.sshManager.deploy(ssh, onProgress)
+      const redeployed = { ...duplicate[1], title, endpoint, ssh, updatedAt: new Date().toISOString() }
+      await tables.hosts.put(duplicate[0], redeployed)
+      return await this.refreshHostInventory(redeployed)
+    }
+    const endpoint = await this.sshManager.deploy(ssh, onProgress)
     const hostId = RemoteHostId(randomUUID())
     const now = new Date().toISOString()
     const host: RemoteHostView = { hostId, title, endpoint, ssh, createdAt: now, updatedAt: now }
@@ -346,6 +564,100 @@ export class RemoteAgentGateway extends Service {
     const state = this.requireGlobal().get()
     await this.requireGlobal().set({ ...state, hostIds: [...state.hostIds, hostId] })
     return await this.refreshHostInventory(host)
+  }
+
+  /** Start a gateway-owned long operation and return before its queued work executes. */
+  private startOperation(params: Record<string, JsonValue>): RemoteOperationView {
+    if (params['confirm'] !== true) throw new Error('operation.start requires confirm: true')
+    const kind = stringField(params, 'kind')
+    if (kind === 'host-ssh-deploy') {
+      const title = requiredName(params, 'title')
+      const ssh = this.sshManager.parseApprovedConfig(params['ssh'])
+      const hostIdText = optionalString(params, 'hostId')
+      const hostId = hostIdText === undefined ? undefined : RemoteHostId(hostIdText)
+      if (hostId !== undefined) this.requireHost(hostId)
+      const target = hostId === undefined
+        ? `ssh:${ssh.user ?? ''}@${ssh.target}:${ssh.port ?? 22}`
+        : `host:${hostId}`
+      return this.launchOperation({
+        kind,
+        title: hostId === undefined ? `部署 ${title}` : `重新部署 ${title}`,
+        detail: '部署任务已排队。',
+        target,
+        ...(hostId === undefined ? {} : { hostId }),
+      }, async (report) => {
+        const input = { ...params, title, ssh: ssh as unknown as JsonValue }
+        const host = hostId === undefined
+          ? await this.deploySshHost(input, report)
+          : await this.updateHost(input, report)
+        report({ phase: 'refreshing', detail: '正在刷新主机和 Agent 状态。' })
+        if (host.inventoryError !== undefined || host.inventory?.healthy !== true) {
+          throw new Error('deployed hostd did not pass its inventory health check')
+        }
+        return { hostId: host.hostId }
+      })
+    }
+    throw new Error('operation kind must be host-ssh-deploy')
+  }
+
+  /** Register one background task, serialize its mutation, and retain a safe result summary. */
+  private launchOperation(
+    input: Pick<RemoteOperationView, 'kind' | 'title' | 'detail' | 'target'>
+      & Partial<Pick<RemoteOperationView, 'hostId'>>,
+    work: (report: (progress: SshDeploymentProgress | { phase: RemoteOperationPhase; detail: string }) => void) => Promise<{ hostId?: ReturnType<typeof RemoteHostId> }>,
+  ): RemoteOperationView {
+    const duplicate = [...this.operations.values()].find(operation =>
+      operation.target === input.target && (operation.status === 'queued' || operation.status === 'running'))
+    if (duplicate !== undefined) throw new Error(`${duplicate.title} 已在运行`)
+    const operationId = RemoteOperationId(randomUUID())
+    const now = new Date().toISOString()
+    const initial: RemoteOperationView = {
+      operationId,
+      kind: input.kind,
+      status: 'queued',
+      phase: 'queued',
+      title: input.title,
+      detail: input.detail,
+      target: input.target,
+      cancellable: false,
+      ...(input.hostId === undefined ? {} : { hostId: input.hostId }),
+      startedAt: now,
+      updatedAt: now,
+    }
+    this.operations.set(operationId, initial)
+    this.pruneOperations()
+    void this.enqueue(async () => {
+      this.updateOperation(operationId, { status: 'running' })
+      try {
+        const result = await work((progress) => { this.updateOperation(operationId, progress) })
+        this.updateOperation(operationId, {
+          status: 'succeeded', phase: 'completed', detail: `${input.title}已完成。`,
+          ...(result.hostId === undefined ? {} : { hostId: result.hostId }),
+          finishedAt: new Date().toISOString(),
+        })
+      } catch (error) {
+        this.updateOperation(operationId, {
+          status: 'failed', phase: 'failed', detail: operationFailureDetail(input.kind, error), finishedAt: new Date().toISOString(),
+        })
+      }
+    })
+    return initial
+  }
+
+  private updateOperation(
+    operationId: ReturnType<typeof RemoteOperationId>,
+    update: Partial<Omit<RemoteOperationView, 'operationId' | 'kind' | 'title' | 'target' | 'startedAt'>>,
+  ): void {
+    const current = this.operations.get(operationId)
+    if (current === undefined) return
+    this.operations.set(operationId, { ...current, ...update, updatedAt: new Date().toISOString() })
+  }
+
+  private pruneOperations(): void {
+    const finished = [...this.operations.values()]
+      .filter(operation => operation.status === 'succeeded' || operation.status === 'failed')
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    for (const operation of finished.slice(20)) this.operations.delete(operation.operationId)
   }
 
   private async proxyHostOperation(
@@ -362,16 +674,22 @@ export class RemoteAgentGateway extends Service {
     return await this.refreshHostInventory(host)
   }
 
-  private async refreshHostInventory(host: RemoteHostView): Promise<RemoteHostView> {
+  private async refreshHostInventory(host: RemoteHostView, retried = false): Promise<RemoteHostView> {
     try {
       const inventory = await this.callHostd(host, 'inventory', {}) as unknown as RemoteHostInventory
-      const { inventoryError: _inventoryError, ...current } = host
+      const { inventoryError: _inventoryError, ...current } = this.requireHost(host.hostId)
       const updated: RemoteHostView = { ...current, inventory, updatedAt: new Date().toISOString() }
       await this.requireTables().hosts.put(host.hostId, updated)
       return updated
     } catch (error) {
+      if (host.ssh !== undefined && !retried) {
+        this.sshManager.releaseTunnel(host.ssh)
+        return await this.refreshHostInventory(this.requireHost(host.hostId), true)
+      }
+      const current = this.requireHost(host.hostId)
+      const { inventory: _inventory, inventoryError: _inventoryError, ...rest } = current
       const updated: RemoteHostView = {
-        ...host, inventoryError: errorMessage(error), updatedAt: new Date().toISOString(),
+        ...rest, inventoryError: inventoryFailure(error), updatedAt: new Date().toISOString(),
       }
       await this.requireTables().hosts.put(host.hostId, updated)
       return updated
@@ -396,6 +714,142 @@ export class RemoteAgentGateway extends Service {
     return project
   }
 
+  /** Rename one catalogued project without touching its remote directory. */
+  private async renameProject(params: Record<string, JsonValue>): Promise<RemoteProjectView> {
+    const projectId = RemoteProjectId(stringField(params, 'projectId'))
+    const current = this.requireProject(projectId)
+    const title = requiredName(params, 'title')
+    if (title === current.title) return current
+    const updated: RemoteProjectView = { ...current, title, updatedAt: new Date().toISOString() }
+    await this.requireTables().projects.put(projectId, updated)
+    return updated
+  }
+
+  /** Enumerate hidden hosts/projects and archived sessions for the settings catalog. */
+  private hiddenItems(): RemoteHiddenItems {
+    const state = this.requireGlobal().get()
+    const tables = this.requireTables()
+    const hosts = state.hostIds
+      .map(id => tables.hosts.get(id))
+      .filter((host): host is RemoteHostView => host !== undefined && host.hiddenAt !== undefined)
+    const projects = state.projectIds
+      .map(id => tables.projects.get(id))
+      .filter((project): project is RemoteProjectView => {
+        if (project === undefined) return false
+        if (project.hiddenAt !== undefined) return true
+        return tables.hosts.get(project.hostId)?.hiddenAt !== undefined
+      })
+    const sessions = state.sessionIds
+      .map(id => tables.sessions.get(id))
+      .filter((session): session is RemoteSessionView => session !== undefined && !this.sessionIsVisible(session))
+    return { hosts, projects, sessions }
+  }
+
+  /** Mark a catalogued host as hidden so the browser omits it from the normal projection. */
+  private async hideHost(params: Record<string, JsonValue>): Promise<RemoteHostView> {
+    const hostId = RemoteHostId(stringField(params, 'hostId'))
+    const current = this.requireHost(hostId)
+    if (current.hiddenAt !== undefined) return current
+    const tables = this.requireTables()
+    const now = new Date().toISOString()
+    const hidden: RemoteHostView = { ...current, hiddenAt: now, updatedAt: now }
+    await tables.hosts.put(hostId, hidden)
+    for (const [projectId, project] of tables.projects.entries()) {
+      if (project.hostId !== hostId || project.hiddenAt !== undefined) continue
+      await tables.projects.put(projectId, { ...project, hiddenAt: now, updatedAt: now })
+      await this.archiveProjectSessions(projectId, now)
+    }
+    return hidden
+  }
+
+  /** Restore a previously hidden host so the browser shows it again. */
+  private async unhideHost(params: Record<string, JsonValue>): Promise<RemoteHostView> {
+    const hostId = RemoteHostId(stringField(params, 'hostId'))
+    const current = this.requireHost(hostId)
+    if (current.hiddenAt === undefined) return current
+    const tables = this.requireTables()
+    const now = new Date().toISOString()
+    const { hiddenAt: _hiddenAt, ...without } = current
+    const restored: RemoteHostView = { ...without, updatedAt: now }
+    await tables.hosts.put(hostId, restored)
+    const hostHiddenAt = current.hiddenAt
+    for (const [projectId, project] of tables.projects.entries()) {
+      if (project.hostId !== hostId || project.hiddenAt === undefined || project.hiddenAt !== hostHiddenAt) continue
+      const { hiddenAt: _projectHiddenAt, ...projectWithout } = project
+      await tables.projects.put(projectId, { ...projectWithout, updatedAt: now })
+    }
+    return restored
+  }
+
+  /** Permanently delete a catalogued host and every project + session that lives on it. */
+  private async deleteHost(params: Record<string, JsonValue>): Promise<RemoteHostView> {
+    const hostId = RemoteHostId(stringField(params, 'hostId'))
+    const current = this.requireHost(hostId)
+    const tables = this.requireTables()
+    const global = this.requireGlobal()
+    const state = global.get()
+    const projectIds = state.projectIds.filter(id => tables.projects.get(id)?.hostId === hostId)
+    const sessionIds = state.sessionIds.filter(id => {
+      const session = tables.sessions.get(id)
+      return session !== undefined && projectIds.includes(session.projectId)
+    })
+    if (current.ssh !== undefined) this.sshManager.releaseTunnel(current.ssh)
+    await this.deleteSessionRecords(sessionIds)
+    for (const id of projectIds) await tables.projects.delete(id)
+    await tables.hosts.delete(hostId)
+    await global.set({
+      ...state,
+      hostIds: state.hostIds.filter(id => id !== hostId),
+      projectIds: state.projectIds.filter(id => !projectIds.includes(id)),
+      sessionIds: state.sessionIds.filter(id => !sessionIds.includes(id)),
+    })
+    return current
+  }
+
+  /** Mark a catalogued project as hidden so the browser omits it from the normal projection. */
+  private async hideProject(params: Record<string, JsonValue>): Promise<RemoteProjectView> {
+    const projectId = RemoteProjectId(stringField(params, 'projectId'))
+    const current = this.requireProject(projectId)
+    if (current.hiddenAt !== undefined) return current
+    const now = new Date().toISOString()
+    const hidden: RemoteProjectView = { ...current, hiddenAt: now, updatedAt: now }
+    await this.requireTables().projects.put(projectId, hidden)
+    await this.archiveProjectSessions(projectId, now)
+    return hidden
+  }
+
+  /** Restore a previously hidden project so the browser shows it again. */
+  private async unhideProject(params: Record<string, JsonValue>): Promise<RemoteProjectView> {
+    const projectId = RemoteProjectId(stringField(params, 'projectId'))
+    const current = this.requireProject(projectId)
+    if (current.hiddenAt === undefined) return current
+    const host = this.requireHost(current.hostId)
+    if (host.hiddenAt !== undefined) throw new Error('请先恢复所属主机')
+    const now = new Date().toISOString()
+    const { hiddenAt: _hiddenAt, ...without } = current
+    const restored: RemoteProjectView = { ...without, updatedAt: now }
+    await this.requireTables().projects.put(projectId, restored)
+    return restored
+  }
+
+  /** Permanently delete a catalogued project and every session that lives on it. */
+  private async deleteProject(params: Record<string, JsonValue>): Promise<RemoteProjectView> {
+    const projectId = RemoteProjectId(stringField(params, 'projectId'))
+    const current = this.requireProject(projectId)
+    const tables = this.requireTables()
+    const global = this.requireGlobal()
+    const state = global.get()
+    const sessionIds = state.sessionIds.filter(id => tables.sessions.get(id)?.projectId === projectId)
+    await this.deleteSessionRecords(sessionIds)
+    await tables.projects.delete(projectId)
+    await global.set({
+      ...state,
+      projectIds: state.projectIds.filter(id => id !== projectId),
+      sessionIds: state.sessionIds.filter(id => !sessionIds.includes(id)),
+    })
+    return current
+  }
+
   private async startSession(params: Record<string, JsonValue>): Promise<RemoteSessionView> {
     const tables = this.requireTables()
     const project = this.requireProject(RemoteProjectId(stringField(params, 'projectId')))
@@ -411,10 +865,10 @@ export class RemoteAgentGateway extends Service {
     }
     const refreshed = await this.refreshHostInventory(host)
     const available = refreshed.inventory?.backends.find(entry => entry.backend === backend)
-    if (!available?.installed || !available.authenticated) {
-      throw new Error(`backend ${backend} is not installed and authenticated on host ${host.title}`)
-    }
+    if (available === undefined || !available.installed) throw new Error(`backend ${backend} is not installed on host ${host.title}`)
     if (!available.sessionCapable) throw new Error(`backend ${backend} has no configured ThreadHarbor session adapter`)
+    if (backend === 'dsh' && !available.authenticated) throw new Error('DSH 需要先在主机设置中配置 API Key')
+    if (!isRemoteBackendSessionReady(available)) throw new Error(`backend ${backend} is not authenticated on host ${host.title}`)
     const sessionId = RemoteSessionId(randomUUID())
     const now = new Date().toISOString()
     const session: RemoteSessionView = {
@@ -431,21 +885,55 @@ export class RemoteAgentGateway extends Service {
     await tables.sessions.put(sessionId, session)
     const state = this.requireGlobal().get()
     await this.requireGlobal().set({ ...state, sessionIds: [...state.sessionIds, sessionId] })
+    // Persist and announce the connecting-state row immediately so the caller
+    // (and any future re-attach from a refreshed browser) sees the session
+    // before the remote hold exists. The hostd call runs after we return.
+    this.wsBroadcaster.broadcast({ type: 'session.view.changed', session })
+    const completion = this.completeStart(host, session, parent?.binding?.nativeSessionId)
+    this.inflightStarts.set(sessionId, completion)
+    void completion.finally(() => { this.inflightStarts.delete(sessionId) })
+    return session
+  }
+
+  /** In-flight session.start completions keyed by session id, so callers
+   *  (especially tests) can block until the remote hold is up or has failed. */
+  private readonly inflightStarts = new Map<ReturnType<typeof RemoteSessionId>, Promise<void>>()
+
+  /** Resolve a freshly created session row by talking to hostd.
+   * Runs detached so the caller is not blocked on remote hold startup. The
+   * final state is broadcast via session.view.changed so any open browser
+   * (current or future) reflects it. Failures flip the row to lost/failed
+   * rather than removing it — the user keeps a tombstone to retry from. */
+  private async completeStart(
+    host: RemoteHostView,
+    initial: RemoteSessionView,
+    parentNativeSessionId: string | undefined,
+  ): Promise<void> {
+    const tables = this.requireTables()
     try {
       const attached = await this.callHostd(host, 'session.start', {
-        sessionId,
-        backend,
-        cwd: project.cwd,
-        ...(parent?.binding?.nativeSessionId === undefined ? {} : { parentNativeSessionId: parent.binding.nativeSessionId }),
+        sessionId: initial.sessionId,
+        backend: initial.backend,
+        cwd: this.requireProject(initial.projectId).cwd,
+        ...(parentNativeSessionId === undefined ? {} : { parentNativeSessionId }),
       }) as unknown as RemoteSessionAttachResult
-      const ready = this.withAttachment(session, attached)
-      await tables.sessions.put(sessionId, ready)
-      return ready
+      const ready = this.withAttachment(initial, attached)
+      await tables.sessions.put(initial.sessionId, ready)
+      this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: ready })
     } catch (error) {
-      await tables.sessions.put(sessionId, {
-        ...session, channelState: 'lost', turnState: 'failed', updatedAt: new Date().toISOString(),
+      const failed: RemoteSessionView = {
+        ...initial,
+        channelState: 'lost',
+        turnState: 'failed',
+        updatedAt: new Date().toISOString(),
+      }
+      await tables.sessions.put(initial.sessionId, failed)
+      this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: failed })
+      this.wsBroadcaster.broadcast({
+        type: 'operation.progress',
+        operationId: `session-start-${initial.sessionId}`,
+        phase: 'failed',
       })
-      throw error
     }
   }
 
@@ -479,7 +967,117 @@ export class RemoteAgentGateway extends Service {
     }
     const ready = this.withAttachment(session, attached)
     await this.requireTables().sessions.put(session.sessionId, ready)
+    this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: ready })
     return ready
+  }
+
+  private async renameSession(params: Record<string, JsonValue>): Promise<RemoteSessionView> {
+    const sessionId = RemoteSessionId(stringField(params, 'sessionId'))
+    const session = this.requireSession(sessionId)
+    const title = requiredName(params, 'title')
+    const updated: RemoteSessionView = { ...session, title, updatedAt: new Date().toISOString() }
+    await this.requireTables().sessions.put(sessionId, updated)
+    return updated
+  }
+
+  private async archiveSession(params: Record<string, JsonValue>): Promise<RemoteSessionView> {
+    const sessionId = RemoteSessionId(stringField(params, 'sessionId'))
+    const root = this.requireSession(sessionId)
+    const archivedAt = new Date().toISOString()
+    await this.archiveSessionIds(this.sessionSubtree(sessionId), archivedAt)
+    return { ...root, archivedAt: root.archivedAt ?? archivedAt, updatedAt: root.archivedAt === undefined ? archivedAt : root.updatedAt }
+  }
+
+  private async unarchiveSession(params: Record<string, JsonValue>): Promise<RemoteSessionView> {
+    const sessionId = RemoteSessionId(stringField(params, 'sessionId'))
+    const root = this.requireSession(sessionId)
+    const project = this.requireProject(root.projectId)
+    if (project.hiddenAt !== undefined || this.requireHost(project.hostId).hiddenAt !== undefined) {
+      throw new Error('请先恢复所属主机或项目')
+    }
+    const tables = this.requireTables()
+    const now = new Date().toISOString()
+    let restored: RemoteSessionView = root
+    for (const id of this.sessionSubtree(sessionId)) {
+      const session = tables.sessions.get(id)
+      if (session === undefined || session.archivedAt === undefined) continue
+      const { archivedAt: _archivedAt, ...without } = session
+      const next = { ...without, updatedAt: now }
+      await tables.sessions.put(id, next)
+      if (id === sessionId) restored = next
+    }
+    return restored
+  }
+
+  private async deleteSession(params: Record<string, JsonValue>): Promise<RemoteSessionView> {
+    const sessionId = RemoteSessionId(stringField(params, 'sessionId'))
+    const root = this.requireSession(sessionId)
+    const ids = [...this.sessionSubtree(sessionId)]
+    await this.deleteSessionRecords(ids)
+    const state = this.requireGlobal().get()
+    await this.requireGlobal().set({
+      ...state,
+      sessionIds: state.sessionIds.filter(id => !ids.includes(id)),
+    })
+    return root
+  }
+
+  private sessionSubtree(sessionId: ReturnType<typeof RemoteSessionId>): Set<ReturnType<typeof RemoteSessionId>> {
+    const sessions = [...this.requireTables().sessions.entries()]
+    const ids = new Set<ReturnType<typeof RemoteSessionId>>([sessionId])
+    for (let changed = true; changed;) {
+      changed = false
+      for (const [id, session] of sessions) {
+        if (session.parentSessionId !== undefined && ids.has(session.parentSessionId) && !ids.has(id)) {
+          ids.add(id)
+          changed = true
+        }
+      }
+    }
+    return ids
+  }
+
+  private sessionIsVisible(session: RemoteSessionView): boolean {
+    if (session.archivedAt !== undefined) return false
+    const project = this.requireTables().projects.get(session.projectId)
+    if (project === undefined || project.hiddenAt !== undefined) return false
+    return this.requireTables().hosts.get(project.hostId)?.hiddenAt === undefined
+  }
+
+  private async archiveProjectSessions(
+    projectId: ReturnType<typeof RemoteProjectId>,
+    archivedAt: string,
+  ): Promise<void> {
+    const ids = this.requireGlobal().get().sessionIds.filter(id => {
+      const session = this.requireTables().sessions.get(id)
+      return session !== undefined && session.projectId === projectId && session.archivedAt === undefined
+    })
+    await this.archiveSessionIds(ids, archivedAt)
+  }
+
+  private async archiveSessionIds(
+    ids: Iterable<ReturnType<typeof RemoteSessionId>>,
+    archivedAt: string,
+  ): Promise<void> {
+    const tables = this.requireTables()
+    for (const id of ids) {
+      const session = tables.sessions.get(id)
+      if (session === undefined || session.archivedAt !== undefined) continue
+      await tables.sessions.put(id, { ...session, archivedAt, updatedAt: archivedAt })
+    }
+  }
+
+  private async deleteSessionRecords(ids: readonly ReturnType<typeof RemoteSessionId>[]): Promise<void> {
+    const tables = this.requireTables()
+    for (const id of ids) {
+      const session = tables.sessions.get(id)
+      if (session !== undefined) {
+        for (const [transcriptId, entry] of tables.transcript.entries()) {
+          if (entry.sessionId === session.sessionId) await tables.transcript.delete(transcriptId)
+        }
+      }
+      await tables.sessions.delete(id)
+    }
   }
 
   private withAttachment(session: RemoteSessionView, attached: RemoteSessionAttachResult): RemoteSessionView {
@@ -517,10 +1115,33 @@ export class RemoteAgentGateway extends Service {
       ...session, turnState: 'running', channelState: 'open', updatedAt: new Date().toISOString(),
     }
     await this.requireTables().sessions.put(session.sessionId, running)
-    return await this.callSessionHostd(running, 'session.prompt', {
-      sessionId: running.sessionId,
-      admission: { clientId, requestId, frame },
-    })
+    this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: running })
+    // A running turn must keep projecting its journal even when the browser
+    // disconnects or hostd push delivery is temporarily silent.
+    this.ensureFollowedSync(session.sessionId)
+    try {
+      return await this.callSessionHostd(running, 'session.prompt', {
+        sessionId: running.sessionId,
+        admission: { clientId, requestId, frame },
+      })
+    } catch (error) {
+      const failed: RemoteSessionView = {
+        ...running, turnState: 'failed', updatedAt: new Date().toISOString(),
+      }
+      await this.requireTables().sessions.put(session.sessionId, failed)
+      this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: failed })
+      const failureId = RemoteTranscriptId(`delivery:${session.sessionId}:${clientId}:${requestId}`)
+      if (this.requireTables().transcript.get(failureId) === undefined) {
+        await this.appendTranscript(session.sessionId, {
+          transcriptId: failureId,
+          role: 'system',
+          kind: 'status',
+          text: `消息提交失败：${displayError(error)}`,
+          requestId,
+        })
+      }
+      throw error
+    }
   }
 
   private async cancel(params: Record<string, JsonValue>): Promise<JsonValue> {
@@ -529,7 +1150,33 @@ export class RemoteAgentGateway extends Service {
     const frame = {
       jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: binding.nativeSessionId ?? session.sessionId },
     }
-    return await this.callSessionHostd(session, 'session.cancel', { sessionId: session.sessionId, frame })
+    try {
+      const result = await this.callSessionHostd(session, 'session.cancel', { sessionId: session.sessionId, frame })
+      const current = this.requireTables().sessions.get(session.sessionId)
+      if (current !== undefined && (current.turnState === 'running' || current.turnState === 'waiting-permission')) {
+        const stopped: RemoteSessionView = {
+          ...current, turnState: 'idle', updatedAt: new Date().toISOString(),
+        }
+        await this.requireTables().sessions.put(session.sessionId, stopped)
+        this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: stopped })
+      }
+      return result
+    } catch (error) {
+      // A failed stop leaves the native outcome unknown. Do not keep presenting
+      // a definitive "running" state forever when its control channel failed.
+      const current = this.requireTables().sessions.get(session.sessionId)
+      if (current !== undefined && (current.turnState === 'running' || current.turnState === 'waiting-permission')) {
+        const failed: RemoteSessionView = {
+          ...current,
+          channelState: current.channelState === 'open' ? 'reconnecting' : current.channelState,
+          turnState: 'failed',
+          updatedAt: new Date().toISOString(),
+        }
+        await this.requireTables().sessions.put(session.sessionId, failed)
+        this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: failed })
+      }
+      throw error
+    }
   }
 
   private async permission(params: Record<string, JsonValue>): Promise<JsonValue> {
@@ -545,7 +1192,8 @@ export class RemoteAgentGateway extends Service {
   }
 
   private async syncEvents(params: Record<string, JsonValue>): Promise<RemoteAgentState> {
-    const session = this.requireSession(RemoteSessionId(stringField(params, 'sessionId')))
+    const sessionId = RemoteSessionId(stringField(params, 'sessionId'))
+    const session = this.requireSession(sessionId)
     const binding = this.requireBinding(session)
     let page: RemoteJournalPage
     try {
@@ -553,54 +1201,80 @@ export class RemoteAgentGateway extends Service {
         sessionId: session.sessionId,
         afterSeq: binding.lastSeq,
         generation: binding.generation,
+        limit: MAX_JOURNAL_EVENTS_PER_SYNC,
       }) as unknown as RemoteJournalPage
+      await this.applyJournalPage(session, binding, page)
     } catch (error) {
       await this.requireTables().sessions.put(session.sessionId, {
         ...session, channelState: 'reconnecting', updatedAt: new Date().toISOString(),
       })
       throw error
     }
+    return this.state()
+  }
+
+  /** Apply one journal page (catchup or live push) to the durable projection.
+   *  Shared by `syncEvents` (HTTP catchup) and the WS push listener. */
+  private async applyJournalPage(
+    session: RemoteSessionView,
+    binding: NonNullable<RemoteSessionView['binding']>,
+    page: RemoteJournalPage,
+  ): Promise<number> {
     if (page.generation !== binding.generation) {
-      await this.requireTables().sessions.put(session.sessionId, {
+      const lost: RemoteSessionView = {
         ...session, channelState: 'lost', turnState: session.turnState === 'running' ? 'failed' : session.turnState,
         binding: { ...binding, state: 'lost' }, updatedAt: new Date().toISOString(),
-      })
+      }
+      await this.requireTables().sessions.put(session.sessionId, lost)
+      this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: lost })
       throw new Error('remote hold generation changed; in-flight outcome is unknown')
     }
-    if (page.gap) {
-      await this.appendTranscript(session.sessionId, {
-        transcriptId: RemoteTranscriptId(randomUUID()), role: 'system', kind: 'status',
-        text: `远程日志在序号 ${page.droppedThrough} 前已截断`,
-      })
-    }
+    const transcript: TranscriptInput[] = []
+    if (page.gap) transcript.push({
+      transcriptId: RemoteTranscriptId(`gap:${session.sessionId}:${page.generation}:${page.droppedThrough}`),
+      role: 'system', kind: 'status', text: `远程日志在序号 ${page.droppedThrough} 前已截断`,
+    })
     let turnState = session.turnState
-    for (const event of page.events) {
+    const events = page.events.slice(0, MAX_JOURNAL_EVENTS_PER_SYNC)
+    for (const event of events) {
       const child = nativeChildUpdate(event.frame)
       if (child !== undefined) await this.upsertNativeChild(session, child)
       const targetSessionId = nativeFrameSessionId(event.frame)
       const nativeSessionId = binding.nativeSessionId ?? session.sessionId
       if (targetSessionId !== nativeSessionId
         && (targetSessionId !== undefined || session.parentSessionId !== undefined)) continue
-      for (const fragment of projectNativeFrame(session.backend, event.frame)) {
-        await this.appendTranscript(session.sessionId, {
-          transcriptId: RemoteTranscriptId(randomUUID()),
-          role: fragment.role,
-          kind: fragment.kind,
-          text: fragment.text,
-          nativeFrame: event.frame,
-          ...(fragment.requestId === undefined ? {} : { requestId: fragment.requestId }),
-        })
+      for (const [fragmentIndex, fragment] of projectNativeFrame(session.backend, event.frame).entries()) {
+        const previous = transcript.at(-1)
+        if (fragment.role === 'assistant' && previous?.role === 'assistant'
+          && previous.kind === fragment.kind && previous.requestId === undefined) {
+          transcript[transcript.length - 1] = { ...previous, text: `${previous.text}${fragment.text}` }
+        } else {
+          transcript.push({
+            transcriptId: RemoteTranscriptId(`native:${session.sessionId}:${page.generation}:${event.seq}:${fragmentIndex}`),
+            role: fragment.role,
+            kind: fragment.kind,
+            text: fragment.text,
+            ...(fragment.role === 'assistant' ? {} : { nativeFrame: event.frame }),
+            ...(fragment.requestId === undefined ? {} : { requestId: fragment.requestId }),
+          })
+        }
         if (fragment.turnState !== undefined) turnState = fragment.turnState
       }
     }
-    await this.requireTables().sessions.put(session.sessionId, {
+    await this.appendTranscriptBatch(session.sessionId, transcript)
+    const processedThrough = events.at(-1)?.seq ?? binding.lastSeq
+    const updated: RemoteSessionView = {
       ...session,
       channelState: 'open',
       turnState,
-      binding: { ...binding, lastSeq: page.latestSeq },
+      binding: { ...binding, lastSeq: processedThrough },
       updatedAt: new Date().toISOString(),
-    })
-    return this.state()
+    }
+    await this.requireTables().sessions.put(session.sessionId, updated)
+    if (turnState !== session.turnState || processedThrough !== binding.lastSeq) {
+      this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: updated })
+    }
+    return processedThrough
   }
 
   private async upsertNativeChild(parent: RemoteSessionView, update: NativeChildUpdate): Promise<void> {
@@ -655,20 +1329,32 @@ export class RemoteAgentGateway extends Service {
 
   private async listDirectory(params: Record<string, JsonValue>): Promise<RemoteDirectoryListing> {
     const host = this.requireHost(RemoteHostId(stringField(params, 'hostId')))
-    return await this.callHostd(host, 'fs.list', { path: stringField(params, 'path') }) as unknown as RemoteDirectoryListing
+    const path = optionalString(params, 'path')
+    return await this.callHostd(host, 'fs.list', path === undefined ? {} : { path }) as unknown as RemoteDirectoryListing
   }
 
   private async appendTranscript(
     sessionId: ReturnType<typeof RemoteSessionId>,
-    input: Omit<RemoteTranscriptEntry, 'sessionId' | 'seq' | 'createdAt'>,
+    input: TranscriptInput,
   ): Promise<RemoteTranscriptEntry> {
+    const [entry] = await this.appendTranscriptBatch(sessionId, [input])
+    if (entry === undefined) throw new Error('transcript append produced no entry')
+    return entry
+  }
+
+  private async appendTranscriptBatch(
+    sessionId: ReturnType<typeof RemoteSessionId>,
+    inputs: readonly TranscriptInput[],
+  ): Promise<readonly RemoteTranscriptEntry[]> {
+    if (inputs.length === 0) return []
     const global = this.requireGlobal()
     const state = global.get()
-    const seq = state.nextTranscriptSeq[sessionId] ?? 0
-    const entry: RemoteTranscriptEntry = {
-      ...input, sessionId, seq, createdAt: new Date().toISOString(),
-    }
-    await this.requireTables().transcript.put(entry.transcriptId, entry)
+    const firstSeq = state.nextTranscriptSeq[sessionId] ?? 0
+    const createdAt = new Date().toISOString()
+    const entries = inputs.map((input, index): RemoteTranscriptEntry => ({
+      ...input, sessionId, seq: firstSeq + index, createdAt,
+    }))
+    for (const entry of entries) await this.requireTables().transcript.put(entry.transcriptId, entry)
     const excess = [...this.requireTables().transcript.entries()]
       .filter(([, candidate]) => candidate.sessionId === sessionId)
       .sort((left, right) => left[1].seq - right[1].seq)
@@ -676,9 +1362,143 @@ export class RemoteAgentGateway extends Service {
     for (const [id] of excess) await this.requireTables().transcript.delete(id)
     await global.set({
       ...state,
-      nextTranscriptSeq: { ...state.nextTranscriptSeq, [sessionId]: seq + 1 },
+      nextTranscriptSeq: { ...state.nextTranscriptSeq, [sessionId]: firstSeq + entries.length },
     })
-    return entry
+    this.wsBroadcaster.broadcastTranscriptBatch(sessionId, entries)
+    return entries
+  }
+
+  private async handleFollow(params: Record<string, JsonValue>): Promise<JsonValue> {
+    const browserId = stringField(params, 'browserId')
+    const sessionId = RemoteSessionId(stringField(params, 'sessionId'))
+    this.wsBroadcaster.follow(browserId, sessionId)
+    const session = this.requireSession(sessionId)
+    if (session.binding?.state !== 'active') {
+      try { await this.attachSession({ sessionId }) } catch { /* follow loop will retry */ }
+    }
+    this.ensureFollowedSync(sessionId)
+    const current = this.requireTables().sessions.get(sessionId)
+    const fromSeq = current?.binding?.lastSeq ?? 0
+    this.wsBroadcaster.broadcast({ type: 'session.followed', sessionId, fromSeq })
+    return { sessionId, fromSeq }
+  }
+
+  private ensureFollowedSync(sessionId: ReturnType<typeof RemoteSessionId>): void {
+    if (this.followedSyncing.has(sessionId)) return
+    this.followedSyncing.add(sessionId)
+    void this.runFollowedLoop(sessionId)
+      .catch(() => { /* a later follow or prompt restarts projection */ })
+      .finally(() => { this.followedSyncing.delete(sessionId) })
+  }
+
+  private sessionNeedsSync(sessionId: ReturnType<typeof RemoteSessionId>): boolean {
+    if (this.syncStopped) return false
+    if (this.wsBroadcaster.hasFollowers(sessionId)) return true
+    const turnState = this.requireTables().sessions.get(sessionId)?.turnState
+    return turnState === 'running' || turnState === 'waiting-permission'
+  }
+
+  private async runFollowedLoop(sessionId: ReturnType<typeof RemoteSessionId>): Promise<void> {
+    while (this.sessionNeedsSync(sessionId)) {
+      const session = this.requireSession(sessionId)
+      const binding = this.requireBinding(session)
+      const project = this.requireProject(session.projectId)
+      const host = this.requireHost(project.hostId)
+
+      // Drain any backlog accumulated before we subscribed.
+      try {
+        const catchup = await this.callSessionHostd(session, 'events.read', {
+          sessionId: session.sessionId,
+          afterSeq: binding.lastSeq,
+          generation: binding.generation,
+          limit: MAX_JOURNAL_EVENTS_PER_SYNC,
+        }) as unknown as RemoteJournalPage
+        await this.applyJournalPage(session, binding, catchup)
+        if (catchup.events.length >= MAX_JOURNAL_EVENTS_PER_SYNC || catchup.latestSeq > binding.lastSeq) continue
+      } catch {
+        // Catchup failed; rely on the WS push once it lands.
+      }
+
+      const live = this.requireSession(sessionId)
+      const liveBinding = this.requireBinding(live)
+
+      const queue: RemoteJournalPage[] = []
+      let flushing = false
+      const flushQueue = async (): Promise<void> => {
+        if (flushing) return
+        flushing = true
+        try {
+          while (queue.length > 0) {
+            const page = queue.shift()!
+            const current = this.requireTables().sessions.get(sessionId)
+            if (current === undefined) return
+            const cb = current.binding
+            if (cb === undefined || cb.state !== 'active') continue
+            try { await this.applyJournalPage(current, cb, page) } catch { /* swallow */ }
+          }
+        } finally {
+          flushing = false
+        }
+      }
+
+      const unsubscribe = this.hostdConnections.subscribe(
+        host,
+        sessionId,
+        liveBinding.generation,
+        liveBinding.lastSeq,
+        (event) => {
+          if (event.type === 'journal.page') {
+            queue.push(event.page)
+            void flushQueue()
+          } else if (event.type === 'journal.gap') {
+            const current = this.requireTables().sessions.get(sessionId)
+            if (current === undefined) return
+            const cb = current.binding
+            if (cb === undefined) return
+            const lost: RemoteSessionView = {
+              ...current,
+              channelState: 'lost',
+              turnState: current.turnState === 'running' ? 'failed' : current.turnState,
+              binding: { ...cb, state: 'lost' },
+              updatedAt: new Date().toISOString(),
+            }
+            void this.requireTables().sessions.put(sessionId, lost)
+            this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: lost })
+          }
+        },
+      )
+
+      try {
+        if (this.sessionNeedsSync(sessionId) && queue.length === 0) {
+          await new Promise(resolveWait => setTimeout(resolveWait, this.config.pollIntervalMs))
+        }
+        await flushQueue()
+      } finally {
+        unsubscribe()
+      }
+    }
+  }
+
+  private async handleUnfollow(params: Record<string, JsonValue>): Promise<JsonValue> {
+    const browserId = stringField(params, 'browserId')
+    const sessionId = RemoteSessionId(stringField(params, 'sessionId'))
+    this.wsBroadcaster.unfollow(browserId, sessionId)
+    this.wsBroadcaster.broadcast({ type: 'session.unfollowed', sessionId })
+    return { sessionId }
+  }
+
+  private async handleHello(params: Record<string, JsonValue>): Promise<JsonValue> {
+    const browserId = stringField(params, 'browserId')
+    const lastSeen = jsonObject(params['lastSeenSeqs'] ?? {}, 'lastSeenSeqs')
+    const result: { readonly sessionId: ReturnType<typeof RemoteSessionId>; readonly fromSeq: number }[] = []
+    for (const [key, raw] of Object.entries(lastSeen)) {
+      if (typeof raw !== 'number' || !Number.isFinite(raw)) continue
+      const sessionId = RemoteSessionId(key)
+      const session = this.requireTables().sessions.get(sessionId)
+      const current = session?.binding?.lastSeq ?? 0
+      if (current > raw) result.push({ sessionId, fromSeq: raw })
+    }
+    return { browserId, missed: result as unknown as JsonValue }
   }
 
   private async callSessionHostd(session: RemoteSessionView, method: RemoteControlRequest['method'], params: Record<string, JsonValue>): Promise<JsonValue> {
@@ -687,24 +1507,7 @@ export class RemoteAgentGateway extends Service {
   }
 
   private async callHostd(host: RemoteHostView, method: RemoteControlRequest['method'], params: Record<string, JsonValue>): Promise<JsonValue> {
-    if (host.ssh !== undefined) await this.sshManager.ensureTunnel(host.ssh, host.endpoint)
-    const id = randomUUID()
-    const response = await fetch(`${host.endpoint}${REMOTE_AGENT_HOSTD_PATH}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id, method, params }),
-      signal: AbortSignal.timeout(this.config.hostdRequestTimeoutMs),
-    })
-    const raw: unknown = await response.json()
-    const record = jsonObject(raw, 'hostd response')
-    if (record['id'] !== id) throw new Error('hostd response id did not match request')
-    if (record['ok'] !== true) {
-      const error = jsonObject(record['error'], 'hostd error')
-      throw new Error(stringField(error, 'message'))
-    }
-    const result = record['result']
-    if (!isJsonValue(result)) throw new Error('hostd result was not JSON')
-    return result
+    return await this.hostdConnections.request(host, method, params)
   }
 
   private requireHost(id: ReturnType<typeof RemoteHostId>): RemoteHostView {

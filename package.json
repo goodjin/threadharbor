@@ -2,9 +2,14 @@
   "name": "threadharbor",
   "version": "0.1.0",
   "description": "Persistent remote coding-agent sessions in DeepSeek Harness Web",
-  "repository": { "type": "git", "url": "git+https://github.com/goodjin/threadharbor.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/goodjin/threadharbor.git"
+  },
   "homepage": "https://github.com/goodjin/threadharbor#readme",
-  "bugs": { "url": "https://github.com/goodjin/threadharbor/issues" },
+  "bugs": {
+    "url": "https://github.com/goodjin/threadharbor/issues"
+  },
   "type": "module",
   "packageManager": "pnpm@11.7.0",
   "engines": {
@@ -13,14 +18,31 @@
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
   "exports": {
-    ".": { "types": "./lib/types/index.d.ts", "default": "./lib/index.js" },
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
-  "files": ["lib/index.js", "lib/types/**/*.d.ts", "cordis.patch.yml", "docs/**/*.md", "README.md", "LICENSE"],
+  "files": [
+    "lib/index.js",
+    "lib/types/**/*.d.ts",
+    "cordis.patch.yml",
+    "deploy/**/*.yml",
+    "docs/**/*.md",
+    "README.md",
+    "LICENSE"
+  ],
   "license": "MIT",
-  "publishConfig": { "access": "public" },
-  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "dependencies": {
     "@threadharbor/dsh-client": "workspace:^",
     "@threadharbor/dsh-gateway": "workspace:^"
@@ -37,10 +59,10 @@
     "check": "npm run typecheck && npm run test && npm run build"
   },
   "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
     "@types/node": "^24.0.0",
     "@types/react": "~18.3.1",
     "@types/ws": "^8.18.1",
-    "@deepseek-ai/cordis": "^4.0.1",
     "lightningcss": "^1.30.1",
     "react": "^18.2.0",
     "tsdown": "^0.15.0",

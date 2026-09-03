@@ -2,7 +2,8 @@
 /** Detached backend owner: native frame proxy, bounded journal, and prompt ledger. */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { performance } from 'node:perf_hooks'
 import { createInterface } from 'node:readline'
 import { createServer, type Server, type Socket } from 'node:net'
 import { dirname } from 'node:path'
@@ -12,8 +13,12 @@ import {
   isJsonValue, jsonObject, type JsonValue, type RemoteJournalEvent, type RemoteJournalPage,
 } from '@threadharbor/protocol'
 import type { HoldRequest, HoldResponse, HoldWorkerConfig, HoldWorkerState } from './hold-protocol.ts'
+import { ChunkCoalescer } from './chunk-coalescer.ts'
 
-function parseConfig(path: string): HoldWorkerConfig {
+const JOURNAL_COMPACT_APPEND_INTERVAL = 512
+const JOURNAL_LOG_APPEND_INTERVAL = 128
+
+export function parseConfig(path: string): HoldWorkerConfig {
   const raw: unknown = JSON.parse(readFileSync(path, 'utf8'))
   const value = jsonObject(raw, 'hold worker config')
   if (value['version'] !== 1) throw new Error('hold worker config version must be 1')
@@ -28,7 +33,7 @@ function parseConfig(path: string): HoldWorkerConfig {
     return item as number
   }
   const backend = text('backend')
-  if (backend !== 'grok' && backend !== 'codex' && backend !== 'dsh') throw new Error('invalid hold backend')
+  if (backend !== 'grok' && backend !== 'codex' && backend !== 'claude' && backend !== 'dsh') throw new Error('invalid hold backend')
   const transportValue = jsonObject(value['transport'], 'hold worker transport')
   const kind = transportValue['kind']
   const transport: HoldWorkerConfig['transport'] = kind === 'stdio'
@@ -43,7 +48,13 @@ function parseConfig(path: string): HoldWorkerConfig {
         : [],
     }
     : kind === 'websocket' && typeof transportValue['url'] === 'string'
-      ? { kind, url: transportValue['url'] }
+      ? {
+        kind,
+        url: transportValue['url'],
+        ...(typeof transportValue['secret'] === 'string' && transportValue['secret'] !== ''
+          ? { secret: transportValue['secret'] }
+          : {}),
+      }
       : (() => { throw new Error('invalid hold worker transport') })()
   if (transport.kind === 'stdio' && transport.command === '') throw new Error('stdio transport command must not be empty')
   return {
@@ -87,6 +98,10 @@ function rawDataText(data: RawData): string {
   return Buffer.from(data).toString('utf8')
 }
 
+function journalMetricsEnabled(): boolean {
+  return process.env['THREADHARBOR_HOLD_JOURNAL_METRICS'] !== '0' && process.env['NODE_ENV'] !== 'test'
+}
+
 /** Live worker runtime. Its process lifetime is intentionally independent from hostd. */
 export class HoldWorker {
   private readonly journal: RemoteJournalEvent[]
@@ -111,6 +126,20 @@ export class HoldWorker {
     readonly socket: Socket
     readonly timer: NodeJS.Timeout
   }>()
+  private readonly seqWaiters = new Set<{
+    readonly afterSeq: number
+    readonly socket: Socket
+    readonly timer: NodeJS.Timeout
+  }>()
+  private readonly pageWaiters = new Set<{
+    readonly afterSeq: number
+    readonly generation?: string
+    readonly socket: Socket
+    readonly timer: NodeJS.Timeout
+  }>()
+  private readonly coalescer = new ChunkCoalescer()
+  private coalesceTimer: ReturnType<typeof setTimeout> | undefined
+  private appendsSinceCompact = 0
 
   /** @param config - immutable owner-only launch record. */
   constructor(private readonly config: HoldWorkerConfig) {
@@ -118,6 +147,7 @@ export class HoldWorker {
     this.journalBytes = this.journal.reduce((sum, event) => sum + Buffer.byteLength(jsonLine(event)), 0)
     this.droppedThrough = this.previousDroppedThrough()
     this.nextSeq = Math.max(this.journal.at(-1)?.seq ?? 0, this.droppedThrough) + 1
+    this.logJournalMetric('recovered', {})
   }
 
   /** Start the backend, local socket, and state publication. */
@@ -166,6 +196,8 @@ export class HoldWorker {
   }
 
   private async performClose(): Promise<void> {
+    this.clearCoalesceTimer()
+    for (const frame of this.coalescer.flush()) this.append(frame)
     process.off('SIGTERM', this.stopFromSignal)
     process.off('SIGINT', this.stopFromSignal)
     const server = this.server
@@ -215,7 +247,11 @@ export class HoldWorker {
   }
 
   private async startWebSocket(baseUrl: string): Promise<void> {
-    const secret = process.env['GROK_AGENT_SECRET']
+    const envSecret = process.env['GROK_AGENT_SECRET']
+    const configSecret = this.config.transport.kind === 'websocket'
+      ? this.config.transport.secret
+      : undefined
+    const secret = envSecret !== undefined && envSecret !== '' ? envSecret : configSecret
     const url = new URL(baseUrl)
     if (secret !== undefined && secret !== '') url.searchParams.set('server-key', secret)
     const socket = new WebSocket(url)
@@ -263,12 +299,12 @@ export class HoldWorker {
         if (typeof resultRecord?.['sessionId'] === 'string') this.nativeSessionId = resultRecord['sessionId']
       }
     }
-    const event = this.append(frame)
+    const journaled = this.journalFrames(this.coalescer.push(frame))
     if (request?.method === 'session/prompt' && this.config.backend === 'codex') {
       const responseRecord = record ?? {}
       const result = responseRecord['result']
       const resultRecord = result !== null && typeof result === 'object' && !Array.isArray(result) ? result : undefined
-      this.append({
+      this.journalFrames([{
         jsonrpc: '2.0',
         method: '_x.ai/session/prompt_complete',
         params: {
@@ -277,7 +313,7 @@ export class HoldWorker {
             ? resultRecord['stopReason']
             : responseRecord['error'] === undefined ? 'end_turn' : 'error',
         },
-      })
+      }])
       this.promptActive = false
       this.drainPromptQueue()
     } else if ((request?.method === 'session/prompt' && record?.['error'] !== undefined)
@@ -285,8 +321,37 @@ export class HoldWorker {
       this.promptActive = false
       this.drainPromptQueue()
     }
-    this.resolveWaiters(event)
-    this.writeState(true)
+    if (journaled.length > 0) {
+      this.resolveWaiters(journaled[journaled.length - 1]!)
+      this.resolveSeqWaiters()
+      this.writeState(true)
+    } else {
+      this.scheduleCoalesceFlush()
+    }
+  }
+
+  private journalFrames(frames: readonly JsonValue[]): RemoteJournalEvent[] {
+    if (frames.length === 0) return []
+    this.clearCoalesceTimer()
+    return frames.map(frame => this.append(frame))
+  }
+
+  private scheduleCoalesceFlush(): void {
+    if (this.coalesceTimer !== undefined) return
+    this.coalesceTimer = setTimeout(() => {
+      this.coalesceTimer = undefined
+      const journaled = this.journalFrames(this.coalescer.flush())
+      if (journaled.length === 0) return
+      this.resolveWaiters(journaled[journaled.length - 1]!)
+      this.resolveSeqWaiters()
+      this.writeState(true)
+    }, 40)
+  }
+
+  private clearCoalesceTimer(): void {
+    if (this.coalesceTimer === undefined) return
+    clearTimeout(this.coalesceTimer)
+    this.coalesceTimer = undefined
   }
 
   private append(frame: JsonValue): RemoteJournalEvent {
@@ -298,19 +363,58 @@ export class HoldWorker {
     }
     this.journal.push(event)
     this.journalBytes += Buffer.byteLength(jsonLine(event))
-    this.trimJournal()
-    writeFileSync(this.config.journalPath, this.journal.map(jsonLine).join(''), { mode: 0o600 })
+    const trimmed = this.trimJournal()
+    if (trimmed || ++this.appendsSinceCompact >= JOURNAL_COMPACT_APPEND_INTERVAL) {
+      const reason = trimmed ? 'retention' : 'interval'
+      const started = performance.now()
+      this.compactJournal()
+      this.logJournalMetric('compact', { reason, durationMs: performance.now() - started })
+    } else {
+      const started = performance.now()
+      appendFileSync(this.config.journalPath, jsonLine(event), { mode: 0o600 })
+      if (this.appendsSinceCompact % JOURNAL_LOG_APPEND_INTERVAL === 0) {
+        this.logJournalMetric('append-sample', { durationMs: performance.now() - started })
+      }
+    }
     return event
   }
 
-  private trimJournal(): void {
+  private trimJournal(): boolean {
+    let trimmed = false
     while (this.journal.length > this.config.maxJournalEvents
       || (this.journalBytes > this.config.maxJournalBytes && this.journal.length > 1)) {
       const removed = this.journal.shift()
       if (removed === undefined) break
       this.journalBytes -= Buffer.byteLength(jsonLine(removed))
       this.droppedThrough = removed.seq
+      trimmed = true
     }
+    return trimmed
+  }
+
+  private compactJournal(): void {
+    const temporary = `${this.config.journalPath}.${process.pid}.tmp`
+    writeFileSync(temporary, this.journal.map(jsonLine).join(''), { mode: 0o600 })
+    renameSync(temporary, this.config.journalPath)
+    this.appendsSinceCompact = 0
+  }
+
+  private logJournalMetric(event: string, fields: Record<string, unknown>): void {
+    if (!journalMetricsEnabled()) return
+    const payload = {
+      event,
+      holdId: this.config.holdId,
+      backend: this.config.backend,
+      generation: this.config.generation,
+      pid: process.pid,
+      journalEvents: this.journal.length,
+      journalBytes: this.journalBytes,
+      latestSeq: this.nextSeq - 1,
+      droppedThrough: this.droppedThrough,
+      appendsSinceCompact: this.appendsSinceCompact,
+      ...fields,
+    }
+    process.stderr.write(`threadharbor-hold-journal ${JSON.stringify(payload)}\n`)
   }
 
   private sendFrame(frame: JsonValue): void {
@@ -447,6 +551,57 @@ export class HoldWorker {
         this.sendFrame(request.frame)
         this.reply(socket, { ok: true, result: { accepted: true } })
         return
+      case 'wait-seq': {
+        if (this.nextSeq - 1 > request.afterSeq) {
+          this.reply(socket, { ok: true, result: { latestSeq: this.nextSeq - 1, timedOut: false } })
+          return
+        }
+        const timer = setTimeout(() => {
+          for (const waiter of this.seqWaiters) {
+            if (waiter.socket !== socket) continue
+            this.seqWaiters.delete(waiter)
+            this.reply(socket, { ok: true, result: { latestSeq: this.nextSeq - 1, timedOut: true } })
+            break
+          }
+        }, request.timeoutMs)
+        this.seqWaiters.add({ afterSeq: request.afterSeq, socket, timer })
+        socket.once('close', () => {
+          for (const waiter of this.seqWaiters) {
+            if (waiter.socket !== socket) continue
+            clearTimeout(waiter.timer)
+            this.seqWaiters.delete(waiter)
+          }
+        })
+        return
+      }
+      case 'wait-page': {
+        if (this.nextSeq - 1 > request.afterSeq) {
+          this.reply(socket, { ok: true, result: this.page(request.afterSeq, request.generation) })
+          return
+        }
+        const timer = setTimeout(() => {
+          for (const waiter of this.pageWaiters) {
+            if (waiter.socket !== socket) continue
+            this.pageWaiters.delete(waiter)
+            this.reply(socket, { ok: true, result: this.page(waiter.afterSeq, waiter.generation) })
+            break
+          }
+        }, request.timeoutMs)
+        this.pageWaiters.add({
+          afterSeq: request.afterSeq,
+          ...(request.generation === undefined ? {} : { generation: request.generation }),
+          socket,
+          timer,
+        })
+        socket.once('close', () => {
+          for (const waiter of this.pageWaiters) {
+            if (waiter.socket !== socket) continue
+            clearTimeout(waiter.timer)
+            this.pageWaiters.delete(waiter)
+          }
+        })
+        return
+      }
       case 'wait': {
         const existing = this.findResponse(request.rpcId, request.afterSeq)
         if (existing !== undefined) {
@@ -503,6 +658,22 @@ export class HoldWorker {
       clearTimeout(waiter.timer)
       this.waiters.delete(waiter)
       this.reply(waiter.socket, { ok: true, result: event.frame })
+    }
+  }
+
+  private resolveSeqWaiters(): void {
+    const latestSeq = this.nextSeq - 1
+    for (const waiter of this.seqWaiters) {
+      if (latestSeq <= waiter.afterSeq) continue
+      clearTimeout(waiter.timer)
+      this.seqWaiters.delete(waiter)
+      this.reply(waiter.socket, { ok: true, result: { latestSeq, timedOut: false } })
+    }
+    for (const waiter of this.pageWaiters) {
+      if (latestSeq <= waiter.afterSeq) continue
+      clearTimeout(waiter.timer)
+      this.pageWaiters.delete(waiter)
+      this.reply(waiter.socket, { ok: true, result: this.page(waiter.afterSeq, waiter.generation) })
     }
   }
 

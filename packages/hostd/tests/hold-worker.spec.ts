@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { createConnection } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { HoldRequest, HoldResponse, HoldWorkerConfig } from '../src/hold-protocol.ts'
-import { HoldWorker } from '../src/hold-worker.ts'
+import { HoldWorker, parseConfig } from '../src/hold-worker.ts'
 
 const roots: string[] = []
 
@@ -76,6 +76,125 @@ describe('HoldWorker', () => {
     }
   })
 
+  it('wakes wait-seq as soon as a new journal event is flushed', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-hold-wait-seq-'))
+    roots.push(root)
+    const socketPath = join(root, 'control.sock')
+    const config: HoldWorkerConfig = {
+      version: 1,
+      holdId: 'hold',
+      generation: 'generation',
+      backend: 'codex',
+      cwd: root,
+      socketPath,
+      journalPath: join(root, 'journal.jsonl'),
+      statePath: join(root, 'state.json'),
+      maxJournalEvents: 20,
+      maxJournalBytes: 100_000,
+      transport: {
+        kind: 'stdio', command: process.execPath,
+        args: [new URL('./fixtures/fake-acp.mjs', import.meta.url).pathname, join(root, 'requests.txt'), join(root, 'gate')],
+      },
+    }
+    const worker = new HoldWorker(config)
+    await worker.start()
+    try {
+      await writeFile(join(root, 'gate'), 'go')
+      const waiting = send(socketPath, { operation: 'wait-seq', afterSeq: 0, timeoutMs: 2000 })
+      await send(socketPath, admission('wake'))
+      const woken = await waiting
+      expect(woken).toMatchObject({ ok: true, result: { timedOut: false } })
+    } finally {
+      await worker.close()
+    }
+  })
+
+  it('returns a journal page as soon as wait-page observes a new event', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-hold-wait-page-'))
+    roots.push(root)
+    const socketPath = join(root, 'control.sock')
+    const config: HoldWorkerConfig = {
+      version: 1,
+      holdId: 'hold',
+      generation: 'generation',
+      backend: 'codex',
+      cwd: root,
+      socketPath,
+      journalPath: join(root, 'journal.jsonl'),
+      statePath: join(root, 'state.json'),
+      maxJournalEvents: 20,
+      maxJournalBytes: 100_000,
+      transport: {
+        kind: 'stdio', command: process.execPath,
+        args: [new URL('./fixtures/fake-acp.mjs', import.meta.url).pathname, join(root, 'requests.txt'), join(root, 'gate')],
+      },
+    }
+    const worker = new HoldWorker(config)
+    await worker.start()
+    try {
+      await writeFile(join(root, 'gate'), 'go')
+      const waiting = send(socketPath, {
+        operation: 'wait-page',
+        afterSeq: 0,
+        generation: 'generation',
+        timeoutMs: 2000,
+      })
+      await send(socketPath, admission('wake'))
+      const woken = await waiting
+      expect(woken.ok).toBe(true)
+      if (!woken.ok) throw new Error(woken.error)
+      const page = woken.result as { events: readonly unknown[] }
+      expect(page.events.length).toBeGreaterThan(0)
+    } finally {
+      await worker.close()
+    }
+  })
+
+  it('appends journal lines and compacts the file after retention trims old events', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-hold-compact-'))
+    roots.push(root)
+    const socketPath = join(root, 'control.sock')
+    const journalPath = join(root, 'journal.jsonl')
+    const gate = join(root, 'gate')
+    await writeFile(gate, 'go')
+    const config: HoldWorkerConfig = {
+      version: 1,
+      holdId: 'hold',
+      generation: 'generation',
+      backend: 'codex',
+      cwd: root,
+      socketPath,
+      journalPath,
+      statePath: join(root, 'state.json'),
+      maxJournalEvents: 3,
+      maxJournalBytes: 100_000,
+      transport: {
+        kind: 'stdio', command: process.execPath,
+        args: [new URL('./fixtures/fake-acp.mjs', import.meta.url).pathname, join(root, 'requests.txt'), gate],
+      },
+    }
+    const worker = new HoldWorker(config)
+    await worker.start()
+    try {
+      await send(socketPath, admission('p1'))
+      await send(socketPath, admission('p2'))
+      await send(socketPath, admission('p3'))
+      await vi.waitFor(async () => {
+        const page = await send(socketPath, { operation: 'read', afterSeq: 0, generation: 'generation' })
+        if (!page.ok) throw new Error(page.error)
+        expect((page.result as { latestSeq: number }).latestSeq).toBeGreaterThanOrEqual(6)
+      })
+      const events = (await readFile(journalPath, 'utf8'))
+        .split('\n')
+        .filter(line => line !== '')
+        .map(line => JSON.parse(line) as { seq: number })
+      expect(events.map(event => event.seq)).toHaveLength(3)
+      expect(events[0]?.seq).toBeGreaterThan(3)
+    } finally {
+      await worker.close()
+    }
+  })
+
   it.each(['grok', 'dsh'] as const)('waits for %s native turn completion before admitting the next prompt', async (backend) => {
     const root = await mkdtemp(join(tmpdir(), `dsh-hold-${backend}-`))
     roots.push(root)
@@ -122,5 +241,56 @@ describe('HoldWorker', () => {
     } finally {
       await worker.close()
     }
+  })
+})
+
+describe('parseConfig', () => {
+  it('preserves the websocket secret written by hostd', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-hold-parse-'))
+    roots.push(root)
+    const configPath = join(root, 'config.json')
+    await writeFile(configPath, JSON.stringify({
+      version: 1,
+      holdId: 'hold',
+      generation: 'gen',
+      backend: 'grok',
+      cwd: root,
+      socketPath: join(root, 'control.sock'),
+      journalPath: join(root, 'journal.jsonl'),
+      statePath: join(root, 'state.json'),
+      maxJournalEvents: 10,
+      maxJournalBytes: 1024,
+      transport: {
+        kind: 'websocket',
+        url: 'ws://127.0.0.1:1/ws',
+        secret: 'grok-secret-from-config',
+      },
+    }))
+    const parsed = parseConfig(configPath)
+    if (parsed.transport.kind !== 'websocket') throw new Error('expected websocket transport')
+    expect(parsed.transport.secret).toBe('grok-secret-from-config')
+    expect(parsed.transport.url).toBe('ws://127.0.0.1:1/ws')
+  })
+
+  it('omits the websocket secret when hostd did not write one', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-hold-parse-'))
+    roots.push(root)
+    const configPath = join(root, 'config.json')
+    await writeFile(configPath, JSON.stringify({
+      version: 1,
+      holdId: 'hold',
+      generation: 'gen',
+      backend: 'grok',
+      cwd: root,
+      socketPath: join(root, 'control.sock'),
+      journalPath: join(root, 'journal.jsonl'),
+      statePath: join(root, 'state.json'),
+      maxJournalEvents: 10,
+      maxJournalBytes: 1024,
+      transport: { kind: 'websocket', url: 'ws://127.0.0.1:1/ws' },
+    }))
+    const parsed = parseConfig(configPath)
+    if (parsed.transport.kind !== 'websocket') throw new Error('expected websocket transport')
+    expect(parsed.transport.secret).toBeUndefined()
   })
 })

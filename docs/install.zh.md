@@ -7,7 +7,7 @@ ThreadHarbor 是 DSH Web profile 的树外 bundle。它使用 `dsh plugin` 安�
 - 已安装可运行的 DeepSeek Harness，并能执行 `dsh --profile web`；
 - DSH 运行环境和 ThreadHarbor 开发构建使用 Node.js `^22.19` 或 `>=24`；
 - 管理 profile 插件和从源码构建时需要 pnpm；
-- 远程主机需要 SSH、Node.js 22 或更新版本；通过 Web 安装 Agent 还需要 npm。
+- 远程主机需要 SSH、Node.js 22 或更新版本，并由管理员预先安装需要使用的 Agent。
 
 ## 从 npm 安装
 
@@ -66,9 +66,9 @@ dsh --profile web --dump-config
 2. 在 ThreadHarbor 侧栏选择“添加主机 → SSH 自动部署”。
 3. 输入 SSH 目标、用户、端口，以及可选的 Web 服务本机私钥绝对路径和 ProxyJump。
 4. 将页面显示的 SHA256 host-key 指纹与主机管理员提供的指纹核对，确认后部署 hostd。
-5. 在主机的 Agent 区域选择 Codex、Grok 或 Claude Code，查看固定安装计划并确认。
-6. 点击“登录”，在页面打开授权链接并输入设备码。
+5. 刷新 Agent 状态，确认远端已安装的命令能被 hostd 发现。
+6. 对 Codex 或 Grok 点击“登录”，在页面打开授权链接并输入设备码。
 7. 点击“配置”编辑对应 Agent 的用户配置；保存前由远程 hostd 校验语法。
 8. 添加远程项目目录，然后从已安装、已登录且具备 session adapter 的 Agent 创建会话。
 
-Claude Code 目前支持安装、登录和配置，但尚未接入 ThreadHarbor 原生会话 adapter，因此不会出现在新会话后端列表中。
+Claude Code 目前支持发现、登录和配置，但尚未接入 ThreadHarbor 原生会话 adapter，因此不会出现在新会话后端列表中。

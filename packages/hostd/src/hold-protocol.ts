@@ -9,7 +9,7 @@ export interface HoldWorkerConfig {
   readonly version: 1
   readonly holdId: string
   readonly generation: string
-  readonly backend: Exclude<RemoteAgentBackend, 'claude'>
+  readonly backend: RemoteAgentBackend
   readonly cwd: string
   readonly socketPath: string
   readonly journalPath: string
@@ -18,7 +18,7 @@ export interface HoldWorkerConfig {
   readonly maxJournalBytes: number
   readonly transport:
     | { readonly kind: 'stdio'; readonly command: string; readonly args: readonly string[] }
-    | { readonly kind: 'websocket'; readonly url: string }
+    | { readonly kind: 'websocket'; readonly url: string; readonly secret?: string }
 }
 
 /** Mutable worker facts persisted for hostd recovery. */
@@ -42,6 +42,8 @@ export type HoldRequest =
   | { readonly operation: 'send'; readonly admission: RemoteNativeAdmission }
   | { readonly operation: 'send-frame'; readonly frame: JsonValue }
   | { readonly operation: 'wait'; readonly rpcId: string; readonly afterSeq: number; readonly timeoutMs: number }
+  | { readonly operation: 'wait-seq'; readonly afterSeq: number; readonly timeoutMs: number }
+  | { readonly operation: 'wait-page'; readonly afterSeq: number; readonly timeoutMs: number; readonly generation?: string }
   | { readonly operation: 'set-native-session'; readonly nativeSessionId: string }
   | { readonly operation: 'shutdown' }
 

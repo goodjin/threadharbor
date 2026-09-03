@@ -2,20 +2,19 @@ import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { AgentManager, type AgentManagerOptions, requireInstallConfirmation } from '../src/agent-manager.ts'
+import { AgentManager, type AgentManagerOptions } from '../src/agent-manager.ts'
 
 const roots: string[] = []
 
 function options(root: string, command: string): AgentManagerOptions {
   return {
-    installPrefix: join(root, 'install'),
-    installTimeoutMs: 1000,
     authTimeoutMs: 3000,
     agentConfigHome: root,
     maxAgentConfigBytes: 4096,
     codexCliCommand: command,
     codexAcpCommand: command,
     claudeCommand: command,
+    claudeAcpCommand: command,
     grokCommand: command,
     dshCommand: '/missing/dsh',
   }
@@ -26,24 +25,6 @@ afterEach(async () => {
 })
 
 describe('AgentManager', () => {
-  it('returns fixed reviewable recipes for every independently installable Agent', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'threadharbor-agent-plan-'))
-    roots.push(root)
-    const manager = new AgentManager(options(root, '/missing/agent'))
-
-    expect(manager.installPlan('codex')).toMatchObject({
-      component: 'codex', requiresConfirmation: true, alreadyInstalled: false,
-      steps: [{ command: expect.stringContaining('@openai/codex@latest') }],
-    })
-    expect(manager.installPlan('grok')).toMatchObject({
-      steps: [{ command: expect.stringContaining('@xai-official/grok@latest') }],
-    })
-    expect(manager.installPlan('claude')).toMatchObject({
-      steps: [{ command: expect.stringContaining('@anthropic-ai/claude-code@latest') }],
-    })
-    expect(() => requireInstallConfirmation(false)).toThrow('confirm: true')
-  })
-
   it('keeps a device login worker alive and exposes only its URL, code, and status', async () => {
     const root = await mkdtemp(join(tmpdir(), 'threadharbor-agent-auth-'))
     roots.push(root)

@@ -4,4 +4,9 @@
 /lib/
 /coverage/
 /reference/
+/.claude/
+/.pnpm-store/
+/.sessions/
+/undefined/
+/scripts/dsh-wrapper.sh
 *.log
