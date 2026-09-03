@@ -46,6 +46,16 @@ function projectAcp(frame: Record<string, JsonValue>): ProjectedFragment[] {
       turnState: 'waiting-permission',
     }]
   }
+  if (method === 'elicitation/create') {
+    const id = requestId(frame)
+    return [{
+      role: 'permission',
+      kind: 'permission',
+      text: typeof params?.['message'] === 'string' ? params['message'] : '需要你的选择',
+      ...(id === undefined ? {} : { requestId: id }),
+      turnState: 'waiting-permission',
+    }]
+  }
   if (method === '_x.ai/session/prompt_complete') {
     const failed = params?.['stopReason'] === 'error'
     return [{
@@ -83,10 +93,28 @@ function projectAcp(frame: Record<string, JsonValue>): ProjectedFragment[] {
     const title = typeof update?.['title'] === 'string' ? update['title'] : '远程工具更新'
     return [{ role: 'tool', kind: 'tool-result', text: title, turnState: 'running' }]
   }
-  if (kind === 'plan') {
-    return [{ role: 'system', kind: 'status', text: '远程计划已更新', turnState: 'running' }]
+  if (kind === 'plan' || kind === 'plan_update') {
+    const entries = planEntrySummaries(update)
+    return [{
+      role: 'system',
+      kind: 'status',
+      text: entries.length === 0 ? '远程计划已更新' : entries.join('；'),
+      turnState: 'running',
+    }]
   }
   return []
+}
+
+function planEntrySummaries(update: Record<string, JsonValue> | undefined): string[] {
+  const direct = Array.isArray(update?.['entries']) ? update['entries'] : undefined
+  const nested = object(update?.['plan'])
+  const nestedEntries = Array.isArray(nested?.['entries']) ? nested['entries']
+    : Array.isArray(nested?.['items']) ? nested['items'] : undefined
+  const rows = direct ?? nestedEntries ?? []
+  return rows.flatMap((row) => {
+    const record = object(row)
+    return typeof record?.['content'] === 'string' && record['content'] !== '' ? [record['content']] : []
+  })
 }
 
 function projectDsh(frame: Record<string, JsonValue>): ProjectedFragment[] {

@@ -426,7 +426,11 @@ export class RemoteAgentHostd {
       }
       : {
         jsonrpc: '2.0', id: initializeId, method: 'initialize', params: {
-          protocolVersion: PROTOCOL_VERSION, clientCapabilities: {},
+          protocolVersion: PROTOCOL_VERSION,
+          clientCapabilities: {
+            elicitation: { form: {} },
+            plan: {},
+          },
         },
       }
     await this.holdRequest(record, { operation: 'send-frame', frame: initialize })

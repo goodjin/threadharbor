@@ -1223,11 +1223,33 @@ export class RemoteAgentGateway extends Service {
     const id = Number.isSafeInteger(Number(requestId)) ? Number(requestId) : requestId
     const result = await this.callSessionHostd(session, 'session.permission', {
       sessionId: session.sessionId,
-      frame: { jsonrpc: '2.0', id, result: { outcome } },
+      frame: { jsonrpc: '2.0', id, result: this.permissionNativeResult(session.sessionId, requestId, outcome) },
     })
     this.ensureFollowedSync(session.sessionId)
     await this.catchupSessionJournal(session.sessionId)
     return result
+  }
+
+  /** Format the native JSON-RPC result for a permission grant or an elicitation form. */
+  private permissionNativeResult(
+    sessionId: ReturnType<typeof RemoteSessionId>,
+    requestId: string,
+    outcome: JsonValue,
+  ): JsonValue {
+    const entry = this.sessionTranscriptEntries(sessionId).findLast(item => item.requestId === requestId)
+    const frame = entry?.nativeFrame
+    const method = frame !== null && typeof frame === 'object' && !Array.isArray(frame) && typeof frame['method'] === 'string'
+      ? frame['method'] : ''
+    if (method === 'elicitation/create') {
+      if (outcome !== null && typeof outcome === 'object' && !Array.isArray(outcome) && typeof outcome['action'] === 'string') {
+        return outcome
+      }
+      if (outcome !== null && typeof outcome === 'object' && !Array.isArray(outcome) && outcome['outcome'] === 'cancelled') {
+        return { action: 'cancel' }
+      }
+      return { action: 'accept', content: outcome }
+    }
+    return { outcome }
   }
 
   /** Pull any journal frames that arrived after a control RPC so the UI can leave waiting-permission. */
