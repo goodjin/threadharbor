@@ -69,5 +69,7 @@ describe('DSH browser artifact', () => {
     expect(js).toContain('/remote-agent/ws')
     expect(js).toContain('重新发送')
     expect(js).toContain('复制全文')
+    expect(js).toContain('需要你的选择')
+    expect(js).toContain('执行计划')
   })
 })

@@ -23,6 +23,23 @@ describe('projectNativeFrame', () => {
     })).toEqual([{
       role: 'system', kind: 'status', text: '远程 Agent 已停止（signal SIGTERM）', turnState: 'failed',
     }])
+    expect(projectNativeFrame('claude', {
+      jsonrpc: '2.0', id: 3, method: 'elicitation/create',
+      params: { mode: 'form', message: '选哪种方案？', requestedSchema: { type: 'object', properties: {} } },
+    })).toEqual([{
+      role: 'permission', kind: 'permission', text: '选哪种方案？', requestId: '3', turnState: 'waiting-permission',
+    }])
+    expect(projectNativeFrame('grok', {
+      jsonrpc: '2.0', method: 'session/update', params: {
+        update: {
+          sessionUpdate: 'plan',
+          entries: [
+            { content: '阅读鉴权', priority: 'high', status: 'in_progress' },
+            { content: '补测试', priority: 'medium', status: 'pending' },
+          ],
+        },
+      },
+    })).toEqual([{ role: 'system', kind: 'status', text: '阅读鉴权；补测试', turnState: 'running' }])
   })
 
   it('keeps dsh session events out of SessionEventMap while deriving display fragments', () => {

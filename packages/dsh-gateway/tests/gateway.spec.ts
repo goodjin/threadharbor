@@ -300,6 +300,32 @@ describe('RemoteAgentGateway', () => {
     }
   })
 
+  it('answers an elicitation form with ACP accept content instead of a permission outcome', async () => {
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', id: 4, method: 'elicitation/create', params: {
+        mode: 'form', message: '选哪种方案？',
+        requestedSchema: { type: 'object', properties: { strategy: { type: 'string', enum: ['a', 'b'] } } },
+      } },
+    ]
+    const { ctx, gateway, calls } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4301' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      await gateway.dispatch(request('session.permission', {
+        sessionId: session.sessionId, requestId: '4', outcome: { action: 'accept', content: { strategy: 'b' } },
+      }))
+      const forwarded = calls.find(call => call.request.method === 'session.permission')?.request
+      expect(forwarded?.params['frame']).toMatchObject({
+        jsonrpc: '2.0', id: 4, result: { action: 'accept', content: { strategy: 'b' } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('does not duplicate transcript when the same journal page is applied twice', async () => {
     const events: JsonValue[] = [
       { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { text: 'hello ' } } } },

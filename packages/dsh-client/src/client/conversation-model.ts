@@ -1,6 +1,8 @@
 /** Pure view-model helpers shared by the remote conversation UI and tests. */
 
-import type { RemoteAgentBackend, RemoteDirectoryEntry, RemoteSessionView, RemoteTranscriptEntry } from '@threadharbor/protocol'
+import type {
+  JsonValue, RemoteAgentBackend, RemoteDirectoryEntry, RemoteSessionView, RemoteTranscriptEntry,
+} from '@threadharbor/protocol'
 
 /** Restore the most recently created session backend for a project, with a stable first-option fallback. */
 export function preferredProjectBackend(
@@ -96,7 +98,14 @@ export function conversationStage(input: {
     }
   }
   if (session.turnState === 'waiting-permission') {
-    return { kind: 'permission', label: '等待你的确认', detail: '远程 Agent 需要权限后才能继续。', state: 'warning', visible: true }
+    const pending = entries.findLast(entry => entry.role === 'permission')
+    const asking = pending !== undefined && parseChoicePrompt(pending)?.kind === 'question'
+    return {
+      kind: 'permission',
+      label: asking ? '等待你的选择' : '等待你的确认',
+      detail: asking ? '远程 Agent 在等你选择方案。' : '远程 Agent 需要权限后才能继续。',
+      state: 'warning', visible: true,
+    }
   }
   if (session.turnState === 'running') {
     const lastUserSeq = entries.findLast(entry => entry.role === 'user')?.seq ?? -1
@@ -166,6 +175,10 @@ export function mergeTranscriptEntries(
       merged[merged.length - 1] = { ...previous, text: previous.text + entry.text }
       continue
     }
+    if (parsePlanItems(entry) !== undefined && previous !== undefined && parsePlanItems(previous) !== undefined) {
+      merged[merged.length - 1] = entry
+      continue
+    }
     merged.push(entry)
   }
   return merged
@@ -231,6 +244,176 @@ export function permissionRequestId(entry: RemoteTranscriptEntry): string | unde
   if (typeof id === 'string' && id.trim() !== '') return id
   if (typeof id === 'number' && Number.isFinite(id)) return String(id)
   return undefined
+}
+
+function recordObject(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+}
+
+function recordText(value: unknown): string | undefined {
+  return typeof value === 'string' && value !== '' ? value : undefined
+}
+
+export interface ChoiceOption {
+  readonly id: string
+  readonly label: string
+  readonly description?: string
+}
+
+export interface ChoiceQuestion {
+  readonly id: string
+  readonly prompt: string
+  readonly multiSelect: boolean
+  readonly options: readonly ChoiceOption[]
+}
+
+export interface ChoicePrompt {
+  readonly kind: 'permission' | 'question'
+  readonly title: string
+  readonly detail?: string
+  readonly questions: readonly ChoiceQuestion[]
+}
+
+export interface PlanItem {
+  readonly content: string
+  readonly status: 'pending' | 'in_progress' | 'completed'
+  readonly priority?: 'high' | 'medium' | 'low'
+}
+
+export function nativeFrameMethod(entry: RemoteTranscriptEntry): string {
+  const frame = recordObject(entry.nativeFrame)
+  return typeof frame?.['method'] === 'string' ? frame['method'] : ''
+}
+
+/** Permission grants can follow the session auto-approve setting; AskUserQuestion cannot. */
+export function isAutoApprovablePermission(entry: RemoteTranscriptEntry): boolean {
+  if (entry.role !== 'permission') return false
+  const method = nativeFrameMethod(entry)
+  return method === '' || method === 'session/request_permission' || method === 'session/requestPermission'
+}
+
+export function parseChoicePrompt(entry: RemoteTranscriptEntry): ChoicePrompt | undefined {
+  const frame = recordObject(entry.nativeFrame)
+  const params = recordObject(frame?.['params'])
+  const method = nativeFrameMethod(entry)
+  if (method === 'elicitation/create') return parseElicitationPrompt(params, entry.text)
+  if (entry.role === 'permission' || method === 'session/request_permission' || method === 'session/requestPermission') {
+    return parsePermissionPrompt(params, entry.text)
+  }
+  return undefined
+}
+
+export function parsePlanItems(entry: RemoteTranscriptEntry): readonly PlanItem[] | undefined {
+  const frame = recordObject(entry.nativeFrame)
+  const params = recordObject(frame?.['params'])
+  const update = recordObject(params?.['update'])
+  const kind = typeof update?.['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
+  if (update === undefined || (kind !== 'plan' && kind !== 'plan_update')) return undefined
+  const nested = recordObject(update['plan'])
+  const rows = Array.isArray(update['entries']) ? update['entries']
+    : Array.isArray(nested?.['entries']) ? nested['entries']
+      : Array.isArray(nested?.['items']) ? nested['items']
+        : []
+  const items = rows.flatMap((row) => {
+    const record = recordObject(row)
+    const content = recordText(record?.['content'])
+    if (content === undefined) return []
+    const status = record?.['status']
+    const priority = record?.['priority']
+    return [{
+      content,
+      status: status === 'completed' || status === 'in_progress' ? status : 'pending',
+      ...(priority === 'high' || priority === 'medium' || priority === 'low' ? { priority } : {}),
+    } satisfies PlanItem]
+  })
+  return items.length === 0 ? undefined : items
+}
+
+export function choiceSubmitOutcome(prompt: ChoicePrompt, answers: Record<string, string | readonly string[]>): JsonValue {
+  if (prompt.kind === 'permission') {
+    const selected = answers[prompt.questions[0]?.id ?? 'optionId']
+    const optionId = Array.isArray(selected) ? selected[0] : selected
+    return { outcome: 'selected', optionId: optionId ?? '' }
+  }
+  const content: Record<string, JsonValue> = {}
+  for (const question of prompt.questions) {
+    const selected = answers[question.id]
+    if (selected === undefined) continue
+    content[question.id] = question.multiSelect
+      ? [...(Array.isArray(selected) ? selected : [selected])]
+      : Array.isArray(selected) ? selected[0] ?? '' : selected
+  }
+  return { action: 'accept', content }
+}
+
+export function choiceCancelOutcome(prompt: ChoicePrompt): JsonValue {
+  return prompt.kind === 'question' ? { action: 'cancel' } : { outcome: 'cancelled' }
+}
+
+function parsePermissionPrompt(params: Record<string, unknown> | undefined, fallback: string): ChoicePrompt {
+  const meta = recordObject(recordObject(params?.['_meta'])?.['permission'])
+  const toolCall = recordObject(params?.['toolCall'])
+  const title = recordText(params?.['title']) ?? recordText(meta?.['title']) ?? recordText(toolCall?.['title']) ?? fallback
+  const detail = recordText(params?.['description']) ?? recordText(meta?.['description'])
+  const options = (Array.isArray(params?.['options']) ? params['options'] : []).flatMap((candidate) => {
+    const option = recordObject(candidate)
+    const id = recordText(option?.['optionId'])
+    if (id === undefined) return []
+    const label = recordText(option?.['name']) ?? recordText(option?.['kind']) ?? id
+    const description = recordText(recordObject(recordObject(option?.['_meta'])?.['permission'])?.['description'])
+    return [{ id, label, ...(description === undefined ? {} : { description }) } satisfies ChoiceOption]
+  })
+  return {
+    kind: 'permission',
+    title: title === '' ? '等待权限确认' : title,
+    ...(detail === undefined ? {} : { detail }),
+    questions: options.length === 0 ? [] : [{ id: 'optionId', prompt: title, multiSelect: false, options }],
+  }
+}
+
+function parseElicitationPrompt(params: Record<string, unknown> | undefined, fallback: string): ChoicePrompt {
+  const title = recordText(params?.['message']) ?? fallback
+  const schema = recordObject(params?.['requestedSchema'])
+  const properties = recordObject(schema?.['properties']) ?? {}
+  const questions = Object.entries(properties).flatMap(([id, raw]) => {
+    const property = recordObject(raw)
+    if (property === undefined) return []
+    const prompt = recordText(property['title']) ?? recordText(property['description']) ?? id
+    const multiSelect = property['type'] === 'array'
+    const options = property['type'] === 'boolean'
+      ? [{ id: 'true', label: '是' }, { id: 'false', label: '否' }]
+      : enumOptions(property)
+    if (options.length === 0) return []
+    return [{ id, prompt, multiSelect, options } satisfies ChoiceQuestion]
+  })
+  return {
+    kind: 'question',
+    title: title === '' ? '需要你的选择' : title,
+    questions,
+  }
+}
+
+function enumOptions(schema: Record<string, unknown>): ChoiceOption[] {
+  if (Array.isArray(schema['enum'])) {
+    return schema['enum'].flatMap((value) => typeof value === 'string' ? [{ id: value, label: value }] : [])
+  }
+  const items = recordObject(schema['items'])
+  const source: unknown[] = Array.isArray(schema['oneOf']) ? schema['oneOf']
+    : Array.isArray(schema['anyOf']) ? schema['anyOf']
+      : Array.isArray(items?.['enum']) ? items['enum']
+        : Array.isArray(items?.['oneOf']) ? items['oneOf']
+          : []
+  return source.flatMap((candidate) => {
+    if (typeof candidate === 'string') return [{ id: candidate, label: candidate }]
+    const record = recordObject(candidate)
+    if (record === undefined) return []
+    const id = recordText(record['const']) ?? (Array.isArray(record['enum']) && typeof record['enum'][0] === 'string'
+      ? record['enum'][0] : undefined)
+    if (id === undefined) return []
+    const label = recordText(record['title']) ?? id
+    const description = recordText(record['description'])
+    return [{ id, label, ...(description === undefined ? {} : { description }) }]
+  })
 }
 
 /** Directory-picker rows omit dot-directories; a typed path is still accepted by fs.list. */

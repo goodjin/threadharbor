@@ -22,9 +22,10 @@ import {
   type RemoteAgentPanel, type RemoteAgentStore, type RemotePromptProgress,
 } from './store.ts'
 import {
-  browsableDirectories, buildTranscriptNodes, conversationStage, isNearScrollBottom, permissionRequestId,
+  browsableDirectories, buildTranscriptNodes, choiceCancelOutcome, choiceSubmitOutcome, conversationStage,
+  isAutoApprovablePermission, isNearScrollBottom, parseChoicePrompt, parsePlanItems, permissionRequestId,
   preferredProjectBackend, shouldAutoApprovePermissions, toolDisclosurePresentation,
-  type ConversationStage, type RemoteTranscriptNode,
+  type ChoicePrompt, type ConversationStage, type RemoteTranscriptNode,
 } from './conversation-model.ts'
 import css from './RemoteSurface.module.css'
 
@@ -36,22 +37,85 @@ export interface RemoteConversationInjected {
 /** Full conversation component props. */
 export type RemoteConversationProps = PropsRuntime<'conversation'> & ConvOwnerProps & RemoteConversationInjected
 
-function permissionOptions(entry: RemoteTranscriptEntry): readonly { id: string; label: string; outcome: JsonValue }[] {
-  const frame = entry.nativeFrame
-  if (frame === undefined || frame === null || typeof frame !== 'object' || Array.isArray(frame)) return []
-  const params = frame['params']
-  if (params === null || typeof params !== 'object' || Array.isArray(params)) return []
-  const options = params['options']
-  if (!Array.isArray(options)) return []
-  return options.flatMap((candidate) => {
-    if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) return []
-    const id = candidate['optionId']
-    if (typeof id !== 'string') return []
-    const label = typeof candidate['name'] === 'string'
-      ? candidate['name']
-      : typeof candidate['kind'] === 'string' ? candidate['kind'] : id
-    return [{ id, label, outcome: { outcome: 'selected', optionId: id } }]
+function PlanCard({ items }: { items: readonly { content: string; status: string; priority?: string }[] }) {
+  return (
+    <article className={css.planCard}>
+      <strong>执行计划</strong>
+      <ol className={css.planList}>
+        {items.map((item, index) => (
+          <li key={`${index}:${item.content}`} data-status={item.status}>
+            <span className={css.planStatus}>
+              {item.status === 'completed' ? '完成' : item.status === 'in_progress' ? '进行中' : '待办'}
+            </span>
+            <span className={css.planContent}>{item.content}</span>
+            {item.priority !== undefined && <small>{item.priority === 'high' ? '高' : item.priority === 'low' ? '低' : '中'}</small>}
+          </li>
+        ))}
+      </ol>
+    </article>
+  )
+}
+
+function ChoiceCard({ prompt, pending, onSubmit }: {
+  prompt: ChoicePrompt
+  pending: boolean
+  onSubmit: (outcome: JsonValue) => void
+}) {
+  const immediate = prompt.questions.length <= 1 && prompt.questions[0]?.multiSelect !== true
+  const [answers, setAnswers] = useState<Record<string, string | readonly string[]>>({})
+  const toggle = (questionId: string, optionId: string, multiSelect: boolean): void => {
+    setAnswers((current) => {
+      if (!multiSelect) return { ...current, [questionId]: optionId }
+      const existing = current[questionId]
+      const selected = Array.isArray(existing) ? [...existing] : existing === undefined ? [] : [existing]
+      const next = selected.includes(optionId) ? selected.filter(value => value !== optionId) : [...selected, optionId]
+      return { ...current, [questionId]: next }
+    })
+  }
+  const ready = prompt.questions.every((question) => {
+    const selected = answers[question.id]
+    return Array.isArray(selected) ? selected.length > 0 : selected !== undefined && selected !== ''
   })
+  return (
+    <article className={css.choiceCard} data-kind={prompt.kind}>
+      <strong>{prompt.kind === 'question' ? '需要你的选择' : '权限请求'}</strong>
+      <p>{prompt.detail ?? prompt.title}</p>
+      {prompt.questions.map(question => (
+        <div key={question.id} className={css.choiceQuestion}>
+          {(prompt.questions.length > 1 || question.prompt !== prompt.title) && <span>{question.prompt}</span>}
+          <div className={css.permissionActions}>
+            {question.options.map(option => {
+              const selected = answers[question.id]
+              const active = Array.isArray(selected) ? selected.includes(option.id) : selected === option.id
+              return (
+                <Button
+                  key={option.id}
+                  size="sm"
+                  variant={active ? 'primary' : 'outline'}
+                  disabled={pending}
+                  title={option.description}
+                  onClick={() => {
+                    if (immediate) onSubmit(choiceSubmitOutcome(prompt, { [question.id]: option.id }))
+                    else toggle(question.id, option.id, question.multiSelect)
+                  }}
+                >{pending && immediate ? '提交中…' : option.label}</Button>
+              )
+            })}
+          </div>
+        </div>
+      ))}
+      <div className={css.permissionActions}>
+        {!immediate && (
+          <Button size="sm" variant="primary" disabled={pending || !ready} onClick={() => {
+            onSubmit(choiceSubmitOutcome(prompt, answers))
+          }}>{pending ? '提交中…' : '提交选择'}</Button>
+        )}
+        <Button size="sm" variant="ghost" disabled={pending} onClick={() => {
+          onSubmit(choiceCancelOutcome(prompt))
+        }}>{pending ? '提交中…' : prompt.kind === 'question' ? '跳过' : '拒绝'}</Button>
+      </div>
+    </article>
+  )
 }
 
 function ReasoningNode({ entry, active }: { entry: RemoteTranscriptEntry; active: boolean }) {
@@ -243,25 +307,25 @@ function TranscriptRow({ node, active, onPermission, onResend, resendDisabled = 
 }) {
   if (node.kind === 'tool') return <ToolNode node={node} active={active} />
   const entry = node.entry
+  const planItems = parsePlanItems(entry)
+  if (planItems !== undefined) return <PlanCard items={planItems} />
   if (entry.role === 'permission') {
-    const options = permissionOptions(entry)
+    const prompt = parseChoicePrompt(entry)
+    const requestId = permissionRequestId(entry)
+    if (prompt === undefined || requestId === undefined) {
+      return (
+        <article className={css.choiceCard}>
+          <strong>权限请求</strong>
+          <p>{entry.text}</p>
+        </article>
+      )
+    }
     return (
-      <article className={css.permissionCard}>
-        <strong>权限请求</strong>
-        <p>{entry.text}</p>
-        <div className={css.permissionActions}>
-          {options.map(option => (
-            <Button key={option.id} size="sm" variant="outline" disabled={permissionPending} onClick={() => {
-              const requestId = permissionRequestId(entry)
-              if (requestId !== undefined) onPermission(requestId, option.outcome)
-            }}>{permissionPending ? '提交中…' : option.label}</Button>
-          ))}
-          <Button size="sm" variant="ghost" disabled={permissionPending} onClick={() => {
-            const requestId = permissionRequestId(entry)
-            if (requestId !== undefined) onPermission(requestId, { outcome: 'cancelled' })
-          }}>{permissionPending ? '提交中…' : '拒绝'}</Button>
-        </div>
-      </article>
+      <ChoiceCard
+        prompt={prompt}
+        pending={permissionPending}
+        onSubmit={(outcome) => { onPermission(requestId, outcome) }}
+      />
     )
   }
   if (entry.role === 'user') {
@@ -1750,13 +1814,18 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
     if (session === undefined || !shouldAutoApprovePermissions(preferences?.approvalChoice)) return
     for (const entry of sessionEntries) {
       const requestId = permissionRequestId(entry)
-      if (entry.role !== 'permission' || requestId === undefined) continue
+      if (entry.role !== 'permission' || requestId === undefined || !isAutoApprovablePermission(entry)) continue
       const action = `permission:${session.sessionId}:${requestId}`
       if (sessionAction !== undefined || answeredPermissionsRef.current.has(action)) continue
-      const options = permissionOptions(entry)
+      const prompt = parseChoicePrompt(entry)
+      const first = prompt?.questions[0]?.options[0]?.id
       answeredPermissionsRef.current.add(action)
       setSessionAction(action)
-      void store.permission(session.sessionId, requestId, options[0]?.outcome ?? { outcome: 'selected' })
+      void store.permission(
+        session.sessionId,
+        requestId,
+        first === undefined ? { outcome: 'selected' } : { outcome: 'selected', optionId: first },
+      )
         .catch(() => undefined)
         .finally(() => { setSessionAction(current => current === action ? undefined : current) })
       break

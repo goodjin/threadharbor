@@ -3,7 +3,8 @@ import { describe, expect, it } from 'vitest'
 import type { RemoteDirectoryEntry, RemoteSessionView, RemoteTranscriptEntry } from '@threadharbor/protocol'
 import { RemoteSessionId, RemoteTranscriptId } from '@threadharbor/protocol'
 import {
-  browsableDirectories, buildTranscriptNodes, conversationStage, isNearScrollBottom, mergeTranscriptEntries,
+  browsableDirectories, buildTranscriptNodes, choiceCancelOutcome, choiceSubmitOutcome, conversationStage,
+  isAutoApprovablePermission, isNearScrollBottom, mergeTranscriptEntries, parseChoicePrompt, parsePlanItems,
   permissionRequestId, preferredProjectBackend, shouldAutoApprovePermissions, toolDisclosurePresentation,
 } from '../src/client/conversation-model.ts'
 
@@ -34,6 +35,82 @@ function session(overrides: Partial<RemoteSessionView> = {}): RemoteSessionView 
 }
 
 describe('remote conversation view model', () => {
+  it('turns AskUserQuestion elicitations and permission grants into the same choice model', () => {
+    const question = parseChoicePrompt({
+      ...entry('3', 'permission', 'permission', '选哪种方案？'),
+      nativeFrame: {
+        jsonrpc: '2.0', id: 3, method: 'elicitation/create',
+        params: {
+          mode: 'form',
+          message: '选哪种方案？',
+          requestedSchema: {
+            type: 'object',
+            properties: {
+              strategy: {
+                type: 'string',
+                title: '实现策略',
+                enum: ['conservative', 'balanced', 'aggressive'],
+              },
+            },
+          },
+        },
+      },
+    })
+    expect(question).toMatchObject({ kind: 'question', title: '选哪种方案？' })
+    expect(question?.questions[0]?.options.map(option => option.id)).toEqual(['conservative', 'balanced', 'aggressive'])
+    expect(choiceSubmitOutcome(question!, { strategy: 'balanced' })).toEqual({
+      action: 'accept', content: { strategy: 'balanced' },
+    })
+    expect(choiceCancelOutcome(question!)).toEqual({ action: 'cancel' })
+    expect(isAutoApprovablePermission({
+      ...entry('3', 'permission', 'permission', '选哪种方案？'),
+      nativeFrame: { jsonrpc: '2.0', id: 3, method: 'elicitation/create', params: { message: '选哪种方案？' } },
+    })).toBe(false)
+
+    const permission = parseChoicePrompt({
+      ...entry('7', 'permission', 'permission', 'Allow shell?'),
+      nativeFrame: {
+        jsonrpc: '2.0', id: 7, method: 'session/request_permission',
+        params: { title: 'Allow shell?', options: [{ optionId: 'once', name: 'Allow once' }] },
+      },
+    })
+    expect(permission?.kind).toBe('permission')
+    expect(choiceSubmitOutcome(permission!, { optionId: 'once' })).toEqual({
+      outcome: 'selected', optionId: 'once',
+    })
+    expect(isAutoApprovablePermission({
+      ...entry('7', 'permission', 'permission', 'Allow shell?'),
+      nativeFrame: { jsonrpc: '2.0', id: 7, method: 'session/request_permission', params: {} },
+    })).toBe(true)
+  })
+
+  it('keeps the latest plan list and renders structured entries', () => {
+    const first = {
+      ...entry('8', 'system', 'status', '阅读鉴权'),
+      nativeFrame: {
+        jsonrpc: '2.0', method: 'session/update',
+        params: { update: { sessionUpdate: 'plan', entries: [{ content: '阅读鉴权', status: 'pending', priority: 'high' }] } },
+      },
+    }
+    const next = {
+      ...entry('9', 'system', 'status', '阅读鉴权；补测试'),
+      nativeFrame: {
+        jsonrpc: '2.0', method: 'session/update',
+        params: {
+          update: {
+            sessionUpdate: 'plan',
+            entries: [
+              { content: '阅读鉴权', status: 'completed', priority: 'high' },
+              { content: '补测试', status: 'in_progress', priority: 'medium' },
+            ],
+          },
+        },
+      },
+    }
+    expect(parsePlanItems(next)?.map(item => item.content)).toEqual(['阅读鉴权', '补测试'])
+    expect(mergeTranscriptEntries([first, next])).toEqual([next])
+  })
+
   it('keeps Claude ACP permission id 0 clickable', () => {
     expect(permissionRequestId({
       ...entry('1', 'permission', 'permission', '等待权限确认'),

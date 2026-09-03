@@ -1014,6 +1014,8 @@
 .reasoningMessage,
 .toolMessage,
 .permissionCard,
+.choiceCard,
+.planCard,
 .statusRow {
   width: 100%;
   max-width: 760px;
@@ -1278,21 +1280,86 @@
   overflow-wrap: anywhere;
 }
 
-.permissionCard {
+.permissionCard,
+.choiceCard,
+.planCard {
   padding: 14px;
   border: 1px solid var(--dsw-alias-state-warn-secondary);
   border-radius: 11px;
   background: var(--dsw-alias-bg-layer-1);
 }
 
-.permissionCard > strong {
+.choiceCard[data-kind="question"],
+.planCard {
+  border-color: var(--dsw-alias-border-l2);
+}
+
+.permissionCard > strong,
+.choiceCard > strong,
+.planCard > strong {
   font-size: 13px;
 }
 
-.permissionCard > p {
+.permissionCard > p,
+.choiceCard > p {
   margin: 7px 0 12px;
   color: var(--dsw-alias-label-secondary);
   font-size: 13px;
+}
+
+.choiceQuestion {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.choiceQuestion > span {
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+}
+
+.planList {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.planList > li {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: start;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.planStatus {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+}
+
+.planList > li[data-status="in_progress"] .planStatus {
+  color: var(--dsw-alias-state-warn-primary);
+}
+
+.planList > li[data-status="completed"] .planStatus {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.planContent {
+  min-width: 0;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.planList > li > small {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
 }
 
 .permissionActions {
