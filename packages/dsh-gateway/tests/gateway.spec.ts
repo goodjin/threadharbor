@@ -274,6 +274,59 @@ describe('RemoteAgentGateway', () => {
     }
   })
 
+  it('answers a Claude permission request with JSON-RPC id 0 and catches up the journal', async () => {
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', id: 0, method: 'session/request_permission', params: {
+        title: 'Exit plan?',
+        options: [{ optionId: 'bypassPermissions', name: 'Yes, and bypass permissions' }],
+      } },
+      { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'current_mode_update', currentModeId: 'bypassPermissions' } } },
+      { jsonrpc: '2.0', method: '_x.ai/session/prompt_complete', params: { stopReason: 'end_turn' } },
+    ]
+    const { ctx, gateway, calls } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4301' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.permission', {
+        sessionId: session.sessionId, requestId: '0', outcome: { outcome: 'selected', optionId: 'bypassPermissions' },
+      }))
+      const forwarded = calls.find(call => call.request.method === 'session.permission')?.request
+      expect(forwarded?.params['frame']).toMatchObject({ jsonrpc: '2.0', id: 0, result: { outcome: { outcome: 'selected', optionId: 'bypassPermissions' } } })
+      expect(calls.filter(call => call.request.method === 'events.read').length).toBeGreaterThan(0)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('does not duplicate transcript when the same journal page is applied twice', async () => {
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { text: 'hello ' } } } },
+      { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { text: 'world' } } } },
+      { jsonrpc: '2.0', method: '_x.ai/session/prompt_complete', params: { stopReason: 'end_turn' } },
+    ]
+    const { ctx, gateway } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4302' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'dup', text: 'hi',
+      }))
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      const page = await readTranscript(gateway, session.sessionId)
+      const assistant = page.entries.filter(entry => entry.role === 'assistant').map(entry => entry.text).join('')
+      expect(assistant).toBe('hello world')
+      expect(page.entries.filter(entry => entry.text === 'hello world' || entry.text === 'hello ' || entry.text === 'world').length)
+        .toBeGreaterThan(0)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('keeps credentials out of persisted loopback host endpoints', async () => {
     const { ctx, gateway } = await harness()
     try {
@@ -480,6 +533,33 @@ describe('RemoteAgentGateway', () => {
     }
   })
 
+  it('fails a running turn when the hold worker is unreachable', async () => {
+    const { ctx, gateway, failNext } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4211',
+      })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'repo', cwd: '/repo',
+      })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'codex',
+      })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'dead-hold', text: 'hello',
+      }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState).toBe('running')
+      failNext()
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState).toBe('failed')
+      const page = await readTranscript(gateway, session.sessionId)
+      expect(page.entries.some(entry => entry.kind === 'status' && entry.text.includes('已停止'))).toBe(true)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('settles a running session immediately after hostd accepts cancellation', async () => {
     const { ctx, gateway, calls } = await harness()
     try {
@@ -502,7 +582,7 @@ describe('RemoteAgentGateway', () => {
 
       await gateway.dispatch(request('session.cancel', { sessionId: session.sessionId }))
 
-      expect(gateway.state().sessions.find(candidate => candidate.sessionId === session.sessionId)?.turnState).toBe('idle')
+      expect(gateway.state().sessions.find(candidate => candidate.sessionId === session.sessionId)?.turnState).toBe('stopped')
       const cancelCall = calls.find(call => call.request.method === 'session.cancel')
       expect(cancelCall?.request.params).toMatchObject({
         sessionId: session.sessionId,
@@ -511,11 +591,68 @@ describe('RemoteAgentGateway', () => {
           params: { sessionId: `native-4203-${session.sessionId}` },
         },
       })
+      const page = await readTranscript(gateway, session.sessionId)
+      expect(page.entries.some(entry => entry.kind === 'status' && entry.text === '用户主动停止')).toBe(true)
       const pushed = browser.sent.map(payload => JSON.parse(payload) as {
         event?: { type?: string; session?: { turnState?: string } }
       })
       expect(pushed.some(frame => frame.event?.type === 'session.view.changed'
-        && frame.event.session?.turnState === 'idle')).toBe(true)
+        && frame.event.session?.turnState === 'stopped')).toBe(true)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('stops the waiting UI even when native cancel cannot reach hostd', async () => {
+    const { ctx, gateway, failNext } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4212',
+      })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'repo', cwd: '/repo',
+      })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'codex',
+      })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'stuck-cancel', text: 'hello',
+      }))
+      failNext()
+      await expect(gateway.dispatch(request('session.cancel', { sessionId: session.sessionId }))).rejects.toThrow()
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState).toBe('stopped')
+      const page = await readTranscript(gateway, session.sessionId)
+      expect(page.entries.some(entry => entry.kind === 'status' && entry.text === '用户主动停止')).toBe(true)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps the user-stopped marker when a late native end_turn arrives', async () => {
+    const events: JsonValue[] = []
+    const { ctx, gateway } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4213',
+      })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'repo', cwd: '/repo',
+      })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'codex',
+      })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'late-complete', text: 'hello',
+      }))
+      await gateway.dispatch(request('session.cancel', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState).toBe('stopped')
+      events.push({ jsonrpc: '2.0', method: '_x.ai/session/prompt_complete', params: { stopReason: 'end_turn' } })
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState).toBe('stopped')
+      const page = await readTranscript(gateway, session.sessionId)
+      expect(page.entries.some(entry => entry.kind === 'status' && entry.text === '用户主动停止')).toBe(true)
     } finally {
       await ctx.fiber.dispose()
     }

@@ -109,6 +109,44 @@ describe('HoldWorker', () => {
     }
   })
 
+  it('does not rewind the journal when afterSeq is ahead of the latest seq', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-hold-ahead-seq-'))
+    roots.push(root)
+    const socketPath = join(root, 'control.sock')
+    const gate = join(root, 'gate')
+    const config: HoldWorkerConfig = {
+      version: 1,
+      holdId: 'hold',
+      generation: 'generation',
+      backend: 'codex',
+      cwd: root,
+      socketPath,
+      journalPath: join(root, 'journal.jsonl'),
+      statePath: join(root, 'state.json'),
+      maxJournalEvents: 20,
+      maxJournalBytes: 100_000,
+      transport: {
+        kind: 'stdio', command: process.execPath,
+        args: [new URL('./fixtures/fake-acp.mjs', import.meta.url).pathname, join(root, 'requests.txt'), gate],
+      },
+    }
+    const worker = new HoldWorker(config)
+    await worker.start()
+    try {
+      await writeFile(gate, 'go')
+      expect(await send(socketPath, admission('ahead'))).toMatchObject({ ok: true, result: { duplicate: false } })
+      await vi.waitFor(async () => {
+        const page = await send(socketPath, { operation: 'read', afterSeq: 0, generation: 'generation' })
+        if (!page.ok) throw new Error(page.error)
+        expect((page.result as { latestSeq: number }).latestSeq).toBeGreaterThan(0)
+      })
+      const ahead = await send(socketPath, { operation: 'read', afterSeq: 999_999, generation: 'generation' })
+      expect(ahead).toMatchObject({ ok: true, result: { gap: false, events: [] } })
+    } finally {
+      await worker.close()
+    }
+  })
+
   it('returns a journal page as soon as wait-page observes a new event', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-hold-wait-page-'))
     roots.push(root)
@@ -238,6 +276,86 @@ describe('HoldWorker', () => {
           return params !== null && typeof params === 'object' && Reflect.get(params, 'source') === 'fake'
         })).toBe(true)
       }
+    } finally {
+      await worker.close()
+    }
+  })
+
+  it('session/cancel drops a queued prompt so the next admission can run', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-hold-cancel-queue-'))
+    roots.push(root)
+    const socketPath = join(root, 'control.sock')
+    const output = join(root, 'requests.txt')
+    const gate = join(root, 'gate')
+    const config: HoldWorkerConfig = {
+      version: 1,
+      holdId: 'hold',
+      generation: 'generation',
+      backend: 'claude',
+      cwd: root,
+      socketPath,
+      journalPath: join(root, 'journal.jsonl'),
+      statePath: join(root, 'state.json'),
+      maxJournalEvents: 20,
+      maxJournalBytes: 100_000,
+      transport: {
+        kind: 'stdio', command: process.execPath,
+        args: [new URL('./fixtures/fake-acp.mjs', import.meta.url).pathname, output, gate],
+      },
+    }
+    const worker = new HoldWorker(config)
+    await worker.start()
+    try {
+      expect(await send(socketPath, admission('p1'))).toMatchObject({ ok: true, result: { duplicate: false } })
+      await vi.waitFor(async () => { expect(await readFile(output, 'utf8')).toBe('p1\n') })
+      expect(await send(socketPath, admission('p2'))).toMatchObject({ ok: true, result: { duplicate: false } })
+      expect(await readFile(output, 'utf8')).toBe('p1\n')
+      expect(await send(socketPath, {
+        operation: 'send-frame',
+        frame: { jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: 'native' } },
+      })).toMatchObject({ ok: true })
+      expect(await send(socketPath, admission('p3'))).toMatchObject({ ok: true, result: { duplicate: false } })
+      await vi.waitFor(async () => { expect(await readFile(output, 'utf8')).toBe('p1\np3\n') })
+    } finally {
+      await worker.close()
+    }
+  })
+
+  it('synthesizes prompt_complete for Claude ACP prompt results', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-hold-claude-complete-'))
+    roots.push(root)
+    const socketPath = join(root, 'control.sock')
+    const output = join(root, 'requests.txt')
+    const gate = join(root, 'gate')
+    const config: HoldWorkerConfig = {
+      version: 1,
+      holdId: 'hold',
+      generation: 'generation',
+      backend: 'claude',
+      cwd: root,
+      socketPath,
+      journalPath: join(root, 'journal.jsonl'),
+      statePath: join(root, 'state.json'),
+      maxJournalEvents: 20,
+      maxJournalBytes: 100_000,
+      transport: {
+        kind: 'stdio', command: process.execPath,
+        args: [new URL('./fixtures/fake-acp.mjs', import.meta.url).pathname, output, gate],
+      },
+    }
+    const worker = new HoldWorker(config)
+    await worker.start()
+    try {
+      await writeFile(gate, 'go')
+      expect(await send(socketPath, admission('claude-1'))).toMatchObject({ ok: true, result: { duplicate: false } })
+      await vi.waitFor(async () => {
+        const page = await send(socketPath, { operation: 'read', afterSeq: 0, generation: 'generation' })
+        if (!page.ok) throw new Error(page.error)
+        const complete = (page.result as { events: readonly { frame: Record<string, unknown> }[] }).events
+          .filter(event => event.frame !== null && typeof event.frame === 'object'
+            && Reflect.get(event.frame, 'method') === '_x.ai/session/prompt_complete')
+        expect(complete).toHaveLength(1)
+      })
     } finally {
       await worker.close()
     }

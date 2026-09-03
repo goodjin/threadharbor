@@ -153,6 +153,18 @@ export function describeHostConnectFailure(error: unknown): string {
   return message
 }
 
+/** Turn an Agent deploy failure into a short, actionable reason. */
+export function describeAgentInstallFailure(error: unknown): string {
+  const message = (error instanceof Error ? error.message : String(error)).replace(/^Error:\s*/u, '').trim()
+  if (/does not implement method agent\.install/i.test(message)) {
+    return '当前 hostd 过旧，还不支持 Agent 部署。请先在主机设置里升级 hostd，再点部署。'
+  }
+  if (/externally-managed-environment/i.test(message)) {
+    return '这台主机的 Python 由系统管理（例如 Homebrew），旧版 hostd 的 pip install --user 会被拒绝。请先升级并重启 hostd，再点部署。'
+  }
+  return message
+}
+
 const EMPTY_STATE: RemoteAgentState = {
   pollIntervalMs: 1000,
   hosts: [],
@@ -170,6 +182,25 @@ const EMPTY_STATE: RemoteAgentState = {
 const CONTROL_REQUEST_TIMEOUT_MS = 75_000
 /** Maximum time to wait for session.start to publish an open binding. */
 const SESSION_OPEN_TIMEOUT_MS = 75_000
+const LIVE_BACKOFF_MS = [250, 500, 1_000, 2_000, 4_000, 8_000] as const
+const CURRENT_SESSION_STORAGE_KEY = 'dsh.remote-agent.current-session-id'
+
+function readPersistedCurrentSessionId(): string | undefined {
+  try {
+    const value = window.localStorage?.getItem(CURRENT_SESSION_STORAGE_KEY)
+    return value === null || value === undefined || value === '' ? undefined : value
+  } catch {
+    return undefined
+  }
+}
+
+function writePersistedCurrentSessionId(sessionId: string): void {
+  try {
+    window.localStorage?.setItem(CURRENT_SESSION_STORAGE_KEY, sessionId)
+  } catch {
+    // ignore quota / disabled storage
+  }
+}
 
 function withoutError(snapshot: RemoteAgentSnapshot): RemoteAgentSnapshot {
   const { error: _error, ...rest } = snapshot
@@ -187,6 +218,17 @@ function errorText(error: unknown): string {
 
 function lastTranscriptSeq(state: RemoteAgentState, sessionId: ReturnType<typeof RemoteSessionId>): number {
   return state.transcript.filter(entry => entry.sessionId === sessionId).at(-1)?.seq ?? -1
+}
+
+/** Insert or replace one session row so a just-created session is visible before the next catalog reload. */
+function withSessionView(state: RemoteAgentState, session: RemoteSessionView): RemoteAgentState {
+  const exists = state.sessions.some(existing => existing.sessionId === session.sessionId)
+  return {
+    ...state,
+    sessions: exists
+      ? state.sessions.map(existing => existing.sessionId === session.sessionId ? session : existing)
+      : [...state.sessions, session],
+  }
 }
 
 function array(value: JsonValue | undefined, label: string): JsonValue[] {
@@ -364,7 +406,7 @@ function parseSession(value: JsonValue): RemoteSessionView {
     title: stringField(record, 'title'),
     backend: remoteAgentBackend(record['backend']),
     channelState: oneOf(record['channelState'], ['connecting', 'open', 'reconnecting', 'closed', 'lost'] as const, 'channelState'),
-    turnState: oneOf(record['turnState'], ['idle', 'running', 'waiting-permission', 'failed'] as const, 'turnState'),
+    turnState: oneOf(record['turnState'], ['idle', 'running', 'waiting-permission', 'stopped', 'failed'] as const, 'turnState'),
     createdAt: stringField(record, 'createdAt'),
     updatedAt: stringField(record, 'updatedAt'),
     ...(record['latestTranscriptSeq'] === undefined ? {} : { latestTranscriptSeq: seqField(record, 'latestTranscriptSeq') }),
@@ -538,6 +580,10 @@ export class RemoteAgentStore {
   private transcriptWork = 0
   private backgroundQueue: string[] = []
   private backgroundBusy = false
+  private liveSyncing = false
+  private liveBackoffIndex = 0
+  private liveWait: { timer: number; resolve: () => void } | undefined
+  private reloadSerial = 0
 
   /** Read the stable current snapshot. */
   getSnapshot = (): RemoteAgentSnapshot => this.snapshot
@@ -574,27 +620,19 @@ export class RemoteAgentStore {
         return
       }
       case 'session.view.changed': {
-        // Patch the session view in place instead of full reload. The push is
-        // already authoritative; re-serializing the whole transcript for one
-        // session field change would waste the WS optimisation.
+        // Upsert the session row in place. session.start returns before the
+        // local catalog has the row; reloading here would leave a gap where
+        // the UI has neither the draft placeholder nor the new session.
         const sessionValue = record['session']
         if (sessionValue === undefined) { void this.reload(); return }
         const session = parseSession(sessionValue) as RemoteSessionView
-        const current = this.snapshot.state
-        if (!current.sessions.some(existing => existing.sessionId === session.sessionId)) {
-          void this.reload()
-          return
-        }
-        const nextState = {
-          ...current,
-          sessions: current.sessions.map(existing =>
-            existing.sessionId === session.sessionId ? session : existing),
-        }
+        const nextState = withSessionView(this.snapshot.state, session)
         const promptProgress = this.reconcilePromptProgress(nextState, { ...this.snapshot, state: nextState })
         const { promptProgress: _cleared, ...rest } = { ...withoutError(this.snapshot), state: nextState }
         this.publish(promptProgress === undefined ? rest : { ...rest, promptProgress })
         const priority = session.sessionId === this.snapshot.currentSessionId ? 'high' : 'low'
         void this.catchupTranscript(session.sessionId, priority)
+        if (priority === 'high') this.ensureLiveTranscriptSync()
         return
       }
       case 'session.followed': {
@@ -638,6 +676,7 @@ export class RemoteAgentStore {
     const promptProgress = this.reconcilePromptProgress(nextState, { ...this.snapshot, state: nextState })
     const { promptProgress: _cleared, ...rest } = nextSnapshot
     this.publish(promptProgress === undefined ? rest : { ...rest, promptProgress })
+    if (sessionId === this.snapshot.currentSessionId) this.liveBackoffIndex = 0
   }
 
   /** Mark a session's transcript as read; zeros its unread counter. */
@@ -679,6 +718,7 @@ export class RemoteAgentStore {
       const current = this.snapshot.currentSessionId
       if (current !== undefined) await this.catchupTranscript(current, 'high')
       this.queueBackgroundTranscripts()
+      this.ensureLiveTranscriptSync()
     } catch (error) {
       this.publish({ ...this.snapshot, phase: 'error', error: String(error) })
     }
@@ -691,6 +731,12 @@ export class RemoteAgentStore {
     this.backgroundQueue = []
     if (this.operationTimer !== undefined) window.clearTimeout(this.operationTimer)
     this.operationTimer = undefined
+    if (this.liveWait !== undefined) {
+      window.clearTimeout(this.liveWait.timer)
+      const resolve = this.liveWait.resolve
+      this.liveWait = undefined
+      resolve()
+    }
     this.listeners.clear()
   }
 
@@ -709,9 +755,11 @@ export class RemoteAgentStore {
       const { promptProgress: _cleared, ...rest } = this.snapshot
       this.publish(promptProgress === undefined ? rest : { ...rest, promptProgress })
     }
+    this.liveBackoffIndex = 0
     await this.catchupTranscript(sessionId, 'high')
     void this.backfillOpenedTranscript(sessionId, this.transcriptWork)
     this.queueBackgroundTranscripts()
+    this.ensureLiveTranscriptSync()
   }
 
   /** Open an unsaved conversation placeholder. The Agent is chosen at first send. */
@@ -934,6 +982,8 @@ export class RemoteAgentStore {
         ...(input.parentSessionId === undefined ? {} : { parentSessionId: input.parentSessionId }),
       })
       const session = parseSession(result)
+      const nextState = withSessionView(this.snapshot.state, session)
+      this.publish({ ...withoutError(this.snapshot), state: nextState, currentSessionId: session.sessionId })
       await this.reload(session.sessionId)
     }, true)
   }
@@ -961,11 +1011,20 @@ export class RemoteAgentStore {
           backend,
         })
         const session = parseSession(result)
+        const nextState = withSessionView(this.snapshot.state, session)
         const progress: RemotePromptProgress = {
           projectId: draft.projectId, sessionId: session.sessionId, phase: 'sending', startedAt, baselineSeq: -1,
         }
         const { draftSession: _draftSession, panel: _panel, ...snapshot } = withoutError(this.snapshot)
-        this.publish({ ...snapshot, currentSessionId: session.sessionId, promptProgress: progress, pending: true })
+        this.publish({
+          ...snapshot,
+          state: nextState,
+          currentSessionId: session.sessionId,
+          promptProgress: progress,
+          pending: true,
+        })
+        this.liveBackoffIndex = 0
+        this.ensureLiveTranscriptSync()
         // session.start now returns as soon as the gateway durably records the
         // session, before the remote hold exists. Wait for the WS push that
         // announces the binding so session.prompt can find a live channel.
@@ -1019,9 +1078,7 @@ export class RemoteAgentStore {
           resolve()
           return
         }
-        if (session === undefined
-          || session.channelState === 'lost'
-          || session.turnState === 'failed') {
+        if (session?.channelState === 'lost' || session?.turnState === 'failed') {
           window.clearTimeout(timer)
           unsubscribe()
           reject(new Error('远程会话建立失败，请重试'))
@@ -1047,6 +1104,8 @@ export class RemoteAgentStore {
       baselineSeq: lastTranscriptSeq(this.snapshot.state, sessionId),
     }
     this.publish({ ...withoutError(this.snapshot), promptProgress: progress })
+    this.liveBackoffIndex = 0
+    this.ensureLiveTranscriptSync()
     try {
       await this.run(async () => {
         try {
@@ -1054,6 +1113,7 @@ export class RemoteAgentStore {
         } finally {
           await this.reload(sessionId)
           void this.catchupTranscript(sessionId, 'high')
+          this.ensureLiveTranscriptSync()
         }
         const current = this.snapshot.state.sessions.find(candidate => candidate.sessionId === sessionId)
         if (current?.turnState === 'running') {
@@ -1135,7 +1195,11 @@ export class RemoteAgentStore {
    * @param outcome - backend-native option value.
    */
   permission(sessionId: ReturnType<typeof RemoteSessionId>, requestId: string, outcome: JsonValue): Promise<void> {
-    return this.mutate('session.permission', { sessionId, requestId, outcome })
+    return this.run(async () => {
+      await this.call('session.permission', { sessionId, requestId, outcome })
+      await this.reload()
+      await this.catchupTranscript(sessionId, 'high')
+    })
   }
 
   private async startOperation(params: Record<string, JsonValue>): Promise<RemoteOperationView> {
@@ -1163,6 +1227,53 @@ export class RemoteAgentStore {
     return this.snapshot.state.transcript.some(entry => entry.sessionId === sessionId)
   }
 
+  private sessionNeedsLiveTranscript(sessionId: ReturnType<typeof RemoteSessionId>): boolean {
+    const session = this.snapshot.state.sessions.find(candidate => candidate.sessionId === sessionId)
+    if (session === undefined) return false
+    if (session.turnState === 'running' || session.turnState === 'waiting-permission') return true
+    const progress = this.snapshot.promptProgress
+    if (progress?.sessionId === sessionId && progress.phase !== 'failed') return true
+    return (session.latestTranscriptSeq ?? -1) > lastTranscriptSeq(this.snapshot.state, sessionId)
+  }
+
+  private liveTranscriptDelayMs(): number {
+    const capped = Math.min(Math.max(this.liveBackoffIndex, 0), LIVE_BACKOFF_MS.length - 1)
+    return LIVE_BACKOFF_MS[capped] ?? 8_000
+  }
+
+  private waitForLiveTranscript(delayMs = this.liveTranscriptDelayMs()): Promise<void> {
+    return new Promise(resolve => {
+      const timer = window.setTimeout(() => {
+        if (this.liveWait?.timer === timer) this.liveWait = undefined
+        resolve()
+      }, delayMs)
+      this.liveWait = { timer, resolve }
+    })
+  }
+
+  private ensureLiveTranscriptSync(): void {
+    if (this.disposed || this.liveSyncing) return
+    const sessionId = this.snapshot.currentSessionId
+    if (sessionId === undefined || !this.sessionNeedsLiveTranscript(sessionId)) return
+    this.liveSyncing = true
+    void this.runLiveTranscriptLoop()
+      .catch(() => undefined)
+      .finally(() => { this.liveSyncing = false })
+  }
+
+  private async runLiveTranscriptLoop(): Promise<void> {
+    while (!this.disposed) {
+      const sessionId = this.snapshot.currentSessionId
+      if (sessionId === undefined || !this.sessionNeedsLiveTranscript(sessionId)) return
+      const delay = this.liveTranscriptDelayMs()
+      const got = await this.catchupTranscript(sessionId, 'high')
+      if (got) this.liveBackoffIndex = 0
+      else this.liveBackoffIndex = Math.min(this.liveBackoffIndex + 1, LIVE_BACKOFF_MS.length - 1)
+      if (this.disposed || !this.sessionNeedsLiveTranscript(sessionId)) return
+      await this.waitForLiveTranscript(delay)
+    }
+  }
+
   private async readTranscriptPage(params: Record<string, JsonValue>): Promise<RemoteTranscriptPage | undefined> {
     try {
       return parseTranscriptPage(await this.call('transcript.read', params))
@@ -1174,8 +1285,8 @@ export class RemoteAgentStore {
   private async catchupTranscript(
     sessionId: ReturnType<typeof RemoteSessionId>,
     priority: 'high' | 'low',
-  ): Promise<void> {
-    if (this.disposed) return
+  ): Promise<boolean> {
+    if (this.disposed) return false
     const hasLocal = this.sessionHasTranscript(sessionId)
     const afterSeq = hasLocal ? lastTranscriptSeq(this.snapshot.state, sessionId) : undefined
     const page = await this.readTranscriptPage({
@@ -1183,16 +1294,17 @@ export class RemoteAgentStore {
       ...(afterSeq === undefined ? {} : { afterSeq }),
       limit: REMOTE_TRANSCRIPT_PAGE_SIZE,
     })
-    if (page === undefined || this.disposed) return
-    if (page.entries.length === 0) return
+    if (page === undefined || this.disposed) return false
+    if (page.entries.length === 0) return false
     this.applyTranscriptEntries(sessionId, page.entries, { countUnread: priority === 'low' && hasLocal })
     const latest = page.latestSeq
     const localLast = lastTranscriptSeq(this.snapshot.state, sessionId)
     if (priority === 'high' && latest > localLast) {
       await this.catchupTranscript(sessionId, priority)
-      return
+      return true
     }
     if (priority === 'low' && latest > localLast) this.enqueueBackgroundTranscript(sessionId)
+    return true
   }
 
   private async backfillOpenedTranscript(
@@ -1250,14 +1362,26 @@ export class RemoteAgentStore {
       })
   }
 
-  private async reload(currentSessionId = this.snapshot.currentSessionId): Promise<void> {
+  private async reload(preferredSessionId?: ReturnType<typeof RemoteSessionId>): Promise<void> {
+    const serial = ++this.reloadSerial
     const catalog = parseRemoteAgentState(await this.call('state', {}))
-    const state = { ...catalog, transcript: this.snapshot.state.transcript }
+    if (this.disposed || serial !== this.reloadSerial) return
+    const inFlight = this.snapshot.state.sessions.filter(session => {
+      if (catalog.sessions.some(existing => existing.sessionId === session.sessionId)) return false
+      return session.sessionId === this.snapshot.currentSessionId
+        || this.snapshot.promptProgress?.sessionId === session.sessionId
+    })
+    const state = {
+      ...catalog,
+      transcript: this.snapshot.state.transcript,
+      sessions: inFlight.length === 0 ? catalog.sessions : [...catalog.sessions, ...inFlight],
+    }
+    const persisted = readPersistedCurrentSessionId()
     const current = this.snapshot.draftSession !== undefined
       ? undefined
-      : currentSessionId !== undefined && state.sessions.some(session => session.sessionId === currentSessionId)
-        ? currentSessionId
-        : state.sessions.at(0)?.sessionId
+      : [this.snapshot.currentSessionId, preferredSessionId, persisted === undefined ? undefined : RemoteSessionId(persisted)]
+        .find(sessionId => sessionId !== undefined && state.sessions.some(session => session.sessionId === sessionId))
+        ?? state.sessions.at(0)?.sessionId
     const promptProgress = this.reconcilePromptProgress(state)
     this.publish({
       phase: 'ready', state, pending: this.snapshot.pending,
@@ -1307,11 +1431,13 @@ export class RemoteAgentStore {
     const progress = snapshot.promptProgress
     if (progress?.sessionId === undefined) return progress
     const session = state.sessions.find(candidate => candidate.sessionId === progress.sessionId)
-    if (session === undefined) return { ...progress, phase: 'failed', message: '远程会话不存在或尚未同步。' }
+    // The catalog can lag session.start; keep in-flight progress until a later
+    // upsert, reload, or RPC error settles the row.
+    if (session === undefined) return progress
     if (session.turnState === 'failed' || session.channelState === 'lost' || session.channelState === 'closed') {
       return { ...progress, phase: 'failed', message: this.snapshot.error ?? '远程会话未能完成本轮请求。' }
     }
-    if (session.turnState === 'idle') return undefined
+    if (session.turnState === 'idle' || session.turnState === 'stopped') return undefined
     const hasBackendEvent = state.transcript.some(entry =>
       entry.sessionId === progress.sessionId && entry.seq > progress.baselineSeq && entry.role !== 'user')
     if (hasBackendEvent) return undefined
@@ -1370,6 +1496,7 @@ export class RemoteAgentStore {
     if (this.disposed) return
     const next = this.withConnectionPhase(snapshot)
     this.snapshot = next
+    if (next.currentSessionId !== undefined) writePersistedCurrentSessionId(next.currentSessionId)
     if (this.followedSessionId !== next.currentSessionId) {
       this.followedSessionId = next.currentSessionId
       this.followHandler?.(next.currentSessionId)

@@ -236,12 +236,11 @@ export class HoldWorker {
       })
     })
     child.on('exit', (code, signal) => {
-      this.append({
+      this.recordTransportEnd({
         jsonrpc: '2.0', method: '_dsh/transport_closed', params: {
           code: code ?? null, signal: signal ?? null,
         },
       })
-      this.writeState(false)
     })
     createInterface({ input: child.stdout }).on('line', (line) => { this.receiveText(line) })
   }
@@ -262,10 +261,9 @@ export class HoldWorker {
     })
     socket.on('message', (data) => { this.receiveText(rawDataText(data)) })
     socket.on('close', (code, reason) => {
-      this.append({
+      this.recordTransportEnd({
         jsonrpc: '2.0', method: '_dsh/transport_closed', params: { code, reason: reason.toString() },
       })
-      this.writeState(false)
     })
     socket.on('error', (error) => {
       this.append({
@@ -300,7 +298,7 @@ export class HoldWorker {
       }
     }
     const journaled = this.journalFrames(this.coalescer.push(frame))
-    if (request?.method === 'session/prompt' && this.config.backend === 'codex') {
+    if (request?.method === 'session/prompt' && (this.config.backend === 'codex' || this.config.backend === 'claude')) {
       const responseRecord = record ?? {}
       const result = responseRecord['result']
       const resultRecord = result !== null && typeof result === 'object' && !Array.isArray(result) ? result : undefined
@@ -328,6 +326,16 @@ export class HoldWorker {
     } else {
       this.scheduleCoalesceFlush()
     }
+  }
+
+  private recordTransportEnd(frame: JsonValue): void {
+    const journaled = this.journalFrames(frame ? [frame] : [])
+    if (journaled.length > 0) {
+      this.resolveWaiters(journaled[journaled.length - 1]!)
+      this.resolveSeqWaiters()
+    }
+    this.promptActive = false
+    this.writeState(false)
   }
 
   private journalFrames(frames: readonly JsonValue[]): RemoteJournalEvent[] {
@@ -417,6 +425,13 @@ export class HoldWorker {
     process.stderr.write(`threadharbor-hold-journal ${JSON.stringify(payload)}\n`)
   }
 
+  private applyNativeCancel(frame: JsonValue): void {
+    const record = frame !== null && typeof frame === 'object' && !Array.isArray(frame) ? frame : undefined
+    if (record?.['method'] !== 'session/cancel') return
+    this.promptQueue.length = 0
+    this.promptActive = false
+  }
+
   private sendFrame(frame: JsonValue): void {
     const record = frame !== null && typeof frame === 'object' && !Array.isArray(frame) ? frame : undefined
     const id = record?.['id']
@@ -497,9 +512,17 @@ export class HoldWorker {
 
   private page(afterSeq: number, generation?: string): RemoteJournalPage {
     const latestSeq = this.nextSeq - 1
-    const staleAhead = afterSeq > latestSeq
-    const effectiveAfter = staleAhead ? 0 : afterSeq
     const generationChanged = generation !== undefined && generation !== this.config.generation
+    if (afterSeq > latestSeq && !generationChanged) {
+      return {
+        generation: this.config.generation,
+        latestSeq,
+        droppedThrough: this.droppedThrough,
+        gap: false,
+        events: [],
+      }
+    }
+    const effectiveAfter = afterSeq
     const gap = generationChanged || effectiveAfter < this.droppedThrough
     return {
       generation: this.config.generation,
@@ -548,6 +571,7 @@ export class HoldWorker {
         return
       }
       case 'send-frame':
+        this.applyNativeCancel(request.frame)
         this.sendFrame(request.frame)
         this.reply(socket, { ok: true, result: { accepted: true } })
         return

@@ -1,4 +1,5 @@
-import { mkdtemp, rm, stat } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -29,6 +30,7 @@ function options(dataDir: string, overrides: Partial<HostdOptions> = {}): HostdO
     claudeAcpArgs: [],
     dshCommand: '/missing/dsh-jsonrpc-agent',
     dshArgs: [],
+    pythonCommand: '/missing/python',
     dshProvider: 'deepseek-official',
     dshModel: 'test',
     grokCommand: process.execPath,
@@ -49,6 +51,8 @@ afterEach(async () => {
 describe('RemoteAgentHostd inventory', () => {
   it('reports installation and authentication independently without starting backends', async () => {
     vi.stubEnv('GROK_AGENT_SECRET', '')
+    vi.stubEnv('GROK_HOME', '')
+    vi.stubEnv('CODEX_HOME', '')
     vi.stubEnv('CODEX_API_KEY', '')
     vi.stubEnv('OPENAI_API_KEY', '')
     vi.stubEnv('DEEPSEEK_API_KEY', '')
@@ -76,6 +80,31 @@ describe('RemoteAgentHostd inventory', () => {
     }))
     expect((await claude.inventory()).backends.find(entry => entry.backend === 'claude'))
       .toMatchObject({ installed: true, authenticated: true, running: false, sessionCapable: true })
+  })
+
+  it('reports Codex as authenticated from auth.json without launching the CLI', async () => {
+    vi.stubEnv('CODEX_HOME', '')
+    vi.stubEnv('CODEX_API_KEY', '')
+    vi.stubEnv('OPENAI_API_KEY', '')
+    const root = await mkdtemp(join(tmpdir(), 'threadharbor-hostd-codex-auth-'))
+    roots.push(root)
+    const marker = join(root, 'spawned')
+    const cli = join(root, 'codex')
+    await writeFile(cli, ['#!/bin/sh', `printf spawned > '${marker}'`, 'exit 0', ''].join('\n'))
+    await chmod(cli, 0o700)
+    await mkdir(join(root, '.codex'), { mode: 0o700 })
+    await writeFile(join(root, '.codex', 'auth.json'), JSON.stringify({
+      auth_mode: 'chatgpt',
+      tokens: { access_token: 'at', refresh_token: 'rt' },
+    }))
+    const hostd = new RemoteAgentHostd(options(root, {
+      agentConfigHome: root,
+      codexCliCommand: cli,
+      codexCommand: cli,
+    }))
+    expect((await hostd.inventory()).backends.find(entry => entry.backend === 'codex'))
+      .toMatchObject({ installed: true, authenticated: true, running: false })
+    expect(existsSync(marker)).toBe(false)
   })
 
   it('stores a DSH API key in an owner-only file and never returns the secret', async () => {

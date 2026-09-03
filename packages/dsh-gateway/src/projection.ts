@@ -53,6 +53,17 @@ function projectAcp(frame: Record<string, JsonValue>): ProjectedFragment[] {
       turnState: failed ? 'failed' : 'idle',
     }]
   }
+  if (method === '_dsh/transport_closed' || method === '_dsh/transport_error') {
+    const detail = typeof params?.['message'] === 'string' ? params['message']
+      : typeof params?.['signal'] === 'string' ? `signal ${params['signal']}`
+        : params?.['code'] !== undefined && params['code'] !== null ? `code ${String(params['code'])}` : ''
+    return [{
+      role: 'system',
+      kind: 'status',
+      text: detail === '' ? '远程 Agent 已停止' : `远程 Agent 已停止（${detail}）`,
+      turnState: 'failed',
+    }]
+  }
   if (method !== 'session/update') return []
   const update = object(params?.['update'])
   const kind = update?.['sessionUpdate']

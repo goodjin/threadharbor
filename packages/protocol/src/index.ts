@@ -237,7 +237,7 @@ export interface RemoteProjectView {
 /** Browser-visible channel state, independent from turn execution. */
 export type RemoteChannelState = 'connecting' | 'open' | 'reconnecting' | 'closed' | 'lost'
 /** Browser-visible turn state. */
-export type RemoteTurnState = 'idle' | 'running' | 'waiting-permission' | 'failed'
+export type RemoteTurnState = 'idle' | 'running' | 'waiting-permission' | 'stopped' | 'failed'
 /** Remote-session binding state. */
 export type RemoteBindingState = 'active' | 'superseded' | 'lost'
 

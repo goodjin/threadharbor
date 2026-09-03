@@ -58,6 +58,8 @@ export interface HostdOptions {
   readonly claudeAcpArgs: readonly string[]
   readonly dshCommand: string
   readonly dshArgs: readonly string[]
+  /** Test seam; production resolves python3, then python. */
+  readonly pythonCommand?: string
   readonly dshProvider: string
   readonly dshModel: string
   readonly grokCommand: string
@@ -189,6 +191,7 @@ export class RemoteAgentHostd {
       claudeAcpCommand: options.claudeAcpCommand,
       grokCommand: options.grokCommand,
       dshCommand: options.dshCommand,
+      ...(options.pythonCommand === undefined ? {} : { pythonCommand: options.pythonCommand }),
     })
     this.loadSessions()
     this.wsHub = new HostdWsHub(this, {
@@ -601,6 +604,7 @@ export class RemoteAgentHostd {
     mkdirSync(directory, { recursive: true, mode: 0o700 })
     const socketPath = this.createHoldSocket(record)
     const configPath = join(directory, 'config.json')
+    const dshLaunch = record.backend === 'dsh' ? await this.agentManager.resolvedDshLaunch() : undefined
     const config: HoldWorkerConfig = {
       version: 1,
       holdId: record.holdId,
@@ -625,14 +629,23 @@ export class RemoteAgentHostd {
           ? { kind: 'stdio', command: this.options.codexCommand, args: this.options.codexArgs }
           : record.backend === 'claude'
             ? { kind: 'stdio', command: this.options.claudeAcpCommand, args: this.options.claudeAcpArgs }
-            : { kind: 'stdio', command: this.options.dshCommand, args: this.options.dshArgs },
+            : { kind: 'stdio', command: dshLaunch?.command ?? this.options.dshCommand, args: this.options.dshArgs },
     }
     writeJsonAtomic(configPath, config)
     const dshKey = record.backend === 'dsh' ? this.agentManager.dshApiKey() : undefined
+    const env: NodeJS.ProcessEnv = { ...process.env }
+    if (dshKey !== undefined) env['DEEPSEEK_API_KEY'] = dshKey
+    if (
+      record.backend === 'dsh'
+      && (env['DSH_CORDIS_CONFIG'] === undefined || env['DSH_CORDIS_CONFIG'] === '')
+      && dshLaunch?.configPath !== undefined
+    ) {
+      env['DSH_CORDIS_CONFIG'] = dshLaunch.configPath
+    }
     const child = spawn(process.execPath, [this.options.workerScript, configPath], {
       cwd: record.cwd,
       detached: process.platform !== 'win32',
-      env: dshKey === undefined ? process.env : { ...process.env, DEEPSEEK_API_KEY: dshKey },
+      env,
       stdio: ['ignore', 'ignore', 'inherit'],
       windowsHide: true,
     })

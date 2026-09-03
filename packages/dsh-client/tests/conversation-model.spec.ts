@@ -4,7 +4,7 @@ import type { RemoteDirectoryEntry, RemoteSessionView, RemoteTranscriptEntry } f
 import { RemoteSessionId, RemoteTranscriptId } from '@threadharbor/protocol'
 import {
   browsableDirectories, buildTranscriptNodes, conversationStage, isNearScrollBottom, mergeTranscriptEntries,
-  preferredProjectBackend, shouldAutoApprovePermissions, toolDisclosurePresentation,
+  permissionRequestId, preferredProjectBackend, shouldAutoApprovePermissions, toolDisclosurePresentation,
 } from '../src/client/conversation-model.ts'
 
 function entry(
@@ -34,6 +34,17 @@ function session(overrides: Partial<RemoteSessionView> = {}): RemoteSessionView 
 }
 
 describe('remote conversation view model', () => {
+  it('keeps Claude ACP permission id 0 clickable', () => {
+    expect(permissionRequestId({
+      ...entry('1', 'permission', 'permission', '等待权限确认'),
+      requestId: '0',
+    })).toBe('0')
+    expect(permissionRequestId({
+      ...entry('2', 'permission', 'permission', '等待权限确认'),
+      nativeFrame: { jsonrpc: '2.0', id: 0, method: 'session/request_permission', params: {} },
+    })).toBe('0')
+  })
+
   it('keeps RemoteConversation hooks above every early return', () => {
     const source = readFileSync(new URL('../src/client/RemoteConversation.tsx', import.meta.url), 'utf8')
     const fn = source.slice(source.indexOf('export function RemoteConversation'))
@@ -175,6 +186,8 @@ describe('remote conversation view model', () => {
       .toMatchObject({ kind: 'reconnecting', label: '连接异常，正在重试' })
     expect(conversationStage({ session: session({ turnState: 'failed' }), entries: [], now: 0 }))
       .toMatchObject({ kind: 'failed', label: '本轮执行失败' })
+    expect(conversationStage({ session: session({ turnState: 'stopped' }), entries: [], now: 0 }))
+      .toMatchObject({ kind: 'stopped', label: '用户主动停止', state: 'done', visible: true })
   })
 
   it('hides dot-directories from picker rows without changing explicit paths', () => {

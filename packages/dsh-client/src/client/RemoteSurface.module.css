@@ -620,6 +620,12 @@
   font-weight: 600;
 }
 
+.backendBadge[data-state="stopped"] {
+  color: var(--dsw-alias-label-secondary);
+  font-weight: 600;
+  text-transform: none;
+}
+
 @keyframes backendBadgePulse {
   0%, 100% { opacity: 0.55; }
   50% { opacity: 1; }
@@ -1003,7 +1009,7 @@
   flex-direction: column;
 }
 
-.userMessage,
+.userTurn,
 .assistantMessage,
 .reasoningMessage,
 .toolMessage,
@@ -1015,17 +1021,24 @@
   margin: 0 auto 18px;
 }
 
-.userMessage {
+.userTurn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.userBubble {
   width: fit-content;
   max-width: min(680px, 86%);
-  margin-right: 0;
-  padding: 6px 14px 10px;
-  border-radius: 16px 16px 4px 16px;
-  background: var(--dsw-alias-bg-layer-2);
+  padding: 8px 14px 10px;
+  border-radius: 18px 18px 6px 18px;
+  background: var(--dsw-alias-bg-layer-3);
+  color: var(--dsw-alias-label-primary);
   line-height: 1.55;
 }
 
-.userMessage > .entryTimestamp {
+.userBubble > .entryTimestamp {
   display: block;
   margin-bottom: 2px;
   color: var(--dsw-alias-label-tertiary);
@@ -1034,6 +1047,10 @@
 }
 
 .assistantMessage {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
   padding: 1px 2px;
   line-height: 1.65;
 }
@@ -1046,8 +1063,50 @@
   letter-spacing: 0.04em;
 }
 
-.assistantMessage > :first-child,
-.assistantMessage > :last-child,
+.messageActions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.userTurn:hover .messageActions,
+.assistantMessage:hover .messageActions,
+.messageActions:focus-within {
+  opacity: 1;
+}
+
+.messageAction {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.messageAction:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.messageAction:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.messageAction[data-copied] {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.assistantMessage > .entryTimestamp + *,
 .reasoningBody > :first-child,
 .reasoningBody > :last-child {
   margin-top: 0;
@@ -1942,7 +2001,8 @@
 }
 
 @media (hover: none) {
-  .treeRowActions {
+  .treeRowActions,
+  .messageActions {
     opacity: 1;
   }
 }

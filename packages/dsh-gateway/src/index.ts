@@ -236,6 +236,11 @@ function displayError(error: unknown): string {
   return message.length <= 500 ? message : `${message.slice(0, 499)}…`
 }
 
+function holdUnreachable(error: unknown): boolean {
+  return /ECONNREFUSED|ENOENT|EPIPE|ENOTSOCK|fetch failed|process is not running|did not start/i
+    .test(errorMessage(error))
+}
+
 function operationFailureDetail(kind: RemoteOperationView['kind'], error: unknown): string {
   const message = errorMessage(error)
   if (/timed out|timeout/i.test(message)) return '操作超时，请检查远端主机状态后重试。'
@@ -278,6 +283,7 @@ export class RemoteAgentGateway extends Service {
   private readonly sshManager: SshManager
   private readonly wsBroadcaster = new WsBroadcaster()
   private readonly followedSyncing = new Set<string>()
+  private readonly journalApply = new Map<string, Promise<void>>()
   private hostdConnections!: HostdConnectionPool
   private syncStopped = false
 
@@ -1188,30 +1194,22 @@ export class RemoteAgentGateway extends Service {
     const frame = {
       jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: binding.nativeSessionId ?? session.sessionId },
     }
+    // User-initiated stop must leave the waiting UI immediately. Native cancel
+    // can be a no-op (Claude already end_turn) or hang on a stuck hold.
+    if (session.turnState === 'running' || session.turnState === 'waiting-permission') {
+      await this.concludeTurn(session, 'stopped', '用户主动停止')
+    }
     try {
-      const result = await this.callSessionHostd(session, 'session.cancel', { sessionId: session.sessionId, frame })
-      const current = this.requireTables().sessions.get(session.sessionId)
-      if (current !== undefined && (current.turnState === 'running' || current.turnState === 'waiting-permission')) {
-        const stopped: RemoteSessionView = {
-          ...current, turnState: 'idle', updatedAt: new Date().toISOString(),
-        }
-        await this.requireTables().sessions.put(session.sessionId, stopped)
-        this.broadcastSessionView(stopped)
-      }
-      return result
+      return await this.callSessionHostd(session, 'session.cancel', { sessionId: session.sessionId, frame })
     } catch (error) {
-      // A failed stop leaves the native outcome unknown. Do not keep presenting
-      // a definitive "running" state forever when its control channel failed.
       const current = this.requireTables().sessions.get(session.sessionId)
-      if (current !== undefined && (current.turnState === 'running' || current.turnState === 'waiting-permission')) {
-        const failed: RemoteSessionView = {
+      if (current !== undefined && current.channelState === 'open') {
+        await this.requireTables().sessions.put(session.sessionId, {
           ...current,
-          channelState: current.channelState === 'open' ? 'reconnecting' : current.channelState,
-          turnState: 'failed',
+          channelState: 'reconnecting',
           updatedAt: new Date().toISOString(),
-        }
-        await this.requireTables().sessions.put(session.sessionId, failed)
-        this.broadcastSessionView(failed)
+        })
+        this.broadcastSessionView({ ...current, channelState: 'reconnecting', updatedAt: new Date().toISOString() })
       }
       throw error
     }
@@ -1223,10 +1221,31 @@ export class RemoteAgentGateway extends Service {
     const outcome = params['outcome']
     if (!isJsonValue(outcome)) throw new TypeError('outcome must be JSON')
     const id = Number.isSafeInteger(Number(requestId)) ? Number(requestId) : requestId
-    return await this.callSessionHostd(session, 'session.permission', {
+    const result = await this.callSessionHostd(session, 'session.permission', {
       sessionId: session.sessionId,
       frame: { jsonrpc: '2.0', id, result: { outcome } },
     })
+    this.ensureFollowedSync(session.sessionId)
+    await this.catchupSessionJournal(session.sessionId)
+    return result
+  }
+
+  /** Pull any journal frames that arrived after a control RPC so the UI can leave waiting-permission. */
+  private async catchupSessionJournal(sessionId: ReturnType<typeof RemoteSessionId>): Promise<void> {
+    const current = this.requireTables().sessions.get(sessionId)
+    const binding = current?.binding
+    if (current === undefined || binding === undefined || binding.state !== 'active') return
+    try {
+      const page = await this.callSessionHostd(current, 'events.read', {
+        sessionId: current.sessionId,
+        afterSeq: binding.lastSeq,
+        generation: binding.generation,
+        limit: MAX_JOURNAL_EVENTS_PER_SYNC,
+      }) as unknown as RemoteJournalPage
+      await this.applyJournalPage(current, binding, page)
+    } catch (error) {
+      if (holdUnreachable(error)) throw error
+    }
   }
 
   private async syncEvents(params: Record<string, JsonValue>): Promise<RemoteAgentState> {
@@ -1243,6 +1262,13 @@ export class RemoteAgentGateway extends Service {
       }) as unknown as RemoteJournalPage
       await this.applyJournalPage(session, binding, page)
     } catch (error) {
+      if (holdUnreachable(error) && (session.turnState === 'running' || session.turnState === 'waiting-permission')) {
+        await this.concludeTurn(session, 'failed', '远程 Agent 进程已停止')
+        process.stderr.write(
+          `threadharbor-gateway: turn failed session=${session.sessionId} reason=hold-unreachable ${errorMessage(error)}\n`,
+        )
+        return this.state()
+      }
       await this.requireTables().sessions.put(session.sessionId, {
         ...session, channelState: 'reconnecting', updatedAt: new Date().toISOString(),
       })
@@ -1254,6 +1280,26 @@ export class RemoteAgentGateway extends Service {
   /** Apply one journal page (catchup or live push) to the durable projection.
    *  Shared by `syncEvents` (HTTP catchup) and the WS push listener. */
   private async applyJournalPage(
+    session: RemoteSessionView,
+    binding: NonNullable<RemoteSessionView['binding']>,
+    page: RemoteJournalPage,
+  ): Promise<number> {
+    const previous = this.journalApply.get(session.sessionId) ?? Promise.resolve()
+    let release: () => void = () => undefined
+    const gate = new Promise<void>(resolve => { release = resolve })
+    this.journalApply.set(session.sessionId, previous.then(() => gate, () => gate))
+    await previous.catch(() => undefined)
+    try {
+      const latest = this.requireTables().sessions.get(session.sessionId) ?? session
+      const currentBinding = latest.binding ?? binding
+      if (currentBinding.state !== 'active') return currentBinding.lastSeq
+      return await this.projectJournalPage(latest, currentBinding, page)
+    } finally {
+      release()
+    }
+  }
+
+  private async projectJournalPage(
     session: RemoteSessionView,
     binding: NonNullable<RemoteSessionView['binding']>,
     page: RemoteJournalPage,
@@ -1273,7 +1319,9 @@ export class RemoteAgentGateway extends Service {
       role: 'system', kind: 'status', text: `远程日志在序号 ${page.droppedThrough} 前已截断`,
     })
     let turnState = session.turnState
-    const events = page.events.slice(0, MAX_JOURNAL_EVENTS_PER_SYNC)
+    const events = page.events
+      .filter(event => event.seq > binding.lastSeq)
+      .slice(0, MAX_JOURNAL_EVENTS_PER_SYNC)
     for (const event of events) {
       const child = nativeChildUpdate(event.frame)
       if (child !== undefined) await this.upsertNativeChild(session, child)
@@ -1301,9 +1349,18 @@ export class RemoteAgentGateway extends Service {
     }
     await this.appendTranscriptBatch(session.sessionId, transcript)
     const processedThrough = events.at(-1)?.seq ?? binding.lastSeq
+    const latest = this.requireTables().sessions.get(session.sessionId)
+    if (latest?.turnState === 'stopped' && turnState !== 'failed') {
+      // User-initiated stop is a durable marker until the next prompt.
+      // A later native end_turn must not rewrite it back to idle/running.
+      turnState = 'stopped'
+    } else if (latest !== undefined && (latest.turnState === 'idle' || latest.turnState === 'failed')
+      && (turnState === 'running' || turnState === 'waiting-permission')) {
+      turnState = latest.turnState
+    }
     const updated: RemoteSessionView = {
       ...session,
-      channelState: 'open',
+      channelState: latest?.channelState === 'lost' ? 'lost' : 'open',
       turnState,
       binding: { ...binding, lastSeq: processedThrough },
       updatedAt: new Date().toISOString(),
@@ -1363,6 +1420,29 @@ export class RemoteAgentGateway extends Service {
     await tables.sessions.put(sessionId, child)
     const state = this.requireGlobal().get()
     await this.requireGlobal().set({ ...state, sessionIds: [...state.sessionIds, sessionId] })
+  }
+
+  private async concludeTurn(
+    session: RemoteSessionView,
+    turnState: 'idle' | 'stopped' | 'failed',
+    text: string,
+  ): Promise<void> {
+    const current = this.requireTables().sessions.get(session.sessionId) ?? session
+    if (current.turnState !== 'running' && current.turnState !== 'waiting-permission') return
+    const next: RemoteSessionView = {
+      ...current,
+      turnState,
+      channelState: turnState === 'failed' && current.channelState === 'open' ? 'reconnecting' : current.channelState,
+      updatedAt: new Date().toISOString(),
+    }
+    await this.requireTables().sessions.put(session.sessionId, next)
+    this.broadcastSessionView(next)
+    const transcriptId = RemoteTranscriptId(`turn:${session.sessionId}:${turnState}:${current.binding?.generation ?? 'none'}:${current.binding?.lastSeq ?? 0}`)
+    if (this.requireTables().transcript.get(transcriptId) === undefined) {
+      await this.appendTranscript(session.sessionId, {
+        transcriptId, role: 'system', kind: 'status', text,
+      })
+    }
   }
 
   private withTranscriptHead(
@@ -1437,14 +1517,17 @@ export class RemoteAgentGateway extends Service {
     inputs: readonly TranscriptInput[],
   ): Promise<readonly RemoteTranscriptEntry[]> {
     if (inputs.length === 0) return []
+    const tables = this.requireTables()
+    const novel = inputs.filter(input => tables.transcript.get(input.transcriptId) === undefined)
+    if (novel.length === 0) return []
     const global = this.requireGlobal()
     const state = global.get()
     const firstSeq = state.nextTranscriptSeq[sessionId] ?? 0
     const createdAt = new Date().toISOString()
-    const entries = inputs.map((input, index): RemoteTranscriptEntry => ({
+    const entries = novel.map((input, index): RemoteTranscriptEntry => ({
       ...input, sessionId, seq: firstSeq + index, createdAt,
     }))
-    for (const entry of entries) await this.requireTables().transcript.put(entry.transcriptId, entry)
+    for (const entry of entries) await tables.transcript.put(entry.transcriptId, entry)
     const excess = [...this.requireTables().transcript.entries()]
       .filter(([, candidate]) => candidate.sessionId === sessionId)
       .sort((left, right) => left[1].seq - right[1].seq)
@@ -1507,8 +1590,14 @@ export class RemoteAgentGateway extends Service {
         }) as unknown as RemoteJournalPage
         await this.applyJournalPage(session, binding, catchup)
         if (catchup.events.length >= MAX_JOURNAL_EVENTS_PER_SYNC) continue
-      } catch {
-        // Catchup failed; rely on the WS push once it lands.
+      } catch (error) {
+        if (holdUnreachable(error)) {
+          await this.concludeTurn(session, 'failed', '远程 Agent 进程已停止')
+          process.stderr.write(
+            `threadharbor-gateway: turn failed session=${sessionId} reason=hold-unreachable ${errorMessage(error)}\n`,
+          )
+          break
+        }
       }
 
       if (!this.sessionNeedsSync(sessionId)) break
@@ -1574,6 +1663,24 @@ export class RemoteAgentGateway extends Service {
             timer.unref?.()
           })
           await flushQueue()
+          const waiting = this.requireTables().sessions.get(sessionId)
+          // Live journal.page already covers a running turn. Re-reading the
+          // journal here races the push path and re-projects the same seqs.
+          // waiting-permission still catchups because some ACP adapters stall
+          // the wait-page until the permission RPC returns.
+          if (waiting?.turnState === 'waiting-permission') {
+            try {
+              await this.catchupSessionJournal(sessionId)
+            } catch (error) {
+              if (holdUnreachable(error)) {
+                await this.concludeTurn(waiting, 'failed', '远程 Agent 进程已停止')
+                process.stderr.write(
+                  `threadharbor-gateway: turn failed session=${sessionId} reason=hold-unreachable ${errorMessage(error)}\n`,
+                )
+                lost = true
+              }
+            }
+          }
         }
       } finally {
         unsubscribe()

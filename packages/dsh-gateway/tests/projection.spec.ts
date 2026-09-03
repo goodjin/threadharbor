@@ -18,6 +18,11 @@ describe('projectNativeFrame', () => {
     expect(projectNativeFrame('codex', {
       jsonrpc: '2.0', method: '_x.ai/session/prompt_complete', params: { stopReason: 'end_turn' },
     })).toEqual([{ role: 'system', kind: 'status', text: '远程轮次完成', turnState: 'idle' }])
+    expect(projectNativeFrame('claude', {
+      jsonrpc: '2.0', method: '_dsh/transport_closed', params: { code: null, signal: 'SIGTERM' },
+    })).toEqual([{
+      role: 'system', kind: 'status', text: '远程 Agent 已停止（signal SIGTERM）', turnState: 'failed',
+    }])
   })
 
   it('keeps dsh session events out of SessionEventMap while deriving display fragments', () => {

@@ -1,17 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RemoteHostId, RemoteProjectId, RemoteSessionId } from '@threadharbor/protocol'
-import { RemoteAgentStore, backendInventoryState, describeHostConnectFailure, hostConnectionLabel, hostDeployment, parseAgentConfigDocument, parseHiddenItems, parseInstallPlan, parseOperation, parseRemoteAgentState } from '../src/client/store.ts'
+import { RemoteAgentStore, backendInventoryState, describeAgentInstallFailure, describeHostConnectFailure, hostConnectionLabel, hostDeployment, parseAgentConfigDocument, parseHiddenItems, parseInstallPlan, parseOperation, parseRemoteAgentState } from '../src/client/store.ts'
 
 const EMPTY = { pollIntervalMs: 60_000, hosts: [], projects: [], sessions: [], transcript: [], operations: [] }
 
 beforeEach(() => {
   const session = new Map<string, string>()
+  const local = new Map<string, string>()
   vi.stubGlobal('window', {
     setTimeout: globalThis.setTimeout.bind(globalThis),
     clearTimeout: globalThis.clearTimeout.bind(globalThis),
     sessionStorage: {
       getItem: (key: string) => session.get(key) ?? null,
       setItem: (key: string, value: string) => { session.set(key, value) },
+    },
+    localStorage: {
+      getItem: (key: string) => local.get(key) ?? null,
+      setItem: (key: string, value: string) => { local.set(key, value) },
+      removeItem: (key: string) => { local.delete(key) },
     },
   })
 })
@@ -113,6 +119,44 @@ describe('RemoteAgentStore', () => {
     }
   })
 
+  it('restores the last selected session instead of jumping to the first catalog row', async () => {
+    const local = new Map<string, string>([['dsh.remote-agent.current-session-id', 's-keep']])
+    vi.stubGlobal('window', {
+      setTimeout: globalThis.setTimeout.bind(globalThis),
+      clearTimeout: globalThis.clearTimeout.bind(globalThis),
+      sessionStorage: { getItem: () => null, setItem: () => undefined },
+      localStorage: {
+        getItem: (key: string) => local.get(key) ?? null,
+        setItem: (key: string, value: string) => { local.set(key, value) },
+      },
+    })
+    const sessions = [
+      {
+        sessionId: 's-first', projectId: 'p', title: 'old', backend: 'codex',
+        channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+        binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+      },
+      {
+        sessionId: 's-keep', projectId: 'p', title: 'keep', backend: 'grok',
+        channelState: 'open', turnState: 'idle', createdAt: 'c', updatedAt: 'd',
+        binding: { holdId: 'hold-2', generation: 'g2', state: 'active', lastSeq: 0 },
+      },
+    ]
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string }
+      return Response.json({ id: body.id, ok: true, result: { ...EMPTY, sessions } })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      expect(store.getSnapshot().currentSessionId).toBe('s-keep')
+      await store.selectSession(RemoteSessionId('s-first'))
+      expect(local.get('dsh.remote-agent.current-session-id')).toBe('s-first')
+    } finally {
+      store.dispose()
+    }
+  })
+
   it('selects an existing session immediately without a blocking attach round-trip', async () => {
     const state = {
       ...EMPTY,
@@ -189,6 +233,95 @@ describe('RemoteAgentStore', () => {
       await vi.waitFor(() => {
         expect(store.getSnapshot().state.transcript.map(entry => entry.seq)).toEqual([0, 1, 2, 3])
       })
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('keeps catching up a running opened session after the first transcript page is empty', async () => {
+    const session = {
+      sessionId: 's-live', projectId: 'p', title: 'work', backend: 'codex',
+      channelState: 'open', turnState: 'running', createdAt: 'a', updatedAt: 'b',
+      latestTranscriptSeq: 1,
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 4 },
+    }
+    let reads = 0
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string; params: Record<string, unknown> }
+      if (body.method === 'transcript.read') {
+        reads += 1
+        const entries = reads === 1
+          ? []
+          : [{
+            transcriptId: 't1', sessionId: 's-live', seq: 1, role: 'assistant', kind: 'message',
+            text: 'late', createdAt: 'c',
+          }]
+        return Response.json({
+          id: body.id, ok: true,
+          result: {
+            sessionId: 's-live', entries, afterSeq: -1, fromSeq: entries[0]?.seq ?? -1,
+            toSeq: entries.at(-1)?.seq ?? -1, latestSeq: reads === 1 ? -1 : 1, hasMore: false,
+          },
+        })
+      }
+      return Response.json({
+        id: body.id, ok: true,
+        result: { ...EMPTY, pollIntervalMs: 20, sessions: [session] },
+      })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      expect(store.getSnapshot().state.transcript).toEqual([])
+      await vi.waitFor(() => {
+        expect(store.getSnapshot().state.transcript.map(entry => entry.text)).toEqual(['late'])
+      })
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('backs off transcript.read while a prompt is running and pages stay empty', async () => {
+    const delays: number[] = []
+    const sessionStore = new Map<string, string>()
+    vi.stubGlobal('window', {
+      setTimeout: (handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+        if (typeof timeout === 'number' && timeout >= 250) delays.push(timeout)
+        return globalThis.setTimeout(handler, timeout, ...args)
+      },
+      clearTimeout: globalThis.clearTimeout.bind(globalThis),
+      sessionStorage: {
+        getItem: (key: string) => sessionStore.get(key) ?? null,
+        setItem: (key: string, value: string) => { sessionStore.set(key, value) },
+      },
+    })
+    const session = {
+      sessionId: 's-backoff', projectId: 'p', title: 'work', backend: 'codex',
+      channelState: 'open', turnState: 'running', createdAt: 'a', updatedAt: 'b',
+      latestTranscriptSeq: -1,
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+    }
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      if (body.method === 'transcript.read') {
+        return Response.json({
+          id: body.id, ok: true,
+          result: {
+            sessionId: 's-backoff', entries: [], afterSeq: -1, fromSeq: -1, toSeq: -1, latestSeq: -1, hasMore: false,
+          },
+        })
+      }
+      return Response.json({
+        id: body.id, ok: true,
+        result: { ...EMPTY, sessions: [session] },
+      })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      await vi.waitFor(() => {
+        expect(delays.slice(0, 4)).toEqual([250, 500, 1000, 2000])
+      }, { timeout: 8_000 })
     } finally {
       store.dispose()
     }
@@ -389,9 +522,140 @@ describe('RemoteAgentStore', () => {
 
       expect(store.getSnapshot().draftSession).toBeUndefined()
       expect(store.getSnapshot().currentSessionId).toBe('s-new')
+      expect(store.getSnapshot().state.sessions.map(entry => entry.sessionId)).toEqual(['s-new'])
       expect(calls.map(call => call.method).filter(method => method !== 'transcript.read'))
-        .toEqual(['state', 'session.start', 'state', 'session.prompt', 'state'])
+        .toEqual(['state', 'session.start', 'session.prompt', 'state'])
       expect(calls[1]?.params).toMatchObject({ projectId: 'p', backend: 'grok', title: 'first question' })
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('inserts a newly created session from session.view.changed without reloading', async () => {
+    const existing = {
+      sessionId: 's-old', projectId: 'p', title: 'work', backend: 'codex',
+      channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+    }
+    const created = {
+      sessionId: 's-new', projectId: 'p', title: 'first question', backend: 'grok',
+      channelState: 'connecting', turnState: 'idle', createdAt: 'c', updatedAt: 'd',
+    }
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      calls.push(body.method)
+      return Response.json({ id: body.id, ok: true, result: { ...EMPTY, sessions: [existing] } })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      store.startSessionDraft(RemoteProjectId('p'))
+      store.consume({ type: 'session.view.changed', session: created })
+
+      expect(calls.filter(method => method !== 'transcript.read')).toEqual(['state'])
+      expect(store.getSnapshot().draftSession).toEqual({ projectId: 'p', title: '新会话' })
+      expect(store.getSnapshot().state.sessions.map(entry => entry.sessionId)).toEqual(['s-old', 's-new'])
+      expect(store.getSnapshot().state.sessions[1]).toMatchObject({ sessionId: 's-new', channelState: 'connecting' })
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('keeps the created session visible while waiting for the remote binding', async () => {
+    const connecting = {
+      sessionId: 's-new', projectId: 'p', title: 'first question', backend: 'grok',
+      channelState: 'connecting', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+    }
+    const opened = {
+      ...connecting,
+      channelState: 'open',
+      turnState: 'running',
+      updatedAt: 'c',
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+    }
+    let created = false
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      if (body.method === 'session.start') {
+        created = true
+        return Response.json({ id: body.id, ok: true, result: connecting })
+      }
+      return Response.json({
+        id: body.id,
+        ok: true,
+        result: body.method === 'session.prompt' ? {} : { ...EMPTY, sessions: created ? [opened] : [] },
+      })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      store.startSessionDraft(RemoteProjectId('p'))
+      const pending = store.promptSessionDraft('grok', 'first question')
+      await vi.waitFor(() => {
+        expect(store.getSnapshot().currentSessionId).toBe('s-new')
+      })
+      expect(store.getSnapshot().draftSession).toBeUndefined()
+      expect(store.getSnapshot().state.sessions).toEqual([expect.objectContaining({
+        sessionId: 's-new', channelState: 'connecting',
+      })])
+
+      store.consume({
+        type: 'transcript.append',
+        sessionId: 's-other',
+        seq: 1,
+        entry: {
+          transcriptId: 't-other', sessionId: 's-other', seq: 1, role: 'assistant', kind: 'message',
+          text: 'unrelated', createdAt: 'a',
+        },
+      })
+      expect(store.getSnapshot().state.sessions[0]?.channelState).toBe('connecting')
+
+      store.consume({ type: 'session.view.changed', session: opened })
+      await pending
+      expect(store.getSnapshot().draftSession).toBeUndefined()
+      expect(store.getSnapshot()).toMatchObject({
+        currentSessionId: 's-new',
+        state: { sessions: [{ sessionId: 's-new', channelState: 'open' }] },
+      })
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('does not let a stale catalog reload drop the in-flight new session', async () => {
+    const existing = {
+      sessionId: 's-old', projectId: 'p', title: 'work', backend: 'codex',
+      channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+    }
+    const created = {
+      sessionId: 's-new', projectId: 'p', title: 'first question', backend: 'grok',
+      channelState: 'connecting', turnState: 'idle', createdAt: 'c', updatedAt: 'd',
+    }
+    let releaseStale: (() => void) | undefined
+    const stale = new Promise<void>(resolve => { releaseStale = resolve })
+    let stateCalls = 0
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      if (body.method === 'state') {
+        stateCalls += 1
+        if (stateCalls === 2) await stale
+        return Response.json({ id: body.id, ok: true, result: { ...EMPTY, sessions: [existing] } })
+      }
+      return Response.json({ id: body.id, ok: true, result: { entries: [], latestSeq: -1, fromSeq: 0, toSeq: -1, hasMore: false } })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      store.consume({ type: 'host.changed', host: { hostId: 'h' } })
+      store.consume({ type: 'session.view.changed', session: created })
+      await store.selectSession(RemoteSessionId('s-new'))
+      expect(store.getSnapshot().state.sessions.map(entry => entry.sessionId)).toEqual(['s-old', 's-new'])
+      releaseStale?.()
+      await vi.waitFor(() => { expect(stateCalls).toBe(2) })
+      expect(store.getSnapshot().state.sessions.map(entry => entry.sessionId)).toEqual(['s-old', 's-new'])
+      expect(store.getSnapshot().currentSessionId).toBe('s-new')
     } finally {
       store.dispose()
     }
@@ -471,6 +735,11 @@ describe('RemoteAgentStore', () => {
         session: { ...session, turnState: 'idle', updatedAt: 'c' },
       })
       expect(store.getSnapshot().state.sessions[0]?.turnState).toBe('idle')
+      store.consume({
+        type: 'session.view.changed',
+        session: { ...session, turnState: 'stopped', updatedAt: 'd' },
+      })
+      expect(store.getSnapshot().state.sessions[0]?.turnState).toBe('stopped')
     } finally {
       store.dispose()
     }
@@ -626,6 +895,10 @@ describe('RemoteAgentStore', () => {
     expect(describeHostConnectFailure('fetch failed')).toBe('无法连接到 hostd。请确认远端服务已启动后再试。')
     expect(describeHostConnectFailure('Error: Failed to fetch')).toBe('无法连接到 hostd。请确认远端服务已启动后再试。')
     expect(describeHostConnectFailure('hostd response id did not match request')).toBe('hostd response id did not match request')
+    expect(describeAgentInstallFailure('hostd does not implement method agent.install.plan'))
+      .toBe('当前 hostd 过旧，还不支持 Agent 部署。请先在主机设置里升级 hostd，再点部署。')
+    expect(describeAgentInstallFailure('DSH installer exited with status 1: error: externally-managed-environment'))
+      .toBe('这台主机的 Python 由系统管理（例如 Homebrew），旧版 hostd 的 pip install --user 会被拒绝。请先升级并重启 hostd，再点部署。')
   })
 
   it('retries a host connection and fails when inventory is still unreachable', async () => {

@@ -22,7 +22,7 @@ export interface PromptProgressView {
 
 /** One user-visible conversation stage rendered in both the header and transcript tail. */
 export interface ConversationStage {
-  readonly kind: 'idle' | 'connecting' | 'sending' | 'waiting' | 'thinking' | 'tool' | 'responding' | 'permission' | 'reconnecting' | 'timeout' | 'failed'
+  readonly kind: 'idle' | 'connecting' | 'sending' | 'waiting' | 'thinking' | 'tool' | 'responding' | 'permission' | 'reconnecting' | 'timeout' | 'stopped' | 'failed'
   readonly label: string
   readonly detail: string
   readonly state: 'done' | 'ongoing' | 'warning' | 'error'
@@ -85,6 +85,15 @@ export function conversationStage(input: {
   }
   if (session.turnState === 'failed') {
     return { kind: 'failed', label: '本轮执行失败', detail: error ?? '远程 Agent 未能完成本轮请求。', state: 'error', visible: true }
+  }
+  if (session.turnState === 'stopped') {
+    return {
+      kind: 'stopped',
+      label: '用户主动停止',
+      detail: '本轮已由你停止，可以继续发送新的请求。',
+      state: 'done',
+      visible: true,
+    }
   }
   if (session.turnState === 'waiting-permission') {
     return { kind: 'permission', label: '等待你的确认', detail: '远程 Agent 需要权限后才能继续。', state: 'warning', visible: true }
@@ -211,6 +220,17 @@ export function buildTranscriptNodes(
 /** Whether the composer approval dropdown should answer permission requests without a click. */
 export function shouldAutoApprovePermissions(approvalChoice: string | undefined): boolean {
   return approvalChoice === 'auto'
+}
+
+/** JSON-RPC id for a permission card, including numeric `0` from Claude ACP. */
+export function permissionRequestId(entry: RemoteTranscriptEntry): string | undefined {
+  if (entry.requestId !== undefined && entry.requestId !== '') return entry.requestId
+  const frame = entry.nativeFrame
+  if (frame === undefined || frame === null || typeof frame !== 'object' || Array.isArray(frame)) return undefined
+  const id = frame['id']
+  if (typeof id === 'string' && id.trim() !== '') return id
+  if (typeof id === 'number' && Number.isFinite(id)) return String(id)
+  return undefined
 }
 
 /** Directory-picker rows omit dot-directories; a typed path is still accepted by fs.list. */

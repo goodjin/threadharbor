@@ -49,7 +49,7 @@ dsh --profile web
 4. Web 服务上传与自身版本一致的自包含 hostd artifact 到 `~/.local/share/threadharbor/current`，优先启用 `systemd --user`；没有 systemd 时使用 detached fallback。
 5. Web 服务持有 SSH loopback tunnel。网页断开不会关闭 tunnel、hostd、登录进程或 Agent hold。
 
-远程主机部署 hostd 需要 Node.js 22 或更新版本。未安装的 Agent 可在主机设置中点部署，由 hostd 在该主机上执行官方 `npm install -g` / `pip install --user`，安装到 npm 与 pip 自己的目录。ThreadHarbor 不使用 `sudo`，也不再打包 Agent 二进制。详细配置见 [docs/remote-hosts.zh.md](docs/remote-hosts.zh.md)。
+远程主机部署 hostd 需要 Node.js 22 或更新版本。未安装的 Agent 可在主机设置中点部署，由 hostd 在该主机上执行官方 `npm install -g` / `pip install --user --break-system-packages`，安装到 npm 与 pip 自己的目录。ThreadHarbor 不使用 `sudo`，也不再打包 Agent 二进制。详细配置见 [docs/remote-hosts.zh.md](docs/remote-hosts.zh.md)。
 
 ## 仓库结构
 

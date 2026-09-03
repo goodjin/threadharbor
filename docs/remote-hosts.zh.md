@@ -44,12 +44,12 @@ hold-worker 会输出低频 JSON line 指标，前缀为 `threadharbor-hold-jour
 
 ## Agent 发现与部署
 
-hostd 从服务 `PATH`、当前 Node 的 `npm prefix -g`/bin，以及 Python user scripts 发现下面的命令。未安装时，主机设置会显示部署按钮；确认后 hostd 在该主机上执行官方安装命令，安装到 npm/pip 自己的目录，而不是 ThreadHarbor 另开前缀：
+hostd 从服务 `PATH`、当前 Node 的 `npm prefix -g`/bin、Python user scripts，以及 `deepseek_harness_runtime.bundled_runtime_path()` 发现下面的命令。未安装时，主机设置会显示部署按钮；确认后 hostd 在该主机上执行官方安装命令，安装到 npm/pip 自己的目录，而不是 ThreadHarbor 另开前缀：
 
 - Codex：`npm install -g @openai/codex@0.150.1 @agentclientprotocol/codex-acp@1.6.2`
 - Grok：`npm install -g @xai-official/grok@1.0.5`
 - Claude Code：`npm install -g @anthropic-ai/claude-code@2.1.251 @agentclientprotocol/claude-agent-acp@0.69.0`
-- DSH：`python3 -m pip install --user --upgrade deepseek-harness-runtime-bin==0.1.1rc1`
+- DSH：`python3 -m pip install --user --upgrade --break-system-packages deepseek-harness-runtime-bin==0.1.1rc1`（`--break-system-packages` 用于 Homebrew 等 PEP 668 环境，软件仍写入 Python user scripts，不改系统 Python）
 
 远端管理员也可以按各 Agent 的官方方式自行安装。hostd 发现的命令：
 
@@ -60,7 +60,7 @@ hostd 从服务 `PATH`、当前 Node 的 `npm prefix -g`/bin，以及 Python use
 
 SSH 自动部署为 hostd 配置以下通用路径：Node.js 可执行文件所在目录、`~/.local/bin`、`~/bin`、`/opt/homebrew/bin`、`/usr/local/bin`、`/usr/bin` 和 `/bin`。使用其他位置时，应把命令链接到这些目录之一；直接启动 hostd 时也可以通过 `--codex-cli-command`、`--codex-command`、`--grok-command`、`--claude-command`、`--claude-acp-command` 和 `--dsh-command` 指定绝对路径。
 
-`dsh-jsonrpc-agent` 还需要配置文件路径。远端可设置 `DSH_CORDIS_CONFIG`，或在直接启动 hostd 时传入 `--dsh-arg <cordis.yml>`。打开主机后，每个 backend 会显示 installed、authenticated、running 和 session-capable 状态；重新安装或调整 `PATH` 后刷新库存即可。
+`dsh-jsonrpc-agent` 还需要配置文件路径。远端可设置 `DSH_CORDIS_CONFIG`，或在直接启动 hostd 时传入 `--dsh-arg <cordis.yml>`。打开主机后，每个 backend 会显示 installed、authenticated、running 和 session-capable 状态；重新安装或调整 `PATH` 后刷新库存即可。Codex / Grok 的登录状态来自本机 `auth.json` 或环境变量中的 API key，刷新库存时不会启动 CLI。
 
 ## Agent 配置
 

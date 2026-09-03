@@ -40,6 +40,7 @@ function sessionBadge(session: RemoteSessionView, attaching: boolean): string {
   if (session.channelState === 'connecting') return '建立远端…'
   if (session.channelState === 'lost' || session.turnState === 'failed') return '建立失败'
   if (session.channelState === 'reconnecting') return '重连中…'
+  if (session.turnState === 'stopped') return '已停止'
   return session.backend
 }
 
@@ -178,7 +179,9 @@ function SessionRow({
         <span
           className={css.backendBadge}
           data-state={session.channelState === 'lost' || session.turnState === 'failed'
-            ? 'failed' : session.channelState === 'connecting' ? 'connecting' : undefined}
+            ? 'failed'
+            : session.channelState === 'connecting' ? 'connecting'
+              : session.turnState === 'stopped' ? 'stopped' : undefined}
         >{sessionBadge(session, session.sessionId === attachingSessionId)}</span>
       </button>
       <button

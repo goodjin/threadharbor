@@ -3,9 +3,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import {
-  accessSync, chmodSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync,
+  accessSync, chmodSync, constants, existsSync, mkdirSync, readFileSync, statSync, writeFileSync,
 } from 'node:fs'
-import { delimiter, dirname, join } from 'node:path'
+import { delimiter, dirname, join, resolve } from 'node:path'
 import {
   RemoteAuthFlowId,
   type JsonValue,
@@ -40,6 +40,15 @@ const CODEX_PACKAGES = ['@openai/codex@0.150.1', '@agentclientprotocol/codex-acp
 const GROK_PACKAGES = ['@xai-official/grok@1.0.5'] as const
 const CLAUDE_PACKAGES = ['@anthropic-ai/claude-code@2.1.251', '@agentclientprotocol/claude-agent-acp@0.69.0'] as const
 const DSH_PIP_SPEC = 'deepseek-harness-runtime-bin==0.1.1rc1'
+/** Homebrew/PEP 668 blocks bare `pip install --user`; `--break-system-packages` still writes the user scripts dir. */
+const DSH_PIP_ARGS = ['-m', 'pip', 'install', '--user', '--upgrade', '--break-system-packages', DSH_PIP_SPEC] as const
+/** Official locator: the wheel ships `dsh-jsonrpc-agent-pkg-<platform>-<arch>`, not a PATH entry. */
+const DSH_RESOLVE_SCRIPT = 'from deepseek_harness_runtime import bundled_runtime_path, bundled_default_config_path; print(bundled_runtime_path()); print(bundled_default_config_path())'
+
+interface DshLaunch {
+  readonly command: string
+  readonly configPath?: string
+}
 
 interface AuthFlow {
   challenge: RemoteAuthChallenge
@@ -55,13 +64,13 @@ function chunkText(chunk: unknown): string {
   return String(chunk)
 }
 
-function commandExists(command: string, extraBins: readonly string[] = []): boolean {
+function resolveCommandPath(command: string, extraBins: readonly string[] = []): string | undefined {
   if (command.includes('/') || command.includes('\\')) {
     try {
       accessSync(command, constants.X_OK)
-      return true
+      return command
     } catch {
-      return false
+      return undefined
     }
   }
   const extensions = process.platform === 'win32'
@@ -71,15 +80,20 @@ function commandExists(command: string, extraBins: readonly string[] = []): bool
   for (const directory of directories) {
     if (directory === '') continue
     for (const extension of extensions) {
+      const candidate = join(directory, `${command}${extension}`)
       try {
-        accessSync(join(directory, `${command}${extension}`), constants.X_OK)
-        return true
+        accessSync(candidate, constants.X_OK)
+        return candidate
       } catch {
         // Try the next PATH candidate.
       }
     }
   }
-  return false
+  return undefined
+}
+
+function commandExists(command: string, extraBins: readonly string[] = []): boolean {
+  return resolveCommandPath(command, extraBins) !== undefined
 }
 
 function quoteDisplay(value: string): string {
@@ -154,6 +168,53 @@ function childEnv(extraBins: readonly string[] = []): NodeJS.ProcessEnv {
   return { ...process.env, PATH: path === '' ? prefix : `${prefix}${delimiter}${path}` }
 }
 
+function envNonEmpty(name: string): boolean {
+  const value = process.env[name]
+  return value !== undefined && value.trim() !== ''
+}
+
+function environmentRoot(name: string, fallback: string): string {
+  const value = process.env[name]
+  return value === undefined || value.trim() === '' ? fallback : resolve(value)
+}
+
+function readJsonObject(path: string): Record<string, unknown> | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+    return parsed as Record<string, unknown>
+  } catch {
+    return undefined
+  }
+}
+
+function nonEmptyString(value: unknown): boolean {
+  return typeof value === 'string' && value.trim() !== ''
+}
+
+/** True when Codex has a ChatGPT session or API key on this host. Never launches the CLI. */
+function hasCodexCredentials(homeDir: string): boolean {
+  if (envNonEmpty('CODEX_API_KEY') || envNonEmpty('OPENAI_API_KEY')) return true
+  const auth = readJsonObject(join(environmentRoot('CODEX_HOME', join(homeDir, '.codex')), 'auth.json'))
+  if (auth === undefined) return false
+  if (nonEmptyString(auth['OPENAI_API_KEY'])) return true
+  const tokens = auth['tokens']
+  if (tokens === null || typeof tokens !== 'object' || Array.isArray(tokens)) return false
+  const record = tokens as Record<string, unknown>
+  return nonEmptyString(record['access_token']) || nonEmptyString(record['refresh_token'])
+}
+
+/** True when Grok has a device/OIDC session on this host. Never launches the CLI. */
+function hasGrokCredentials(homeDir: string): boolean {
+  const auth = readJsonObject(join(environmentRoot('GROK_HOME', join(homeDir, '.grok')), 'auth.json'))
+  if (auth === undefined) return false
+  return Object.values(auth).some((entry) => {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return false
+    const record = entry as Record<string, unknown>
+    return nonEmptyString(record['refresh_token']) || nonEmptyString(record['key'])
+  })
+}
+
 function safeUrl(text: string): string | undefined {
   const match = text.match(/https:\/\/[^\s<>"']+/)
   if (match === null) return undefined
@@ -182,6 +243,7 @@ export class AgentManager {
   private readonly flows = new Map<string, AuthFlow>()
   private readonly configs: AgentConfigManager
   private extraBinDirs: readonly string[] = []
+  private dshLaunch: DshLaunch | undefined
 
   /** @param options - administrator-resolved commands and timings. */
   constructor(private readonly options: AgentManagerOptions) {
@@ -201,18 +263,23 @@ export class AgentManager {
    */
   async inventory(running: ReadonlySet<RemoteAgentBackend>): Promise<readonly RemoteBackendInventory[]> {
     await this.refreshExtraBins()
+    await this.refreshDshLaunch()
     const codexInstalled = this.hasCommand(this.options.codexCliCommand) && this.hasCommand(this.options.codexAcpCommand)
     const grokInstalled = this.hasCommand(this.options.grokCommand)
     const claudeAcpInstalled = this.hasCommand(this.options.claudeAcpCommand)
     const claudeInstalled = this.hasCommand(this.options.claudeCommand) && claudeAcpInstalled
-    const dshInstalled = this.hasCommand(this.options.dshCommand)
-    const [codexAuth, grokAuth] = await Promise.all([
-      codexInstalled ? this.check(this.options.codexCliCommand, ['login', 'status']) : Promise.resolve(false),
-      grokInstalled ? this.check(this.options.grokCommand, ['models']) : Promise.resolve(false),
-    ])
+    const dshInstalled = this.dshInstalled()
     return [
-      { backend: 'grok', installed: grokInstalled, authenticated: grokAuth, running: running.has('grok'), sessionCapable: true },
-      { backend: 'codex', installed: codexInstalled, authenticated: codexAuth, running: running.has('codex'), sessionCapable: true },
+      {
+        backend: 'grok', installed: grokInstalled,
+        authenticated: grokInstalled && hasGrokCredentials(this.options.agentConfigHome),
+        running: running.has('grok'), sessionCapable: true,
+      },
+      {
+        backend: 'codex', installed: codexInstalled,
+        authenticated: codexInstalled && hasCodexCredentials(this.options.agentConfigHome),
+        running: running.has('codex'), sessionCapable: true,
+      },
       {
         backend: 'claude', installed: claudeInstalled, authenticated: claudeInstalled,
         running: running.has('claude'), sessionCapable: claudeAcpInstalled,
@@ -252,7 +319,7 @@ export class AgentManager {
         requiresConfirmation: true,
         steps: [planStep(
           'Install the official DeepSeek Harness JSON-RPC runtime from PyPI',
-          [python, '-m', 'pip', 'install', '--user', '--upgrade', DSH_PIP_SPEC].map(quoteDisplay).join(' '),
+          [python, ...DSH_PIP_ARGS].map(quoteDisplay).join(' '),
         )],
       }
     }
@@ -307,9 +374,12 @@ export class AgentManager {
       }
     }
     await this.refreshExtraBins(true)
+    if (backend === 'dsh') await this.refreshDshLaunch(true)
     const installed = this.installPlan(backend)
     if (!installed.alreadyInstalled) {
-      throw new Error(`${backend} installer finished but the command is not on PATH or in the official npm/pip location`)
+      throw new Error(backend === 'dsh'
+        ? 'pip installed deepseek-harness-runtime-bin but bundled_runtime_path() did not resolve a runtime executable'
+        : `${backend} installer finished but the command is not on PATH or in the official npm/pip location`)
     }
     return installed
   }
@@ -457,7 +527,66 @@ export class AgentManager {
     if (backend === 'codex') return this.hasCommand(this.options.codexCliCommand) && this.hasCommand(this.options.codexAcpCommand)
     if (backend === 'claude') return this.hasCommand(this.options.claudeCommand) && this.hasCommand(this.options.claudeAcpCommand)
     if (backend === 'grok') return this.hasCommand(this.options.grokCommand)
-    return this.hasCommand(this.options.dshCommand)
+    return this.dshInstalled()
+  }
+
+  private dshInstalled(): boolean {
+    return this.resolveDshFromPath() !== undefined || this.dshLaunch?.command !== undefined
+  }
+
+  private resolveDshFromPath(): string | undefined {
+    return resolveCommandPath(this.options.dshCommand, this.extraBinDirs)
+  }
+
+  /** Absolute DSH runtime command and bundled config, if the official wheel is present.
+   * @returns launch paths for hold-worker stdio.
+   */
+  async resolvedDshLaunch(): Promise<DshLaunch | undefined> {
+    await this.refreshExtraBins()
+    await this.refreshDshLaunch()
+    if (this.dshLaunch !== undefined) return this.dshLaunch
+    const command = this.resolveDshFromPath()
+    return command === undefined ? undefined : { command }
+  }
+
+  private async refreshDshLaunch(force = false): Promise<void> {
+    if (!force && this.dshLaunch !== undefined) return
+    const fromPath = this.resolveDshFromPath()
+    if (fromPath !== undefined) {
+      this.dshLaunch = { command: fromPath }
+      return
+    }
+    const python = this.options.pythonCommand ?? resolvePython()
+    if (python === undefined) {
+      this.dshLaunch = undefined
+      return
+    }
+    try {
+      const result = await run(python, ['-c', DSH_RESOLVE_SCRIPT], 5_000, this.extraBinDirs)
+      const paths = result.output.trim().split(/\r?\n/).map(line => line.trim()).filter(line => line.includes('/') || line.includes('\\'))
+      const command = paths.length >= 2 ? paths[paths.length - 2] : paths[0]
+      const configPath = paths.length >= 2 ? paths[paths.length - 1] : undefined
+      if (result.code !== 0 || command === undefined) {
+        this.dshLaunch = undefined
+        return
+      }
+      try {
+        accessSync(command, constants.X_OK)
+        if (!statSync(command).isFile()) {
+          this.dshLaunch = undefined
+          return
+        }
+      } catch {
+        this.dshLaunch = undefined
+        return
+      }
+      this.dshLaunch = {
+        command,
+        ...(configPath !== undefined && existsSync(configPath) ? { configPath } : {}),
+      }
+    } catch {
+      this.dshLaunch = undefined
+    }
   }
 
   private npmInstaller(): { readonly command: string; readonly args: readonly string[] } {
@@ -502,20 +631,12 @@ export class AgentManager {
     if (python === undefined) throw new Error('python3 is not available on this host')
     const result = await run(
       python,
-      ['-m', 'pip', 'install', '--user', '--upgrade', DSH_PIP_SPEC],
+      [...DSH_PIP_ARGS],
       this.options.installTimeoutMs,
       this.extraBinDirs,
     )
     if (result.code !== 0) {
       throw new Error(`DSH installer exited with status ${result.code}: ${result.output.trim().slice(-2000) || 'no output'}`)
-    }
-  }
-
-  private async check(command: string, args: readonly string[]): Promise<boolean> {
-    try {
-      return (await run(command, args, 10_000, this.extraBinDirs)).code === 0
-    } catch {
-      return false
     }
   }
 

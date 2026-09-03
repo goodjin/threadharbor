@@ -40,6 +40,9 @@ export interface HelloAck {
 }
 
 const WS_OPEN = 1
+const TRANSCRIPT_DROP_LOG_INTERVAL_MS = 5_000
+
+type TranscriptPushDropReason = 'no-follower' | 'socket-closed' | 'send-failed'
 
 /** Routes WebSocket frames and tracks per-browser follow sets. */
 export class WsBroadcaster {
@@ -48,6 +51,7 @@ export class WsBroadcaster {
   private readonly followedByBrowser = new Map<string, Set<RemoteSessionId>>()
   private pushSeq = 0
   private requestHandler: WsRequestHandler | undefined
+  private readonly dropLogAt = new Map<string, { at: number; suppressed: number }>()
 
   /** Bind the gateway dispatcher so browser WS frames can start follow/prompt loops. */
   setRequestHandler(handler: WsRequestHandler): void {
@@ -122,7 +126,14 @@ export class WsBroadcaster {
    * @param event - server-initiated push event.
    */
   broadcastFollowed(sessionId: RemoteSessionId, event: RemoteGatewayWsEvent): void {
-    this.sendMatching((subscriber) => subscriber.followed.has(sessionId), event)
+    const seq = event.type === 'transcript.append' ? event.seq : undefined
+    this.sendMatching(
+      (subscriber) => subscriber.followed.has(sessionId),
+      event,
+      sessionId,
+      seq,
+      seq,
+    )
   }
 
   /** Send one transcript batch to browsers following the session. */
@@ -139,19 +150,31 @@ export class WsBroadcaster {
       })
       return
     }
-    const matching = [...this.subscribers.values()].filter(subscriber => subscriber.followed.has(sessionId))
-    const batchSubscribers = matching.filter(subscriber => subscriber.supportsTranscriptBatch)
-    const legacySubscribers = matching.filter(subscriber => !subscriber.supportsTranscriptBatch)
     const first = entries[0]
     const last = entries[entries.length - 1]
     if (first === undefined || last === undefined) return
+    const matching = [...this.subscribers.values()].filter(subscriber => subscriber.followed.has(sessionId))
+    const open = matching.filter(subscriber => subscriber.ws.readyState === WS_OPEN)
+    if (open.length === 0) {
+      this.noteTranscriptPushDrop(
+        sessionId,
+        matching.length === 0 ? 'no-follower' : 'socket-closed',
+        first.seq,
+        last.seq,
+      )
+      return
+    }
+    const batchSubscribers = open.filter(subscriber => subscriber.supportsTranscriptBatch)
+    const legacySubscribers = open.filter(subscriber => !subscriber.supportsTranscriptBatch)
     if (batchSubscribers.length > 0) {
       const event: RemoteGatewayWsEvent = {
         type: 'transcript.batch', sessionId, entries, fromSeq: first.seq, toSeq: last.seq,
       }
       const payload: RemoteGatewayWsFrame = { direction: 'push', seq: ++this.pushSeq, event }
       const json = JSON.stringify(payload)
-      for (const subscriber of batchSubscribers) this.send(subscriber.ws, json)
+      for (const subscriber of batchSubscribers) {
+        this.send(subscriber.ws, json, sessionId, first.seq, last.seq)
+      }
     }
     for (const entry of entries) {
       if (legacySubscribers.length === 0) break
@@ -160,7 +183,9 @@ export class WsBroadcaster {
       }
       const payload: RemoteGatewayWsFrame = { direction: 'push', seq: ++this.pushSeq, event }
       const json = JSON.stringify(payload)
-      for (const subscriber of legacySubscribers) this.send(subscriber.ws, json)
+      for (const subscriber of legacySubscribers) {
+        this.send(subscriber.ws, json, sessionId, entry.seq, entry.seq)
+      }
     }
   }
 
@@ -204,13 +229,26 @@ export class WsBroadcaster {
     if (!browserStillConnected) this.followedByBrowser.delete(subscriber.browserId)
   }
 
-  private send(ws: WebSocket, payload: string): void {
-    if (ws.readyState !== WS_OPEN) return
+  private send(
+    ws: WebSocket,
+    payload: string,
+    sessionId?: RemoteSessionId,
+    fromSeq?: number,
+    toSeq?: number,
+  ): void {
+    if (ws.readyState !== WS_OPEN) {
+      if (sessionId !== undefined) this.noteTranscriptPushDrop(sessionId, 'socket-closed', fromSeq ?? -1, toSeq ?? -1)
+      return
+    }
     try {
       ws.send(payload, (error) => {
-        if (error !== undefined) this.dropConnection(ws)
+        if (error !== undefined) {
+          if (sessionId !== undefined) this.noteTranscriptPushDrop(sessionId, 'send-failed', fromSeq ?? -1, toSeq ?? -1)
+          this.dropConnection(ws)
+        }
       })
     } catch {
+      if (sessionId !== undefined) this.noteTranscriptPushDrop(sessionId, 'send-failed', fromSeq ?? -1, toSeq ?? -1)
       this.dropConnection(ws)
     }
   }
@@ -285,13 +323,64 @@ export class WsBroadcaster {
   private sendMatching(
     predicate: (subscriber: Subscriber) => boolean,
     event: RemoteGatewayWsEvent,
+    sessionId?: RemoteSessionId,
+    fromSeq?: number,
+    toSeq?: number,
   ): void {
+    const matched = [...this.subscribers.values()].filter(predicate)
+    const open = matched.filter(subscriber => subscriber.ws.readyState === WS_OPEN)
+    if (sessionId !== undefined && open.length === 0) {
+      this.noteTranscriptPushDrop(
+        sessionId,
+        matched.length === 0 ? 'no-follower' : 'socket-closed',
+        fromSeq ?? -1,
+        toSeq ?? -1,
+      )
+      return
+    }
     const payload: RemoteGatewayWsFrame = { direction: 'push', seq: ++this.pushSeq, event }
     const json = JSON.stringify(payload)
+    for (const subscriber of open) this.send(subscriber.ws, json, sessionId, fromSeq, toSeq)
+  }
+
+  private liveFollowerCount(sessionId: RemoteSessionId): number {
+    let count = 0
     for (const subscriber of this.subscribers.values()) {
-      if (predicate(subscriber) && subscriber.ws.readyState === WS_OPEN) {
-        this.send(subscriber.ws, json)
-      }
+      if (subscriber.followed.has(sessionId)) count += 1
     }
+    return count
+  }
+
+  private followedBrowserCount(sessionId: RemoteSessionId): number {
+    let count = 0
+    for (const followed of this.followedByBrowser.values()) {
+      if (followed.has(sessionId)) count += 1
+    }
+    return count
+  }
+
+  private noteTranscriptPushDrop(
+    sessionId: RemoteSessionId,
+    reason: TranscriptPushDropReason,
+    fromSeq: number,
+    toSeq: number,
+  ): void {
+    const key = `${sessionId}:${reason}`
+    const now = Date.now()
+    const previous = this.dropLogAt.get(key)
+    if (previous !== undefined && now - previous.at < TRANSCRIPT_DROP_LOG_INTERVAL_MS) {
+      previous.suppressed += 1
+      return
+    }
+    const suppressed = previous?.suppressed ?? 0
+    this.dropLogAt.set(key, { at: now, suppressed: 0 })
+    process.stderr.write(
+      `threadharbor-gateway: transcript push dropped session=${sessionId} reason=${reason}`
+      + ` fromSeq=${fromSeq} toSeq=${toSeq}`
+      + ` sockets=${this.subscribers.size}`
+      + ` liveFollowers=${this.liveFollowerCount(sessionId)}`
+      + ` followedBrowsers=${this.followedBrowserCount(sessionId)}`
+      + ` suppressed=${suppressed}\n`,
+    )
   }
 }

@@ -71,6 +71,48 @@ describe('WsBroadcaster', () => {
     broadcaster.registerForTesting(ws as unknown as WebSocket, browserId, supportsTranscriptBatch)
   }
 
+  it('logs when a transcript batch has no live follower', () => {
+    const writes: string[] = []
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      writes.push(String(chunk))
+      return true
+    })
+    try {
+      const alice = makeSocket()
+      register(alice, 'alice')
+      broadcaster.broadcastTranscriptBatch(RemoteSessionId('session-a'), [1, 2].map((seq) => ({
+        transcriptId: `t${seq}`, sessionId: RemoteSessionId('session-a'), seq,
+        role: 'assistant', kind: 'message', text: String(seq), createdAt: 'now',
+      })))
+      expect(parseSent(alice)).toEqual([])
+      expect(writes.some(line => line.includes('reason=no-follower') && line.includes('session=session-a'))).toBe(true)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('logs when every follower socket is already closed', () => {
+    const writes: string[] = []
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      writes.push(String(chunk))
+      return true
+    })
+    try {
+      const alice = makeSocket()
+      register(alice, 'alice')
+      broadcaster.follow('alice', RemoteSessionId('session-a'))
+      Object.defineProperty(alice, 'readyState', { configurable: true, value: 3 })
+      broadcaster.broadcastTranscriptBatch(RemoteSessionId('session-a'), [{
+        transcriptId: 't1', sessionId: RemoteSessionId('session-a'), seq: 4,
+        role: 'assistant', kind: 'message', text: 'x', createdAt: 'now',
+      }])
+      expect(parseSent(alice)).toEqual([])
+      expect(writes.some(line => line.includes('reason=socket-closed') && line.includes('fromSeq=4'))).toBe(true)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
   it('delivers transcript frames only to subscribers that follow the session', () => {
     const alice = makeSocket()
     const bob = makeSocket()

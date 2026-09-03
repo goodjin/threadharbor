@@ -78,7 +78,7 @@ const sessionRecord = z.object({
   title: z.string(),
   backend: z.enum(['grok', 'codex', 'claude', 'dsh']),
   channelState: z.enum(['connecting', 'open', 'reconnecting', 'closed', 'lost']),
-  turnState: z.enum(['idle', 'running', 'waiting-permission', 'failed']),
+  turnState: z.enum(['idle', 'running', 'waiting-permission', 'stopped', 'failed']),
   createdAt: z.string(),
   updatedAt: z.string(),
   archivedAt: z.string().optional(),

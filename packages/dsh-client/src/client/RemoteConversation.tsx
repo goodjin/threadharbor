@@ -5,8 +5,8 @@ import type { ReactNode } from 'react'
 import {
   Button, IconAgentPresetOutline16, IconCheckOutline16, IconChevronDownOutline14,
   IconChevronRightOutline14, IconCodeOutline16, IconCopyOutline16, IconEnhanceOutline16,
-  IconLinkOutline16, IconSendOutline16, IconStopFill16, IconThinkOutline16, IconTrashOutline16,
-  MarkdownText, MessageText, StateDot, writeClipboard,
+  IconLinkOutline16, IconRefreshOutline16, IconSendOutline16, IconStopFill16, IconThinkOutline16,
+  IconTrashOutline16, MarkdownText, MessageText, StateDot, writeClipboard,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConvOwnerProps } from '@deepseek-ai/dsh-client-ui-layout/client'
@@ -17,12 +17,13 @@ import type {
 } from '@threadharbor/protocol'
 import { RemoteHostId, RemoteProjectId, RemoteSessionId, isRemoteBackendSessionReady } from '@threadharbor/protocol'
 import {
-  BACKEND_ORDER, backendInventoryState, describeHostConnectFailure, hostConnectionLabel, hostDeployment, hostIpLabel,
+  BACKEND_ORDER, backendInventoryState, describeAgentInstallFailure, describeHostConnectFailure,
+  hostConnectionLabel, hostDeployment, hostIpLabel,
   type RemoteAgentPanel, type RemoteAgentStore, type RemotePromptProgress,
 } from './store.ts'
 import {
-  browsableDirectories, buildTranscriptNodes, conversationStage, isNearScrollBottom, preferredProjectBackend,
-  shouldAutoApprovePermissions, toolDisclosurePresentation,
+  browsableDirectories, buildTranscriptNodes, conversationStage, isNearScrollBottom, permissionRequestId,
+  preferredProjectBackend, shouldAutoApprovePermissions, toolDisclosurePresentation,
   type ConversationStage, type RemoteTranscriptNode,
 } from './conversation-model.ts'
 import css from './RemoteSurface.module.css'
@@ -165,6 +166,36 @@ function latestLine(text: string): string {
 }
 
 /** Show the current session id with a copy-to-clipboard affordance. */
+function CopyIconButton({ text, label }: { text: string; label: string }) {
+  const [copied, setCopied] = useState(false)
+  const timerRef = useRef<number | undefined>(undefined)
+  useEffect(() => () => {
+    if (timerRef.current !== undefined) window.clearTimeout(timerRef.current)
+  }, [])
+  const onCopy = (): void => {
+    if (text === '') return
+    void writeClipboard(text).then((ok) => {
+      if (!ok) return
+      setCopied(true)
+      if (timerRef.current !== undefined) window.clearTimeout(timerRef.current)
+      timerRef.current = window.setTimeout(() => { setCopied(false) }, 1000)
+    })
+  }
+  return (
+    <button
+      type="button"
+      className={css.messageAction}
+      data-copied={copied || undefined}
+      aria-label={copied ? '已复制' : label}
+      title={copied ? '已复制' : label}
+      disabled={text === ''}
+      onClick={(event) => { event.stopPropagation(); onCopy() }}
+    >
+      {copied ? <IconCheckOutline16 /> : <IconCopyOutline16 />}
+    </button>
+  )
+}
+
 function SessionIdChip({ sessionId }: { sessionId: string }) {
   const [copied, setCopied] = useState(false)
   const timerRef = useRef<number | undefined>(undefined)
@@ -202,10 +233,12 @@ function SessionIdChip({ sessionId }: { sessionId: string }) {
   )
 }
 
-function TranscriptRow({ node, active, onPermission, permissionPending = false }: {
+function TranscriptRow({ node, active, onPermission, onResend, resendDisabled = false, permissionPending = false }: {
   node: RemoteTranscriptNode
   active: boolean
   onPermission: (requestId: string, outcome: JsonValue) => void
+  onResend?: (text: string) => void
+  resendDisabled?: boolean
   permissionPending?: boolean
 }) {
   if (node.kind === 'tool') return <ToolNode node={node} active={active} />
@@ -219,11 +252,13 @@ function TranscriptRow({ node, active, onPermission, permissionPending = false }
         <div className={css.permissionActions}>
           {options.map(option => (
             <Button key={option.id} size="sm" variant="outline" disabled={permissionPending} onClick={() => {
-              if (entry.requestId !== undefined) onPermission(entry.requestId, option.outcome)
+              const requestId = permissionRequestId(entry)
+              if (requestId !== undefined) onPermission(requestId, option.outcome)
             }}>{permissionPending ? '提交中…' : option.label}</Button>
           ))}
           <Button size="sm" variant="ghost" disabled={permissionPending} onClick={() => {
-            if (entry.requestId !== undefined) onPermission(entry.requestId, { outcome: 'cancelled' })
+            const requestId = permissionRequestId(entry)
+            if (requestId !== undefined) onPermission(requestId, { outcome: 'cancelled' })
           }}>{permissionPending ? '提交中…' : '拒绝'}</Button>
         </div>
       </article>
@@ -231,11 +266,26 @@ function TranscriptRow({ node, active, onPermission, permissionPending = false }
   }
   if (entry.role === 'user') {
     return (
-      <article className={css.userMessage}>
-        <span className={css.entryTimestamp} title={entry.createdAt}>
-          {formatEntryTime(entry.createdAt)}
-        </span>
-        <MessageText text={entry.text} />
+      <article className={css.userTurn}>
+        <div className={css.userBubble}>
+          <span className={css.entryTimestamp} title={entry.createdAt}>
+            {formatEntryTime(entry.createdAt)}
+          </span>
+          <MessageText text={entry.text} />
+        </div>
+        <div className={css.messageActions}>
+          <CopyIconButton text={entry.text} label="复制" />
+          <button
+            type="button"
+            className={css.messageAction}
+            aria-label="重新发送"
+            title="重新发送"
+            disabled={resendDisabled || entry.text.trim() === ''}
+            onClick={() => { onResend?.(entry.text) }}
+          >
+            <IconRefreshOutline16 />
+          </button>
+        </div>
       </article>
     )
   }
@@ -247,6 +297,9 @@ function TranscriptRow({ node, active, onPermission, permissionPending = false }
           {formatEntryTime(entry.createdAt)}
         </span>
         <MarkdownText text={entry.text} streaming={active} />
+        <div className={css.messageActions}>
+          <CopyIconButton text={entry.text} label="复制全文" />
+        </div>
       </article>
     )
   }
@@ -881,6 +934,18 @@ function sessionPreferencesKey(hostId: string, backend: RemoteAgentBackend): str
   return `${hostId}-${backend}`
 }
 
+function resolveSessionPreferences(
+  backend: RemoteAgentBackend,
+  memory: Record<string, SessionPreferences>,
+  sessionId?: string,
+  hostId?: string,
+): SessionPreferences {
+  const stored = { ...readPersistedSessionPreferences(), ...memory }
+  const fromSession = sessionId === undefined ? undefined : stored[sessionId]
+  const fromHost = hostId === undefined ? undefined : stored[sessionPreferencesKey(hostId, backend)]
+  return normalizeSessionPreferences(backend, fromSession ?? fromHost ?? defaultSessionPreferences(backend))
+}
+
 function SessionControls({ backend, preferences, disabled, onChange }: {
   backend: RemoteAgentBackend
   preferences: SessionPreferences
@@ -1027,13 +1092,13 @@ function AgentSetupPanel({ host, store, operations = [], onClose, embedded = fal
     setConfig(undefined)
     setLocalError('')
     void tracked(`${backend}:plan`, () => store.installPlan(host.hostId, backend)).then(setPlan)
-      .catch((error: unknown) => { setLocalError(String(error)) })
+      .catch((error: unknown) => { setLocalError(describeAgentInstallFailure(error)) })
   }
   const deployAgent = (backend: RemoteAgentBackend): void => {
     setLocalError('')
     void tracked(`${backend}:install-start`, () => store.installAgent(host.hostId, backend)).then((operation) => {
       setOperationId(operation.operationId)
-    }).catch((error: unknown) => { setLocalError(String(error)) })
+    }).catch((error: unknown) => { setLocalError(describeAgentInstallFailure(error)) })
   }
 
   const content = (
@@ -1499,7 +1564,9 @@ function DraftConversation({ project, host, projectSessions, store, pending, err
   const backendSignature = backends.join(',')
   const [backend, setBackend] = useState<RemoteAgentBackend | ''>(() => preferredBackend)
   const [preferences, setPreferences] = useState<SessionPreferences>(() =>
-    preferredBackend === '' ? defaultSessionPreferences('codex') : defaultSessionPreferences(preferredBackend))
+    preferredBackend === ''
+      ? defaultSessionPreferences('codex')
+      : resolveSessionPreferences(preferredBackend, {}, undefined, host.hostId))
   const [draft, setDraft] = useState('')
   useEffect(() => {
     setBackend(current => current !== '' && backends.includes(current) ? current : preferredBackend)
@@ -1510,8 +1577,8 @@ function DraftConversation({ project, host, projectSessions, store, pending, err
   }, [backends.length, host.hostId, host.inventory, store])
   useEffect(() => {
     if (backend === '') return
-    setPreferences(current => normalizeSessionPreferences(backend, current))
-  }, [backend])
+    setPreferences(resolveSessionPreferences(backend, {}, undefined, host.hostId))
+  }, [backend, host.hostId])
   const progress = promptProgress?.projectId === project.projectId && promptProgress.sessionId === undefined
     ? promptProgress
     : undefined
@@ -1673,22 +1740,23 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
   }, [session?.sessionId])
   const preferences = session === undefined
     ? undefined
-    : normalizeSessionPreferences(
+    : resolveSessionPreferences(
       session.backend,
-      sessionPreferences[session.sessionId]
-        ?? (sessionHost === undefined ? undefined : sessionPreferences[sessionPreferencesKey(sessionHost.hostId, session.backend)])
-        ?? defaultSessionPreferences(session.backend),
+      sessionPreferences,
+      session.sessionId,
+      sessionHost?.hostId,
     )
   useEffect(() => {
     if (session === undefined || !shouldAutoApprovePermissions(preferences?.approvalChoice)) return
     for (const entry of sessionEntries) {
-      if (entry.role !== 'permission' || entry.requestId === undefined) continue
-      const action = `permission:${session.sessionId}:${entry.requestId}`
+      const requestId = permissionRequestId(entry)
+      if (entry.role !== 'permission' || requestId === undefined) continue
+      const action = `permission:${session.sessionId}:${requestId}`
       if (sessionAction !== undefined || answeredPermissionsRef.current.has(action)) continue
       const options = permissionOptions(entry)
       answeredPermissionsRef.current.add(action)
       setSessionAction(action)
-      void store.permission(session.sessionId, entry.requestId, options[0]?.outcome ?? { outcome: 'selected' })
+      void store.permission(session.sessionId, requestId, options[0]?.outcome ?? { outcome: 'selected' })
         .catch(() => undefined)
         .finally(() => { setSessionAction(current => current === action ? undefined : current) })
       break
@@ -1716,6 +1784,16 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
         />
       )
     }
+  }
+
+  if (session === undefined && snapshot.currentSessionId !== undefined) {
+    return (
+      <main className={css.hero}>
+        <div className={css.heroMark}>话</div>
+        <h1>正在打开会话</h1>
+        <p>远程会话已创建，正在同步到会话列表。</p>
+      </main>
+    )
   }
 
   if (session === undefined) {
@@ -1773,6 +1851,12 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
     followBottomRef.current = true
     setDraft('')
     void store.prompt(session.sessionId, text).catch(() => { setDraft(text) })
+  }
+  const resend = (text: string): void => {
+    const payload = text.trim()
+    if (payload === '' || sessionAction !== undefined || snapshot.pending || session.channelState !== 'open') return
+    followBottomRef.current = true
+    void store.prompt(session.sessionId, payload).catch(() => undefined)
   }
   const submitPermission = (requestId: string, outcome: JsonValue): void => {
     if (sessionAction !== undefined) return
@@ -1832,9 +1916,12 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
                 key={node.id}
                 node={node}
                 active={index === transcript.length - 1 && session.turnState === 'running'}
-                permissionPending={node.kind === 'entry' && node.entry.requestId !== undefined
-                  && sessionAction === `permission:${session.sessionId}:${node.entry.requestId}`}
+                permissionPending={node.kind === 'entry' && permissionRequestId(node.entry) !== undefined
+                  && sessionAction === `permission:${session.sessionId}:${permissionRequestId(node.entry)}`}
+                resendDisabled={session.channelState !== 'open' || snapshot.pending || sessionAction !== undefined
+                  || session.turnState === 'running'}
                 onPermission={submitPermission}
+                onResend={resend}
               />
             ))}
             <ConversationActivity stage={visibleStage} />
