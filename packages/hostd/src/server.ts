@@ -2,7 +2,7 @@
 
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { connect, createConnection } from 'node:net'
 import { dirname, join } from 'node:path'
@@ -126,6 +126,34 @@ function ownerSuffix(): string {
   return typeof process.getuid === 'function' ? String(process.getuid()) : 'nouid'
 }
 
+/** Unix domain socket paths are short; keep the directory well under the platform limit. */
+const HOLD_RUNTIME_DIR_MAX = 48
+
+function holdRuntimeDirectory(): string {
+  const uid = ownerSuffix()
+  const candidates: string[] = []
+  const xdg = process.env['XDG_RUNTIME_DIR']
+  if (typeof xdg === 'string' && xdg !== '') candidates.push(join(xdg, 'th'))
+  if (uid !== 'nouid') candidates.push(join('/run/user', uid, 'th'))
+  candidates.push(join('/tmp', `th-${uid}`))
+  let lastError: unknown
+  for (const dir of candidates) {
+    if (dir.length > HOLD_RUNTIME_DIR_MAX) continue
+    try {
+      ensureOwnerOnlyDirectory(dir)
+      return dir
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('unable to create hold runtime directory')
+}
+
+function holdSocketDead(error: unknown): boolean {
+  return /ECONNREFUSED|ENOENT|EPIPE|ENOTSOCK|ECONNRESET/i
+    .test(error instanceof Error ? error.message : String(error))
+}
+
 function ensureOwnerOnlyDirectory(path: string): void {
   mkdirSync(path, { recursive: true, mode: 0o700 })
   const stats = statSync(path)
@@ -172,6 +200,7 @@ export class RemoteAgentHostd {
   private listenedPort: number | undefined
   private readonly agentManager: AgentManager
   private readonly wsHub: HostdWsHub
+  private readonly holdLocks = new Map<string, Promise<unknown>>()
 
   /** @param options - fully resolved deployment configuration. */
   constructor(readonly options: HostdOptions) {
@@ -416,51 +445,11 @@ export class RemoteAgentHostd {
       updatedAt: now,
     }
     await this.spawnHold(record)
-    const before = await this.latestSeq(record)
-    const initializeId = `hostd-initialize-${randomUUID()}`
-    const initialize = spec.backend === 'dsh'
-      ? {
-        jsonrpc: '2.0', id: initializeId, method: 'initialize', params: {
-          cwd: spec.cwd, provider: this.options.dshProvider, model: this.options.dshModel,
-        },
-      }
-      : {
-        jsonrpc: '2.0', id: initializeId, method: 'initialize', params: {
-          protocolVersion: PROTOCOL_VERSION,
-          clientCapabilities: {
-            elicitation: { form: {} },
-            plan: {},
-          },
-        },
-      }
-    await this.holdRequest(record, { operation: 'send-frame', frame: initialize })
-    this.requireRpcSuccess(await this.holdRequest(record, {
-      operation: 'wait', rpcId: initializeId, afterSeq: before, timeoutMs: this.options.operationTimeoutMs,
-    }), initializeId)
-
-    let nativeSessionId = spec.sessionId as string
-    if (spec.backend !== 'dsh') {
-      const createId = `hostd-session-${randomUUID()}`
-      const method = spec.parentNativeSessionId === undefined ? 'session/new' : 'session/fork'
-      const createFrame = {
-        jsonrpc: '2.0', id: createId, method, params: {
-          ...(spec.parentNativeSessionId === undefined ? {} : { sessionId: spec.parentNativeSessionId }),
-          cwd: spec.cwd, mcpServers: [],
-        },
-      }
-      const createBefore = await this.latestSeq(record)
-      await this.holdRequest(record, { operation: 'send-frame', frame: createFrame })
-      const response = this.requireRpcSuccess(await this.holdRequest(record, {
-        operation: 'wait', rpcId: createId, afterSeq: createBefore, timeoutMs: this.options.operationTimeoutMs,
-      }), createId)
-      const result = jsonObject(response['result'], 'session create result')
-      nativeSessionId = stringField(result, 'sessionId')
-    }
-    await this.holdRequest(record, { operation: 'set-native-session', nativeSessionId })
-    const ready: HostdSessionRecord = { ...record, nativeSessionId, updatedAt: new Date().toISOString() }
-    this.sessions.set(spec.sessionId, ready)
-    this.saveSessions()
-    return await this.attachRecord(ready)
+    await this.initializeHold(record)
+    const ready = await this.bindNativeSession(record, {
+      ...(spec.parentNativeSessionId === undefined ? {} : { parentNativeSessionId: spec.parentNativeSessionId }),
+    })
+    return await this.snapshotHold(ready.record)
   }
 
   private async attachSession(params: Record<string, JsonValue>): Promise<RemoteSessionAttachResult> {
@@ -501,13 +490,123 @@ export class RemoteAgentHostd {
   }
 
   private async attachRecord(record: HostdSessionRecord): Promise<RemoteSessionAttachResult> {
+    return await this.withHoldLock(record.holdId, async () => {
+      try {
+        return await this.snapshotHold(record)
+      } catch (error) {
+        if (!holdSocketDead(error)) throw error
+        return await this.reviveHold(record)
+      }
+    })
+  }
+
+  private async snapshotHold(record: HostdSessionRecord, reopened = false): Promise<RemoteSessionAttachResult> {
     const latestSeq = await this.latestSeq(record)
     return {
       holdId: RemoteHoldId(record.holdId),
       generation: record.generation,
       ...(record.nativeSessionId === undefined ? {} : { nativeSessionId: record.nativeSessionId }),
       latestSeq,
+      ...(reopened ? { reopened: true } : {}),
     }
+  }
+
+  private async reviveHold(record: HostdSessionRecord): Promise<RemoteSessionAttachResult> {
+    this.unlinkStaleHoldSockets(record.holdId)
+    if (record.backend === 'grok') await this.ensureGrokServer()
+    await this.spawnHold(record)
+    await this.initializeHold(record)
+    const ready = await this.bindNativeSession(record, { loadExisting: true })
+    return await this.snapshotHold(ready.record, ready.reopened)
+  }
+
+  private async withHoldLock<T>(holdId: string, task: () => Promise<T>): Promise<T> {
+    const previous = this.holdLocks.get(holdId) ?? Promise.resolve()
+    let release: () => void = () => undefined
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const current = previous.then(() => gate, () => gate)
+    this.holdLocks.set(holdId, current)
+    await previous.catch(() => undefined)
+    try {
+      return await task()
+    } finally {
+      release()
+      if (this.holdLocks.get(holdId) === current) this.holdLocks.delete(holdId)
+    }
+  }
+
+  private async initializeHold(record: HostdSessionRecord): Promise<void> {
+    const before = await this.latestSeq(record)
+    const initializeId = `hostd-initialize-${randomUUID()}`
+    const initialize = record.backend === 'dsh'
+      ? {
+        jsonrpc: '2.0', id: initializeId, method: 'initialize', params: {
+          cwd: record.cwd, provider: this.options.dshProvider, model: this.options.dshModel,
+        },
+      }
+      : {
+        jsonrpc: '2.0', id: initializeId, method: 'initialize', params: {
+          protocolVersion: PROTOCOL_VERSION,
+          clientCapabilities: {
+            elicitation: { form: {} },
+            plan: {},
+          },
+        },
+      }
+    await this.holdRequest(record, { operation: 'send-frame', frame: initialize })
+    this.requireRpcSuccess(await this.holdRequest(record, {
+      operation: 'wait', rpcId: initializeId, afterSeq: before, timeoutMs: this.options.operationTimeoutMs,
+    }), initializeId)
+  }
+
+  private async bindNativeSession(
+    record: HostdSessionRecord,
+    options: { readonly parentNativeSessionId?: string; readonly loadExisting?: boolean } = {},
+  ): Promise<{ record: HostdSessionRecord; reopened: boolean }> {
+    let nativeSessionId = record.nativeSessionId ?? record.sessionId
+    let reopened = false
+    if (record.backend === 'dsh') {
+      nativeSessionId = record.sessionId
+      reopened = options.loadExisting === true
+    } else if (options.loadExisting === true && record.nativeSessionId !== undefined) {
+      try {
+        nativeSessionId = await this.nativeSessionRpc(record, 'session/load', {
+          sessionId: record.nativeSessionId, cwd: record.cwd, mcpServers: [],
+        })
+      } catch {
+        nativeSessionId = await this.nativeSessionRpc(record, 'session/new', { cwd: record.cwd, mcpServers: [] })
+        reopened = true
+      }
+    } else {
+      const method = options.parentNativeSessionId === undefined ? 'session/new' : 'session/fork'
+      nativeSessionId = await this.nativeSessionRpc(record, method, {
+        ...(options.parentNativeSessionId === undefined ? {} : { sessionId: options.parentNativeSessionId }),
+        cwd: record.cwd, mcpServers: [],
+      })
+    }
+    await this.holdRequest(record, { operation: 'set-native-session', nativeSessionId })
+    const ready: HostdSessionRecord = { ...record, nativeSessionId, updatedAt: new Date().toISOString() }
+    this.sessions.set(ready.sessionId, ready)
+    this.saveSessions()
+    return { record: ready, reopened }
+  }
+
+  private async nativeSessionRpc(
+    record: HostdSessionRecord,
+    method: 'session/new' | 'session/fork' | 'session/load',
+    params: Record<string, JsonValue>,
+  ): Promise<string> {
+    const rpcId = `hostd-session-${randomUUID()}`
+    const before = await this.latestSeq(record)
+    await this.holdRequest(record, {
+      operation: 'send-frame',
+      frame: { jsonrpc: '2.0', id: rpcId, method, params },
+    })
+    const response = this.requireRpcSuccess(await this.holdRequest(record, {
+      operation: 'wait', rpcId, afterSeq: before, timeoutMs: this.options.operationTimeoutMs,
+    }), rpcId)
+    const result = jsonObject(response['result'], 'session create result')
+    return stringField(result, 'sessionId')
   }
 
   private async sendAdmission(params: Record<string, JsonValue>): Promise<JsonValue> {
@@ -635,6 +734,7 @@ export class RemoteAgentHostd {
             ? { kind: 'stdio', command: this.options.claudeAcpCommand, args: this.options.claudeAcpArgs }
             : { kind: 'stdio', command: dshLaunch?.command ?? this.options.dshCommand, args: this.options.dshArgs },
     }
+    this.unlinkStaleHoldSockets(record.holdId)
     writeJsonAtomic(configPath, config)
     const dshKey = record.backend === 'dsh' ? this.agentManager.dshApiKey() : undefined
     const env: NodeJS.ProcessEnv = { ...process.env }
@@ -672,8 +772,10 @@ export class RemoteAgentHostd {
     if (process.platform === 'win32') return `\\\\.\\pipe\\threadharbor-hostd-${record.holdId}`
     const current = this.shortHoldSocket(record.holdId)
     if (existsSync(current)) return current
-    const legacy = join(this.options.dataDir, 'holds', record.holdId, 'control.sock')
-    return existsSync(legacy) ? legacy : current
+    for (const candidate of this.holdSocketLookups(record.holdId)) {
+      if (existsSync(candidate)) return candidate
+    }
+    return current
   }
 
   private createHoldSocket(record: HostdSessionRecord): string {
@@ -684,7 +786,34 @@ export class RemoteAgentHostd {
   }
 
   private shortHoldSocket(holdId: string): string {
-    return join('/tmp', `threadharbor-hostd-${ownerSuffix()}`, `h-${holdId}.sock`)
+    return join(holdRuntimeDirectory(), `h-${holdId}.sock`)
+  }
+
+  private holdSocketLookups(holdId: string): string[] {
+    const uid = ownerSuffix()
+    const xdg = process.env['XDG_RUNTIME_DIR']
+    const dirs = [
+      ...(typeof xdg === 'string' && xdg !== '' ? [join(xdg, 'th')] : []),
+      ...(uid !== 'nouid' ? [join('/run/user', uid, 'th')] : []),
+      join('/tmp', `th-${uid}`),
+      join('/tmp', `threadharbor-hostd-${uid}`),
+    ]
+    return [
+      ...dirs.map(dir => join(dir, `h-${holdId}.sock`)),
+      join(this.options.dataDir, 'holds', holdId, 'control.sock'),
+    ]
+  }
+
+  private unlinkStaleHoldSockets(holdId: string): void {
+    if (process.platform === 'win32') return
+    const paths = new Set([this.shortHoldSocket(holdId), ...this.holdSocketLookups(holdId)])
+    for (const path of paths) {
+      try {
+        if (existsSync(path)) unlinkSync(path)
+      } catch {
+        // spawn still recreates the current runtime socket
+      }
+    }
   }
 
   /** Issue one hold-worker control request; used by the WS hub.

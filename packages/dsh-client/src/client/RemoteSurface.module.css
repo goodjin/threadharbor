@@ -1414,6 +1414,10 @@
   line-height: 1.45;
 }
 
+.activityActions {
+  margin-top: 8px;
+}
+
 .conversationActivity[data-state='warning'] {
   border-color: var(--dsw-alias-state-warn-secondary);
 }

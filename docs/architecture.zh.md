@@ -23,7 +23,11 @@ ThreadHarbor 由一个可安装的 DeepSeek Harness bundle 和四个职责独立
 
 hostd 为每个会话启动 detached hold worker。worker 持有 Grok WebSocket、Codex ACP stdio 或 DSH JSON-RPC stdio，记录 generation、单调 seq、有界 journal 和 prompt admission ledger。浏览器刷新只会中断到 gateway 的短请求，不会影响 gateway→hostd tunnel、hostd、hold worker或 Agent 原生连接。
 
+hold worker 的控制 socket 放在短路径运行目录：优先 `$XDG_RUNTIME_DIR/th`，其次 `/run/user/<uid>/th`，再退回 `/tmp/th-<uid>`。journal 和会话元数据仍在 `dataDir/holds/<holdId>/`。Unix domain socket 路径长度有限，所以运行目录必须短；`/tmp` 只作无法创建系统运行目录时的回退。
+
 Web 重连时调用 attach，并带着最后 generation 与 seq 读取 journal。generation 不一致时，gateway 将会话标为 lost，不会自动重发结果未知的 prompt。journal 已截断时会明确插入 gap 状态记录。
+
+若 attach 发现控制 socket 已死（`ECONNREFUSED` / `ENOENT` 等），hostd 会在**同一个会话 id 和 hold generation** 上重启 worker：恢复 journal，重新 initialize，并尝试 `session/load`；失败则 `session/new`。UI 会话不变。原生会话被重建时 gateway 写入一条状态记录，说明模型上下文可能未恢复。仍无法恢复时，会话标为 lost，提示「在当前会话重开」，而不是只展示原始 socket 路径。
 
 ## SSH 部署
 

@@ -3,7 +3,8 @@ import { describe, expect, it } from 'vitest'
 import type { RemoteDirectoryEntry, RemoteSessionView, RemoteTranscriptEntry } from '@threadharbor/protocol'
 import { RemoteSessionId, RemoteTranscriptId } from '@threadharbor/protocol'
 import {
-  browsableDirectories, buildTranscriptNodes, choiceCancelOutcome, choiceSubmitOutcome, conversationStage,
+  browsableDirectories, buildTranscriptNodes, choiceCancelOutcome, choiceSubmitOutcome,
+  conversationPresentation, conversationStage,
   isAutoApprovablePermission, isNearScrollBottom, mergeTranscriptEntries, parseChoicePrompt, parsePlanItems,
   permissionRequestId, preferredProjectBackend, shouldAutoApprovePermissions, toolDisclosurePresentation,
 } from '../src/client/conversation-model.ts'
@@ -137,13 +138,14 @@ describe('remote conversation view model', () => {
   })
 
   it('treats an already-open session as a live-channel join instead of a blocking attach', () => {
-    const stage = conversationStage({
+    const view = conversationPresentation({
       session: session({ channelState: 'connecting', turnState: 'idle' }),
       entries: [],
       now: Date.parse('2026-08-29T00:00:00.000Z'),
     })
-    expect(stage.label).toBe('正在接入实时通道')
-    expect(stage.detail).toContain('WebSocket')
+    expect(view.channel.label).toBe('正在接入实时通道')
+    expect(view.channel.detail).toContain('WebSocket')
+    expect(view.turn.visible).toBe(false)
   })
 
   it('keeps running and completed tool calls collapsed to one status row by default', () => {
@@ -259,8 +261,29 @@ describe('remote conversation view model', () => {
       .toMatchObject({ kind: 'tool', label: '工具执行中', detail: 'read_file' })
     expect(conversationStage({ session: session({ turnState: 'waiting-permission' }), entries: [], now: 0 }))
       .toMatchObject({ kind: 'permission', state: 'warning' })
-    expect(conversationStage({ session: session({ channelState: 'reconnecting' }), entries: [], now: 0 }))
-      .toMatchObject({ kind: 'reconnecting', label: '连接异常，正在重试' })
+    expect(conversationPresentation({
+      session: session({ channelState: 'reconnecting', turnState: 'failed' }), entries: [], now: 0,
+    })).toMatchObject({
+      channel: { kind: 'reconnecting', label: '会话通道中断', visible: true },
+      turn: { kind: 'failed', label: '本轮执行失败', visible: true },
+      headerLabel: '会话通道中断 · 本轮执行失败',
+      actions: { canReconnect: true, canSend: false, canStop: false, canCompose: false },
+    })
+    expect(conversationPresentation({
+      session: session({ channelState: 'lost', turnState: 'idle' }), entries: [], now: 0,
+    })).toMatchObject({
+      channel: { kind: 'failed', label: '连接已丢失', detail: '远程会话进程已停止。可以点「在当前会话重开」，对话记录会保留。' },
+      actions: { canReconnect: true, canCompose: false },
+    })
+    expect(conversationPresentation({
+      session: session({ channelState: 'open', turnState: 'waiting-permission' }), entries: [], now: 0,
+    }).actions).toMatchObject({ canStop: true, canSend: false, canCompose: true, canReconnect: false })
+    expect(conversationPresentation({
+      session: session({ channelState: 'open' }), entries: [], now: 0, transportPhase: 'reconnecting',
+    })).toMatchObject({
+      channel: { kind: 'transport', label: '实时通道断开，正在自动重连' },
+      actions: { canReconnect: false, canSend: false, canCompose: false },
+    })
     expect(conversationStage({ session: session({ turnState: 'failed' }), entries: [], now: 0 }))
       .toMatchObject({ kind: 'failed', label: '本轮执行失败' })
     expect(conversationStage({ session: session({ turnState: 'stopped' }), entries: [], now: 0 }))

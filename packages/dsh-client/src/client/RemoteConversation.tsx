@@ -22,7 +22,8 @@ import {
   type RemoteAgentPanel, type RemoteAgentStore, type RemotePromptProgress,
 } from './store.ts'
 import {
-  browsableDirectories, buildTranscriptNodes, choiceCancelOutcome, choiceSubmitOutcome, conversationStage,
+  browsableDirectories, buildTranscriptNodes, choiceCancelOutcome, choiceSubmitOutcome,
+  conversationPresentation,
   isAutoApprovablePermission, isNearScrollBottom, parseChoicePrompt, parsePlanItems, permissionRequestId,
   preferredProjectBackend, shouldAutoApprovePermissions, toolDisclosurePresentation,
   type ChoicePrompt, type ConversationStage, type RemoteTranscriptNode,
@@ -370,7 +371,10 @@ function TranscriptRow({ node, active, onPermission, onResend, resendDisabled = 
   return <div className={css.statusRow}>{entry.text}</div>
 }
 
-function ConversationActivity({ stage }: { stage: ConversationStage }) {
+function ConversationActivity({ stage, action }: {
+  stage: ConversationStage
+  action?: { readonly label: string; readonly pendingLabel?: string; readonly pending?: boolean; readonly onClick: () => void }
+}) {
   if (!stage.visible) return null
   return (
     <div className={css.conversationActivity} data-state={stage.state} role="status" aria-live="polite">
@@ -378,6 +382,13 @@ function ConversationActivity({ stage }: { stage: ConversationStage }) {
       <div>
         <strong>{stage.label}</strong>
         <p>{stage.detail}</p>
+        {action !== undefined && (
+          <div className={css.activityActions}>
+            <Button size="sm" variant="outline" disabled={action.pending === true} onClick={action.onClick}>
+              {action.pending === true ? (action.pendingLabel ?? '重连中…') : action.label}
+            </Button>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -1757,16 +1768,24 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
     [snapshot.state.transcript, session?.sessionId],
   )
   const transcript = useMemo(() => buildTranscriptNodes(sessionEntries), [sessionEntries])
-  const activityClock = useActivityClock(snapshot.promptProgress !== undefined || session?.turnState === 'running')
-  const stage = session === undefined
+  const activityClock = useActivityClock(
+    snapshot.promptProgress !== undefined
+    || session?.turnState === 'running'
+    || session?.turnState === 'waiting-permission'
+    || snapshot.phase === 'reconnecting',
+  )
+  const presentation = session === undefined
     ? undefined
-    : conversationStage({
+    : conversationPresentation({
       session,
       entries: sessionEntries,
       ...(snapshot.promptProgress === undefined ? {} : { progress: snapshot.promptProgress }),
       ...(snapshot.error === undefined ? {} : { error: snapshot.error }),
       now: activityClock,
+      transportPhase: snapshot.phase,
+      pending: snapshot.pending,
     })
+  const stage = presentation?.turn
   const lastNode = transcript.at(-1)
   const nodeSignature = lastNode === undefined
     ? 'empty'
@@ -1901,6 +1920,8 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
   const visibleStage = stage ?? {
     kind: 'idle', label: '已就绪', detail: '可以发送新的请求。', state: 'done', visible: false,
   } satisfies ConversationStage
+  const actions = presentation?.actions
+  const channelStage = presentation?.channel
   const setPreferences = (next: SessionPreferences): void => {
     if (session === undefined) return
     const normalized = normalizeSessionPreferences(session.backend, next)
@@ -1916,14 +1937,14 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
   }
   const send = (): void => {
     const text = draft.trim()
-    if (text === '') return
+    if (text === '' || actions?.canSend !== true) return
     followBottomRef.current = true
     setDraft('')
     void store.prompt(session.sessionId, text).catch(() => { setDraft(text) })
   }
   const resend = (text: string): void => {
     const payload = text.trim()
-    if (payload === '' || sessionAction !== undefined || snapshot.pending || session.channelState !== 'open') return
+    if (payload === '' || sessionAction !== undefined || actions?.canResend !== true) return
     followBottomRef.current = true
     void store.prompt(session.sessionId, payload).catch(() => undefined)
   }
@@ -1949,6 +1970,22 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
     if (element === null) return
     scrollToBottom(element)
   }
+  const reconnect = (): void => {
+    if (sessionAction !== undefined) return
+    const action = `reconnect:${session.sessionId}`
+    setSessionAction(action)
+    void store.reconnectSession(session.sessionId)
+      .catch(() => undefined)
+      .finally(() => { setSessionAction(current => current === action ? undefined : current) })
+  }
+  const reconnectAction = actions?.canReconnect === true
+    ? {
+      label: session.channelState === 'lost' ? '在当前会话重开' : '重新连接',
+      pendingLabel: session.channelState === 'lost' ? '重开中…' : '重连中…',
+      pending: sessionAction === `reconnect:${session.sessionId}`,
+      onClick: reconnect,
+    }
+    : undefined
   return (
     <main className={css.conversation}>
       <header className={css.conversationHeader}>
@@ -1959,8 +1996,8 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
         <div className={css.sessionMeta}>
           <SessionIdChip sessionId={session.sessionId} />
           <div className={css.sessionState}>
-            <StateDot state={visibleStage.state} />
-            <span>{visibleStage.label}</span>
+            <StateDot state={presentation?.headerState ?? visibleStage.state} />
+            <span>{presentation?.headerLabel ?? visibleStage.label}</span>
           </div>
         </div>
       </header>
@@ -1987,14 +2024,21 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
                 active={index === transcript.length - 1 && session.turnState === 'running'}
                 permissionPending={node.kind === 'entry' && permissionRequestId(node.entry) !== undefined
                   && sessionAction === `permission:${session.sessionId}:${permissionRequestId(node.entry)}`}
-                resendDisabled={session.channelState !== 'open' || snapshot.pending || sessionAction !== undefined
-                  || session.turnState === 'running'}
+                resendDisabled={actions?.canResend !== true || sessionAction !== undefined}
                 onPermission={submitPermission}
                 onResend={resend}
               />
             ))}
-            <ConversationActivity stage={visibleStage} />
-            {transcript.length === 0 && !visibleStage.visible && <p className={css.emptyTranscript}>远程会话已连接。发送一条消息开始。</p>}
+            {channelStage?.visible === true && (
+              <ConversationActivity
+                stage={channelStage}
+                {...(reconnectAction === undefined ? {} : { action: reconnectAction })}
+              />
+            )}
+            {visibleStage.visible && <ConversationActivity stage={visibleStage} />}
+            {transcript.length === 0 && !visibleStage.visible && channelStage?.visible !== true && (
+              <p className={css.emptyTranscript}>远程会话已连接。发送一条消息开始。</p>
+            )}
           </div>
         </div>
         {showJumpToLatest && (
@@ -2008,7 +2052,7 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
             <SessionControls
               backend={session.backend}
               preferences={preferences}
-              disabled={session.channelState !== 'open' || snapshot.pending}
+              disabled={actions?.canChangePreferences !== true}
               onChange={setPreferences}
             />
           )}
@@ -2016,7 +2060,7 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
             aria-label="发送给远程 Agent"
             value={draft}
             placeholder={`发送给 ${session.backend}`}
-            disabled={session.channelState !== 'open' || session.parentSessionId !== undefined}
+            disabled={actions?.canCompose !== true}
             onChange={(event) => { setDraft(event.target.value) }}
             onKeyDown={(event) => {
               if (event.key === 'Enter' && !event.shiftKey) {
@@ -2027,10 +2071,10 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
           />
           <div className={css.composerActions}>
             <span>{session.parentSessionId === undefined ? `${session.backend} · Enter 发送，Shift+Enter 换行` : '子会话由远端 Agent 管理'}</span>
-            {session.turnState === 'running' && (
+            {actions?.canStop === true && (
               <Button size="sm" variant="toolbar" icon={<IconStopFill16 />} disabled={sessionAction !== undefined} onClick={stop}>{sessionAction === `stop:${session.sessionId}` ? '停止中…' : '停止'}</Button>
             )}
-            <Button size="sm" variant="primary" icon={<IconSendOutline16 />} aria-label="发送" disabled={session.parentSessionId !== undefined || draft.trim() === '' || snapshot.pending} onClick={send} />
+            <Button size="sm" variant="primary" icon={<IconSendOutline16 />} aria-label="发送" disabled={actions?.canSend !== true || draft.trim() === ''} onClick={send} />
           </div>
         </div>
       </div>

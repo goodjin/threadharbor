@@ -125,6 +125,8 @@ async function harness(events: JsonValue[] = []) {
   const subscribeEvents: { port: string; sessionId: string; generation: string }[] = []
 
   let failing = false
+  const methodErrors = new Map<string, string>()
+  let nextAttach: Record<string, JsonValue> | undefined
   /** Per-socket map of subscribed sessions for the WS push fan-out. */
   const subscriptionsBySocket = new WeakMap<MockSocket, Map<string, { generation: string; lastSeq: number }>>()
   let pushSeq = 0
@@ -145,7 +147,18 @@ async function harness(events: JsonValue[] = []) {
           params: (frame['params'] as Record<string, JsonValue>) ?? {},
         }
         calls.push({ port, request })
-        const result = respondToRequest(request, port, events)
+        const errorMessage = methodErrors.get(request.method)
+        if (errorMessage !== undefined) {
+          methodErrors.delete(request.method)
+          return JSON.stringify({
+            direction: 'response', id: request.id, ok: false,
+            error: { code: 'HOSTD_ERROR', message: errorMessage },
+          })
+        }
+        const result = request.method === 'session.attach' && nextAttach !== undefined
+          ? { ...respondToRequest(request, port, events) as Record<string, JsonValue>, ...nextAttach }
+          : respondToRequest(request, port, events)
+        if (request.method === 'session.attach') nextAttach = undefined
         return JSON.stringify({ direction: 'response', id: request.id, ok: true, result })
       }
       if (frame.direction === 'subscribe') {
@@ -209,6 +222,8 @@ async function harness(events: JsonValue[] = []) {
   return {
     ctx, gateway: ctx.remoteAgentGateway, calls,
     failNext: () => { failing = true },
+    failMethod: (method: string, message: string) => { methodErrors.set(method, message) },
+    setNextAttach: (value: Record<string, JsonValue>) => { nextAttach = value },
     pushJournalPage,
     subscribeEvents,
     upgradePath,
@@ -679,6 +694,62 @@ describe('RemoteAgentGateway', () => {
       expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState).toBe('stopped')
       const page = await readTranscript(gateway, session.sessionId)
       expect(page.entries.some(entry => entry.kind === 'status' && entry.text === '用户主动停止')).toBe(true)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('reattaches a reconnecting session when the browser follows it again', async () => {
+    const { ctx, gateway, calls } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4402' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.attach', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.channelState).toBe('open')
+      const attached = calls.filter(call => call.request.method === 'session.attach')
+      expect(attached.length).toBeGreaterThan(0)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('translates a dead hold socket into an in-place reopen instruction and marks the session lost', async () => {
+    const { ctx, gateway, failMethod } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4403' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      failMethod('session.attach', 'Error: connect ECONNREFUSED /tmp/threadharbor-hostd-501/h-dead.sock')
+      await expect(gateway.dispatch(request('session.attach', { sessionId: session.sessionId })))
+        .rejects.toThrow('在当前会话重开')
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.channelState).toBe('lost')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps the same session and records a reopen marker when hostd recreates the native agent', async () => {
+    const { ctx, gateway, setNextAttach } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4404' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      setNextAttach({ reopened: true, latestSeq: 9, nativeSessionId: 'native-reopened' })
+      const attached = await gateway.dispatch(request('session.attach', { sessionId: session.sessionId })) as unknown as {
+        sessionId: string
+        channelState: string
+        binding?: { nativeSessionId?: string; lastSeq: number }
+      }
+      expect(attached.sessionId).toBe(session.sessionId)
+      expect(attached.channelState).toBe('open')
+      expect(attached.binding?.nativeSessionId).toBe('native-reopened')
+      expect(attached.binding?.lastSeq).toBe(9)
+      const page = await readTranscript(gateway, session.sessionId)
+      expect(page.entries.some(entry => entry.text.includes('已在当前会话上重新打开'))).toBe(true)
     } finally {
       await ctx.fiber.dispose()
     }

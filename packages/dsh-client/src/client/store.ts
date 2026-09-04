@@ -153,6 +153,16 @@ export function describeHostConnectFailure(error: unknown): string {
   return message
 }
 
+/** Turn a session-hold reconnect failure into a short, actionable reason. */
+export function describeSessionReconnectFailure(error: unknown): string {
+  const message = (error instanceof Error ? error.message : String(error)).replace(/^Error:\s*/u, '').trim()
+  if (message.includes('在当前会话') || message.includes('远程会话进程已停止')) return message
+  if (/ECONNREFUSED|ENOENT|ENOTSOCK|EPIPE|ECONNRESET/i.test(message) && /\.sock|named pipe|hold /i.test(message)) {
+    return '远程会话进程已停止。可以点「在当前会话重开」，系统会在当前会话上重启 Agent，对话记录会保留。'
+  }
+  return message
+}
+
 /** Turn an Agent deploy failure into a short, actionable reason. */
 export function describeAgentInstallFailure(error: unknown): string {
   const message = (error instanceof Error ? error.message : String(error)).replace(/^Error:\s*/u, '').trim()
@@ -937,6 +947,20 @@ export class RemoteAgentStore {
     await this.refreshInventory(hostId)
     const host = this.snapshot.state.hosts.find(candidate => candidate.hostId === hostId)
     if (host?.inventoryError !== undefined) throw new Error(host.inventoryError)
+  }
+
+  /** Re-attach one catalogued session after the remote hold dropped. */
+  async reconnectSession(sessionId: ReturnType<typeof RemoteSessionId>): Promise<void> {
+    await this.run(async () => {
+      try {
+        await this.call('session.attach', { sessionId })
+      } catch (error) {
+        throw new Error(describeSessionReconnectFailure(error))
+      }
+      await this.reload(sessionId)
+      await this.catchupTranscript(sessionId, 'high')
+      this.ensureLiveTranscriptSync()
+    })
   }
 
   /** Register one remote directory as a host-owned project.

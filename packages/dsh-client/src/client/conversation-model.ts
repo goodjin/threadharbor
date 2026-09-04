@@ -1,7 +1,8 @@
 /** Pure view-model helpers shared by the remote conversation UI and tests. */
 
 import type {
-  JsonValue, RemoteAgentBackend, RemoteDirectoryEntry, RemoteSessionView, RemoteTranscriptEntry,
+  JsonValue, RemoteAgentBackend, RemoteChannelState, RemoteDirectoryEntry, RemoteSessionView,
+  RemoteTranscriptEntry, RemoteTurnState,
 } from '@threadharbor/protocol'
 
 /** Restore the most recently created session backend for a project, with a stable first-option fallback. */
@@ -24,11 +25,30 @@ export interface PromptProgressView {
 
 /** One user-visible conversation stage rendered in both the header and transcript tail. */
 export interface ConversationStage {
-  readonly kind: 'idle' | 'connecting' | 'sending' | 'waiting' | 'thinking' | 'tool' | 'responding' | 'permission' | 'reconnecting' | 'timeout' | 'stopped' | 'failed'
+  readonly kind: 'idle' | 'connecting' | 'sending' | 'waiting' | 'thinking' | 'tool' | 'responding' | 'permission' | 'reconnecting' | 'timeout' | 'stopped' | 'failed' | 'transport'
   readonly label: string
   readonly detail: string
   readonly state: 'done' | 'ongoing' | 'warning' | 'error'
   readonly visible: boolean
+}
+
+/** Composer and banner gates derived from channel × turn × transport. */
+export interface SessionActionGates {
+  readonly canCompose: boolean
+  readonly canSend: boolean
+  readonly canStop: boolean
+  readonly canReconnect: boolean
+  readonly canResend: boolean
+  readonly canChangePreferences: boolean
+}
+
+/** Channel banner and turn banner are independent; the header joins both labels. */
+export interface ConversationPresentation {
+  readonly turn: ConversationStage
+  readonly channel: ConversationStage
+  readonly actions: SessionActionGates
+  readonly headerLabel: string
+  readonly headerState: ConversationStage['state']
 }
 
 /** Compact disclosure policy for a tool call in the transcript. */
@@ -50,8 +70,21 @@ function failureLabel(message: string | undefined): string {
   return '发送失败'
 }
 
-/** Derive a complete UI stage even when the backend has not emitted any native frame. */
-export function conversationStage(input: {
+const IDLE_TURN: ConversationStage = {
+  kind: 'idle', label: '已就绪', detail: '可以发送新的请求。', state: 'done', visible: false,
+}
+const OPEN_CHANNEL: ConversationStage = {
+  kind: 'idle', label: '通道已连接', detail: '', state: 'done', visible: false,
+}
+
+function rankState(state: ConversationStage['state']): number {
+  if (state === 'error') return 3
+  if (state === 'warning') return 2
+  if (state === 'ongoing') return 1
+  return 0
+}
+
+function turnStage(input: {
   readonly session: RemoteSessionView
   readonly entries: readonly RemoteTranscriptEntry[]
   readonly progress?: PromptProgressView
@@ -67,21 +100,6 @@ export function conversationStage(input: {
     const label = failureLabel(progress.message)
     return { kind: label === '请求超时' ? 'timeout' : 'failed', label, detail: progress.message ?? '请求未成功送达远程 Agent。', state: 'error', visible: true }
   }
-  if (session.channelState === 'connecting' || progress?.phase === 'connecting') {
-    const creating = progress?.phase === 'connecting'
-    return {
-      kind: 'connecting',
-      label: creating ? '正在连接 Agent' : '正在接入实时通道',
-      detail: creating ? '正在创建远程会话并建立通信通道。' : '会话已打开，正在接入 WebSocket 推送。',
-      state: 'ongoing', visible: true,
-    }
-  }
-  if (session.channelState === 'reconnecting' || progress?.phase === 'reconnecting') {
-    return { kind: 'reconnecting', label: '连接异常，正在重试', detail: progress?.message ?? error ?? '暂时无法读取远程状态。', state: 'warning', visible: true }
-  }
-  if (session.channelState === 'lost' || session.channelState === 'closed') {
-    return { kind: 'failed', label: session.channelState === 'lost' ? '连接已丢失' : '会话已关闭', detail: error ?? '无法继续读取远程 Agent 状态。', state: 'error', visible: true }
-  }
   if (progress?.phase === 'sending') {
     return { kind: 'sending', label: '正在发送消息', detail: '正在把请求提交到远程 Agent。', state: 'ongoing', visible: true }
   }
@@ -93,8 +111,7 @@ export function conversationStage(input: {
       kind: 'stopped',
       label: '用户主动停止',
       detail: '本轮已由你停止，可以继续发送新的请求。',
-      state: 'done',
-      visible: true,
+      state: 'done', visible: true,
     }
   }
   if (session.turnState === 'waiting-permission') {
@@ -103,11 +120,11 @@ export function conversationStage(input: {
     return {
       kind: 'permission',
       label: asking ? '等待你的选择' : '等待你的确认',
-      detail: asking ? '远程 Agent 在等你选择方案。' : '远程 Agent 需要权限后才能继续。',
+      detail: asking ? '远程 Agent 在等你选择方案。点选项继续，或停止本轮。' : '远程 Agent 需要权限后才能继续。点选项或停止本轮。',
       state: 'warning', visible: true,
     }
   }
-  if (session.turnState === 'running') {
+  if (session.turnState === 'running' || progress?.phase === 'waiting') {
     const lastUserSeq = entries.findLast(entry => entry.role === 'user')?.seq ?? -1
     const backendEntries = progress === undefined
       ? entries.filter(entry => entry.seq > lastUserSeq && entry.role !== 'user')
@@ -128,7 +145,7 @@ export function conversationStage(input: {
       return { kind: 'waiting', label: '等待 Agent 响应', detail: '请求已送达，正在等待第一个后台事件。', state: 'ongoing', visible: true }
     }
     if (last.role === 'permission') {
-      return { kind: 'permission', label: '等待你的确认', detail: '远程 Agent 需要权限后才能继续。', state: 'warning', visible: true }
+      return { kind: 'permission', label: '等待你的确认', detail: '远程 Agent 需要权限后才能继续。点选项或停止本轮。', state: 'warning', visible: true }
     }
     if (last.kind === 'reasoning') {
       return { kind: 'thinking', label: '思考中', detail: 'Agent 正在分析请求。', state: 'ongoing', visible: true }
@@ -141,10 +158,134 @@ export function conversationStage(input: {
     }
     return { kind: 'responding', label: '正在生成回复', detail: 'Agent 已开始返回内容。', state: 'ongoing', visible: true }
   }
-  if (error !== undefined) {
-    return { kind: 'reconnecting', label: '状态同步失败', detail: error, state: 'warning', visible: true }
+  if (error !== undefined && session.channelState === 'open') {
+    return { kind: 'failed', label: '状态同步失败', detail: error, state: 'warning', visible: true }
   }
-  return { kind: 'idle', label: '已就绪', detail: '可以发送新的请求。', state: 'done', visible: false }
+  return IDLE_TURN
+}
+
+function channelStage(input: {
+  readonly channelState: RemoteChannelState
+  readonly creating: boolean
+  readonly transportPhase?: 'loading' | 'ready' | 'reconnecting' | 'error'
+  readonly error?: string
+}): ConversationStage {
+  if (input.transportPhase === 'reconnecting' && input.channelState !== 'connecting') {
+    return {
+      kind: 'transport',
+      label: '实时通道断开，正在自动重连',
+      detail: '浏览器到网关的连接已断开，正在后台重试。无需操作。',
+      state: 'warning', visible: true,
+    }
+  }
+  if (input.transportPhase === 'error') {
+    return {
+      kind: 'transport',
+      label: '实时通道失败',
+      detail: input.error ?? '浏览器无法连上网关。稍后会自动重试。',
+      state: 'error', visible: true,
+    }
+  }
+  if (input.channelState === 'connecting' || input.creating) {
+    return {
+      kind: 'connecting',
+      label: input.creating ? '正在连接 Agent' : '正在接入实时通道',
+      detail: input.creating ? '正在创建远程会话并建立通信通道。' : '会话已打开，正在接入 WebSocket 推送。',
+      state: 'ongoing', visible: true,
+    }
+  }
+  if (input.channelState === 'reconnecting') {
+    return {
+      kind: 'reconnecting',
+      label: '会话通道中断',
+      detail: input.error ?? '远端会话进程暂时不可用。点重新连接，系统会尝试在当前会话上恢复。',
+      state: 'warning', visible: true,
+    }
+  }
+  if (input.channelState === 'lost') {
+    return {
+      kind: 'failed',
+      label: '连接已丢失',
+      detail: input.error ?? '远程会话进程已停止。可以点「在当前会话重开」，对话记录会保留。',
+      state: 'error', visible: true,
+    }
+  }
+  if (input.channelState === 'closed') {
+    return {
+      kind: 'failed',
+      label: '会话已关闭',
+      detail: input.error ?? '无法继续读取远程 Agent 状态。',
+      state: 'error', visible: true,
+    }
+  }
+  return OPEN_CHANNEL
+}
+
+function sessionActionGates(input: {
+  readonly channelState: RemoteChannelState
+  readonly turnState: RemoteTurnState
+  readonly transportPhase?: 'loading' | 'ready' | 'reconnecting' | 'error'
+  readonly pending: boolean
+  readonly child: boolean
+}): SessionActionGates {
+  const live = input.channelState === 'open' && (input.transportPhase === 'ready' || input.transportPhase === undefined)
+  const turnBusy = input.turnState === 'running' || input.turnState === 'waiting-permission'
+  const canCompose = !input.child && live
+  return {
+    canCompose,
+    canSend: canCompose && !input.pending && !turnBusy,
+    canStop: !input.child && turnBusy,
+    canReconnect: input.channelState === 'reconnecting' || input.channelState === 'lost',
+    canResend: canCompose && !input.pending && !turnBusy,
+    canChangePreferences: !input.child && live && !input.pending,
+  }
+}
+
+/** Channel and turn banners plus composer gates. Turn is never hidden by a reconnecting channel. */
+export function conversationPresentation(input: {
+  readonly session: RemoteSessionView
+  readonly entries: readonly RemoteTranscriptEntry[]
+  readonly progress?: PromptProgressView
+  readonly error?: string
+  readonly now: number
+  readonly transportPhase?: 'loading' | 'ready' | 'reconnecting' | 'error'
+  readonly pending?: boolean
+}): ConversationPresentation {
+  const creating = input.progress?.sessionId === input.session.sessionId && input.progress.phase === 'connecting'
+  const channel = channelStage({
+    channelState: input.session.channelState,
+    creating,
+    ...(input.transportPhase === undefined ? {} : { transportPhase: input.transportPhase }),
+    ...(input.error === undefined ? {} : { error: input.error }),
+  })
+  const turn = turnStage(input)
+  const actions = sessionActionGates({
+    channelState: input.session.channelState,
+    turnState: input.session.turnState,
+    ...(input.transportPhase === undefined ? {} : { transportPhase: input.transportPhase }),
+    pending: input.pending === true,
+    child: input.session.parentSessionId !== undefined,
+  })
+  const headerParts = [
+    ...(channel.visible ? [channel.label] : []),
+    ...(turn.visible ? [turn.label] : []),
+  ]
+  return {
+    turn, channel, actions,
+    headerLabel: headerParts.length === 0 ? '已就绪' : headerParts.join(' · '),
+    headerState: rankState(channel.state) >= rankState(turn.state) ? channel.state : turn.state,
+  }
+}
+
+/** Turn-only stage for tests and compact callers. Channel banners live on conversationPresentation. */
+export function conversationStage(input: {
+  readonly session: RemoteSessionView
+  readonly entries: readonly RemoteTranscriptEntry[]
+  readonly progress?: PromptProgressView
+  readonly error?: string
+  readonly now: number
+}): ConversationStage {
+  return conversationPresentation(input).turn
 }
 
 /** Minimum scroll metrics needed to decide whether live output should remain pinned. */

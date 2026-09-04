@@ -37,7 +37,7 @@ async function shutdownHolds(dataDir: string): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       const socket = createConnection(socketPath)
       socket.once('connect', () => { socket.write('{"operation":"shutdown"}\n') })
-      socket.once('error', reject)
+      socket.once('error', () => { resolve() })
       socket.once('end', resolve)
       socket.resume()
     })
@@ -120,6 +120,77 @@ describe('RemoteAgentHostd session control', () => {
       }
     } finally {
       await restarted.close()
+      await shutdownHolds(root)
+    }
+  })
+
+  it('places hold sockets under XDG_RUNTIME_DIR and revives a dead hold on attach', async () => {
+    vi.stubEnv('GROK_AGENT_SECRET', 'host-only-grok-secret')
+    vi.stubEnv('CODEX_API_KEY', 'host-only-codex-key')
+    const runtime = join('/tmp', `tht-${process.pid}`)
+    roots.push(runtime)
+    vi.stubEnv('XDG_RUNTIME_DIR', runtime)
+    const root = await mkdtemp(join(tmpdir(), 'threadharbor-hostd-revive-'))
+    roots.push(root)
+    const project = await mkdtemp(join(tmpdir(), 'threadharbor-hostd-project-'))
+    roots.push(project)
+    const grok = await listenLoopback()
+    const options: HostdOptions = {
+      host: '127.0.0.1', port: 0, dataDir: root,
+      maxRequestBytes: 1024 * 1024, operationTimeoutMs: 1000, workerStartupTimeoutMs: 3000,
+      maxJournalEvents: 100, maxJournalBytes: 100_000, maxDirectoryEntries: 100,
+      authTimeoutMs: 1000,
+      installTimeoutMs: 1000,
+      agentConfigHome: root, maxAgentConfigBytes: 4096,
+      codexCliCommand: process.execPath,
+      codexCommand: process.execPath, codexArgs: [],
+      claudeCommand: '/missing/claude',
+      claudeAcpCommand: '/missing/claude-agent-acp', claudeAcpArgs: [],
+      dshCommand: process.execPath, dshArgs: [], dshProvider: 'deepseek-official', dshModel: 'test',
+      grokCommand: process.execPath, grokServeHost: '127.0.0.1', grokServePort: grok.port, grokArgs: [],
+      workerScript: new URL('./fixtures/fake-hold-worker.mjs', import.meta.url).pathname,
+      hostdHttpFallback: false,
+    }
+    const hostd = new RemoteAgentHostd(options)
+    await hostd.start()
+    try {
+      const started = await hostd.dispatch(request('session.start', {
+        sessionId: 'codex-revive', backend: 'codex', cwd: project,
+      })) as unknown as { generation: string; nativeSessionId?: string; holdId: string }
+      const holdsDir = join(root, 'holds')
+      const holdId = (await readdir(holdsDir))[0]
+      expect(holdId).toBeTypeOf('string')
+      const config = JSON.parse(await readFile(join(holdsDir, holdId!, 'config.json'), 'utf8')) as { socketPath: string }
+      expect(config.socketPath.startsWith(join(runtime, 'th'))).toBe(true)
+      expect(config.socketPath).not.toContain('threadharbor-hostd-')
+
+      await shutdownHolds(root)
+      const attached = await hostd.dispatch(request('session.attach', { sessionId: 'codex-revive' })) as unknown as {
+        generation: string
+        nativeSessionId?: string
+        reopened?: boolean
+      }
+      expect(attached.generation).toBe(started.generation)
+      expect(attached.nativeSessionId).toBe(started.nativeSessionId)
+      const revivedConfig = JSON.parse(await readFile(join(holdsDir, holdId!, 'config.json'), 'utf8')) as { socketPath: string }
+      expect(revivedConfig.socketPath.startsWith(join(runtime, 'th'))).toBe(true)
+
+      await hostd.dispatch(request('session.prompt', {
+        sessionId: 'codex-revive',
+        admission: {
+          clientId: 'browser', requestId: 'after-revive',
+          frame: {
+            jsonrpc: '2.0', id: 'after-revive', method: 'session/prompt',
+            params: { sessionId: attached.nativeSessionId ?? 'codex-revive', prompt: [{ type: 'text', text: 'hello' }] },
+          },
+        },
+      }))
+      const page = await hostd.dispatch(request('events.read', {
+        sessionId: 'codex-revive', afterSeq: 0, generation: attached.generation,
+      })) as unknown as RemoteJournalPage
+      expect(JSON.stringify(page.events)).toContain('codex reply')
+    } finally {
+      await hostd.close()
       await shutdownHolds(root)
     }
   })

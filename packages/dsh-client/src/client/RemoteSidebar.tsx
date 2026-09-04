@@ -27,10 +27,12 @@ export interface RemoteSidebarInjected {
 export type RemoteSidebarProps = PropsRuntime<'sidebar'> & SidebarOwnerProps & RemoteSidebarInjected
 
 function sessionState(session: RemoteSessionView): 'done' | 'warning' | 'ongoing' | 'error' {
+  if (session.channelState === 'lost') return 'error'
+  if (session.channelState === 'reconnecting') return 'warning'
   if (session.channelState === 'connecting') return 'ongoing'
+  if (session.turnState === 'failed') return 'error'
   if (session.turnState === 'waiting-permission') return 'warning'
   if (session.turnState === 'running') return 'ongoing'
-  if (session.channelState === 'lost' || session.turnState === 'failed') return 'error'
   return 'done'
 }
 
@@ -38,9 +40,12 @@ function sessionState(session: RemoteSessionView): 'done' | 'warning' | 'ongoing
 function sessionBadge(session: RemoteSessionView, attaching: boolean): string {
   if (attaching) return '连接中…'
   if (session.channelState === 'connecting') return '建立远端…'
-  if (session.channelState === 'lost' || session.turnState === 'failed') return '建立失败'
+  if (session.channelState === 'lost') return '已断开'
   if (session.channelState === 'reconnecting') return '重连中…'
+  if (session.turnState === 'failed') return '本轮失败'
+  if (session.turnState === 'waiting-permission') return '待确认'
   if (session.turnState === 'stopped') return '已停止'
+  if (session.turnState === 'running') return '进行中'
   return session.backend
 }
 

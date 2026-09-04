@@ -365,6 +365,8 @@ export interface RemoteSessionAttachResult {
   readonly generation: string
   readonly nativeSessionId?: string
   readonly latestSeq: number
+  /** True when attach had to recreate the native Agent session under the same hold. */
+  readonly reopened?: boolean
 }
 
 /** Bounded directory entry returned by hostd. */

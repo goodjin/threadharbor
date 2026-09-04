@@ -37,8 +37,11 @@ function handle(request) {
   if (request.operation === 'send-frame') {
     const frame = request.frame
     if (frame.method === 'initialize') append({ jsonrpc: '2.0', id: frame.id, result: { ready: true } })
-    else if (frame.method === 'session/new' || frame.method === 'session/fork') {
-      append({ jsonrpc: '2.0', id: frame.id, result: { sessionId: `${config.backend}-native` } })
+    else if (frame.method === 'session/new' || frame.method === 'session/fork' || frame.method === 'session/load') {
+      append({
+        jsonrpc: '2.0', id: frame.id,
+        result: { sessionId: typeof frame.params?.sessionId === 'string' ? frame.params.sessionId : `${config.backend}-native` },
+      })
     }
     return { ok: true, result: { accepted: true } }
   }

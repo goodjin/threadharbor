@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RemoteHostId, RemoteProjectId, RemoteSessionId } from '@threadharbor/protocol'
-import { RemoteAgentStore, backendInventoryState, describeAgentInstallFailure, describeHostConnectFailure, hostConnectionLabel, hostDeployment, parseAgentConfigDocument, parseHiddenItems, parseInstallPlan, parseOperation, parseRemoteAgentState } from '../src/client/store.ts'
+import { RemoteAgentStore, backendInventoryState, describeAgentInstallFailure, describeHostConnectFailure, describeSessionReconnectFailure, hostConnectionLabel, hostDeployment, parseAgentConfigDocument, parseHiddenItems, parseInstallPlan, parseOperation, parseRemoteAgentState } from '../src/client/store.ts'
 
 const EMPTY = { pollIntervalMs: 60_000, hosts: [], projects: [], sessions: [], transcript: [], operations: [] }
 
@@ -899,6 +899,45 @@ describe('RemoteAgentStore', () => {
       .toBe('当前 hostd 过旧，还不支持 Agent 部署。请先在主机设置里升级 hostd，再点部署。')
     expect(describeAgentInstallFailure('DSH installer exited with status 1: error: externally-managed-environment'))
       .toBe('这台主机的 Python 由系统管理（例如 Homebrew），旧版 hostd 的 pip install --user 会被拒绝。请先升级并重启 hostd，再点部署。')
+    expect(describeSessionReconnectFailure('Error: connect ECONNREFUSED /tmp/threadharbor-hostd-501/h-dead.sock'))
+      .toBe('远程会话进程已停止。可以点「在当前会话重开」，系统会在当前会话上重启 Agent，对话记录会保留。')
+    expect(describeSessionReconnectFailure('远程会话进程已停止。可以点「在当前会话重开」，系统会在当前会话上重启 Agent，对话记录会保留。'))
+      .toBe('远程会话进程已停止。可以点「在当前会话重开」，系统会在当前会话上重启 Agent，对话记录会保留。')
+  })
+
+  it('re-attaches a reconnecting session without waiting for a later catalog reload', async () => {
+    const session = {
+      sessionId: 's-reconnect', projectId: 'p', title: 'work', backend: 'codex',
+      channelState: 'reconnecting', turnState: 'failed', createdAt: 'a', updatedAt: 'b',
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 3 },
+    }
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      calls.push(body.method)
+      if (body.method === 'session.attach') {
+        return Response.json({
+          id: body.id, ok: true,
+          result: { ...session, channelState: 'open', turnState: 'idle', updatedAt: 'c' },
+        })
+      }
+      return Response.json({
+        id: body.id, ok: true,
+        result: { ...EMPTY, sessions: [{ ...session, channelState: 'open', turnState: 'idle' }] },
+      })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      await store.reconnectSession(RemoteSessionId('s-reconnect'))
+      expect(calls.filter(method => method !== 'transcript.read')).toEqual(['state', 'session.attach', 'state'])
+      expect(store.getSnapshot()).toMatchObject({
+        currentSessionId: 's-reconnect',
+        state: { sessions: [{ sessionId: 's-reconnect', channelState: 'open' }] },
+      })
+    } finally {
+      store.dispose()
+    }
   })
 
   it('retries a host connection and fails when inventory is still unreachable', async () => {
