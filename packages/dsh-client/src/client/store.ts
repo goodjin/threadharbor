@@ -138,6 +138,22 @@ export function hostDeploymentBadge(
   return undefined
 }
 
+export function isLoopbackHostEndpoint(endpoint: string): boolean {
+  try {
+    const url = new URL(endpoint)
+    return url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '::1'
+  } catch {
+    return false
+  }
+}
+
+/** Whether the host settings card can offer 升级/部署 hostd. */
+export function canUpgradeHostd(host: RemoteHostView, artifactVersion: string | undefined): boolean {
+  const state = hostDeployment(host, artifactVersion)
+  if (host.ssh?.hostKeyFingerprint !== undefined) return state === 'outdated' || state === 'missing'
+  return state === 'outdated' && isLoopbackHostEndpoint(host.endpoint)
+}
+
 /** Turn a hostd reachability failure into a short, actionable reason. */
 export function describeHostConnectFailure(error: unknown): string {
   const message = (error instanceof Error ? error.message : String(error)).replace(/^Error:\s*/u, '').trim()
@@ -843,6 +859,13 @@ export class RemoteAgentStore {
    */
   updateSshHost(hostId: ReturnType<typeof RemoteHostId>, title: string, ssh: RemoteSshConfig): Promise<RemoteOperationView> {
     return this.startOperation({ kind: 'host-ssh-deploy', hostId, title, ssh: ssh as unknown as JsonValue, confirm: true })
+  }
+
+  /** Upgrade hostd: SSH hosts redeploy; loopback endpoint hosts restart the local process. */
+  upgradeHostd(hostId: ReturnType<typeof RemoteHostId>): Promise<RemoteOperationView | void> {
+    const host = this.snapshot.state.hosts.find(candidate => candidate.hostId === hostId)
+    if (host?.ssh !== undefined) return this.updateSshHost(hostId, host.title, host.ssh)
+    return this.mutate('host.upgrade', { hostId, confirm: true })
   }
 
   /** Fetch a non-mutating agent installation plan.

@@ -420,9 +420,24 @@ function HostSection({
             <span>
               {host.title}
               {badge !== undefined && (
-                <span className={`${css.hostBadge} ${badge.tone === 'warn' ? css.hostBadgeWarn : badge.tone === 'error' ? css.hostBadgeError : css.hostBadgeMuted}`}
-                  aria-label={badge.label}
-                  title={badge.label}
+                <span
+                  className={`${css.hostBadge} ${badge.tone === 'warn' ? css.hostBadgeWarn : badge.tone === 'error' ? css.hostBadgeError : css.hostBadgeMuted}`}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`${badge.label} ${host.title} 的 hostd`}
+                  title={`${badge.label} hostd`}
+                  onClick={(event) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    void store.refreshInventory(host.hostId).catch(() => undefined)
+                    store.showPanel({ kind: 'host-settings', hostId: host.hostId })
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key !== 'Enter' && event.key !== ' ') return
+                    event.preventDefault()
+                    event.stopPropagation()
+                    store.showPanel({ kind: 'host-settings', hostId: host.hostId })
+                  }}
                 >{badge.label}</span>
               )}
             </span>

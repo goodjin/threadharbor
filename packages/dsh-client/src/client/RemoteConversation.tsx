@@ -18,7 +18,7 @@ import type {
 import { RemoteHostId, RemoteProjectId, RemoteSessionId, isRemoteBackendSessionReady } from '@threadharbor/protocol'
 import {
   BACKEND_ORDER, backendInventoryState, describeAgentInstallFailure, describeHostConnectFailure,
-  hostConnectionLabel, hostDeployment, hostIpLabel,
+  canUpgradeHostd, hostConnectionLabel, hostDeployment, hostIpLabel,
   type RemoteAgentPanel, type RemoteAgentStore, type RemotePromptProgress,
 } from './store.ts'
 import {
@@ -481,8 +481,10 @@ function HostPanel({ host, store, operations, onClose, artifactVersion }: {
   const [success, setSuccess] = useState('')
   const [operationId, setOperationId] = useState<string>()
   const [busy, setBusy] = useState<'inspect' | 'deploy' | 'save-title' | 'save-host' | 'connect'>()
-  const [connectionOpen, setConnectionOpen] = useState(host === undefined)
   const deploymentState = host === undefined ? 'checking' : hostDeployment(host, artifactVersion)
+  const [connectionOpen, setConnectionOpen] = useState(
+    host === undefined || deploymentState === 'outdated' || deploymentState === 'missing',
+  )
   const ipLabel = host === undefined ? '' : hostIpLabel(host)
   const statusLabel = host === undefined ? '' : hostConnectionLabel(host, artifactVersion)
   const live = host !== undefined && host.inventoryError === undefined
@@ -490,7 +492,7 @@ function HostPanel({ host, store, operations, onClose, artifactVersion }: {
   const artifactLabel = artifactVersion === undefined || artifactVersion === '' || artifactVersion === 'unknown'
     ? undefined
     : artifactVersion
-  const showHostdAction = host !== undefined && (deploymentState === 'missing' || deploymentState === 'outdated')
+  const showHostdAction = host !== undefined && canUpgradeHostd(host, artifactVersion)
   const hostdActionLabel = deploymentState === 'outdated' ? '升级 hostd' : '部署 hostd'
   const hostdActionDetail = deploymentState === 'outdated'
     ? `远端 hostd ${versionLabel ?? '未知版本'} 落后于当前 ${artifactLabel ?? 'gateway'}，升级后会重启服务并重建隧道。`
@@ -548,6 +550,19 @@ function HostPanel({ host, store, operations, onClose, artifactVersion }: {
     void store.reconnectHost(host.hostId)
       .then(() => { setSuccess('已连接到 hostd') })
       .catch((error: unknown) => { setLocalError(describeHostConnectFailure(error)) })
+      .finally(() => { setBusy(undefined) })
+  }
+  const upgradeHostd = (): void => {
+    if (host === undefined) return
+    setBusy('deploy')
+    setLocalError('')
+    setSuccess('')
+    void store.upgradeHostd(host.hostId)
+      .then((operation) => {
+        if (operation !== undefined) setOperationId(operation.operationId)
+        else setSuccess('已升级并重启本机 hostd')
+      })
+      .catch((error: unknown) => { setLocalError(String(error)) })
       .finally(() => { setBusy(undefined) })
   }
   const saveTitle = (): void => {
@@ -629,7 +644,9 @@ function HostPanel({ host, store, operations, onClose, artifactVersion }: {
                       {live && deploymentState === 'deployed'
                         ? `远端 hostd 正在运行${versionLabel === undefined ? '' : `（${versionLabel}）`}，与当前版本一致。`
                         : live && deploymentState === 'outdated'
-                          ? `远端 hostd ${versionLabel ?? '未知版本'} 落后于当前 ${artifactLabel ?? 'gateway'}。`
+                          ? host.ssh === undefined
+                            ? `本机 hostd ${versionLabel ?? '未知版本'} 落后于当前 ${artifactLabel ?? 'gateway'}。升级会用当前制品重启本机进程，会话 hold 会按设计继续存活。`
+                            : hostdActionDetail
                           : '当前连不上 hostd。请先点连接再探测；失败后会显示原因。'}
                     </p>
                     {host.inventoryError !== undefined && (
@@ -637,6 +654,12 @@ function HostPanel({ host, store, operations, onClose, artifactVersion }: {
                         {busy === 'connect' ? '连接中…' : '连接'}
                       </Button>
                     )}
+                    {showHostdAction && (
+                      <Button size="sm" variant="outline" disabled={busy !== undefined || deploying || hostTitle.trim() === ''} onClick={upgradeHostd}>
+                        {busy === 'deploy' || deploying ? '部署中…' : hostdActionLabel}
+                      </Button>
+                    )}
+                    {deployOperation !== undefined && <OperationProgress operation={deployOperation} />}
                   </div>
                 )}
               </>
@@ -693,7 +716,7 @@ function HostPanel({ host, store, operations, onClose, artifactVersion }: {
                       </Button>
                     )}
                     {showHostdAction && (
-                      <Button size="sm" variant="outline" disabled={busy !== undefined || deploying || hostTitle.trim() === ''} onClick={deploy}>
+                      <Button size="sm" variant="outline" disabled={busy !== undefined || deploying || hostTitle.trim() === ''} onClick={upgradeHostd}>
                         {busy === 'deploy' || deploying ? '部署中…' : hostdActionLabel}
                       </Button>
                     )}

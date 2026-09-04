@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RemoteHostId, RemoteProjectId, RemoteSessionId } from '@threadharbor/protocol'
-import { RemoteAgentStore, backendInventoryState, describeAgentInstallFailure, describeHostConnectFailure, describeSessionReconnectFailure, hostConnectionLabel, hostDeployment, parseAgentConfigDocument, parseHiddenItems, parseInstallPlan, parseOperation, parseRemoteAgentState } from '../src/client/store.ts'
+import { RemoteAgentStore, backendInventoryState, canUpgradeHostd, describeAgentInstallFailure, describeHostConnectFailure, describeSessionReconnectFailure, hostConnectionLabel, hostDeployment, parseAgentConfigDocument, parseHiddenItems, parseInstallPlan, parseOperation, parseRemoteAgentState } from '../src/client/store.ts'
 
 const EMPTY = { pollIntervalMs: 60_000, hosts: [], projects: [], sessions: [], transcript: [], operations: [] }
 
@@ -389,6 +389,45 @@ describe('RemoteAgentStore', () => {
           kind: 'host-ssh-deploy', hostId: 'h', title: '开发机',
           ssh: { target: 'dev-box', user: 'good', hostKeyFingerprint: 'SHA256:test' }, confirm: true,
         },
+      })
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('upgrades loopback hostd in place and SSH hostd through deploy', async () => {
+    const local = {
+      hostId: 'local', title: 'Mac-good', endpoint: 'http://127.0.0.1:62846', createdAt: 'a', updatedAt: 'b',
+    }
+    const remote = {
+      hostId: 'remote', title: 'Mac-mini', endpoint: 'http://127.0.0.1:50862', createdAt: 'a', updatedAt: 'b',
+      ssh: { target: '100.96.156.60', hostKeyFingerprint: 'SHA256:mini' },
+    }
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = []
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string; params: Record<string, unknown> }
+      calls.push({ method: body.method, params: body.params })
+      const result = body.method === 'state'
+        ? { ...EMPTY, hosts: [local, remote] }
+        : body.method === 'operation.start'
+          ? {
+            operationId: 'op-up', kind: 'host-ssh-deploy', status: 'queued', phase: 'queued',
+            title: '重新部署 Mac-mini', detail: '部署任务已排队。', target: 'host:remote', cancellable: false,
+            hostId: 'remote', startedAt: 'a', updatedAt: 'a',
+          }
+          : {}
+      return Response.json({ id: body.id, ok: true, result })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      await store.upgradeHostd(RemoteHostId('local'))
+      await store.upgradeHostd(RemoteHostId('remote'))
+      expect(calls.filter(call => call.method === 'host.upgrade')).toEqual([
+        { method: 'host.upgrade', params: { hostId: 'local', confirm: true } },
+      ])
+      expect(calls.find(call => call.method === 'operation.start')?.params).toMatchObject({
+        kind: 'host-ssh-deploy', hostId: 'remote', title: 'Mac-mini',
       })
     } finally {
       store.dispose()
@@ -930,6 +969,21 @@ describe('RemoteAgentStore', () => {
       ...base,
       inventory: { protocolVersion: 1, hostdVersion: '0.1.0+aaaaaaaaaaaa', hostId: 'native', healthy: true, backends: [] },
     }, '0.1.0+bbbbbbbbbbbb')).toBe('已连接，待升级')
+    const outdatedLocal = {
+      ...base,
+      endpoint: 'http://127.0.0.1:62846',
+      inventory: { protocolVersion: 1 as const, hostdVersion: '0.1.0', hostId: 'native', healthy: true, backends: [] },
+    }
+    expect(canUpgradeHostd(outdatedLocal, '0.1.0+abcd')).toBe(true)
+    expect(canUpgradeHostd({
+      ...outdatedLocal,
+      ssh: { target: 'mini', hostKeyFingerprint: 'SHA256:abc' },
+    }, '0.1.0+abcd')).toBe(true)
+    expect(canUpgradeHostd({
+      ...base,
+      endpoint: 'http://127.0.0.1:62846',
+      inventory: { protocolVersion: 1 as const, hostdVersion: '0.1.0+abcd', hostId: 'native', healthy: true, backends: [] },
+    }, '0.1.0+abcd')).toBe(false)
     const stale = {
       ...base,
       inventoryError: 'fetch failed',

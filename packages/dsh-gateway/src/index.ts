@@ -50,6 +50,7 @@ import {
 import { projectNativeFrame } from './projection.ts'
 import { remoteAgentDomainSpec, type RemoteAgentCatalogState } from './spec.ts'
 import { SshManager, type SshDeploymentProgress } from './ssh-manager.ts'
+import { restartLoopbackHostd } from './local-hostd.ts'
 import { WsBroadcaster } from './ws-broadcaster.ts'
 import { HostdConnectionPool } from './hostd-connection-pool.ts'
 
@@ -424,6 +425,8 @@ export class RemoteAgentGateway extends Service {
         return await this.sshManager.inspect(this.sshManager.parseInspectionConfig(request.params['ssh'])) as unknown as JsonValue
       case 'host.ssh.deploy':
         return await this.enqueue(() => this.deploySshHost(request.params)) as unknown as JsonValue
+      case 'host.upgrade':
+        return await this.enqueue(() => this.upgradeHost(request.params)) as unknown as JsonValue
       case 'operation.start':
         return this.startOperation(request.params) as unknown as JsonValue
       case 'operation.list':
@@ -578,6 +581,19 @@ export class RemoteAgentGateway extends Service {
     await tables.hosts.put(hostId, updated)
     if (current.ssh !== undefined && !sameSshTunnel(current.ssh, ssh)) this.sshManager.releaseTunnel(current.ssh)
     return await this.refreshHostInventory(updated)
+  }
+
+  private async upgradeHost(params: Record<string, JsonValue>): Promise<RemoteHostView> {
+    if (params['confirm'] !== true) throw new Error('hostd upgrade requires confirm: true')
+    const host = this.requireHost(RemoteHostId(stringField(params, 'hostId')))
+    if (host.ssh !== undefined) {
+      throw new Error('SSH 主机请用「升级 hostd」走自动部署，不要对本机隧道端口重启')
+    }
+    const url = new URL(host.endpoint)
+    const port = url.port === '' ? 80 : Number(url.port)
+    if (!Number.isSafeInteger(port) || port <= 0) throw new Error('本机 hostd 地址没有有效端口')
+    await restartLoopbackHostd(port, hostdArtifactDirectory())
+    return await this.refreshHostInventory(host)
   }
 
   private async deploySshHost(

@@ -396,6 +396,7 @@ export type RemoteGatewayMethod =
   | 'host.delete'
   | 'host.ssh.inspect'
   | 'host.ssh.deploy'
+  | 'host.upgrade'
   | 'operation.start'
   | 'operation.list'
   | 'agent.install.plan'

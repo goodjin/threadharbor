@@ -53,6 +53,7 @@ describe('DSH browser artifact', () => {
     expect(js).toContain('保存名称')
     expect(js).toContain('升级 hostd')
     expect(js).toContain('部署 hostd')
+    expect(js).toContain('升级会用当前制品重启本机进程')
     expect(js).toContain('请确认远端服务已启动后再试')
     expect(js).toContain('取消隐藏')
     expect(js).toContain('设置：查看全部主机、项目和会话')

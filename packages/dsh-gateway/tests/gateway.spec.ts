@@ -302,6 +302,17 @@ describe('RemoteAgentGateway', () => {
     }
   })
 
+  it('refuses to treat an SSH tunnel port as a local hostd upgrade target', async () => {
+    const { ctx, gateway } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'box', endpoint: 'http://127.0.0.1:65534' })) as unknown as { hostId: string }
+      await expect(gateway.dispatch(request('host.upgrade', { hostId: host.hostId, confirm: true })))
+        .rejects.toThrow('找不到本机 hostd 进程')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('answers a Claude permission request with JSON-RPC id 0 and catches up the journal', async () => {
     const events: JsonValue[] = [
       { jsonrpc: '2.0', id: 0, method: 'session/request_permission', params: {
