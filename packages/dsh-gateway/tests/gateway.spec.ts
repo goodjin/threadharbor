@@ -579,6 +579,49 @@ describe('RemoteAgentGateway', () => {
     }
   })
 
+  it('records droppedThrough when the per-session ring deletes older entries', async () => {
+    // 21 distinct tool_call events produce 21 transcript rows that won't merge;
+    // combined with the single user row from `session.prompt` we exceed the
+    // test config's `maxTranscriptEntriesPerSession: 20` so the oldest two
+    // rows get rotated out, and the gateway must surface `droppedThrough` so
+    // the browser can show a banner.
+    const events: JsonValue[] = Array.from({ length: 21 }, (_, index) => ({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'tool_call', toolCallId: `call-${index}`, title: `Load skill ${index}` } },
+    }))
+    const { ctx, gateway } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4220' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+
+      // Pre-trim: no rotation has happened yet, so the projection omits the
+      // optional field entirely (matches the optional schema in spec.ts).
+      const beforeView = gateway.state().sessions.find(entry => entry.sessionId === RemoteSessionId(session.sessionId))
+      expect(beforeView?.droppedThrough).toBeUndefined()
+
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'trim-1', text: 'fill-the-ring',
+      }))
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+
+      const page = await readTranscript(gateway, session.sessionId, { limit: 100 })
+      // The ring keeps the most recent 20 entries; the oldest 2 (seq 0 and 1)
+      // are gone from the projection.
+      expect(page.entries[0]?.seq).toBe(2)
+      expect(page.entries.at(-1)?.seq).toBe(page.latestSeq)
+
+      // The session view now carries the highest deleted seq so the banner
+      // can render. Lost-count in the UI is `droppedThrough + 1`.
+      const afterView = gateway.state().sessions.find(entry => entry.sessionId === RemoteSessionId(session.sessionId))
+      expect(afterView?.droppedThrough).toBe(1)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('default transcript.read starts at the latest user message when the turn is longer than the page', async () => {
     const events: JsonValue[] = Array.from({ length: 12 }, (_, index) => ({
       jsonrpc: '2.0',
@@ -719,7 +762,9 @@ describe('RemoteAgentGateway', () => {
       expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState).toBe('running')
       failNext()
       await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
-      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState).toBe('failed')
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)).toMatchObject({
+        turnState: 'failed', channelState: 'reconnecting',
+      })
       const page = await readTranscript(gateway, session.sessionId)
       expect(page.entries.some(entry => entry.kind === 'status' && entry.text.includes('已停止'))).toBe(true)
     } finally {
@@ -917,6 +962,75 @@ describe('RemoteAgentGateway', () => {
       expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.channelState).toBe('open')
       const attached = calls.filter(call => call.request.method === 'session.attach')
       expect(attached.length).toBeGreaterThan(0)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('revives a dead hold and retries prompt delivery in place', async () => {
+    const { ctx, gateway, failMethod, calls } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4415' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      failMethod('session.prompt', 'Error: connect ENOENT /tmp/th-501/h-dead.sock')
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'revive-1', text: 'hello',
+      }))
+      expect(calls.filter(call => call.request.method === 'session.prompt')).toHaveLength(2)
+      expect(calls.some(call => call.request.method === 'session.attach')).toBe(true)
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)).toMatchObject({
+        channelState: 'open', turnState: 'running',
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('marks a session lost with a reopen instruction when prompt cannot revive the hold', async () => {
+    const { ctx, gateway, failMethod } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4416' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      failMethod('session.prompt', 'Error: connect ENOENT /tmp/th-501/h-dead.sock')
+      failMethod('session.attach', 'Error: connect ENOENT /tmp/th-501/h-dead.sock')
+      await expect(gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'dead-1', text: 'hello',
+      }))).rejects.toThrow('在当前会话重开')
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)).toMatchObject({
+        channelState: 'lost', turnState: 'failed',
+      })
+      const page = await readTranscript(gateway, session.sessionId)
+      expect(page.entries.some(entry => entry.text.includes('消息提交失败') && entry.text.includes('在当前会话重开'))).toBe(true)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('does not reopen a reconnecting channel when a later journal page is projected', async () => {
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { text: 'stale' } } } },
+    ]
+    const { ctx, gateway, failMethod } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4417' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'stale-page', text: 'hello',
+      }))
+      failMethod('events.read', 'Error: connect ENOENT /tmp/th-501/h-dead.sock')
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId })).catch(() => undefined)
+      await vi.waitFor(() => {
+        expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.channelState)
+          .toBe('reconnecting')
+      })
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.channelState).toBe('reconnecting')
     } finally {
       await ctx.fiber.dispose()
     }

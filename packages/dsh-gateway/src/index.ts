@@ -1292,7 +1292,7 @@ export class RemoteAgentGateway extends Service {
 
   private async prompt(params: Record<string, JsonValue>): Promise<JsonValue> {
     const session = this.requireSession(RemoteSessionId(stringField(params, 'sessionId')))
-    const binding = this.requireBinding(session)
+    this.requireBinding(session)
     const clientId = stringField(params, 'clientId')
     const requestId = stringField(params, 'requestId')
     const text = stringField(params, 'text')
@@ -1304,40 +1304,76 @@ export class RemoteAgentGateway extends Service {
         })
       }
     })
-    const nativeSessionId = binding.nativeSessionId ?? session.sessionId
-    const frame = session.backend === 'dsh'
+    try {
+      return await this.deliverPrompt(session, clientId, requestId, text)
+    } catch (error) {
+      if (holdUnreachable(error)) {
+        try {
+          const revived = await this.attachSession({ sessionId: session.sessionId })
+          return await this.deliverPrompt(revived, clientId, requestId, text)
+        } catch (retryError) {
+          await this.markPromptUndelivered(session, clientId, requestId, retryError)
+          throw new Error(holdSessionFailure(retryError))
+        }
+      }
+      await this.markPromptUndelivered(session, clientId, requestId, error)
+      throw error
+    }
+  }
+
+  /** Mark the session running and forward one admission to hostd. */
+  private async deliverPrompt(
+    session: RemoteSessionView,
+    clientId: string,
+    requestId: string,
+    text: string,
+  ): Promise<JsonValue> {
+    const current = this.requireTables().sessions.get(session.sessionId) ?? session
+    const nativeSessionId = current.binding?.nativeSessionId ?? current.sessionId
+    const frame = current.backend === 'dsh'
       ? { jsonrpc: '2.0', id: requestId, method: 'session/prompt', params: { sessionId: nativeSessionId, contentBlocks: [{ type: 'text', text }] } }
       : { jsonrpc: '2.0', id: requestId, method: 'session/prompt', params: { sessionId: nativeSessionId, prompt: [{ type: 'text', text }] } }
     const running: RemoteSessionView = {
-      ...session, turnState: 'running', channelState: 'open', updatedAt: new Date().toISOString(),
+      ...current, turnState: 'running', channelState: 'open', updatedAt: new Date().toISOString(),
     }
     await this.requireTables().sessions.put(session.sessionId, running)
     this.broadcastSessionView(running)
     // A running turn must keep projecting its journal even when the browser
     // disconnects or hostd push delivery is temporarily silent.
     this.ensureFollowedSync(session.sessionId)
-    try {
-      return await this.callSessionHostd(running, 'session.prompt', {
-        sessionId: running.sessionId,
-        admission: { clientId, requestId, frame },
+    return await this.callSessionHostd(running, 'session.prompt', {
+      sessionId: running.sessionId,
+      admission: { clientId, requestId, frame },
+    })
+  }
+
+  /** Record a prompt that never reached the Agent, and surface reopen when the hold is dead. */
+  private async markPromptUndelivered(
+    session: RemoteSessionView,
+    clientId: string,
+    requestId: string,
+    error: unknown,
+  ): Promise<void> {
+    const current = this.requireTables().sessions.get(session.sessionId) ?? session
+    const holdDead = holdUnreachable(error)
+    const failed: RemoteSessionView = {
+      ...current,
+      turnState: 'failed',
+      channelState: holdDead ? 'lost' : current.channelState,
+      ...(holdDead && current.binding !== undefined ? { binding: { ...current.binding, state: 'lost' } } : {}),
+      updatedAt: new Date().toISOString(),
+    }
+    await this.requireTables().sessions.put(session.sessionId, failed)
+    this.broadcastSessionView(failed)
+    const failureId = RemoteTranscriptId(`delivery:${session.sessionId}:${clientId}:${requestId}`)
+    if (this.requireTables().transcript.get(failureId) === undefined) {
+      await this.appendTranscript(session.sessionId, {
+        transcriptId: failureId,
+        role: 'system',
+        kind: 'status',
+        text: `消息提交失败：${holdDead ? holdSessionFailure(error) : displayError(error)}`,
+        requestId,
       })
-    } catch (error) {
-      const failed: RemoteSessionView = {
-        ...running, turnState: 'failed', updatedAt: new Date().toISOString(),
-      }
-      await this.requireTables().sessions.put(session.sessionId, failed)
-      this.broadcastSessionView(failed)
-      const failureId = RemoteTranscriptId(`delivery:${session.sessionId}:${clientId}:${requestId}`)
-      if (this.requireTables().transcript.get(failureId) === undefined) {
-        await this.appendTranscript(session.sessionId, {
-          transcriptId: failureId,
-          role: 'system',
-          kind: 'status',
-          text: `消息提交失败：${displayError(error)}`,
-          requestId,
-        })
-      }
-      throw error
     }
   }
 
@@ -1548,7 +1584,9 @@ export class RemoteAgentGateway extends Service {
     }
     const updated: RemoteSessionView = {
       ...latest,
-      channelState: latest.channelState === 'lost' ? 'lost' : 'open',
+      channelState: latest.channelState === 'connecting' || latest.channelState === 'open'
+        ? 'open'
+        : latest.channelState,
       turnState,
       binding: { ...binding, lastSeq: processedThrough },
       updatedAt: new Date().toISOString(),
@@ -1640,7 +1678,12 @@ export class RemoteAgentGateway extends Service {
     session: RemoteSessionView,
     state = this.requireGlobal().get(),
   ): RemoteSessionView {
-    return { ...session, latestTranscriptSeq: (state.nextTranscriptSeq[session.sessionId] ?? 0) - 1 }
+    const droppedThrough = state.droppedThrough?.[session.sessionId]
+    return {
+      ...session,
+      latestTranscriptSeq: (state.nextTranscriptSeq[session.sessionId] ?? 0) - 1,
+      ...(droppedThrough !== undefined ? { droppedThrough } : {}),
+    }
   }
 
   private broadcastSessionView(session: RemoteSessionView): void {
@@ -1724,9 +1767,17 @@ export class RemoteAgentGateway extends Service {
       .sort((left, right) => left[1].seq - right[1].seq)
       .slice(0, -this.config.maxTranscriptEntriesPerSession)
     for (const [id] of excess) await this.requireTables().transcript.delete(id)
+    // Record the highest seq the gateway once held but has now rotated out,
+    // so the browser can show an honest banner when the session is re-opened.
+    // Mirrors hostd's `droppedThrough` convention; the count of lost entries
+    // equals `droppedThrough + 1` because the projected seq starts at 0.
+    const lastDropped = excess.at(-1)?.[1].seq
     await global.set({
       ...state,
       nextTranscriptSeq: { ...state.nextTranscriptSeq, [sessionId]: firstSeq + entries.length },
+      ...(lastDropped !== undefined
+        ? { droppedThrough: { ...(state.droppedThrough ?? {}), [sessionId]: lastDropped } }
+        : {}),
     })
     this.wsBroadcaster.broadcastTranscriptBatch(sessionId, entries)
     return entries

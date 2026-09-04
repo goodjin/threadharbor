@@ -36,6 +36,7 @@ import {
   readDisplayPreferences,
   subscribeDisplayPreferences,
 } from './display-preferences.ts'
+import { TranscriptGapBanner } from './transcript-gap-banner.tsx'
 
 /** Props injected by the conversation slot registration. */
 export interface RemoteConversationInjected {
@@ -2236,12 +2237,18 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
   }
   const reconnectAction = actions?.canReconnect === true
     ? {
-      label: session.channelState === 'lost' ? '在当前会话重开' : '重新连接',
-      pendingLabel: session.channelState === 'lost' ? '重开中…' : '重连中…',
+      label: session.channelState === 'reconnecting' ? '重新连接' : '在当前会话重开',
+      pendingLabel: session.channelState === 'reconnecting' ? '重连中…' : '重开中…',
       pending: sessionAction === `reconnect:${session.sessionId}`,
       onClick: reconnect,
     }
     : undefined
+  const reconnectOnChannel = reconnectAction !== undefined
+    && channelStage?.visible === true
+    && (session.channelState === 'reconnecting' || session.channelState === 'lost')
+  const reconnectOnTurn = reconnectAction !== undefined && !reconnectOnChannel
+    && visibleStage.visible
+    && (visibleStage.kind === 'failed' || visibleStage.kind === 'timeout')
   return (
     <main className={css.conversation}>
       <header className={css.conversationHeader}>
@@ -2283,6 +2290,9 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
           }}
         >
           <div ref={transcriptColumnRef} className={css.transcriptColumn}>
+            {session.droppedThrough !== undefined && session.droppedThrough >= 0
+              ? <TranscriptGapBanner session={session} />
+              : null}
             {transcript.map((node, index) => (
               <TranscriptRow
                 key={node.id}
@@ -2328,10 +2338,15 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
             {channelStage?.visible === true && (
               <ConversationActivity
                 stage={channelStage}
-                {...(reconnectAction === undefined ? {} : { action: reconnectAction })}
+                {...(reconnectOnChannel !== true || reconnectAction === undefined ? {} : { action: reconnectAction })}
               />
             )}
-            {visibleStage.visible && <ConversationActivity stage={visibleStage} />}
+            {visibleStage.visible && (
+              <ConversationActivity
+                stage={visibleStage}
+                {...(reconnectOnTurn !== true || reconnectAction === undefined ? {} : { action: reconnectAction })}
+              />
+            )}
             {transcript.length === 0 && !visibleStage.visible && channelStage?.visible !== true && (
               <p className={css.emptyTranscript}>远程会话已连接。发送一条消息开始。</p>
             )}

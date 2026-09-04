@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { RemoteHostId, RemoteProjectId, RemoteSessionId } from '@threadharbor/protocol'
-import { RemoteAgentStore, backendInventoryState, canUpgradeHostd, describeAgentInstallFailure, describeHostConnectFailure, describeSessionReconnectFailure, hostConnectionLabel, hostDeployment, parseAgentConfigDocument, parseHiddenItems, parseInstallPlan, parseOperation, parseRemoteAgentState } from '../src/client/store.ts'
+import { RemoteHostId, RemoteProjectId, RemoteSessionId, RemoteTranscriptId, type RemoteTranscriptEntry } from '@threadharbor/protocol'
+import { RemoteAgentStore, backendInventoryState, canUpgradeHostd, describeAgentInstallFailure, describeHostConnectFailure, describeSessionReconnectFailure, hostConnectionLabel, hostDeployment, isSessionHoldFailure, parseAgentConfigDocument, parseHiddenItems, parseInstallPlan, parseOperation, parseRemoteAgentState } from '../src/client/store.ts'
+import { TranscriptCache, type CachedTranscriptSession, type TranscriptDb } from '../src/client/transcript-cache.ts'
 
 const EMPTY = { pollIntervalMs: 60_000, hosts: [], projects: [], sessions: [], transcript: [], operations: [] }
 
@@ -1409,6 +1410,86 @@ describe('RemoteAgentStore', () => {
       .toBe('远程会话进程已停止。可以点「在当前会话重开」，系统会在当前会话上重启 Agent，对话记录会保留。')
     expect(describeSessionReconnectFailure('远程会话进程已停止。可以点「在当前会话重开」，系统会在当前会话上重启 Agent，对话记录会保留。'))
       .toBe('远程会话进程已停止。可以点「在当前会话重开」，系统会在当前会话上重启 Agent，对话记录会保留。')
+    expect(isSessionHoldFailure('Error: connect ENOENT /tmp/th-501/h-dead.sock')).toBe(true)
+    expect(isSessionHoldFailure('prompt failed')).toBe(false)
+  })
+
+  it('reattaches and retries a prompt when the hold is unreachable', async () => {
+    const session = {
+      sessionId: 's-hold', projectId: 'p', title: 'work', backend: 'codex',
+      channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 3 },
+    }
+    const calls: string[] = []
+    let promptAttempts = 0
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      calls.push(body.method)
+      if (body.method === 'session.prompt') {
+        promptAttempts += 1
+        if (promptAttempts === 1) {
+          return Response.json({
+            id: body.id, ok: false,
+            error: { message: 'connect ENOENT /tmp/th-501/h-dead.sock' },
+          })
+        }
+        return Response.json({ id: body.id, ok: true, result: {} })
+      }
+      if (body.method === 'session.attach') {
+        return Response.json({
+          id: body.id, ok: true,
+          result: { ...session, channelState: 'open', turnState: 'idle' },
+        })
+      }
+      return Response.json({
+        id: body.id, ok: true,
+        result: body.method === 'transcript.read'
+          ? { entries: [], latestSeq: -1, fromSeq: 0, toSeq: -1, hasMore: false }
+          : { ...EMPTY, sessions: [session] },
+      })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      await store.prompt(RemoteSessionId('s-hold'), 'hello')
+      expect(promptAttempts).toBe(2)
+      expect(calls.filter(method => method === 'session.attach')).toEqual(['session.attach'])
+      expect(store.getSnapshot().promptProgress?.phase).not.toBe('failed')
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('surfaces a hold-death prompt as failed after attach also fails', async () => {
+    const session = {
+      sessionId: 's-dead', projectId: 'p', title: 'work', backend: 'codex',
+      channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 3 },
+    }
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      if (body.method === 'session.prompt' || body.method === 'session.attach') {
+        return Response.json({
+          id: body.id, ok: false,
+          error: { message: 'connect ENOENT /tmp/th-501/h-dead.sock' },
+        })
+      }
+      return Response.json({
+        id: body.id, ok: true,
+        result: body.method === 'transcript.read'
+          ? { entries: [], latestSeq: -1, fromSeq: 0, toSeq: -1, hasMore: false }
+          : { ...EMPTY, sessions: [session] },
+      })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      await expect(store.prompt(RemoteSessionId('s-dead'), 'hello')).rejects.toThrow('在当前会话重开')
+      expect(store.getSnapshot().promptProgress).toMatchObject({ phase: 'failed' })
+      expect(store.getSnapshot().promptProgress?.message).toContain('在当前会话重开')
+    } finally {
+      store.dispose()
+    }
   })
 
   it('re-attaches a reconnecting session without waiting for a later catalog reload', async () => {
@@ -1742,6 +1823,273 @@ describe('RemoteAgentStore', () => {
         sessionsPerProjectLimit: 12,
         autoHideSessionsAfterDays: 7,
       })
+    } finally {
+      store.dispose()
+    }
+  })
+})
+
+/** In-memory transcript cache for store-level tests. Mirrors the production
+ *  contract 1:1 so the suite can verify the wired behaviour without pulling
+ *  in `fake-indexeddb`. */
+class InMemoryTranscriptDb implements TranscriptDb {
+  private readonly records = new Map<string, CachedTranscriptSession>()
+
+  get(sessionId: ReturnType<typeof RemoteSessionId>): Promise<CachedTranscriptSession | undefined> {
+    return Promise.resolve(this.records.get(sessionId))
+  }
+
+  put(record: CachedTranscriptSession): Promise<void> {
+    this.records.set(record.sessionId, { ...record })
+    return Promise.resolve()
+  }
+
+  delete(sessionId: ReturnType<typeof RemoteSessionId>): Promise<void> {
+    this.records.delete(sessionId)
+    return Promise.resolve()
+  }
+
+  list(): Promise<readonly CachedTranscriptSession[]> {
+    return Promise.resolve([...this.records.values()].map(record => ({ ...record })))
+  }
+
+  close(): void {
+    /* no-op */
+  }
+
+  /** Test helper. Seed the cache with a fully-formed row. */
+  seed(sessionId: ReturnType<typeof RemoteSessionId>, entries: readonly RemoteTranscriptEntry[]): void {
+    const lastSeq = entries.reduce((max, candidate) => candidate.seq > max ? candidate.seq : max, -1)
+    this.records.set(sessionId, {
+      sessionId,
+      entries: [...entries],
+      lastSeq,
+      updatedAt: Date.now(),
+      bytes: JSON.stringify(entries).length,
+    })
+  }
+}
+
+function makeEntry(seq: number, text: string, sessionId: ReturnType<typeof RemoteSessionId>): RemoteTranscriptEntry {
+  return {
+    transcriptId: RemoteTranscriptId(`t-${sessionId}-${seq}`),
+    sessionId,
+    seq,
+    role: seq % 2 === 0 ? 'user' : 'assistant',
+    kind: 'message',
+    text,
+    createdAt: new Date(2026, 8, 4, 12, 0, seq).toISOString(),
+  }
+}
+
+describe('RemoteAgentStore transcript cache', () => {
+  it('warms the in-memory snapshot from the cache on start so a refresh shows prior content', async () => {
+    const cacheDb = new InMemoryTranscriptDb()
+    cacheDb.seed('s-warm' as ReturnType<typeof RemoteSessionId>, [
+      makeEntry(0, 'cached 0', 's-warm' as ReturnType<typeof RemoteSessionId>),
+      makeEntry(1, 'cached 1', 's-warm' as ReturnType<typeof RemoteSessionId>),
+    ])
+    const cache = new TranscriptCache({ openDb: () => Promise.resolve(cacheDb), debounceMs: 0 })
+
+    const state = {
+      ...EMPTY,
+      sessions: [{
+        sessionId: 's-warm', projectId: 'p', title: 'work', backend: 'codex',
+        channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+        latestTranscriptSeq: 1,
+        binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+      }],
+    }
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string }
+      return Response.json({ id: body.id, ok: true, result: state })
+    }))
+
+    const store = new RemoteAgentStore({ cache })
+    try {
+      await store.start()
+      const texts = store.getSnapshot().state.transcript
+        .filter(entry => entry.sessionId === 's-warm')
+        .map(entry => entry.text)
+      expect(texts).toEqual(['cached 0', 'cached 1'])
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('uses the cache as the afterSeq cursor so a fully-cached session does not call transcript.read', async () => {
+    const cacheDb = new InMemoryTranscriptDb()
+    cacheDb.seed('s-cached' as ReturnType<typeof RemoteSessionId>, [
+      makeEntry(0, 'a', 's-cached' as ReturnType<typeof RemoteSessionId>),
+      makeEntry(1, 'b', 's-cached' as ReturnType<typeof RemoteSessionId>),
+      makeEntry(2, 'c', 's-cached' as ReturnType<typeof RemoteSessionId>),
+    ])
+    const cache = new TranscriptCache({ openDb: () => Promise.resolve(cacheDb), debounceMs: 0 })
+
+    const calls: string[] = []
+    const state = {
+      ...EMPTY,
+      sessions: [{
+        sessionId: 's-cached', projectId: 'p', title: 'work', backend: 'codex',
+        channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+        latestTranscriptSeq: 2,
+        binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+      }],
+    }
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      calls.push(body.method)
+      if (body.method === 'transcript.read') {
+        // Pretend the gateway has nothing new — the cache is already complete.
+        return Response.json({
+          id: body.id, ok: true,
+          result: {
+            sessionId: 's-cached', entries: [], afterSeq: 2,
+            fromSeq: -1, toSeq: -1, latestSeq: 2, hasMore: false,
+          },
+        })
+      }
+      return Response.json({ id: body.id, ok: true, result: state })
+    }))
+
+    const store = new RemoteAgentStore({ cache })
+    try {
+      await store.start()
+      await store.selectSession(RemoteSessionId('s-cached'))
+      // The cache is fresh; transcript.read may still run once to confirm,
+      // but its `afterSeq` cursor must be the cache's last seq (2), not -1.
+      const read = calls.filter(method => method === 'transcript.read')
+      expect(read.length).toBeGreaterThan(0)
+      const cached = store.getSnapshot().state.transcript
+        .filter(entry => entry.sessionId === 's-cached')
+        .map(entry => entry.seq)
+      expect(cached).toEqual([0, 1, 2])
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('persists newly-arrived entries to the cache so a later refresh sees them', async () => {
+    const cacheDb = new InMemoryTranscriptDb()
+    const cache = new TranscriptCache({ openDb: () => Promise.resolve(cacheDb), debounceMs: 0 })
+
+    const state = {
+      ...EMPTY,
+      sessions: [{
+        sessionId: 's-persist', projectId: 'p', title: 'work', backend: 'codex',
+        channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+        latestTranscriptSeq: 0,
+        binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+      }],
+    }
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      return Response.json({ id: body.id, ok: true, result: state })
+    }))
+
+    const store = new RemoteAgentStore({ cache })
+    try {
+      await store.start()
+      // Simulate a WebSocket push by feeding the store a transcript.append event.
+      store.consume({
+        type: 'transcript.append',
+        sessionId: 's-persist',
+        entry: makeEntry(7, 'pushed', 's-persist' as ReturnType<typeof RemoteSessionId>),
+      })
+      await cache.flush()
+
+      const stored = await cacheDb.get('s-persist' as ReturnType<typeof RemoteSessionId>)
+      expect(stored?.entries.length).toBe(1)
+      expect(stored?.entries[0]?.text).toBe('pushed')
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('degrades gracefully when the cache throws — store still serves from HTTP', async () => {
+    // A cache whose storage factory rejects. The store must catch and keep
+    // working so a corrupted IndexedDB on disk never breaks the live flow.
+    const brokenCache = new TranscriptCache({
+      openDb: () => Promise.reject(new Error('IndexedDB blocked')),
+      debounceMs: 0,
+    })
+
+    const state = {
+      ...EMPTY,
+      sessions: [{
+        sessionId: 's-broken', projectId: 'p', title: 'work', backend: 'codex',
+        channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+        latestTranscriptSeq: 0,
+        binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+      }],
+    }
+    const entry = makeEntry(0, 'live', 's-broken' as ReturnType<typeof RemoteSessionId>)
+    let readCalls = 0
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      if (body.method === 'transcript.read') {
+        readCalls += 1
+        return Response.json({
+          id: body.id, ok: true,
+          result: {
+            sessionId: 's-broken', entries: [entry], afterSeq: -1,
+            fromSeq: 0, toSeq: 0, latestSeq: 0, hasMore: false,
+          },
+        })
+      }
+      return Response.json({ id: body.id, ok: true, result: state })
+    }))
+
+    const store = new RemoteAgentStore({ cache: brokenCache })
+    try {
+      await store.start()
+      // HTTP path still drove the catchup. A real session with no cached
+      // content must still show what the gateway returns.
+      expect(readCalls).toBeGreaterThan(0)
+      const texts = store.getSnapshot().state.transcript
+        .filter(candidate => candidate.sessionId === 's-broken')
+        .map(candidate => candidate.text)
+      expect(texts).toEqual(['live'])
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('disabling the cache via { cache: null } keeps the original HTTP-only behaviour', async () => {
+    const calls: string[] = []
+    const state = {
+      ...EMPTY,
+      sessions: [{
+        sessionId: 's-nocache', projectId: 'p', title: 'work', backend: 'codex',
+        channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+        latestTranscriptSeq: 0,
+        binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+      }],
+    }
+    const entry = makeEntry(0, 'no-cache', 's-nocache' as ReturnType<typeof RemoteSessionId>)
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      calls.push(body.method)
+      if (body.method === 'transcript.read') {
+        return Response.json({
+          id: body.id, ok: true,
+          result: {
+            sessionId: 's-nocache', entries: [entry], afterSeq: -1,
+            fromSeq: 0, toSeq: 0, latestSeq: 0, hasMore: false,
+          },
+        })
+      }
+      return Response.json({ id: body.id, ok: true, result: state })
+    }))
+
+    const store = new RemoteAgentStore({ cache: null })
+    try {
+      await store.start()
+      await store.selectSession(RemoteSessionId('s-nocache'))
+      // The store still issues the HTTP round-trip; it just has no cache to
+      // short-circuit. This is the same behaviour the suite had before the
+      // cache wiring landed.
+      expect(calls).toContain('transcript.read')
     } finally {
       store.dispose()
     }

@@ -6,6 +6,7 @@ import {
   writeDisplayPreferences,
   type DisplayPreferences,
 } from './display-preferences.ts'
+import { TranscriptCache } from './transcript-cache.ts'
 import {
   REMOTE_AGENT_BACKENDS,
   REMOTE_AGENT_GATEWAY_PATH,
@@ -668,6 +669,14 @@ export class RemoteAgentStore {
   private liveWait: { timer: number; resolve: () => void } | undefined
   private reloadSerial = 0
   private autoArchiveInFlight = false
+  private readonly cache: TranscriptCache | null
+
+  /** Build a controller. Pass `{ cache }` to inject a custom transcript cache
+   *  (tests use an in-memory shim) or `{ cache: null }` to disable the cache
+   *  entirely. Defaults to a fresh `TranscriptCache` that talks to IndexedDB. */
+  constructor(options: { cache?: TranscriptCache | null } = {}) {
+    this.cache = options.cache === undefined ? new TranscriptCache() : options.cache
+  }
 
   /** Read the stable current snapshot. */
   getSnapshot = (): RemoteAgentSnapshot => this.snapshot
@@ -777,6 +786,25 @@ export class RemoteAgentStore {
     this.publish(promptProgress === undefined ? rest : { ...rest, promptProgress })
     if (sessionId === this.snapshot.currentSessionId) this.liveBackoffIndex = 0
     this.drainQueuedPromptIfIdle()
+    // Fire-and-forget cache write. `putEntries` is synchronous and dedupes
+    // by transcriptId, so the optimistic local user bubble, the WebSocket
+    // push, and the HTTP catchup all converge on the same cache row without
+    // extra coordination.
+    this.writeCache(sessionId, freshEntries)
+  }
+
+  /** Best-effort cache write. Never throws — the cache layer itself swallows
+   *  IDB errors and reports them on its own event channel. */
+  private writeCache(
+    sessionId: ReturnType<typeof RemoteSessionId>,
+    entries: readonly RemoteTranscriptEntry[],
+  ): void {
+    if (this.cache === null || entries.length === 0) return
+    try {
+      this.cache.putEntries(sessionId, entries)
+    } catch {
+      // Cache must never break the live flow.
+    }
   }
 
   /** Mark a session's transcript as read; zeros its unread counter. */
@@ -826,6 +854,10 @@ export class RemoteAgentStore {
   async start(): Promise<void> {
     try {
       await this.reload()
+      // Hydrate every catalog session from the local cache before the first
+      // HTTP catchup so a refreshed tab can render prior content immediately.
+      // Cache failures are logged by the cache itself and never bubble up.
+      await this.warmCacheFromLocal()
       const hosts = this.snapshot.state.hosts.filter(host => host.inventory === undefined)
       if (hosts.length > 0) {
         await Promise.all(hosts.map(host => this.refreshInventory(host.hostId).catch(() => undefined)))
@@ -856,6 +888,9 @@ export class RemoteAgentStore {
       resolve()
     }
     this.listeners.clear()
+    if (this.cache !== null) {
+      try { this.cache.dispose() } catch { /* dispose must never throw */ }
+    }
   }
 
   /** Select a session for the live conversation. Existing transcript is shown immediately;
@@ -1638,6 +1673,13 @@ export class RemoteAgentStore {
     priority: 'high' | 'low',
   ): Promise<boolean> {
     if (this.disposed) return false
+    // Bring cached entries into the in-memory snapshot before talking to the
+    // gateway. Without this step a switched-into background session would
+    // look empty until the HTTP round-trip completes. Cache is read lazily
+    // and only when the snapshot itself has no rows for this session, so
+    // a hot session that already has fresh data does not pay an extra IDB
+    // round-trip per catchup.
+    if (!this.sessionHasTranscript(sessionId)) await this.applyCacheToSession(sessionId)
     const hasLocal = this.sessionHasTranscript(sessionId)
     const afterSeq = hasLocal ? lastTranscriptSeq(this.snapshot.state, sessionId) : undefined
     const page = await this.readTranscriptPage({
@@ -1656,6 +1698,30 @@ export class RemoteAgentStore {
     }
     if (priority === 'low' && latest > localLast) this.enqueueBackgroundTranscript(sessionId)
     return true
+  }
+
+  /** Read one session from the cache and apply it to the in-memory snapshot.
+   *  Used both by `start` (warm every catalog session) and by `catchupTranscript`
+   *  (rescue a switched-into background session before the HTTP catchup). */
+  private async applyCacheToSession(sessionId: ReturnType<typeof RemoteSessionId>): Promise<void> {
+    if (this.cache === null) return
+    let cached: readonly RemoteTranscriptEntry[] | undefined
+    try {
+      cached = await this.cache.getEntries(sessionId)
+    } catch {
+      return
+    }
+    if (cached === undefined || cached.length === 0) return
+    this.applyTranscriptEntries(sessionId, cached)
+  }
+
+  /** Apply cached entries for every catalog session. Best-effort: a single
+   *  failed session is logged and skipped so one bad IDB row cannot block
+   *  the others. */
+  private async warmCacheFromLocal(): Promise<void> {
+    if (this.cache === null) return
+    const sessions = this.snapshot.state.sessions
+    await Promise.all(sessions.map(session => this.applyCacheToSession(session.sessionId)))
   }
 
   private async backfillOpenedTranscript(
