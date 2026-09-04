@@ -39,6 +39,8 @@ Gateway 拥有 SSH 配置和 tunnel；hostd 不接触私钥。部署分为 scan�
 
 Gateway 把已安装包中的自包含 hostd artifact 上传到普通用户目录，服务只监听远程 loopback。Web 服务分配本地 loopback 端口并持有 OpenSSH `-L` tunnel。Gateway 生命周期结束时只关闭自己持有的 tunnel，不终止远程 hostd 或 holds。
 
+hostd 的 `hostdVersion` 是 `package.json` 版本加上 `bin.js` 与 `hold-worker.js` 的短摘要。gateway 用同一规则计算当前制品版本。两者不一致时，Web 把该主机标为待升级并显示「升级 hostd」。hostd 进程启动时固定自己的版本，所以只重建制品、不重启远端进程时按钮仍会出现。
+
 ## Agent adapter
 
 Agent manager 把 inventory、auth、config 和部署操作放在可扩展 adapter 后面。未安装时，浏览器只能确认一份 hostd 预声明的官方安装计划；实际命令在目标主机上执行，浏览器不能提交可执行文件、shell 参数或配置路径。安装走 npm/pip 官方路径：`npm install -g` 写入该 Node 的 global prefix，`pip install --user --break-system-packages` 写入 Python user scripts（Homebrew 等 PEP 668 环境禁止裸 `pip install --user`）。hostd 从这些目录和 `PATH` 发现已知命令。

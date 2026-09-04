@@ -7,6 +7,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@threadharbor/protocol': `${root}packages/protocol/src/index.ts`,
+      '@threadharbor/hostd/version': `${root}packages/hostd/src/version.ts`,
       '@threadharbor/hostd': `${root}packages/hostd/src/server.ts`,
       '@threadharbor/dsh-gateway': `${root}packages/dsh-gateway/src/index.ts`,
       '@threadharbor/dsh-client': `${root}packages/dsh-client/src/index.ts`,

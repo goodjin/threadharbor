@@ -34,6 +34,15 @@ import {
 import { AgentManager, requireInstallConfirmation } from './agent-manager.ts'
 import type { HoldRequest, HoldResponse, HoldWorkerConfig } from './hold-protocol.ts'
 import { HostdWsHub } from './ws-hub.ts'
+import { runningHostdVersion } from './version.ts'
+
+export {
+  HOSTD_ARTIFACT_FILES,
+  hostdArtifactVersionFromDirectory,
+  hostdVersionFromFiles,
+  readHostdPackageVersion,
+  runningHostdVersion,
+} from './version.ts'
 
 /** Fully resolved hostd deployment configuration. */
 export interface HostdOptions {
@@ -74,6 +83,8 @@ export interface HostdOptions {
    * older hostd should appear unreachable so SSH reconnect kicks in.
    */
   readonly hostdHttpFallback: boolean
+  /** Test seam; production is package version plus a digest of this process's files. */
+  readonly hostdVersion?: string
 }
 
 interface HostdSessionRecord {
@@ -201,6 +212,7 @@ export class RemoteAgentHostd {
   private readonly agentManager: AgentManager
   private readonly wsHub: HostdWsHub
   private readonly holdLocks = new Map<string, Promise<unknown>>()
+  private readonly codeVersion: string
 
   /** @param options - fully resolved deployment configuration. */
   constructor(readonly options: HostdOptions) {
@@ -209,6 +221,8 @@ export class RemoteAgentHostd {
     if (!existsSync(identityPath)) writeFileSync(identityPath, `${randomUUID()}\n`, { mode: 0o600 })
     this.hostId = readFileSync(identityPath, 'utf8').trim()
     this.sessionsPath = join(options.dataDir, 'sessions.json')
+    this.codeVersion = options.hostdVersion
+      ?? runningHostdVersion(options.workerScript, fileURLToPath(new URL('.', import.meta.url)))
     this.agentManager = new AgentManager({
       installTimeoutMs: options.installTimeoutMs,
       authTimeoutMs: options.authTimeoutMs,
@@ -367,7 +381,7 @@ export class RemoteAgentHostd {
     if (await tcpOpen(this.options.grokServeHost, this.options.grokServePort)) running.add('grok')
     return {
       protocolVersion: 1,
-      hostdVersion: '0.1.0',
+      hostdVersion: this.codeVersion,
       hostId: this.hostId,
       healthy: true,
       backends: await this.agentManager.inventory(running),

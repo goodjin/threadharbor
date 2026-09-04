@@ -40,6 +40,7 @@ const LIBRARY = {
 
 export default defineConfig([
   { ...LIBRARY, entry: { index: `${root}lib/types/server.js` } },
+  { ...LIBRARY, entry: { version: `${root}lib/types/version.js` } },
   { ...SELF_CONTAINED, entry: [`${root}lib/types/bin.js`] },
   { ...SELF_CONTAINED, entry: { 'hold-worker': `${root}lib/types/hold-worker.js` } },
 ])

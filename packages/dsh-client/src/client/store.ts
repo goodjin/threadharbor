@@ -1415,9 +1415,13 @@ export class RemoteAgentStore {
       ...(promptProgress === undefined ? {} : { promptProgress }),
       ...(current === undefined ? {} : { currentSessionId: current }),
     })
+    if (current !== undefined) {
+      void this.catchupTranscript(current, 'high')
+      this.ensureLiveTranscriptSync()
+    }
   }
 
-  /** One HTTP `state` snapshot while the socket is down. Not a live journal loop. */
+  /** Rebuild catalog over HTTP while the socket is down, then page in transcript. */
   private rebuildFromHttp(): void {
     if (this.disposed || this.rebuildInFlight) return
     this.rebuildInFlight = true

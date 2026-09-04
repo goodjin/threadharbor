@@ -12,4 +12,5 @@ export default defineConfig({
   fixedExtension: false,
   dts: false,
   clean: false,
+  external: [/^@threadharbor\/hostd/],
 })

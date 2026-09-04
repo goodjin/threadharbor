@@ -43,6 +43,7 @@ class MockWebSocket {
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   MockWebSocket.instances.length = 0
 })
 
@@ -120,7 +121,7 @@ describe('WsTransport', () => {
     transport.close()
   })
 
-  it('rebuilds state over HTTP while reconnecting and does not follow over HTTP', async () => {
+  it('sends follow and other control RPCs over HTTP while reconnecting', async () => {
     vi.stubGlobal('WebSocket', () => { throw new Error('protocol not supported') })
     const calls: { method: string }[] = []
     vi.stubGlobal('fetch', async (_input: string, init?: RequestInit) => {
@@ -135,8 +136,9 @@ describe('WsTransport', () => {
     expect(transport.getPhase()).toBe('reconnecting')
     transport.follow('session-1')
     await expect(transport.call('state', {})).resolves.toEqual({ pollIntervalMs: 1 })
-    await Promise.resolve()
-    expect(calls).toEqual([{ method: 'state' }])
+    await vi.waitFor(() => {
+      expect(calls.map(call => call.method).sort()).toEqual(['session.follow', 'state'])
+    })
     transport.close()
   })
 
@@ -179,8 +181,7 @@ describe('WsTransport', () => {
     transport.close()
   })
 
-  it('does not send live RPCs over HTTP while reconnecting', async () => {
-    vi.useFakeTimers()
+  it('falls back to HTTP for prompt and transcript.read while reconnecting', async () => {
     const ctor = vi.fn((url: string) => new MockWebSocket(url))
     vi.stubGlobal('WebSocket', ctor)
     const calls: { method: string }[] = []
@@ -188,20 +189,18 @@ describe('WsTransport', () => {
       const body = JSON.parse(String(init?.body ?? '{}')) as { id: string; method: string }
       calls.push({ method: body.method })
       return {
-        json: async () => ({ id: body.id, ok: true, result: {} }),
+        json: async () => ({ id: body.id, ok: true, result: { accepted: true } }),
       }
     })
     const transport = new WsTransport({ url: 'ws://test/ws', browserId: 'browser-1' })
     try {
       transport.connect()
-      const pending = transport.call('session.prompt', { sessionId: 's1', text: 'hi' })
-      const expected = expect(pending).rejects.toThrow('ws did not reach live phase in time')
-      await vi.advanceTimersByTimeAsync(5_000)
-      await expected
-      expect(calls).toEqual([])
+      expect(transport.getPhase()).toBe('connecting')
+      await expect(transport.call('session.prompt', { sessionId: 's1', text: 'hi' })).resolves.toEqual({ accepted: true })
+      await expect(transport.call('transcript.read', { sessionId: 's1' })).resolves.toEqual({ accepted: true })
+      expect(calls.map(call => call.method)).toEqual(['session.prompt', 'transcript.read'])
     } finally {
       transport.close()
-      vi.useRealTimers()
     }
   })
 

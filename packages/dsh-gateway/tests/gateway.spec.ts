@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { join } from 'node:path'
 import type { EventEmitter } from 'node:events'
+import { hostdArtifactVersionFromDirectory } from '@threadharbor/hostd/version'
 import { Context } from '@deepseek-ai/cordis'
 import Storage from '@deepseek-ai/dsh-storage'
 import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
@@ -289,6 +291,17 @@ describe('RemoteAgentGateway', () => {
     }
   })
 
+  it('reports the current hostd artifact digest so the web can offer upgrades', async () => {
+    const { ctx, gateway } = await harness()
+    try {
+      const expected = hostdArtifactVersionFromDirectory(join(process.cwd(), 'packages/hostd/lib'))
+      expect(gateway.state().hostdArtifactVersion).toBe(expected)
+      expect(gateway.state().hostdArtifactVersion).toMatch(/^0\.1\.0(\+[0-9a-f]{12})?$/)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('answers a Claude permission request with JSON-RPC id 0 and catches up the journal', async () => {
     const events: JsonValue[] = [
       { jsonrpc: '2.0', id: 0, method: 'session/request_permission', params: {
@@ -530,6 +543,36 @@ describe('RemoteAgentGateway', () => {
       await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
       const afterJournal = browser.sent.map(payload => JSON.parse(payload) as { event?: { type?: string; session?: { turnState?: string } } })
       expect(afterJournal.some(frame => frame.event?.type === 'session.view.changed' && frame.event.session?.turnState === 'idle')).toBe(true)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps waiting-permission when elicitation arrives after prompt_complete', async () => {
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { text: 'answer' } } } },
+      { jsonrpc: '2.0', method: '_x.ai/session/prompt_complete', params: { stopReason: 'end_turn' } },
+    ]
+    const { ctx, gateway } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4212' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'request-elicit', text: 'hello',
+      }))
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === RemoteSessionId(session.sessionId))?.turnState).toBe('idle')
+      events.push({
+        jsonrpc: '2.0', id: 0, method: 'elicitation/create',
+        params: { mode: 'form', message: '选哪种方案？', requestedSchema: { type: 'object', properties: {} } },
+      })
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === RemoteSessionId(session.sessionId))?.turnState)
+        .toBe('waiting-permission')
+      const transcript = (await readTranscript(gateway, session.sessionId)).entries
+      expect(transcript.some(entry => entry.kind === 'permission' && entry.text === '选哪种方案？')).toBe(true)
     } finally {
       await ctx.fiber.dispose()
     }

@@ -272,10 +272,10 @@ describe('RemoteAgentStore', () => {
     const store = new RemoteAgentStore()
     try {
       await store.start()
-      expect(store.getSnapshot().state.transcript).toEqual([])
       await vi.waitFor(() => {
         expect(store.getSnapshot().state.transcript.map(entry => entry.text)).toEqual(['late'])
       })
+      expect(reads).toBeGreaterThan(1)
     } finally {
       store.dispose()
     }
@@ -716,6 +716,43 @@ describe('RemoteAgentStore', () => {
     }
   })
 
+  it('pages transcript over HTTP after a reconnecting catalog rebuild', async () => {
+    const session = {
+      sessionId: 's-live', projectId: 'p', title: 'work', backend: 'codex',
+      channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+      latestTranscriptSeq: 1,
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 4 },
+    }
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      if (body.method === 'transcript.read') {
+        return Response.json({
+          id: body.id, ok: true,
+          result: {
+            sessionId: 's-live',
+            entries: [{
+              transcriptId: 't1', sessionId: 's-live', seq: 1, role: 'assistant',
+              kind: 'message', text: 'answer', createdAt: 'a',
+            }],
+            latestSeq: 1, fromSeq: 1, toSeq: 1, hasMore: false, afterSeq: -1,
+          },
+        })
+      }
+      return Response.json({ id: body.id, ok: true, result: { ...EMPTY, sessions: [session] } })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      store.setPhase('reconnecting')
+      await store.start()
+      await vi.waitFor(() => {
+        expect(store.getSnapshot().state.transcript.some(entry => entry.text === 'answer')).toBe(true)
+      })
+      expect(store.getSnapshot().phase).toBe('reconnecting')
+    } finally {
+      store.dispose()
+    }
+  })
+
   it('applies session.view.changed turnState without a full reload', async () => {
     const session = {
       sessionId: 's-view', projectId: 'p', title: 'work', backend: 'codex',
@@ -885,6 +922,14 @@ describe('RemoteAgentStore', () => {
       ...base,
       inventory: { protocolVersion: 1, hostdVersion: '1.0.0', hostId: 'native', healthy: true, backends: [] },
     }, '1.0.0')).toBe('deployed')
+    expect(hostDeployment({
+      ...base,
+      inventory: { protocolVersion: 1, hostdVersion: '0.1.0+aaaaaaaaaaaa', hostId: 'native', healthy: true, backends: [] },
+    }, '0.1.0+bbbbbbbbbbbb')).toBe('outdated')
+    expect(hostConnectionLabel({
+      ...base,
+      inventory: { protocolVersion: 1, hostdVersion: '0.1.0+aaaaaaaaaaaa', hostId: 'native', healthy: true, backends: [] },
+    }, '0.1.0+bbbbbbbbbbbb')).toBe('已连接，待升级')
     const stale = {
       ...base,
       inventoryError: 'fetch failed',

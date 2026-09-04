@@ -2,10 +2,11 @@
 
 import { randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { readFileSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { HOSTD_ARTIFACT_FILES, hostdArtifactVersionFromDirectory } from '@threadharbor/hostd/version'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { DomainGlobal, KvTable } from '@deepseek-ai/dsh-storage-domain'
@@ -200,18 +201,29 @@ function hostdArtifactDirectory(): string {
   return fileURLToPath(new URL('../../hostd/lib/', import.meta.url))
 }
 
-const HOSTD_VERSION_CACHE: { value?: string } = {}
+const HOSTD_VERSION_CACHE: { stamp?: string; value?: string } = {}
+
+function hostdArtifactStamp(directory: string): string {
+  return HOSTD_ARTIFACT_FILES.map((file) => {
+    const path = join(directory, file)
+    try {
+      if (!existsSync(path)) return `${file}:missing`
+      const stats = statSync(path)
+      return `${file}:${stats.size}:${stats.mtimeMs}`
+    } catch {
+      return `${file}:missing`
+    }
+  }).join('|')
+}
 
 function hostdArtifactVersion(): string {
-  if (HOSTD_VERSION_CACHE.value !== undefined) return HOSTD_VERSION_CACHE.value
-  try {
-    const pkgPath = fileURLToPath(new URL('../../hostd/package.json', import.meta.url))
-    const parsed = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version?: unknown }
-    HOSTD_VERSION_CACHE.value = typeof parsed.version === 'string' ? parsed.version : 'unknown'
-  } catch {
-    HOSTD_VERSION_CACHE.value = 'unknown'
-  }
-  return HOSTD_VERSION_CACHE.value
+  const directory = hostdArtifactDirectory()
+  const stamp = hostdArtifactStamp(directory)
+  if (HOSTD_VERSION_CACHE.value !== undefined && HOSTD_VERSION_CACHE.stamp === stamp) return HOSTD_VERSION_CACHE.value
+  const value = hostdArtifactVersionFromDirectory(directory)
+  HOSTD_VERSION_CACHE.stamp = stamp
+  HOSTD_VERSION_CACHE.value = value
+  return value
 }
 
 function errorMessage(error: unknown): string {
@@ -1418,9 +1430,11 @@ export class RemoteAgentGateway extends Service {
       // User-initiated stop is a durable marker until the next prompt.
       // A later native end_turn must not rewrite it back to idle/running.
       turnState = 'stopped'
-    } else if (latest !== undefined && (latest.turnState === 'idle' || latest.turnState === 'failed')
+    } else if (latest?.turnState === 'failed'
       && (turnState === 'running' || turnState === 'waiting-permission')) {
-      turnState = latest.turnState
+      // Hold-unreachable / transport failure is terminal until the next prompt.
+      // Idle is not: Claude may emit prompt_complete and then AskUserQuestion.
+      turnState = 'failed'
     }
     const updated: RemoteSessionView = {
       ...session,

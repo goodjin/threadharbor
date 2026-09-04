@@ -60,7 +60,9 @@ describe('RemoteAgentHostd inventory', () => {
     roots.push(root)
     const hostd = new RemoteAgentHostd(options(root))
 
-    expect((await hostd.inventory()).backends).toEqual([
+    const inventory = await hostd.inventory()
+    expect(inventory.hostdVersion).toMatch(/^0\.1\.0(\+[0-9a-f]{12})?$/)
+    expect(inventory.backends).toEqual([
       { backend: 'grok', installed: true, authenticated: false, running: false, sessionCapable: true },
       { backend: 'codex', installed: false, authenticated: false, running: false, sessionCapable: true },
       { backend: 'claude', installed: false, authenticated: false, running: false, sessionCapable: false },

@@ -12,9 +12,13 @@
       "types": "./lib/types/server.d.ts",
       "default": "./lib/index.js"
     },
+    "./version": {
+      "types": "./lib/types/version.d.ts",
+      "default": "./lib/version.js"
+    },
     "./package.json": "./package.json"
   },
-  "files": ["lib/index.js", "lib/bin.js", "lib/hold-worker.js", "lib/types/**/*.d.ts"],
+  "files": ["lib/index.js", "lib/version.js", "lib/bin.js", "lib/hold-worker.js", "lib/types/**/*.d.ts"],
   "license": "MIT",
   "publishConfig": { "access": "public" },
   "dependencies": {
