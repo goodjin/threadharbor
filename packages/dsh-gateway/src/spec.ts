@@ -17,6 +17,11 @@ export const remoteAgentCatalogState = z.object({
   projectIds: z.array(projectId),
   sessionIds: z.array(sessionId),
   nextTranscriptSeq: z.record(z.string(), z.number().int().nonnegative()),
+  /** Highest seq that has been rotated out of the projected transcript for
+   *  each session. Survives across deploys so a refresh can tell the user
+   *  that older messages are no longer available. Optional in the schema so
+   *  an upgraded gateway can read pre-existing catalogs without a migration. */
+  droppedThrough: z.record(z.string(), z.number().int().nonnegative()).optional(),
 })
 
 /** Durable catalog state type. */
@@ -83,6 +88,9 @@ const sessionRecord = z.object({
   updatedAt: z.string(),
   archivedAt: z.string().optional(),
   binding: binding.optional(),
+  /** Highest seq that has been rotated out of the projected transcript.
+   *  Absent when the session has never been trimmed. */
+  droppedThrough: z.number().int().nonnegative().optional(),
 }) as unknown as z.ZodType<RemoteSessionView>
 const transcriptRecord: z.ZodType<RemoteTranscriptEntry> = z.object({
   transcriptId: z.string().transform(RemoteTranscriptId),
@@ -102,7 +110,7 @@ export const remoteAgentDomainSpec = defineDomain({
   version: 1,
   global: {
     schema: remoteAgentCatalogState,
-    initial: { hostIds: [], projectIds: [], sessionIds: [], nextTranscriptSeq: {} },
+    initial: { hostIds: [], projectIds: [], sessionIds: [], nextTranscriptSeq: {}, droppedThrough: {} },
   },
   tables: {
     hosts: domainTable<ReturnType<typeof RemoteHostId>, RemoteHostView>(hostRecord),

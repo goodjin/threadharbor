@@ -49,14 +49,15 @@ ThreadHarbor 把 Agent 的 cwd 设成了项目路径，并通过 hold-worker 直
    - 新 fixture `fake-env-snapshot.mjs`：把 `process.env.DSH_SESSION_ROOT` 写到指定文件。
    - `hold-worker.spec.ts`：新增两条用例覆盖「设了 sessionRoot 时注入」与「未设时不注入」。
    - `parseConfig`：新增 round-trip 用例，确认 `sessionRoot` 可被读回且缺失时为 `undefined`。
-5. 旧项目里的 `.sessions/`：本次改动只影响新建会话；迁移策略留给后续决定（见下文）。
+5. 旧项目里的 `.sessions/`：`spawnHold` 在启动 DSH hold 前调用 `migrateProjectDshSessions`，把 `<cwd>/.sessions/<projectKey>/<sessionId>/` 移到 `<dataDir>/dsh-sessions/`。目标已有同名会话时保留目标（正在写入的 `DSH_SESSION_ROOT` 副本），删除项目残留。空的 `.sessions` 树删掉。
 
 ## 验证步骤
 
 1. ✅ `npx vitest run packages/hostd/tests/hold-worker.spec.ts` — 17/17 通过（含 4 条新增）。
-2. ✅ `npx vitest run packages/hostd/tests/` — 52/52 通过；`hostd-integration.spec.ts` 跨 backend 流程仍绿。
+2. ✅ `npx vitest run packages/hostd/tests/dsh-sessions.spec.ts` — 5/5 通过（项目 `.sessions` 迁入 `dsh-sessions`、目标已有则保留、symlink 跳过）。
 3. ✅ `npx tsc -p packages/hostd/tsconfig.json --noEmit` — 无类型错误。
-4. 待真机：启动一个 DSH 项目，打开几条会话，确认 `~/.local/state/threadharbor/dsh-sessions/<projectKey>/<sessionId>/session.jsonl.zstd` 出现，项目目录不再新增 `.sessions/`。
+4. ✅ 本机已把 `/Users/good/github/threadharbor/.sessions` 与 `/Users/good/qg/nexa-service/.sessions` 迁入 `/private/tmp/threadharbor-hostd-run.mA1zJL/dsh-sessions/`；项目目录下 `.sessions` 已删除。`a990f321-…` 目标侧已有活副本，未覆盖。
+5. 待真机：新 DSH 会话应只写入 `dataDir/dsh-sessions/`，项目目录不再出现 `.sessions/`。
 
 ## 相关测试
 
@@ -65,16 +66,14 @@ ThreadHarbor 把 Agent 的 cwd 设成了项目路径，并通过 hold-worker 直
   - `leaves DSH_SESSION_ROOT unset when the config does not provide one`
   - `preserves an explicit sessionRoot for stdio dsh backends`（parseConfig）
   - `omits sessionRoot when the field is absent`（parseConfig）
+- `packages/hostd/tests/dsh-sessions.spec.ts`
 - `packages/hostd/tests/fixtures/fake-env-snapshot.mjs`（新增 fixture）
 
 ## 设计建议
 
 - **目录归属**：DSH JSONL 放在 hostd dataDir 下的 `dsh-sessions/`，跟 hold journal 同级，符合「hostd 拥有自己的 dataDir」的设计，比塞进 Web 的 `$DSH_HOME` 更稳——不绑通道、不绑通道布局。
 - **跨 hold 共享**：`dsh-sessions/` 不是按 hold 隔离的，DSH 用 `cwd` 当 projectKey，所有同一项目的 hold 共享同一棵子树；这样 attach / fork 续上历史不会因为 hold 目录被清掉而丢 JSONL。
-- **迁移问题**：已存在的项目 `<cwd>/.sessions/` 不会被本次修改自动迁移。两种选择：
-  - 静默：用户自清，不做兼容（默认）。
-  - 一次性迁移：在 `session.start` 检测到项目里已有 `.sessions/`，把 `<cwd>/.sessions/*` 移到 `<dataDir>/dsh-sessions/<projectKey>/*`，再继续。
-  目前选择「只对新建会话生效」。如果后续要兼容旧目录，可以新增一个 hostd 控制 RPC 做一次性迁移，避免改启动路径引入新的不确定性。
+- **迁移问题**：`packages/hostd/src/dsh-sessions.ts` `migrateProjectDshSessions` 在每次 DSH `spawnHold` 时把项目 `.sessions` 迁到 `dataDir/dsh-sessions`。同名会话以目标为准，避免覆盖已经在独立目录里写入的活副本。`.sessions` 若是指向 session root 的 symlink 则跳过。
 - **dataDir 漂移（未解决，后续 ticket）**：本机当前 hostd 实际用的是 `/private/tmp/threadharbor-hostd-run.XXXX/`，跟设计默认 `~/.local/state/threadharbor` 不一致。`/tmp` 在重启后会被清掉，hold journal 也会丢；这跟本 fix 是独立问题，应该分开处理。
   - **升级路径会延续坏路径**：`packages/dsh-gateway/src/local-hostd.ts:33` 的 `restartLoopbackHostd` 会用 `lsof`+`ps` 读出当前 hostd 进程的 `--data-dir` 再原样回传，所以「升级 hostd」按钮不会自动把 dataDir 迁回 `~/.local/state/threadharbor`。
   - **代码里没有 `/tmp` 入口**：grep 全仓 `--data-dir` 只在 `bin.ts:54`（默认 `~/.local/state/threadharbor`）、`ssh-manager.ts:265/267`（SSH 远端，`$state/hostd`）和 `local-hostd.ts:33`（续传）出现。也就是说 `/private/tmp/threadharbor-hostd-run.XXX/` 是某次手工启动（很可能是 `mktemp -d` 之类）留下的，gateway 自己不会建这个路径。

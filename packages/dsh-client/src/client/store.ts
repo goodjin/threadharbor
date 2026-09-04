@@ -187,11 +187,18 @@ export function describeHostConnectFailure(error: unknown): string {
   return message
 }
 
+/** Whether an RPC error means the remote hold/session process is gone. */
+export function isSessionHoldFailure(error: unknown): boolean {
+  const message = (error instanceof Error ? error.message : String(error)).replace(/^Error:\s*/u, '').trim()
+  if (message.includes('在当前会话') || message.includes('远程会话进程已停止')) return true
+  return /ECONNREFUSED|ENOENT|ENOTSOCK|EPIPE|ECONNRESET|fetch failed|process is not running|did not start/i.test(message)
+}
+
 /** Turn a session-hold reconnect failure into a short, actionable reason. */
 export function describeSessionReconnectFailure(error: unknown): string {
   const message = (error instanceof Error ? error.message : String(error)).replace(/^Error:\s*/u, '').trim()
   if (message.includes('在当前会话') || message.includes('远程会话进程已停止')) return message
-  if (/ECONNREFUSED|ENOENT|ENOTSOCK|EPIPE|ECONNRESET/i.test(message) && /\.sock|named pipe|hold /i.test(message)) {
+  if (isSessionHoldFailure(error) && /\.sock|named pipe|hold /i.test(message)) {
     return '远程会话进程已停止。可以点「在当前会话重开」，系统会在当前会话上重启 Agent，对话记录会保留。'
   }
   return message
@@ -1178,7 +1185,7 @@ export class RemoteAgentStore {
         const progress: RemotePromptProgress = { ...connecting, phase: 'sending' }
         this.publish({ ...withoutError(this.snapshot), promptProgress: progress, pending: true })
         try {
-          await this.call('session.prompt', { sessionId: session.sessionId, clientId, requestId, text })
+          await this.deliverPrompt(session.sessionId, clientId, requestId, text)
         } finally {
           await this.reload(session.sessionId)
           void this.catchupTranscript(session.sessionId, 'high')
@@ -1235,6 +1242,26 @@ export class RemoteAgentStore {
     })
   }
 
+  /** Forward one prompt; if the hold is dead, re-attach once and retry the same request. */
+  private async deliverPrompt(
+    sessionId: ReturnType<typeof RemoteSessionId>,
+    clientId: string,
+    requestId: string,
+    text: string,
+  ): Promise<void> {
+    try {
+      await this.call('session.prompt', { sessionId, clientId, requestId, text })
+    } catch (error) {
+      if (!isSessionHoldFailure(error)) throw error
+      try {
+        await this.call('session.attach', { sessionId })
+      } catch (attachError) {
+        throw new Error(describeSessionReconnectFailure(attachError))
+      }
+      await this.call('session.prompt', { sessionId, clientId, requestId, text })
+    }
+  }
+
   /** Admit one prompt with a stable browser identity and request id.
    * @param sessionId - root session receiving the prompt.
    * @param text - user text forwarded unchanged.
@@ -1271,7 +1298,7 @@ export class RemoteAgentStore {
     try {
       await this.run(async () => {
         try {
-          await this.call('session.prompt', { sessionId, clientId, requestId, text })
+          await this.deliverPrompt(sessionId, clientId, requestId, text)
         } finally {
           await this.reload(sessionId)
           void this.catchupTranscript(sessionId, 'high')

@@ -33,6 +33,7 @@ import {
   type RemoteAgentBackend,
 } from '@threadharbor/protocol'
 import { AgentManager, requireInstallConfirmation } from './agent-manager.ts'
+import { migrateProjectDshSessions } from './dsh-sessions.ts'
 import type { HoldRequest, HoldResponse, HoldWorkerConfig } from './hold-protocol.ts'
 import { HostdWsHub } from './ws-hub.ts'
 import { runningHostdVersion } from './version.ts'
@@ -738,6 +739,7 @@ export class RemoteAgentHostd {
     const configPath = join(directory, 'config.json')
     const dshLaunch = record.backend === 'dsh' ? await this.agentManager.resolvedDshLaunch() : undefined
     const sessionRoot = record.backend === 'dsh' ? dshSessionRoot(this.options.dataDir) : undefined
+    if (sessionRoot !== undefined) migrateProjectDshSessions(record.cwd, sessionRoot)
     const config: HoldWorkerConfig = {
       version: 1,
       holdId: record.holdId,

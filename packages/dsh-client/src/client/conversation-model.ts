@@ -98,13 +98,25 @@ function turnStage(input: {
 
   if (progress?.phase === 'failed') {
     const label = failureLabel(progress.message)
-    return { kind: label === '请求超时' ? 'timeout' : 'failed', label, detail: progress.message ?? '请求未成功送达远程 Agent。', state: 'error', visible: true }
+    return {
+      kind: label === '请求超时' ? 'timeout' : 'failed',
+      label,
+      detail: progress.message ?? '请求未成功送达远程 Agent。可以点「在当前会话重开」再试。',
+      state: 'error',
+      visible: true,
+    }
   }
   if (progress?.phase === 'sending') {
     return { kind: 'sending', label: '正在发送消息', detail: '正在把请求提交到远程 Agent。', state: 'ongoing', visible: true }
   }
   if (session.turnState === 'failed') {
-    return { kind: 'failed', label: '本轮执行失败', detail: error ?? '远程 Agent 未能完成本轮请求。', state: 'error', visible: true }
+    return {
+      kind: 'failed',
+      label: '本轮执行失败',
+      detail: error ?? '远程 Agent 未能完成本轮请求。可以点「在当前会话重开」，或直接发送新的请求。',
+      state: 'error',
+      visible: true,
+    }
   }
   if (session.turnState === 'stopped') {
     return {
@@ -219,16 +231,23 @@ function sessionActionGates(input: {
   readonly transportPhase?: 'loading' | 'ready' | 'reconnecting' | 'error'
   readonly pending: boolean
   readonly child: boolean
+  readonly progress?: PromptProgressView
 }): SessionActionGates {
   const transportDown = input.transportPhase === 'reconnecting' || input.transportPhase === 'loading'
   const live = input.channelState === 'open' && !transportDown
   const turnBusy = input.turnState === 'running' || input.turnState === 'waiting-permission'
   const canCompose = !input.child && live
+  const sendFailed = input.progress?.phase === 'failed'
   return {
     canCompose,
     canSend: canCompose && !input.pending && !turnBusy,
     canStop: !input.child && turnBusy,
-    canReconnect: input.channelState === 'reconnecting' || input.channelState === 'lost',
+    canReconnect: !input.child && (
+      input.channelState === 'reconnecting'
+      || input.channelState === 'lost'
+      || input.turnState === 'failed'
+      || sendFailed
+    ),
     canResend: canCompose && !input.pending && !turnBusy,
     canChangePreferences: !input.child && live && !input.pending,
   }
@@ -264,6 +283,7 @@ export function conversationPresentation(input: {
     ...(input.transportPhase === undefined ? {} : { transportPhase: input.transportPhase }),
     pending: input.pending === true,
     child: input.session.parentSessionId !== undefined,
+    ...(input.progress === undefined ? {} : { progress: input.progress }),
   })
   const headerParts = [
     ...(channel.visible ? [channel.label] : []),

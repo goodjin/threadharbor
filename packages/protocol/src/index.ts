@@ -266,6 +266,10 @@ export interface RemoteSessionView {
   /** Archived sessions stay durable but are omitted from the normal browser projection. */
   readonly archivedAt?: string
   readonly binding?: RemoteSessionBinding
+  /** Highest seq the gateway once held but has since rotated out of the
+   *  projected transcript. Present only when entries have been trimmed; the
+   *  count of lost entries equals this value (transcript starts at seq 0). */
+  readonly droppedThrough?: number
 }
 
 /** Projected transcript entry stored separately from Harness SessionEventMap. */

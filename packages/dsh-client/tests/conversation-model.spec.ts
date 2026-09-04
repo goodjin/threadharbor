@@ -326,6 +326,14 @@ describe('remote conversation view model', () => {
       actions: { canReconnect: true, canCompose: false },
     })
     expect(conversationPresentation({
+      session: session({ channelState: 'open', turnState: 'failed' }), entries: [], now: 0,
+    }).actions).toMatchObject({ canReconnect: true, canSend: true, canCompose: true })
+    expect(conversationPresentation({
+      session: session({ channelState: 'open', turnState: 'idle' }),
+      progress: { sessionId: 'session', phase: 'failed', startedAt: 0, baselineSeq: -1, message: 'connect ENOENT /tmp/h.sock' },
+      entries: [], now: 0,
+    }).actions).toMatchObject({ canReconnect: true, canSend: true })
+    expect(conversationPresentation({
       session: session({ channelState: 'open', turnState: 'waiting-permission' }), entries: [], now: 0,
     }).actions).toMatchObject({ canStop: true, canSend: false, canCompose: true, canReconnect: false })
     expect(conversationPresentation({
