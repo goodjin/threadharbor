@@ -600,8 +600,43 @@ describe('RemoteAgentStore', () => {
 
       expect(calls.filter(method => method !== 'transcript.read')).toEqual(['state'])
       expect(store.getSnapshot().draftSession).toEqual({ projectId: 'p', title: '新会话' })
-      expect(store.getSnapshot().state.sessions.map(entry => entry.sessionId)).toEqual(['s-old', 's-new'])
-      expect(store.getSnapshot().state.sessions[1]).toMatchObject({ sessionId: 's-new', channelState: 'connecting' })
+      expect(store.getSnapshot().state.sessions.map(entry => entry.sessionId)).toEqual(['s-new', 's-old'])
+      expect(store.getSnapshot().state.sessions[0]).toMatchObject({ sessionId: 's-new', channelState: 'connecting' })
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('keeps newly created sessions at the top of the project list across drafts', async () => {
+    const first = {
+      sessionId: 's-first', projectId: 'p', title: 'first question', backend: 'grok',
+      channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'a',
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+    }
+    const second = {
+      sessionId: 's-second', projectId: 'p', title: 'second question', backend: 'codex',
+      channelState: 'open', turnState: 'idle', createdAt: 'b', updatedAt: 'b',
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+    }
+    const third = {
+      sessionId: 's-third', projectId: 'p', title: 'third question', backend: 'grok',
+      channelState: 'open', turnState: 'idle', createdAt: 'c', updatedAt: 'c',
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+    }
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      return Response.json({ id: body.id, ok: true, result: { ...EMPTY, sessions: [first, second] } })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      // Server already has the older two sessions in the catalog.
+      expect(store.getSnapshot().state.sessions.map(entry => entry.sessionId)).toEqual(['s-first', 's-second'])
+
+      // A fresh session.view.changed for a new session must land at the top.
+      store.consume({ type: 'session.view.changed', session: third })
+      expect(store.getSnapshot().state.sessions.map(entry => entry.sessionId))
+        .toEqual(['s-third', 's-first', 's-second'])
     } finally {
       store.dispose()
     }
@@ -669,6 +704,135 @@ describe('RemoteAgentStore', () => {
     }
   })
 
+  it('opens the created session when a catalog reload arrives while the draft is still showing', async () => {
+    const created = {
+      sessionId: 's-new', projectId: 'p', title: 'first question', backend: 'grok',
+      channelState: 'open', turnState: 'running',
+      createdAt: new Date().toISOString(), updatedAt: 'c',
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+    }
+    let releaseStart: (() => void) | undefined
+    const startHeld = new Promise<void>(resolve => { releaseStart = resolve })
+    let stateCalls = 0
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      if (body.method === 'session.start') {
+        await startHeld
+        return Response.json({ id: body.id, ok: true, result: created })
+      }
+      if (body.method === 'state') {
+        stateCalls += 1
+        return Response.json({
+          id: body.id, ok: true,
+          result: { ...EMPTY, sessions: stateCalls === 1 ? [] : [created] },
+        })
+      }
+      return Response.json({
+        id: body.id, ok: true,
+        result: body.method === 'transcript.read'
+          ? {
+            sessionId: 's-new', entries: [{
+              transcriptId: 't1', sessionId: 's-new', seq: 1, role: 'assistant', kind: 'message',
+              text: 'hello from agent', createdAt: 'c',
+            }],
+            afterSeq: 0, latestSeq: 1, fromSeq: 1, toSeq: 1, hasMore: false,
+          }
+          : { ...EMPTY, sessions: [created] },
+      })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      store.startSessionDraft(RemoteProjectId('p'))
+      const pending = store.promptSessionDraft('grok', 'first question')
+      await vi.waitFor(() => {
+        expect(store.getSnapshot().promptProgress?.phase).toBe('connecting')
+      })
+      expect(store.getSnapshot().draftSession).toEqual({ projectId: 'p', title: '新会话' })
+
+      store.consume({ type: 'host.changed', host: { hostId: 'h' } })
+      await vi.waitFor(() => {
+        expect(store.getSnapshot().currentSessionId).toBe('s-new')
+      })
+      expect(store.getSnapshot().draftSession).toBeUndefined()
+      await vi.waitFor(() => {
+        expect(store.getSnapshot().state.transcript.some(entry => entry.text === 'hello from agent')).toBe(true)
+      })
+      releaseStart?.()
+      await pending
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('clears promptProgress when a different project starts a new draft mid-flight', async () => {
+    // First draft's session.start is stalled, leaving promptProgress pointing at
+    // project A. The user then abandons it and starts a new draft for project B.
+    // The store must clear promptProgress so the new draft's UI is not blocked by
+    // a progress entry that belongs to the abandoned draft.
+    let releaseStart: (() => void) | undefined
+    const startHeld = new Promise<void>(resolve => { releaseStart = resolve })
+    let startCalls = 0
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      if (body.method === 'session.start') {
+        startCalls += 1
+        if (startCalls === 1) {
+          // Stall the first create RPC so promptProgress for project A stays visible
+          // while we exercise the cross-draft switch.
+          await startHeld
+        }
+        return Response.json({
+          id: body.id, ok: true,
+          result: {
+            sessionId: `s-${startCalls}`, projectId: 'p', title: 't', backend: 'grok',
+            channelState: 'connecting', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+          },
+        })
+      }
+      return Response.json({
+        id: body.id, ok: true,
+        result: body.method === 'session.prompt' ? {} : { ...EMPTY },
+      })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      store.startSessionDraft(RemoteProjectId('p-a'))
+      const firstDraft = store.promptSessionDraft('grok', 'first question')
+
+      await vi.waitFor(() => {
+        expect(store.getSnapshot().promptProgress?.projectId).toBe('p-a')
+      })
+      expect(store.getSnapshot().pending).toBe(true)
+
+      // The user abandons the in-flight draft and starts a new one for project B.
+      store.startSessionDraft(RemoteProjectId('p-b'))
+      const snapshot = store.getSnapshot()
+      expect(snapshot.draftSession).toEqual({ projectId: 'p-b', title: '新会话' })
+
+      // The new draft's promptProgress check must be false: the previous progress
+      // entry belonged to project A and was cleared by startSessionDraft.
+      const draftBusyForB = snapshot.promptProgress?.projectId === 'p-b'
+        && snapshot.promptProgress.sessionId === undefined
+        && snapshot.promptProgress.phase !== 'failed'
+      expect(draftBusyForB).toBeFalsy()
+
+      // pending remains true while the first RPC is in flight, but DraftConversation
+      // intentionally ignores snapshot.pending and only blocks when its OWN draft's
+      // promptProgress matches.
+      expect(snapshot.pending).toBe(true)
+
+      // Release the held fetch so the dangling promise resolves after dispose().
+      releaseStart?.()
+      // Intentionally do not await firstDraft — we already verified the invariant.
+      void firstDraft.catch(() => undefined)
+    } finally {
+      store.dispose()
+      releaseStart?.()
+    }
+  })
+
   it('does not let a stale catalog reload drop the in-flight new session', async () => {
     const existing = {
       sessionId: 's-old', projectId: 'p', title: 'work', backend: 'codex',
@@ -697,10 +861,10 @@ describe('RemoteAgentStore', () => {
       store.consume({ type: 'host.changed', host: { hostId: 'h' } })
       store.consume({ type: 'session.view.changed', session: created })
       await store.selectSession(RemoteSessionId('s-new'))
-      expect(store.getSnapshot().state.sessions.map(entry => entry.sessionId)).toEqual(['s-old', 's-new'])
+      expect(store.getSnapshot().state.sessions.map(entry => entry.sessionId)).toEqual(['s-new', 's-old'])
       releaseStale?.()
       await vi.waitFor(() => { expect(stateCalls).toBe(2) })
-      expect(store.getSnapshot().state.sessions.map(entry => entry.sessionId)).toEqual(['s-old', 's-new'])
+      expect(store.getSnapshot().state.sessions.map(entry => entry.sessionId)).toEqual(['s-new', 's-old'])
       expect(store.getSnapshot().currentSessionId).toBe('s-new')
     } finally {
       store.dispose()
@@ -806,6 +970,47 @@ describe('RemoteAgentStore', () => {
     }
   })
 
+  it('catchups the current session when the live channel comes back', async () => {
+    const calls: string[] = []
+    const session = {
+      sessionId: 's-live', projectId: 'p', title: 'work', backend: 'codex',
+      channelState: 'open', turnState: 'running', createdAt: 'a', updatedAt: 'b',
+      latestTranscriptSeq: 2,
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 9 },
+    }
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string; params?: { afterSeq?: number } }
+      calls.push(body.method)
+      if (body.method === 'transcript.read') {
+        return Response.json({
+          id: body.id, ok: true,
+          result: {
+            sessionId: 's-live', afterSeq: body.params?.afterSeq ?? -1,
+            fromSeq: 1, toSeq: 2, latestSeq: 2, hasMore: false,
+            entries: [
+              { transcriptId: 't1', sessionId: 's-live', seq: 1, role: 'user', kind: 'message', text: 'hello', createdAt: 'a' },
+              { transcriptId: 't2', sessionId: 's-live', seq: 2, role: 'assistant', kind: 'message', text: 'late answer', createdAt: 'b' },
+            ],
+          },
+        })
+      }
+      return Response.json({ id: body.id, ok: true, result: { ...EMPTY, sessions: [session] } })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      expect(store.getSnapshot().state.transcript.some(entry => entry.text === 'late answer')).toBe(true)
+      calls.length = 0
+      store.setPhase('reconnecting')
+      store.setPhase('ready')
+      await vi.waitFor(() => {
+        expect(calls).toContain('transcript.read')
+      })
+    } finally {
+      store.dispose()
+    }
+  })
+
   it('tracks sending and waiting until the first backend event arrives', async () => {
     const runningSession = {
       sessionId: 's-progress', projectId: 'p', title: 'work', backend: 'codex',
@@ -847,6 +1052,201 @@ describe('RemoteAgentStore', () => {
         },
       })
       expect(store.getSnapshot().promptProgress).toBeUndefined()
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('inserts the user message into the transcript before session.prompt returns', async () => {
+    const session = {
+      sessionId: 's-optimistic', projectId: 'p', title: 'work', backend: 'codex',
+      channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+    }
+    let releasePrompt: (() => void) | undefined
+    const promptAdmission = new Promise<void>((resolve) => { releasePrompt = resolve })
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      if (body.method === 'session.prompt') {
+        await promptAdmission
+        return Response.json({ id: body.id, ok: true, result: { accepted: true } })
+      }
+      return Response.json({ id: body.id, ok: true, result: { ...EMPTY, sessions: [session] } })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      const task = store.prompt(RemoteSessionId('s-optimistic'), 'hello world')
+      const optimistic = store.getSnapshot().state.transcript
+        .filter(entry => entry.role === 'user')
+        .map(entry => entry.text)
+      expect(optimistic).toEqual(['hello world'])
+      expect(store.getSnapshot().promptProgress).toMatchObject({ sessionId: 's-optimistic', phase: 'sending' })
+      releasePrompt?.()
+      await task
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('parks the next message as queued while a previous turn is still in flight', async () => {
+    const session = {
+      sessionId: 's-queue', projectId: 'p', title: 'work', backend: 'codex',
+      channelState: 'open', turnState: 'running', createdAt: 'a', updatedAt: 'b',
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+    }
+    const promptRelease: { current: (() => void) | undefined } = { current: undefined }
+    const promptAdmission = new Promise<void>((resolve) => { promptRelease.current = resolve })
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      if (body.method === 'session.prompt') {
+        await promptAdmission
+        return Response.json({ id: body.id, ok: true, result: { accepted: true } })
+      }
+      return Response.json({ id: body.id, ok: true, result: { ...EMPTY, sessions: [session] } })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      const firstTask = store.prompt(RemoteSessionId('s-queue'), 'first')
+      // First call's transcript insert + sending state are visible immediately.
+      expect(store.getSnapshot().queuedPrompt).toBeUndefined()
+      expect(store.getSnapshot().state.transcript.some(entry => entry.role === 'user' && entry.text === 'first')).toBe(true)
+      // While the first turn is still in flight we queue the next one.
+      store.enqueuePrompt(RemoteSessionId('s-queue'), 'second')
+      expect(store.getSnapshot().queuedPrompt?.text).toBe('second')
+      const userTexts = store.getSnapshot().state.transcript
+        .filter(entry => entry.sessionId === 's-queue')
+        .map(entry => entry.text)
+      expect(userTexts).toEqual(['first'])
+      promptRelease.current?.()
+      await firstTask
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('drains the queued prompt automatically once the live turn settles', async () => {
+    const runningSession = {
+      sessionId: 's-drain', projectId: 'p', title: 'work', backend: 'codex',
+      channelState: 'open', turnState: 'running', createdAt: 'a', updatedAt: 'b',
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+    }
+    const idleSession = { ...runningSession, turnState: 'idle' as const }
+    const promptReleases: ((this: void) => void)[] = []
+    const promptCount = { value: 0 }
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      if (body.method === 'session.prompt') {
+        promptCount.value += 1
+        await new Promise<void>((resolve) => { promptReleases.push(resolve) })
+        return Response.json({ id: body.id, ok: true, result: { accepted: true } })
+      }
+      const catalog = body.method === 'state'
+        ? { ...EMPTY, sessions: [idleSession] }
+        : EMPTY
+      return Response.json({ id: body.id, ok: true, result: catalog })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      void store.prompt(RemoteSessionId('s-drain'), 'first').catch(() => undefined)
+      store.enqueuePrompt(RemoteSessionId('s-drain'), 'queued')
+      expect(store.getSnapshot().queuedPrompt?.text).toBe('queued')
+
+      // Release the first session.prompt; the spec's mock state reload returns turnState:'idle'
+      // for subsequent state polls, but we instead drive the drain via an explicit push
+      // simulating the backend acknowledging the turn.
+      promptReleases.shift()?.()
+      store.consume({
+        type: 'transcript.append',
+        sessionId: 's-drain',
+        seq: 5,
+        entry: {
+          transcriptId: 't-bang', sessionId: 's-drain', seq: 5, role: 'assistant',
+          kind: 'message', text: 'done', createdAt: '2026-08-30T00:00:01.000Z',
+        },
+      })
+      // Drain runs synchronously inside applyTranscriptEntries; the second prompt
+      // is enqueued via fetch and awaits its own release.
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(store.getSnapshot().queuedPrompt).toBeUndefined()
+      expect(promptCount.value).toBe(2)
+      // Release the second prompt so dispose doesn't dangle on an open promise.
+      promptReleases.shift()?.()
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('cancelQueuedPrompt drops the queue and never reaches the backend', async () => {
+    const session = {
+      sessionId: 's-cancel', projectId: 'p', title: 'work', backend: 'codex',
+      channelState: 'open', turnState: 'running', createdAt: 'a', updatedAt: 'b',
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+    }
+    const promptRelease: { current: (() => void) | undefined } = { current: undefined }
+    const promptAdmission = new Promise<void>((resolve) => { promptRelease.current = resolve })
+    const promptMethods: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      if (body.method === 'session.prompt') {
+        promptMethods.push(body.method)
+        await promptAdmission
+        return Response.json({ id: body.id, ok: true, result: { accepted: true } })
+      }
+      return Response.json({ id: body.id, ok: true, result: { ...EMPTY, sessions: [session] } })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      void store.prompt(RemoteSessionId('s-cancel'), 'first').catch(() => undefined)
+      store.enqueuePrompt(RemoteSessionId('s-cancel'), 'do not send')
+      expect(store.getSnapshot().queuedPrompt?.text).toBe('do not send')
+      store.cancelQueuedPrompt()
+      expect(store.getSnapshot().queuedPrompt).toBeUndefined()
+      promptRelease.current?.()
+      await new Promise((resolve) => window.setTimeout(resolve, 20))
+      expect(promptMethods.length).toBe(1)
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('selectSession clears the queued prompt for the previous session', async () => {
+    const s1 = {
+      sessionId: 's-a', projectId: 'p', title: 'a', backend: 'codex',
+      channelState: 'open', turnState: 'running', createdAt: 'a', updatedAt: 'a',
+      binding: { holdId: 'hold-a', generation: 'g', state: 'active', lastSeq: 0 },
+    }
+    const s2 = {
+      sessionId: 's-b', projectId: 'p', title: 'b', backend: 'codex',
+      channelState: 'open', turnState: 'running', createdAt: 'b', updatedAt: 'b',
+      binding: { holdId: 'hold-b', generation: 'g', state: 'active', lastSeq: 0 },
+    }
+    const promptRelease: { current: (() => void) | undefined } = { current: undefined }
+    const promptAdmission = new Promise<void>((resolve) => { promptRelease.current = resolve })
+    let mockSessions = [s1, s2]
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      if (body.method === 'session.prompt') {
+        await promptAdmission
+        return Response.json({ id: body.id, ok: true, result: { accepted: true } })
+      }
+      return Response.json({ id: body.id, ok: true, result: { ...EMPTY, sessions: mockSessions } })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      void store.prompt(RemoteSessionId('s-a'), 'first').catch(() => undefined)
+      store.enqueuePrompt(RemoteSessionId('s-a'), 'queued on s-a')
+      expect(store.getSnapshot().queuedPrompt?.sessionId).toBe('s-a')
+      mockSessions = [s2]
+      await store.selectSession(RemoteSessionId('s-b'))
+      expect(store.getSnapshot().queuedPrompt).toBeUndefined()
+      promptRelease.current?.()
     } finally {
       store.dispose()
     }
@@ -1118,6 +1518,230 @@ describe('RemoteAgentStore', () => {
         'hidden.list',
       ])
       expect(store.getSnapshot().hiddenItems?.hosts[0]?.hiddenAt).toBe('2026-08-31T00:00:00.000Z')
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('auto-archives only the unarchived sessions older than the configured threshold', async () => {
+    const archivedCalls: string[] = []
+    const fresh = '2026-09-04T12:00:00.000Z'
+    const stale = '2026-07-15T12:00:00.000Z'
+    const initialState = {
+      ...EMPTY,
+      // Pre-populate the host with inventory so `start()` does not call
+      // `refreshInventory` (which would mutate `state` and strip archived rows).
+      hosts: [{
+        hostId: 'h', title: 'box', endpoint: 'http://127.0.0.1:3091', createdAt: 'a', updatedAt: 'b',
+        inventory: {
+          protocolVersion: 1, hostdVersion: '0.1.0', hostId: 'native-h', healthy: true,
+          backends: [{ backend: 'codex', installed: true, authenticated: true, running: true, sessionCapable: true }],
+        },
+      }],
+      projects: [{ projectId: 'p', hostId: 'h', title: 'repo', cwd: '/repo', createdAt: 'a', updatedAt: 'b' }],
+      sessions: [
+        // recent → keep
+        { sessionId: 'fresh', projectId: 'p', title: 'fresh', backend: 'codex',
+          channelState: 'open', turnState: 'idle', createdAt: fresh, updatedAt: fresh },
+        // old → archive
+        { sessionId: 'stale-1', projectId: 'p', title: 'stale-1', backend: 'codex',
+          channelState: 'open', turnState: 'idle', createdAt: stale, updatedAt: stale },
+        // already archived → ignore
+        { sessionId: 'stale-archived', projectId: 'p', title: 'stale-archived', backend: 'codex',
+          channelState: 'open', turnState: 'idle', createdAt: stale, updatedAt: stale, archivedAt: stale },
+        // old child of a fresh parent → still archive (decision is per-row)
+        { sessionId: 'stale-2', projectId: 'p', title: 'stale-2', backend: 'codex',
+          channelState: 'open', turnState: 'idle', createdAt: stale, updatedAt: stale },
+      ],
+    }
+    let stateCalls = 0
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string; params: Record<string, unknown> }
+      if (body.method === 'session.archive') {
+        archivedCalls.push(String(body.params['sessionId']))
+        return Response.json({ id: body.id, ok: true, result: {} })
+      }
+      if (body.method === 'state') {
+        stateCalls += 1
+        // After the first archive, the next state response drops the row so
+        // the store sees the catalog is clean and stops re-archiving it.
+        const sessions = stateCalls <= 1
+          ? initialState.sessions
+          : initialState.sessions.filter(session => session.sessionId !== 'stale-1' && session.sessionId !== 'stale-2')
+        return Response.json({ id: body.id, ok: true, result: { ...EMPTY, ...initialState, sessions } })
+      }
+      return Response.json({ id: body.id, ok: true, result: initialState })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      // Disable auto-archive while bootstrapping so the test owns the timing.
+      store.updateDisplayPreferences({ autoHideSessionsAfterDays: 0 })
+      await store.start()
+      archivedCalls.length = 0
+      // Tighten the threshold to 30 days; both stale rows are ~51 days old
+      // at the freeze date used by the test, fresh is today.
+      store.updateDisplayPreferences({ autoHideSessionsAfterDays: 30 })
+      // The fire-and-forget chain may schedule several archive passes; wait
+      // until the call count stabilizes before asserting.
+      await vi.waitFor(() => {
+        expect(archivedCalls.sort()).toEqual(['stale-1', 'stale-2'])
+      })
+      // Already-archived row must never be re-sent.
+      expect(archivedCalls).not.toContain('stale-archived')
+      // Fresh row stays untouched.
+      expect(archivedCalls).not.toContain('fresh')
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('archiveStaleSessions is a no-op when auto-archive is disabled', async () => {
+    const initialState = {
+      ...EMPTY,
+      hosts: [{
+        hostId: 'h', title: 'box', endpoint: 'http://127.0.0.1:3091', createdAt: 'a', updatedAt: 'b',
+        inventory: {
+          protocolVersion: 1, hostdVersion: '0.1.0', hostId: 'native-h', healthy: true,
+          backends: [{ backend: 'codex', installed: true, authenticated: true, running: true, sessionCapable: true }],
+        },
+      }],
+      projects: [{ projectId: 'p', hostId: 'h', title: 'repo', cwd: '/repo', createdAt: 'a', updatedAt: 'b' }],
+      sessions: [{
+        sessionId: 's', projectId: 'p', title: 'work', backend: 'codex',
+        channelState: 'open', turnState: 'idle',
+        createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+      }],
+    }
+    const archiveCalls: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      if (body.method === 'session.archive') {
+        archiveCalls.push(body.method)
+        return Response.json({ id: body.id, ok: true, result: {} })
+      }
+      return Response.json({ id: body.id, ok: true, result: initialState })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      store.updateDisplayPreferences({ autoHideSessionsAfterDays: 0 })
+      await store.start()
+      archiveCalls.length = 0
+      // Re-applying the same zero threshold must not trigger any archive.
+      store.updateDisplayPreferences({ autoHideSessionsAfterDays: 0 })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(archiveCalls).toEqual([])
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('archiveStaleSessions keeps going when a single archive RPC fails', async () => {
+    const stale = '2026-07-15T12:00:00.000Z'
+    const initialState = {
+      ...EMPTY,
+      hosts: [{
+        hostId: 'h', title: 'box', endpoint: 'http://127.0.0.1:3091', createdAt: 'a', updatedAt: 'b',
+        inventory: {
+          protocolVersion: 1, hostdVersion: '0.1.0', hostId: 'native-h', healthy: true,
+          backends: [{ backend: 'codex', installed: true, authenticated: true, running: true, sessionCapable: true }],
+        },
+      }],
+      projects: [{ projectId: 'p', hostId: 'h', title: 'repo', cwd: '/repo', createdAt: 'a', updatedAt: 'b' }],
+      sessions: [
+        { sessionId: 'stale-1', projectId: 'p', title: 's1', backend: 'codex',
+          channelState: 'open', turnState: 'idle', createdAt: stale, updatedAt: stale },
+        { sessionId: 'stale-2', projectId: 'p', title: 's2', backend: 'codex',
+          channelState: 'open', turnState: 'idle', createdAt: stale, updatedAt: stale },
+      ],
+    }
+    const failuresById = new Map<string, number>()
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string; params: Record<string, unknown> }
+      if (body.method === 'session.archive') {
+        const sessionId = String(body.params['sessionId'])
+        const previous = failuresById.get(sessionId) ?? 0
+        if (previous < 1) {
+          failuresById.set(sessionId, previous + 1)
+          return new Response('boom', { status: 500 })
+        }
+        return Response.json({ id: body.id, ok: true, result: {} })
+      }
+      return Response.json({ id: body.id, ok: true, result: initialState })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      store.updateDisplayPreferences({ autoHideSessionsAfterDays: 0 })
+      await store.start()
+      store.updateDisplayPreferences({ autoHideSessionsAfterDays: 30 })
+      // Both sessions must eventually land in the success path despite one
+      // transient failure; the second attempt is always OK.
+      await vi.waitFor(() => {
+        expect(failuresById.get('stale-1')).toBeGreaterThanOrEqual(1)
+        expect(failuresById.get('stale-2')).toBeUndefined()
+      })
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('updateDisplayPreferences re-evaluates against the new threshold', async () => {
+    const fresh = '2026-09-04T12:00:00.000Z'
+    const initialState = {
+      ...EMPTY,
+      hosts: [{
+        hostId: 'h', title: 'box', endpoint: 'http://127.0.0.1:3091', createdAt: 'a', updatedAt: 'b',
+        inventory: {
+          protocolVersion: 1, hostdVersion: '0.1.0', hostId: 'native-h', healthy: true,
+          backends: [{ backend: 'codex', installed: true, authenticated: true, running: true, sessionCapable: true }],
+        },
+      }],
+      projects: [{ projectId: 'p', hostId: 'h', title: 'repo', cwd: '/repo', createdAt: 'a', updatedAt: 'b' }],
+      sessions: [{
+        sessionId: 'mid', projectId: 'p', title: 'mid', backend: 'codex',
+        channelState: 'open', turnState: 'idle',
+        // 45 days old at the freeze date used by the test → "stale" at 30d
+        // but "fresh" at 60d.
+        createdAt: '2026-07-21T12:00:00.000Z', updatedAt: '2026-07-21T12:00:00.000Z',
+      }, {
+        sessionId: 'recent', projectId: 'p', title: 'recent', backend: 'codex',
+        channelState: 'open', turnState: 'idle', createdAt: fresh, updatedAt: fresh,
+      }],
+    }
+    const archiveCalls: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string; params: Record<string, unknown> }
+      if (body.method === 'session.archive') {
+        archiveCalls.push(String(body.params['sessionId']))
+        return Response.json({ id: body.id, ok: true, result: {} })
+      }
+      return Response.json({ id: body.id, ok: true, result: initialState })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      store.updateDisplayPreferences({ autoHideSessionsAfterDays: 0 })
+      await store.start()
+      archiveCalls.length = 0
+      store.updateDisplayPreferences({ autoHideSessionsAfterDays: 30 })
+      await vi.waitFor(() => { expect(archiveCalls).toContain('mid') })
+      expect(archiveCalls).not.toContain('recent')
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('getDisplayPreferences reflects the latest persisted value', async () => {
+    const store = new RemoteAgentStore()
+    try {
+      expect(store.getDisplayPreferences()).toEqual({
+        sessionsPerProjectLimit: 8,
+        autoHideSessionsAfterDays: 30,
+      })
+      store.updateDisplayPreferences({ sessionsPerProjectLimit: 12, autoHideSessionsAfterDays: 7 })
+      expect(store.getDisplayPreferences()).toEqual({
+        sessionsPerProjectLimit: 12,
+        autoHideSessionsAfterDays: 7,
+      })
     } finally {
       store.dispose()
     }

@@ -1,6 +1,12 @@
 /** React-free browser object layer for the remote-agent control endpoint. */
 
 import {
+  archiveCutoff,
+  readDisplayPreferences,
+  writeDisplayPreferences,
+  type DisplayPreferences,
+} from './display-preferences.ts'
+import {
   REMOTE_AGENT_BACKENDS,
   REMOTE_AGENT_GATEWAY_PATH,
   RemoteHoldId,
@@ -37,6 +43,16 @@ import {
   type RemoteSshInspection,
 } from '@threadharbor/protocol'
 
+/** Single browser-local slot that holds the next user message while a previous
+ *  turn is still in flight. Released automatically once the live turn ends or
+ *  discarded when the user cancels or switches sessions. */
+export interface RemoteQueuedPrompt {
+  readonly sessionId: ReturnType<typeof RemoteSessionId>
+  readonly text: string
+  readonly requestId: string
+  readonly queuedAt: number
+}
+
 /** Browser interaction snapshot. */
 export interface RemoteAgentSnapshot {
   readonly phase: 'loading' | 'ready' | 'reconnecting' | 'error'
@@ -47,6 +63,8 @@ export interface RemoteAgentSnapshot {
   readonly panel?: RemoteAgentPanel
   readonly pending: boolean
   readonly promptProgress?: RemotePromptProgress
+  /** Next message held in the browser until the live turn finishes. */
+  readonly queuedPrompt?: RemoteQueuedPrompt
   readonly error?: string
   /** Hidden hosts/projects and archived sessions; loaded when the settings panel opens. */
   readonly hiddenItems?: RemoteHiddenItems
@@ -238,22 +256,54 @@ function promptTitle(text: string): string {
   return firstLine.length <= 40 ? firstLine : `${firstLine.slice(0, 39)}…`
 }
 
+/** If a draft create is in flight, prefer the session that start already produced. */
+function inFlightCreatedSessionId(
+  state: RemoteAgentState,
+  draft: RemoteSessionDraft | undefined,
+  progress: RemotePromptProgress | undefined,
+  currentSessionId: ReturnType<typeof RemoteSessionId> | undefined,
+): ReturnType<typeof RemoteSessionId> | undefined {
+  if (progress === undefined || progress.phase === 'failed') return undefined
+  if (progress.sessionId !== undefined
+    && state.sessions.some(session => session.sessionId === progress.sessionId)) {
+    return progress.sessionId
+  }
+  if (currentSessionId !== undefined && state.sessions.some(session => session.sessionId === currentSessionId)) {
+    return currentSessionId
+  }
+  if (draft === undefined || progress.sessionId !== undefined) return undefined
+  const matches = state.sessions.filter(session =>
+    session.projectId === draft.projectId
+    && session.parentSessionId === undefined
+    && Date.parse(session.createdAt) >= progress.startedAt - 2_000)
+  const latest = matches.sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0]
+  return latest === undefined ? undefined : latest.sessionId
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
 function lastTranscriptSeq(state: RemoteAgentState, sessionId: ReturnType<typeof RemoteSessionId>): number {
-  return state.transcript.filter(entry => entry.sessionId === sessionId).at(-1)?.seq ?? -1
+  let last = -1
+  for (const entry of state.transcript) {
+    if (entry.sessionId === sessionId && entry.seq > last) last = entry.seq
+  }
+  return last
 }
 
-/** Insert or replace one session row so a just-created session is visible before the next catalog reload. */
+/** Insert or replace one session row so a just-created session is visible before the next catalog reload.
+ *  New sessions are prepended so they appear at the top of the project list, matching the
+ *  server-side `state()` projection (which sorts by `updatedAt` desc). Prepending keeps the
+ *  optimistic local insert aligned with the eventual server order, so users do not see the new
+ *  session flash from the bottom to the top during the next reload. */
 function withSessionView(state: RemoteAgentState, session: RemoteSessionView): RemoteAgentState {
   const exists = state.sessions.some(existing => existing.sessionId === session.sessionId)
   return {
     ...state,
     sessions: exists
       ? state.sessions.map(existing => existing.sessionId === session.sessionId ? session : existing)
-      : [...state.sessions, session],
+      : [session, ...state.sessions],
   }
 }
 
@@ -610,6 +660,7 @@ export class RemoteAgentStore {
   private liveBackoffIndex = 0
   private liveWait: { timer: number; resolve: () => void } | undefined
   private reloadSerial = 0
+  private autoArchiveInFlight = false
 
   /** Read the stable current snapshot. */
   getSnapshot = (): RemoteAgentSnapshot => this.snapshot
@@ -654,9 +705,20 @@ export class RemoteAgentStore {
         const session = parseSession(sessionValue) as RemoteSessionView
         const nextState = withSessionView(this.snapshot.state, session)
         const promptProgress = this.reconcilePromptProgress(nextState, { ...this.snapshot, state: nextState })
-        const { promptProgress: _cleared, ...rest } = { ...withoutError(this.snapshot), state: nextState }
-        this.publish(promptProgress === undefined ? rest : { ...rest, promptProgress })
-        const priority = session.sessionId === this.snapshot.currentSessionId ? 'high' : 'low'
+        const adopted = inFlightCreatedSessionId(
+          nextState, this.snapshot.draftSession, this.snapshot.promptProgress, this.snapshot.currentSessionId,
+        )
+        const { promptProgress: _cleared, draftSession: _draft, ...rest } = {
+          ...withoutError(this.snapshot), state: nextState,
+        }
+        const keepDraft = this.snapshot.draftSession !== undefined && adopted === undefined
+        this.publish({
+          ...rest,
+          ...(promptProgress === undefined ? {} : { promptProgress }),
+          ...(keepDraft ? { draftSession: this.snapshot.draftSession } : {}),
+          ...(adopted === undefined ? {} : { currentSessionId: adopted }),
+        })
+        const priority = session.sessionId === (adopted ?? this.snapshot.currentSessionId) ? 'high' : 'low'
         void this.catchupTranscript(session.sessionId, priority)
         if (priority === 'high') this.ensureLiveTranscriptSync()
         return
@@ -707,6 +769,7 @@ export class RemoteAgentStore {
     const { promptProgress: _cleared, ...rest } = nextSnapshot
     this.publish(promptProgress === undefined ? rest : { ...rest, promptProgress })
     if (sessionId === this.snapshot.currentSessionId) this.liveBackoffIndex = 0
+    this.drainQueuedPromptIfIdle()
   }
 
   /** Mark a session's transcript as read; zeros its unread counter. */
@@ -720,10 +783,25 @@ export class RemoteAgentStore {
 
   /** Update the connection phase (driven by the WebSocket transport). */
   setPhase(phase: 'loading' | 'ready' | 'reconnecting' | 'error'): void {
+    const becameReady = phase === 'ready'
+      && (this.connectionPhase === 'reconnecting' || this.snapshot.phase === 'reconnecting')
     if (phase === 'ready' || phase === 'reconnecting') this.connectionPhase = phase
-    if (this.snapshot.phase === phase) return
-    this.publish({ ...withoutError(this.snapshot), phase })
-    if (phase === 'reconnecting') this.rebuildFromHttp()
+    if (this.snapshot.phase !== phase) {
+      this.publish({ ...withoutError(this.snapshot), phase })
+      if (phase === 'reconnecting') this.rebuildFromHttp()
+    }
+    if (!becameReady) return
+    this.liveBackoffIndex = 0
+    if (this.liveWait !== undefined) {
+      window.clearTimeout(this.liveWait.timer)
+      const resolve = this.liveWait.resolve
+      this.liveWait = undefined
+      resolve()
+    }
+    const current = this.snapshot.currentSessionId
+    if (current === undefined) return
+    void this.catchupTranscript(current, 'high')
+    this.ensureLiveTranscriptSync()
   }
 
   /** Route live RPCs through the WebSocket; tests omit this and keep using fetch. */
@@ -746,7 +824,10 @@ export class RemoteAgentStore {
         await Promise.all(hosts.map(host => this.refreshInventory(host.hostId).catch(() => undefined)))
       }
       const current = this.snapshot.currentSessionId
-      if (current !== undefined) await this.catchupTranscript(current, 'high')
+      if (current !== undefined) {
+        await this.catchupTranscript(current, 'high')
+        void this.backfillOpenedTranscript(current, this.transcriptWork)
+      }
       this.queueBackgroundTranscripts()
       this.ensureLiveTranscriptSync()
     } catch (error) {
@@ -777,7 +858,8 @@ export class RemoteAgentStore {
   async selectSession(sessionId: ReturnType<typeof RemoteSessionId>): Promise<void> {
     this.attachSerial += 1
     this.transcriptWork += 1
-    const { draftSession: _draftSession, panel: _panel, attachingSessionId: _attaching, ...snapshot } = withoutError(this.snapshot)
+    const { draftSession: _draftSession, panel: _panel, attachingSessionId: _attaching, queuedPrompt: _queuedPrompt, ...snapshot } = withoutError(this.snapshot)
+    void _queuedPrompt
     this.publish({ ...snapshot, currentSessionId: sessionId })
     this.markRead(sessionId)
     const promptProgress = this.reconcilePromptProgress(this.snapshot.state)
@@ -1077,10 +1159,21 @@ export class RemoteAgentStore {
           promptProgress: connecting,
           pending: true,
         })
+        this.applyTranscriptEntries(session.sessionId, [{
+          transcriptId: RemoteTranscriptId(`user:${session.sessionId}:${clientId}:${requestId}`),
+          sessionId: session.sessionId,
+          seq: 0,
+          role: 'user',
+          kind: 'message',
+          text,
+          requestId,
+          createdAt: new Date().toISOString(),
+        }])
         this.liveBackoffIndex = 0
         await this.catchupTranscript(session.sessionId, 'high')
         this.ensureLiveTranscriptSync()
-        // Hold readiness arrives as session.view.changed over the live socket.
+        // session.start waits for the hold. Only wait on a later view.changed
+        // if this response is still the connecting placeholder.
         await this.awaitSessionOpen(session.sessionId)
         const progress: RemotePromptProgress = { ...connecting, phase: 'sending' }
         this.publish({ ...withoutError(this.snapshot), promptProgress: progress, pending: true })
@@ -1151,12 +1244,26 @@ export class RemoteAgentStore {
     const requestId = `${clientId}-${Date.now()}-${++this.requestSerial}`
     const session = this.snapshot.state.sessions.find(candidate => candidate.sessionId === sessionId)
     if (session === undefined) throw new Error(`unknown session ${sessionId}`)
+    const baselineSeq = lastTranscriptSeq(this.snapshot.state, sessionId)
+    // Optimistic local user bubble so Send feels instantaneous. The transcriptId
+    // matches `promptSessionDraft`'s shape so the gateway can echo the same id
+    // and `applyTranscriptEntries` will dedup the eventual server-side push.
+    this.applyTranscriptEntries(sessionId, [{
+      transcriptId: RemoteTranscriptId(`user:${sessionId}:${clientId}:${requestId}`),
+      sessionId,
+      seq: baselineSeq + 1,
+      role: 'user',
+      kind: 'message',
+      text,
+      requestId,
+      createdAt: new Date().toISOString(),
+    }])
     const progress: RemotePromptProgress = {
       projectId: session.projectId,
       sessionId,
       phase: 'sending',
       startedAt: Date.now(),
-      baselineSeq: lastTranscriptSeq(this.snapshot.state, sessionId),
+      baselineSeq,
     }
     this.publish({ ...withoutError(this.snapshot), promptProgress: progress })
     this.liveBackoffIndex = 0
@@ -1185,6 +1292,65 @@ export class RemoteAgentStore {
       })
       throw error
     }
+  }
+
+  /** Park the next user message locally while a previous turn is still in flight.
+   *  The result renders as a "queued" bubble in the conversation; the browser
+   *  drains the slot automatically once `promptProgress` settles to `undefined`.
+   * @param sessionId - target session that will receive the prompt.
+   * @param text - user text forwarded unchanged once drained.
+   */
+  enqueuePrompt(sessionId: ReturnType<typeof RemoteSessionId>, text: string): void {
+    const session = this.snapshot.state.sessions.find(candidate => candidate.sessionId === sessionId)
+    if (session === undefined) throw new Error(`unknown session ${sessionId}`)
+    const trimmed = text.trim()
+    if (trimmed === '') return
+    const clientId = this.clientId()
+    const queuedAt = Date.now()
+    const queued: RemoteQueuedPrompt = {
+      sessionId,
+      text: trimmed,
+      requestId: `${clientId}-${queuedAt}-${++this.requestSerial}-q`,
+      queuedAt,
+    }
+    const { queuedPrompt: _drop, ...snapshot } = withoutError(this.snapshot)
+    void _drop
+    this.publish({ ...snapshot, queuedPrompt: queued })
+    this.drainQueuedPromptIfIdle()
+  }
+
+  /** Drop the browser-local queued bubble without sending anything. */
+  cancelQueuedPrompt(): void {
+    if (this.snapshot.queuedPrompt === undefined) return
+    const { queuedPrompt: _drop, ...snapshot } = withoutError(this.snapshot)
+    void _drop
+    this.publish(snapshot)
+    this.drainQueuedPromptIfIdle()
+  }
+
+  /** When the live turn just settled, fire the queued slot through `prompt`. */
+  private drainQueuedPromptIfIdle(): void {
+    if (this.disposed) return
+    const queued = this.snapshot.queuedPrompt
+    if (queued === undefined) return
+    const live = this.snapshot.promptProgress
+    const liveBusyFor = live?.sessionId === queued.sessionId
+      && live.phase !== 'failed'
+      && live.phase !== 'reconnecting'
+    if (liveBusyFor) return
+    const current = this.snapshot.currentSessionId
+    // Belt-and-braces: if the user has switched sessions in the meantime, drop.
+    if (current !== queued.sessionId) {
+      const { queuedPrompt: _drop, ...snapshot } = withoutError(this.snapshot)
+      void _drop
+      this.publish(snapshot)
+      return
+    }
+    const { queuedPrompt: _drop, ...snapshot } = withoutError(this.snapshot)
+    void _drop
+    const text = queued.text
+    this.publish(snapshot)
+    void this.prompt(queued.sessionId, text).catch(() => undefined)
   }
 
   /** Cancel the selected backend-native turn.
@@ -1259,6 +1425,62 @@ export class RemoteAgentStore {
   /** Permanently delete one session subtree and its projected transcript. */
   deleteSession(sessionId: ReturnType<typeof RemoteSessionId>): Promise<void> {
     return this.mutate('session.delete', { sessionId })
+  }
+
+  /** Read the current sidebar display preferences. Pure read; never throws. */
+  getDisplayPreferences(): DisplayPreferences {
+    return readDisplayPreferences()
+  }
+
+  /** Persist updated display preferences and re-run the auto-archive job so a
+   *  tightening of the threshold takes effect without waiting for the next
+   *  catalog reload. The settings UI binds its inputs to this method so the
+   *  sidebar immediately reflects a fresh cap or threshold value. */
+  updateDisplayPreferences(next: Partial<DisplayPreferences>): DisplayPreferences {
+    const current = readDisplayPreferences()
+    const merged: DisplayPreferences = {
+      sessionsPerProjectLimit: next.sessionsPerProjectLimit ?? current.sessionsPerProjectLimit,
+      autoHideSessionsAfterDays: next.autoHideSessionsAfterDays ?? current.autoHideSessionsAfterDays,
+    }
+    writeDisplayPreferences(merged)
+    void this.archiveStaleSessions().catch(() => undefined)
+    return merged
+  }
+
+  /** Archive every visible, non-archived session whose `updatedAt` is older
+   *  than the configured auto-hide threshold. The job is idempotent — calling
+   *  it twice with the same threshold archives nothing on the second pass
+   *  because the gateway filter drops archived sessions from the projection.
+   *  Failures from individual archives are caught and logged but never bubble
+   *  up: one stale session with a broken transport must not block the rest. */
+  async archiveStaleSessions(): Promise<number> {
+    if (this.autoArchiveInFlight) return 0
+    const prefs = readDisplayPreferences()
+    const cutoff = archiveCutoff(Date.now(), prefs.autoHideSessionsAfterDays)
+    if (cutoff === null) return 0
+    this.autoArchiveInFlight = true
+    try {
+      const targets = this.snapshot.state.sessions.filter(session => {
+        if (session.archivedAt !== undefined) return false
+        return session.updatedAt < cutoff
+      })
+      let archived = 0
+      for (const session of targets) {
+        try {
+          await this.call('session.archive', { sessionId: session.sessionId })
+          archived += 1
+        } catch (error) {
+          console.warn('threadharbor: auto-archive failed for session', session.sessionId, error)
+        }
+      }
+      if (archived > 0) {
+        // Refresh the catalog so the sidebar drops the archived rows immediately.
+        void this.reload().catch(() => undefined)
+      }
+      return archived
+    } finally {
+      this.autoArchiveInFlight = false
+    }
   }
 
   /** Hide one catalogued host from the normal projection while preserving its data. */
@@ -1476,23 +1698,42 @@ export class RemoteAgentStore {
     const state = {
       ...catalog,
       transcript: this.snapshot.state.transcript,
-      sessions: inFlight.length === 0 ? catalog.sessions : [...catalog.sessions, ...inFlight],
+      // Prepend in-flight sessions so a session the server has not yet
+      // committed (rare, but possible if `session.start` and the resulting
+      // catalog reload race) still shows up at the top of the project list
+      // rather than disappearing behind the existing rows.
+      sessions: inFlight.length === 0 ? catalog.sessions : [...inFlight, ...catalog.sessions],
     }
     const persisted = readPersistedCurrentSessionId()
-    const current = this.snapshot.draftSession !== undefined
-      ? undefined
-      : [this.snapshot.currentSessionId, preferredSessionId, persisted === undefined ? undefined : RemoteSessionId(persisted)]
-        .find(sessionId => sessionId !== undefined && state.sessions.some(session => session.sessionId === sessionId))
-        ?? state.sessions.at(0)?.sessionId
+    const adopted = inFlightCreatedSessionId(
+      state, this.snapshot.draftSession, this.snapshot.promptProgress, this.snapshot.currentSessionId,
+    )
+    const keepDraft = this.snapshot.draftSession !== undefined && adopted === undefined
+    const current = adopted
+      ?? (keepDraft
+        ? undefined
+        : [this.snapshot.currentSessionId, preferredSessionId, persisted === undefined ? undefined : RemoteSessionId(persisted)]
+          .find(sessionId => sessionId !== undefined && state.sessions.some(session => session.sessionId === sessionId))
+          ?? state.sessions.at(0)?.sessionId)
     const promptProgress = this.reconcilePromptProgress(state)
     this.publish({
       phase: 'ready', state, pending: this.snapshot.pending,
       ...(this.snapshot.panel === undefined ? {} : { panel: this.snapshot.panel }),
-      ...(this.snapshot.draftSession === undefined ? {} : { draftSession: this.snapshot.draftSession }),
+      ...(keepDraft ? { draftSession: this.snapshot.draftSession } : {}),
       ...(this.snapshot.attachingSessionId === undefined ? {} : { attachingSessionId: this.snapshot.attachingSessionId }),
       ...(promptProgress === undefined ? {} : { promptProgress }),
       ...(current === undefined ? {} : { currentSessionId: current }),
     })
+    if (adopted !== undefined) {
+      this.liveBackoffIndex = 0
+      void this.catchupTranscript(adopted, 'high')
+      this.ensureLiveTranscriptSync()
+    }
+    this.drainQueuedPromptIfIdle()
+    // Every successful catalog reload is a chance to retire sessions that have
+    // been quiet past the auto-hide threshold. Run it fire-and-forget so a slow
+    // archive call never blocks the next reload tick.
+    void this.archiveStaleSessions().catch(() => undefined)
   }
 
   /** One HTTP `state` snapshot while the socket is down. Not a live journal loop. */
@@ -1539,6 +1780,7 @@ export class RemoteAgentStore {
     if (session.turnState === 'failed' || session.channelState === 'lost' || session.channelState === 'closed') {
       return { ...progress, phase: 'failed', message: this.snapshot.error ?? '远程会话未能完成本轮请求。' }
     }
+    if (session.channelState === 'connecting') return progress
     if (session.turnState === 'idle' || session.turnState === 'stopped') return undefined
     const hasBackendEvent = state.transcript.some(entry =>
       entry.sessionId === progress.sessionId && entry.seq > progress.baselineSeq && entry.role !== 'user')

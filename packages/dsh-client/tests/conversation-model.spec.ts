@@ -6,7 +6,8 @@ import {
   browsableDirectories, buildTranscriptNodes, choiceCancelOutcome, choiceSubmitOutcome,
   conversationPresentation, conversationStage,
   isAutoApprovablePermission, isNearScrollBottom, mergeTranscriptEntries, parseChoicePrompt, parsePlanItems,
-  permissionRequestId, preferredProjectBackend, shouldAutoApprovePermissions, toolDisclosurePresentation,
+  autoApproveOptionId, pendingPermissionEntry, permissionRequestId, preferredProjectBackend,
+  shouldAutoApprovePermissions, shouldPinPendingPermission, toolDisclosurePresentation,
 } from '../src/client/conversation-model.ts'
 
 function entry(
@@ -135,6 +136,42 @@ describe('remote conversation view model', () => {
     expect(shouldAutoApprovePermissions('auto')).toBe(true)
     expect(shouldAutoApprovePermissions('ask')).toBe(false)
     expect(shouldAutoApprovePermissions(undefined)).toBe(false)
+    expect(shouldAutoApprovePermissions('ask', 'bypass')).toBe(true)
+    expect(shouldAutoApprovePermissions('ask', 'full-access')).toBe(true)
+    expect(shouldAutoApprovePermissions('ask', 'edit')).toBe(false)
+  })
+
+  it('picks bypassPermissions when skip-confirm is on, and pins a scrolled-away card', () => {
+    const permission = {
+      ...entry('371', 'permission', 'permission', '等待权限确认'),
+      requestId: '0',
+      nativeFrame: {
+        jsonrpc: '2.0', id: 0, method: 'session/request_permission',
+        params: {
+          options: [
+            { optionId: 'bypassPermissions', name: 'Yes, and bypass permissions' },
+            { optionId: 'auto', name: 'Yes, and use "auto" mode' },
+            { optionId: 'plan', name: 'No, keep planning' },
+          ],
+        },
+      },
+    }
+    const prompt = parseChoicePrompt(permission)
+    expect(autoApproveOptionId(prompt, { permissionMode: 'bypass' })).toBe('bypassPermissions')
+    expect(autoApproveOptionId(prompt, { approvalChoice: 'auto' })).toBe('auto')
+    expect(pendingPermissionEntry([
+      entry('370', 'assistant', 'message', '计划'),
+      permission,
+      entry('372', 'tool', 'tool-call', 'Edit'),
+    ])).toEqual(permission)
+    expect(shouldPinPendingPermission('waiting-permission', permission, 'native-tool')).toBe(true)
+    expect(shouldPinPendingPermission('waiting-permission', permission, permission.transcriptId)).toBe(false)
+    expect(shouldPinPendingPermission('running', permission, 'native-tool')).toBe(false)
+    expect(conversationStage({
+      session: session({ turnState: 'waiting-permission' }),
+      entries: [permission, entry('372', 'tool', 'tool-call', 'Edit')],
+      now: 0,
+    })).toMatchObject({ kind: 'permission', label: '等待你的确认', visible: true })
   })
 
   it('treats an already-open session as a live-channel join instead of a blocking attach', () => {

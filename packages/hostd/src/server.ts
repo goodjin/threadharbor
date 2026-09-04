@@ -6,6 +6,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSy
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { connect, createConnection } from 'node:net'
 import { dirname, join } from 'node:path'
+import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
@@ -172,6 +173,14 @@ function ensureOwnerOnlyDirectory(path: string): void {
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
   if (uid !== undefined && stats.uid !== uid) throw new Error(`${path} is not owned by the current user`)
   if ((stats.mode & 0o077) !== 0) chmodSync(path, 0o700)
+}
+
+/** Resolved and pre-created DSH session root. Lives under hostd dataDir so
+ *  JSONL never scatters into project ./.sessions directories. */
+function dshSessionRoot(dataDir: string): string {
+  const root = join(dataDir, 'dsh-sessions')
+  ensureOwnerOnlyDirectory(root)
+  return root
 }
 
 function writeJsonAtomic(path: string, value: unknown): void {
@@ -676,9 +685,15 @@ export class RemoteAgentHostd {
   }
 
   private listDirectory(params: Record<string, JsonValue>): RemoteDirectoryListing {
-    const requested = stringField(params, 'path')
-    const path = realpathSync(requested)
-    if (!statSync(path).isDirectory()) throw new Error(`not a directory: ${requested}`)
+    // The browser's "添加项目" panel mounts with an empty `path` so the user
+    // can pick a starting directory; hostd must default to a sensible root
+    // instead of throwing "path must be a non-empty string".
+    const requested = optionalString(params, 'path')
+    const target = requested?.trim() === '' || requested === undefined
+      ? homedir()
+      : requested
+    const path = realpathSync(target)
+    if (!statSync(path).isDirectory()) throw new Error(`not a directory: ${target}`)
     const names = readdirSync(path).sort((a, b) => a.localeCompare(b))
     const entries: RemoteDirectoryEntry[] = []
     for (const name of names.slice(0, this.options.maxDirectoryEntries)) {
@@ -722,6 +737,7 @@ export class RemoteAgentHostd {
     const socketPath = this.createHoldSocket(record)
     const configPath = join(directory, 'config.json')
     const dshLaunch = record.backend === 'dsh' ? await this.agentManager.resolvedDshLaunch() : undefined
+    const sessionRoot = record.backend === 'dsh' ? dshSessionRoot(this.options.dataDir) : undefined
     const config: HoldWorkerConfig = {
       version: 1,
       holdId: record.holdId,
@@ -733,6 +749,7 @@ export class RemoteAgentHostd {
       statePath: join(directory, 'state.json'),
       maxJournalEvents: this.options.maxJournalEvents,
       maxJournalBytes: this.options.maxJournalBytes,
+      ...(sessionRoot === undefined ? {} : { sessionRoot }),
       transport: record.backend === 'grok'
         ? {
           kind: 'websocket',

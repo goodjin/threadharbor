@@ -3,8 +3,10 @@
 import type { JsonValue } from '@threadharbor/protocol'
 
 const MAX_MERGED_CHARS = 240
-/** Idle window before a buffered thought/message chunk is journaled. */
-export const CHUNK_COALESCE_IDLE_MS = 40
+/** Idle window before a buffered thought/message chunk is journaled.
+ *  40ms flushed about as often as the model paused (~8 journal events/s) and
+ *  outran gateway projection. 200ms still feels like streaming and cuts rate. */
+export const CHUNK_COALESCE_IDLE_MS = 200
 
 interface PendingChunk {
   frame: Record<string, JsonValue>

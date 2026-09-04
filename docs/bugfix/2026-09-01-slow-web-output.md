@@ -13,7 +13,7 @@ Journal 里 1 秒 20–44 条，绝大多数是 1–6 字的 `agent_message_chun
 网关每 1 秒最多读 64 条，追不上 30–40 条/秒的生成，积压到 100 秒以上。
 
 ## 修复方案
-- hold 合并连续同类型 token chunk（同 messageId / 思考块），满 240 字或 40ms 或遇到工具调用再写入 journal。
+- hold 合并连续同类型 token chunk（同 messageId / 思考块），满 240 字或 200ms 空闲或遇到工具调用再写入 journal。
 - 网关每批 100 条；还有未读事件就立刻拉下一批，不等 1 秒。
 - hold 新增 `wait-seq`：有新 journal 立刻唤醒网关（旧 hold 不支持时退回普通 read）。
 

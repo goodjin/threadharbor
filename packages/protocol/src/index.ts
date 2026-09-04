@@ -486,6 +486,7 @@ export type RemoteGatewayWsFrame =
   | { readonly direction: 'push'; readonly seq: number; readonly event: RemoteGatewayWsEvent }
   | { readonly direction: 'ping' }
   | { readonly direction: 'pong' }
+  | { readonly direction: 'closing'; readonly reason?: string }
 
 /** Test whether a value is lossless JSON data.
  * @param value - candidate wire value.

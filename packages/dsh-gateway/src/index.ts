@@ -172,6 +172,48 @@ function optionalNonNegativeInteger(record: Record<string, JsonValue>, key: stri
   return value as number
 }
 
+/** Comparator used by `state()` so newly created sessions appear at the top of
+ *  the project list. Sessions with a more recent `updatedAt` come first; if
+ *  `updatedAt` is missing or tied, fall back to `createdAt`; finally preserve
+ *  the original `sessionIds` order so two sessions stamped in the same
+ *  millisecond stay stable. `Array.prototype.sort` is stable, so the chained
+ *  compares act as a deterministic tiebreaker chain. */
+function sortSessionsByRecencyDesc(
+  left: RemoteSessionView,
+  right: RemoteSessionView,
+): number {
+  const leftUpdated = left.updatedAt
+  const rightUpdated = right.updatedAt
+  if (leftUpdated !== undefined && rightUpdated !== undefined && leftUpdated !== rightUpdated) {
+    return leftUpdated < rightUpdated ? 1 : -1
+  }
+  if (leftUpdated === undefined && rightUpdated !== undefined) return 1
+  if (rightUpdated === undefined && leftUpdated !== undefined) return -1
+  const leftCreated = left.createdAt
+  const rightCreated = right.createdAt
+  if (leftCreated !== rightCreated) return leftCreated < rightCreated ? 1 : -1
+  return 0
+}
+
+/** Default transcript.read window: the latest user message plus what follows.
+ *  A raw tail of `limit` rows drops that prompt when the turn produced more
+ *  tool/reasoning rows than the page size. */
+function latestTurnPage(
+  entries: readonly RemoteTranscriptEntry[],
+  limit: number,
+): RemoteTranscriptEntry[] {
+  if (entries.length === 0) return []
+  const from = entries.findLastIndex(entry => entry.role === 'user')
+  if (from === -1) return entries.slice(-limit)
+  return entries.slice(from, from + limit)
+}
+
+function latestTurnRemaining(entries: readonly RemoteTranscriptEntry[]): number {
+  const from = entries.findLastIndex(entry => entry.role === 'user')
+  if (from === -1) return entries.length
+  return entries.length - from
+}
+
 function requiredName(record: Record<string, JsonValue>, key: string): string {
   const value = stringField(record, key).trim()
   if (value === '') throw new Error(`${key} must not be blank`)
@@ -325,6 +367,7 @@ export class RemoteAgentGateway extends Service {
     })
     ctx.effect(() => () => { this.sshManager.close() }, 'threadharbor.sshClose')
     ctx.effect(() => () => { void this.hostdConnections.closeAll() }, 'remoteAgent.hostdConnectionsClose')
+    ctx.effect(() => () => { this.wsBroadcaster.shutdown() }, 'remoteAgent.wsShutdown')
     ctx.effect(() => () => { this.syncStopped = true }, 'remoteAgent.sessionSyncClose')
   }
 
@@ -392,7 +435,13 @@ export class RemoteAgentGateway extends Service {
       sessions: state.sessionIds
         .map(id => this.requireRecord(tables.sessions, id, 'session'))
         .filter(session => this.sessionIsVisible(session))
-        .map(session => this.withTranscriptHead(session, state)),
+        .map(session => this.withTranscriptHead(session, state))
+        // Sort newest-first by `updatedAt` (fallback `createdAt`) so newly
+        // created sessions show up at the top of the project list instead of
+        // jumping to the bottom. Stable sort preserves insertion order when
+        // timestamps tie, e.g. for two sessions created in the same millisecond.
+        .slice()
+        .sort(sortSessionsByRecencyDesc),
       transcript: [],
       operations: [...this.operations.values()].sort((left, right) => right.startedAt.localeCompare(left.startedAt)),
       hostdArtifactVersion: hostdArtifactVersion(),
@@ -455,7 +504,7 @@ export class RemoteAgentGateway extends Service {
       case 'project.delete':
         return await this.enqueue(() => this.deleteProject(request.params)) as unknown as JsonValue
       case 'session.start':
-        return await this.enqueue(() => this.startSession(request.params)) as unknown as JsonValue
+        return await this.startSessionAndWait(request.params) as unknown as JsonValue
       case 'session.attach':
         return await this.enqueue(() => this.attachSession(request.params)) as unknown as JsonValue
       case 'session.rename':
@@ -477,13 +526,13 @@ export class RemoteAgentGateway extends Service {
       case 'events.read':
         return await this.enqueue(() => this.syncEvents(request.params)) as unknown as JsonValue
       case 'session.follow':
-        return await this.enqueue(() => this.handleFollow(request.params)) as unknown as JsonValue
+        return this.handleFollow(request.params)
       case 'session.unfollow':
-        return await this.enqueue(() => this.handleUnfollow(request.params)) as unknown as JsonValue
+        return this.handleUnfollow(request.params)
       case 'session.catchup':
         return await this.enqueue(() => this.syncEvents(request.params)) as unknown as JsonValue
       case 'browser.hello':
-        return await this.enqueue(() => this.handleHello(request.params)) as unknown as JsonValue
+        return this.handleHello(request.params)
       case 'fs.list':
         return await this.listDirectory(request.params) as unknown as JsonValue
       default:
@@ -931,7 +980,22 @@ export class RemoteAgentGateway extends Service {
     return current
   }
 
-  private async startSession(params: Record<string, JsonValue>): Promise<RemoteSessionView> {
+  /** Persist the connecting row under the catalog lock, then wait for the hold
+   *  outside that lock so other RPCs are not blocked on agent spawn. */
+  private async startSessionAndWait(params: Record<string, JsonValue>): Promise<RemoteSessionView> {
+    const started = await this.enqueue(() => this.startSession(params))
+    try {
+      await started.completion
+    } catch (error) {
+      throw new Error(displayError(error))
+    }
+    return this.withTranscriptHead(this.requireSession(started.sessionId))
+  }
+
+  private async startSession(params: Record<string, JsonValue>): Promise<{
+    readonly sessionId: ReturnType<typeof RemoteSessionId>
+    readonly completion: Promise<void>
+  }> {
     const tables = this.requireTables()
     const project = this.requireProject(RemoteProjectId(stringField(params, 'projectId')))
     const parentIdValue = optionalString(params, 'parentSessionId')
@@ -986,9 +1050,9 @@ export class RemoteAgentGateway extends Service {
     const announced = this.withTranscriptHead(session)
     this.broadcastSessionView(announced)
     const completion = this.completeStart(host, session, parent?.binding?.nativeSessionId)
-    this.inflightStarts.set(sessionId, completion)
+    this.inflightStarts.set(sessionId, completion.then(() => undefined, () => undefined))
     void completion.finally(() => { this.inflightStarts.delete(sessionId) })
-    return announced
+    return { sessionId, completion }
   }
 
   /** In-flight session.start completions keyed by session id, so callers
@@ -1030,6 +1094,7 @@ export class RemoteAgentGateway extends Service {
         operationId: `session-start-${initial.sessionId}`,
         phase: 'failed',
       })
+      throw error
     }
   }
 
@@ -1232,11 +1297,13 @@ export class RemoteAgentGateway extends Service {
     const requestId = stringField(params, 'requestId')
     const text = stringField(params, 'text')
     const userTranscriptId = RemoteTranscriptId(`user:${session.sessionId}:${clientId}:${requestId}`)
-    if (this.requireTables().transcript.get(userTranscriptId) === undefined) {
-      await this.appendTranscript(session.sessionId, {
-        transcriptId: userTranscriptId, role: 'user', kind: 'message', text, requestId,
-      })
-    }
+    await this.withSessionJournalApply(session.sessionId, async () => {
+      if (this.requireTables().transcript.get(userTranscriptId) === undefined) {
+        await this.appendTranscript(session.sessionId, {
+          transcriptId: userTranscriptId, role: 'user', kind: 'message', text, requestId,
+        })
+      }
+    })
     const nativeSessionId = binding.nativeSessionId ?? session.sessionId
     const frame = session.backend === 'dsh'
       ? { jsonrpc: '2.0', id: requestId, method: 'session/prompt', params: { sessionId: nativeSessionId, contentBlocks: [{ type: 'text', text }] } }
@@ -1603,12 +1670,12 @@ export class RemoteAgentGateway extends Service {
       ? entries.filter(entry => entry.seq > afterSeq).slice(0, limit)
       : beforeSeq !== undefined
         ? entries.filter(entry => entry.seq < beforeSeq).slice(-limit)
-        : entries.slice(-limit)
+        : latestTurnPage(entries, limit)
     const remaining = afterSeq !== undefined
       ? entries.filter(entry => entry.seq > afterSeq).length
       : beforeSeq !== undefined
         ? entries.filter(entry => entry.seq < beforeSeq).length
-        : entries.length
+        : latestTurnRemaining(entries)
     return {
       sessionId,
       entries: page,
@@ -1665,24 +1732,53 @@ export class RemoteAgentGateway extends Service {
     return entries
   }
 
-  private async handleFollow(params: Record<string, JsonValue>): Promise<JsonValue> {
+  private handleFollow(params: Record<string, JsonValue>): JsonValue {
     const browserId = stringField(params, 'browserId')
     const sessionId = RemoteSessionId(stringField(params, 'sessionId'))
     this.wsBroadcaster.follow(browserId, sessionId)
+    this.ensureFollowedSync(sessionId)
+    this.replayTranscriptTail(sessionId)
+    const current = this.requireTables().sessions.get(sessionId)
+    const fromSeq = current?.binding?.lastSeq ?? 0
+    this.wsBroadcaster.broadcast({ type: 'session.followed', sessionId, fromSeq })
+    void this.ensureFollowedBinding(sessionId)
+    return { sessionId, fromSeq }
+  }
+
+  /** Attach a stale binding in the background so follow can return and replay immediately. */
+  private async ensureFollowedBinding(sessionId: ReturnType<typeof RemoteSessionId>): Promise<void> {
     const starting = this.inflightStarts.get(sessionId)
     if (starting !== undefined) await starting.catch(() => undefined)
-    const session = this.requireSession(sessionId)
+    const session = this.requireTables().sessions.get(sessionId)
+    if (session === undefined) return
     if (session.channelState !== 'connecting'
       && (session.binding?.state !== 'active'
         || session.channelState === 'reconnecting'
         || session.channelState === 'lost')) {
       try { await this.attachSession({ sessionId }) } catch { /* follow loop will retry */ }
+      this.ensureFollowedSync(sessionId)
     }
-    this.ensureFollowedSync(sessionId)
-    const current = this.requireTables().sessions.get(sessionId)
-    const fromSeq = current?.binding?.lastSeq ?? 0
-    this.wsBroadcaster.broadcast({ type: 'session.followed', sessionId, fromSeq })
-    return { sessionId, fromSeq }
+  }
+
+  /** Push the newest turn, starting at the last user message when the tail would omit it. */
+  private replayTranscriptTail(
+    sessionId: ReturnType<typeof RemoteSessionId>,
+    afterSeq = -1,
+    browserId?: string,
+  ): void {
+    const entries = this.sessionTranscriptEntries(sessionId).filter(entry => entry.seq > afterSeq)
+    if (entries.length === 0) return
+    const tail = afterSeq >= 0 ? entries.slice(0, REMOTE_TRANSCRIPT_PAGE_SIZE) : latestTurnPage(entries, REMOTE_TRANSCRIPT_PAGE_SIZE)
+    if (browserId === undefined) {
+      this.wsBroadcaster.broadcastTranscriptBatch(sessionId, tail)
+      return
+    }
+    const first = tail[0]
+    const last = tail[tail.length - 1]
+    if (first === undefined || last === undefined) return
+    this.wsBroadcaster.sendToBrowser(browserId, {
+      type: 'transcript.batch', sessionId, entries: tail, fromSeq: first.seq, toSeq: last.seq,
+    })
   }
 
   private ensureFollowedSync(sessionId: ReturnType<typeof RemoteSessionId>): void {
@@ -1801,11 +1897,10 @@ export class RemoteAgentGateway extends Service {
           })
           await flushQueue()
           const waiting = this.requireTables().sessions.get(sessionId)
-          // Live journal.page already covers a running turn. Re-reading the
-          // journal here races the push path and re-projects the same seqs.
-          // waiting-permission still catchups because some ACP adapters stall
-          // the wait-page until the permission RPC returns.
-          if (waiting?.turnState === 'waiting-permission') {
+          // Catch up on the poll tick so a dead hold is not stuck in `running`
+          // forever waiting for a push that will never come. applyJournalPage
+          // ignores seq <= lastSeq, so this does not re-project live frames.
+          if (waiting?.turnState === 'running' || waiting?.turnState === 'waiting-permission') {
             try {
               await this.catchupSessionJournal(sessionId)
             } catch (error) {
@@ -1832,7 +1927,7 @@ export class RemoteAgentGateway extends Service {
     }
   }
 
-  private async handleUnfollow(params: Record<string, JsonValue>): Promise<JsonValue> {
+  private handleUnfollow(params: Record<string, JsonValue>): JsonValue {
     const browserId = stringField(params, 'browserId')
     const sessionId = RemoteSessionId(stringField(params, 'sessionId'))
     this.wsBroadcaster.unfollow(browserId, sessionId)
@@ -1840,16 +1935,19 @@ export class RemoteAgentGateway extends Service {
     return { sessionId }
   }
 
-  private async handleHello(params: Record<string, JsonValue>): Promise<JsonValue> {
+  private handleHello(params: Record<string, JsonValue>): JsonValue {
     const browserId = stringField(params, 'browserId')
     const lastSeen = jsonObject(params['lastSeenSeqs'] ?? {}, 'lastSeenSeqs')
+    const state = this.requireGlobal().get()
     const result: { readonly sessionId: ReturnType<typeof RemoteSessionId>; readonly fromSeq: number }[] = []
     for (const [key, raw] of Object.entries(lastSeen)) {
       if (typeof raw !== 'number' || !Number.isFinite(raw)) continue
       const sessionId = RemoteSessionId(key)
-      const session = this.requireTables().sessions.get(sessionId)
-      const current = session?.binding?.lastSeq ?? 0
-      if (current > raw) result.push({ sessionId, fromSeq: raw })
+      const current = (state.nextTranscriptSeq[sessionId] ?? 0) - 1
+      if (current > raw) {
+        result.push({ sessionId, fromSeq: raw })
+        this.replayTranscriptTail(sessionId, raw, browserId)
+      }
     }
     return { browserId, missed: result as unknown as JsonValue }
   }

@@ -1,9 +1,10 @@
 /** DSH-style remote host → project → session → child-session browser. */
 
 import { useId, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { applyLimitToSessions, subscribeDisplayPreferences } from './display-preferences.ts'
 import {
-  Button, IconEllipsisOutline16, IconFolderClose16,
-  IconFolderOpen16, IconNewChatOutline16, IconPanelLeftOutline16,
+  Button, IconChevronDownOutline14, IconChevronRightOutline14, IconEllipsisOutline16,
+  IconFolderClose16, IconFolderOpen16, IconNewChatOutline16, IconPanelLeftOutline16,
   IconPlusOutline16, IconProjectAddOutline16, IconSearchOutline16, Input, Modal,
   IconSettingsOutline16, IconTreeCorner8x10, StateDot,
   useDismissOnOutsidePointer,
@@ -102,7 +103,9 @@ function sessionMatches(session: RemoteSessionView, sessions: readonly RemoteSes
 }
 
 function TreeToggle({ open }: { open: boolean }) {
-  return <span className={css.treeBar} data-open={open || undefined} aria-hidden="true" />
+  return open
+    ? <IconChevronDownOutline14 aria-hidden="true" />
+    : <IconChevronRightOutline14 aria-hidden="true" />
 }
 
 function SessionRows({
@@ -243,7 +246,7 @@ function SessionRow({
 }
 
 function ProjectSection({
-  project, sessions, currentSessionId, attachingSessionId, draftCurrent, query, open, onToggle, onRename, store, onHideProject, onRenameProject, active,
+  project, sessions, currentSessionId, attachingSessionId, draftCurrent, query, open, onToggle, onRename, store, onHideProject, onRenameProject, active, limit, sessionOverflowExpanded, onToggleSessionOverflow,
 }: {
   project: RemoteProjectView
   sessions: readonly RemoteSessionView[]
@@ -258,11 +261,18 @@ function ProjectSection({
   onHideProject: (project: RemoteProjectView) => void
   store: RemoteAgentStore
   active: boolean
+  limit: number
+  sessionOverflowExpanded: boolean
+  onToggleSessionOverflow: () => void
 }) {
   const queryMatchesProject = query === '' || includesQuery(project.title, query) || includesQuery(project.cwd, query)
   const visibleSessions = queryMatchesProject ? sessions : sessions.filter(session => sessionMatches(session, sessions, query))
   if (query !== '' && !queryMatchesProject && visibleSessions.length === 0) return null
   const expanded = query === '' ? open : true
+  // Searching forces the full list so the user never loses a match behind the cap.
+  const cap = query === '' ? limit : 0
+  const overflow = applyLimitToSessions(visibleSessions, cap, sessionOverflowExpanded)
+  const renderedSessions = query === '' ? overflow.visible : visibleSessions
   const [menuOpen, setMenuOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
   useDismissOnOutsidePointer(menuRef, menuOpen, () => { setMenuOpen(false) })
@@ -277,7 +287,7 @@ function ProjectSection({
           title={project.cwd}
           onClick={onToggle}
         >
-          <span className={css.treeBarCell}><TreeToggle open={expanded} /></span>
+          <span className={css.chevron}><TreeToggle open={expanded} /></span>
           <span className={css.folderIcon} aria-hidden="true">{expanded ? <IconFolderOpen16 /> : <IconFolderClose16 />}</span>
           <span className={css.treeLabel}>{project.title}</span>
         </button>
@@ -336,7 +346,7 @@ function ProjectSection({
             </button>
           )}
           <SessionRows
-            sessions={visibleSessions}
+            sessions={renderedSessions}
             currentSessionId={currentSessionId}
             attachingSessionId={attachingSessionId}
             query={queryMatchesProject ? '' : query}
@@ -344,6 +354,22 @@ function ProjectSection({
             onRename={onRename}
             store={store}
           />
+          {query === '' && overflow.showToggle && !sessionOverflowExpanded && (
+            <button
+              type="button"
+              className={css.sessionOverflowToggle}
+              aria-label={`在 ${project.title} 中展开更多会话`}
+              onClick={onToggleSessionOverflow}
+            >更多 <span className={css.sessionOverflowCount}>(+{overflow.overflow})</span></button>
+          )}
+          {query === '' && overflow.showToggle && sessionOverflowExpanded && (
+            <button
+              type="button"
+              className={css.sessionOverflowToggle}
+              aria-label={`收起 ${project.title} 的多余会话`}
+              onClick={onToggleSessionOverflow}
+            >收起</button>
+          )}
           {!draftCurrent && visibleSessions.filter(session => session.parentSessionId === undefined).length === 0 && (
             <button type="button" className={css.emptyTreeAction} onClick={() => { store.startSessionDraft(project.projectId) }}>
               <IconPlusOutline16 /> 新建会话
@@ -358,7 +384,7 @@ function ProjectSection({
 function HostSection({
   host, projects, sessions, currentSessionId, attachingSessionId, draftProjectId, query,
   open, onToggle, projectOpen, onToggleProject, onRename, store, artifactVersion, active,
-  activeProjectId, onRenameHost, onHideHost, onRenameProject, onHideProject,
+  activeProjectId, onRenameHost, onHideHost, onRenameProject, onHideProject, sessionLimit, sessionOverflowExpanded, onToggleSessionOverflow,
 }: {
   host: RemoteHostView
   projects: readonly RemoteProjectView[]
@@ -380,6 +406,9 @@ function HostSection({
   artifactVersion: string | undefined
   active: boolean
   activeProjectId: string | undefined
+  sessionLimit: number
+  sessionOverflowExpanded: (projectId: string) => boolean
+  onToggleSessionOverflow: (projectId: string) => void
 }) {
   const hostMatchesQuery = query === '' || includesQuery(host.title, query) || includesQuery(host.endpoint, query)
   const visibleProjects = hostMatchesQuery ? projects : projects.filter(project => {
@@ -414,7 +443,7 @@ function HostSection({
           title={host.endpoint}
           onClick={onToggle}
         >
-          <span className={css.treeBarCell}><TreeToggle open={expanded} /></span>
+          <span className={css.chevron}><TreeToggle open={expanded} /></span>
           <StateDot state={hostState(host)} />
           <span className={css.treeLabel}>
             <span>
@@ -523,6 +552,9 @@ function HostSection({
               onHideProject={onHideProject}
               active={activeProjectId === project.projectId}
               store={store}
+              limit={sessionLimit}
+              sessionOverflowExpanded={sessionOverflowExpanded(project.projectId)}
+              onToggleSessionOverflow={() => { onToggleSessionOverflow(project.projectId) }}
             />
           ))}
           {visibleProjects.length === 0 && (
@@ -715,10 +747,14 @@ function toggleSet(current: ReadonlySet<string>, key: string): Set<string> {
 /** Render the complete remote navigation column. */
 export function RemoteSidebar({ collapsed, store, toggleSidebar }: RemoteSidebarProps) {
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
+  // Re-render whenever display preferences change so a cap tweak in the settings
+  // panel is reflected immediately, without waiting for the next snapshot.
+  const displayPrefs = useSyncExternalStore(subscribeDisplayPreferences, store.getDisplayPreferences, store.getDisplayPreferences)
   const state = snapshot.state
   const [query, setQuery] = useState('')
   const [closedHosts, setClosedHosts] = useState<ReadonlySet<string>>(() => new Set())
   const [closedProjects, setClosedProjects] = useState<ReadonlySet<string>>(() => new Set())
+  const [expandedProjects, setExpandedProjects] = useState<ReadonlySet<string>>(() => new Set())
   const [renameSession, setRenameSession] = useState<RemoteSessionView>()
   const [renameHost, setRenameHost] = useState<RemoteHostView>()
   const [renameProject, setRenameProject] = useState<RemoteProjectView>()
@@ -805,6 +841,9 @@ export function RemoteSidebar({ collapsed, store, toggleSidebar }: RemoteSidebar
             artifactVersion={state.hostdArtifactVersion}
             active={activeHostId === host.hostId}
             activeProjectId={activeProjectId}
+            sessionLimit={displayPrefs.sessionsPerProjectLimit}
+            sessionOverflowExpanded={(projectId) => expandedProjects.has(projectId)}
+            onToggleSessionOverflow={(projectId) => { setExpandedProjects(current => toggleSet(current, projectId)) }}
           />
         ))}
         {state.hosts.length === 0 && <p className={css.empty}>添加一台已命名的主机，然后选择项目目录开始会话。</p>}

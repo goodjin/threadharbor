@@ -336,8 +336,9 @@ export class HostdWsHub {
         // If the page was capped, immediately drain the remainder so a busy hold
         // flushes in bounded chunks instead of waiting for new events.
         if (page.events.length > this.options.maxEventsPerPage) continue
-      } catch {
+      } catch (error) {
         if (abort.signal.aborted) return
+        if (holdSocketDead(error)) this.fanoutHoldDead(record)
         this.waiters.delete(record.holdId)
         return
       }
@@ -364,6 +365,25 @@ export class HostdWsHub {
 
   private subscribersFor(record: HostdSessionRecord): Map<WebSocket, Subscriber> {
     return this.subscribersBySession.get(RemoteSessionId(record.sessionId)) ?? new Map()
+  }
+
+  private fanoutHoldDead(record: HostdSessionRecord): void {
+    for (const candidate of this.recordByHoldId.values()) {
+      if (candidate.holdId !== record.holdId) continue
+      const sessionId = RemoteSessionId(candidate.sessionId)
+      const sessionSubs = this.subscribersBySession.get(sessionId)
+      if (sessionSubs === undefined || sessionSubs.size === 0) continue
+      const event: RemoteHostdWsEvent = {
+        type: 'journal.gap',
+        sessionId,
+        droppedThrough: 0,
+        generation: candidate.generation,
+      }
+      const payload = JSON.stringify({ direction: 'push', seq: ++this.pushSeq, event } satisfies RemoteHostdWsFrame)
+      for (const subscriber of sessionSubs.values()) {
+        if (subscriber.ws.readyState === WS_OPEN) subscriber.ws.send(payload)
+      }
+    }
   }
 
   private fanoutPage(record: HostdSessionRecord, page: RemoteJournalPage): void {
@@ -394,6 +414,11 @@ export class HostdWsHub {
       if (ws.readyState === WS_OPEN) ws.send(JSON.stringify({ direction: 'ping' }))
     }
   }
+}
+
+function holdSocketDead(error: unknown): boolean {
+  return /ECONNREFUSED|ENOENT|EPIPE|ENOTSOCK|ECONNRESET/i
+    .test(error instanceof Error ? error.message : String(error))
 }
 
 function wsText(data: unknown): string {

@@ -250,8 +250,7 @@
 }
 
 .chevron,
-.folderIcon,
-.treeBarCell {
+.folderIcon {
   flex: none;
   display: inline-flex;
   align-items: center;
@@ -261,31 +260,6 @@
 
 .chevron {
   width: 14px;
-}
-
-/* Horizontal bar frame that replaces the chevron toggle on tree-row headers. */
-.treeBarCell {
-  width: 18px;
-  height: 14px;
-  border-radius: 4px;
-  background: var(--dsw-alias-bg-layer-2);
-  border: 1px solid var(--dsw-alias-border-l2);
-  position: relative;
-}
-
-.treeBar {
-  position: absolute;
-  left: 3px;
-  right: 3px;
-  top: 50%;
-  height: 0;
-  margin-top: -1px;
-  border-top: 2px solid var(--dsw-alias-label-tertiary);
-  border-radius: 1px;
-}
-
-.treeBar[data-open] {
-  border-top-color: var(--dsw-alias-label-secondary);
 }
 
 .treeLabel {
@@ -658,6 +632,38 @@
 .emptyTreeAction:hover {
   color: var(--dsw-alias-label-primary);
   background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* Toggle shown when a project has more top-level sessions than the configured
+ * display cap. Visually a sibling of `.emptyTreeAction` so the sidebar reads
+ * as one consistent affordance family. */
+.sessionOverflowToggle {
+  min-height: 26px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 2px 5px 4px 26px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--dsw-alias-label-tertiary);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.sessionOverflowToggle:hover,
+.sessionOverflowToggle:focus-visible {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+  outline: none;
+}
+
+.sessionOverflowToggle .sessionOverflowCount {
+  margin-left: 4px;
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-tertiary);
 }
 
 .hostOffline {
@@ -1046,6 +1052,49 @@
   color: var(--dsw-alias-label-tertiary);
   font-size: 10px;
   letter-spacing: 0.04em;
+}
+
+/* Locally queued bubble shown while a previous turn is still running.
+ *  Mirrors `.userTurn` / `.userBubble` so the user reads the queue as "the
+ *  user message I just typed", then pushes it to the backend automatically. */
+.queuedTurn {
+  position: relative;
+}
+
+.queuedTurn::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  pointer-events: none;
+  border: 1px dashed var(--dsw-alias-state-warning-secondary, color-mix(in srgb, var(--dsw-alias-state-warn-primary, #c0892b) 45%, transparent));
+  border-radius: 22px;
+  opacity: 0.55;
+}
+
+.queuedBubble {
+  background: color-mix(in srgb, var(--dsw-alias-bg-layer-3) 70%, var(--dsw-alias-bg-layer-1));
+  color: var(--dsw-alias-label-secondary);
+  border: 1px dashed var(--dsw-alias-state-warn-secondary, color-mix(in srgb, var(--dsw-alias-state-warn-primary, #c0892b) 50%, transparent));
+  border-radius: 18px 18px 6px 18px;
+}
+
+.queuedBadge {
+  display: inline-flex;
+  align-items: center;
+  margin: 0 0 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  color: var(--dsw-alias-state-warn-primary, #c0892b);
+  background: color-mix(in srgb, var(--dsw-alias-state-warn-primary, #c0892b) 12%, transparent);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  letter-spacing: 0.04em;
+}
+
+.queuedTurn .messageActions {
+  /* Cancel button must be reachable without hover so users can drop the queue. */
+  opacity: 1;
 }
 
 .assistantMessage {
@@ -1785,6 +1834,57 @@
   margin-top: 4px;
   color: var(--dsw-alias-label-tertiary);
   font-size: 12px;
+}
+
+/* Two-column form used by the display-preferences editor. The first row
+ * stacks label/control/help so the inputs read top-to-bottom on narrow
+ * panels without breaking alignment on wider ones. */
+.settingsForm {
+  display: grid;
+  gap: 16px;
+}
+
+.settingsField {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.settingsField > span {
+  font-weight: 600;
+}
+
+.settingsField input {
+  width: 100%;
+  min-height: 32px;
+  padding: 4px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: var(--dsw-alias-surface-base);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.settingsField input:focus-visible {
+  outline: 2px solid var(--dsw-alias-accent-emphasis);
+  outline-offset: 1px;
+  border-color: transparent;
+}
+
+.settingsField input[aria-invalid="true"] {
+  border-color: var(--dsw-alias-status-error, var(--dsw-alias-label-danger));
+}
+
+.settingsField small {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+}
+
+.settingsField small.error {
+  color: var(--dsw-alias-label-danger);
 }
 
 .panelActions,

@@ -51,4 +51,17 @@ describe('projectNativeFrame', () => {
       },
     })).toEqual([{ role: 'assistant', kind: 'message', text: 'hello', turnState: 'running' }])
   })
+
+  it('treats synthesized _x.ai/session/prompt_complete as a DSH turn end so the UI is not stuck waiting', () => {
+    // DSH backends occasionally skip `session.status=idle` / `turn/end` after the
+    // JSON-RPC response. Hold worker synthesizes `_x.ai/session/prompt_complete`
+    // for DSH too; the projector must recognize it so the conversation flips
+    // back to idle and the queued next prompt can drain.
+    expect(projectNativeFrame('dsh', {
+      jsonrpc: '2.0', method: '_x.ai/session/prompt_complete', params: { stopReason: 'end_turn' },
+    })).toEqual([{ role: 'system', kind: 'status', text: '远程轮次完成', turnState: 'idle' }])
+    expect(projectNativeFrame('dsh', {
+      jsonrpc: '2.0', method: '_x.ai/session/prompt_complete', params: { stopReason: 'error' },
+    })).toEqual([{ role: 'system', kind: 'status', text: '远程轮次失败', turnState: 'failed' }])
+  })
 })

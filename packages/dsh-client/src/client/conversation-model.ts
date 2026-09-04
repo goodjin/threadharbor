@@ -115,7 +115,7 @@ function turnStage(input: {
     }
   }
   if (session.turnState === 'waiting-permission') {
-    const pending = entries.findLast(entry => entry.role === 'permission')
+    const pending = pendingPermissionEntry(entries)
     const asking = pending !== undefined && parseChoicePrompt(pending)?.kind === 'question'
     return {
       kind: 'permission',
@@ -370,9 +370,52 @@ export function buildTranscriptNodes(
   return nodes
 }
 
-/** Whether the composer approval dropdown should answer permission requests without a click. */
-export function shouldAutoApprovePermissions(approvalChoice: string | undefined): boolean {
+/** Whether the composer should answer permission grants without a click.
+ *  Claude's "跳过确认" is `permissionMode=bypass`; Codex "完全访问" is `full-access`.
+ *  Those are distinct from AskUserQuestion, which still requires a click. */
+export function shouldAutoApprovePermissions(
+  approvalChoice: string | undefined,
+  permissionMode?: string,
+): boolean {
   return approvalChoice === 'auto'
+    || permissionMode === 'bypass'
+    || permissionMode === 'full-access'
+}
+
+/** Pick the option that matches the current skip/auto setting, then the first option. */
+export function autoApproveOptionId(
+  prompt: ChoicePrompt | undefined,
+  preferences: { readonly approvalChoice?: string; readonly permissionMode?: string } = {},
+): string | undefined {
+  const options = prompt?.questions[0]?.options ?? []
+  if (options.length === 0) return undefined
+  const preferred = preferences.permissionMode === 'bypass' || preferences.permissionMode === 'full-access'
+    ? ['bypassPermissions']
+    : preferences.approvalChoice === 'auto'
+      ? ['auto', 'bypassPermissions']
+      : []
+  for (const id of preferred) {
+    const match = options.find(option => option.id === id)
+    if (match !== undefined) return match.id
+  }
+  return options[0]?.id
+}
+
+/** Latest permission row, used both for the waiting banner and the pinned card. */
+export function pendingPermissionEntry(
+  entries: readonly RemoteTranscriptEntry[],
+): RemoteTranscriptEntry | undefined {
+  return entries.findLast(entry => entry.role === 'permission')
+}
+
+/** Re-show the pending card at the tail when later output has scrolled it out of view. */
+export function shouldPinPendingPermission(
+  turnState: RemoteTurnState,
+  pending: RemoteTranscriptEntry | undefined,
+  lastNodeId: string | undefined,
+): boolean {
+  if (turnState !== 'waiting-permission' || pending === undefined) return false
+  return lastNodeId !== pending.transcriptId
 }
 
 /** JSON-RPC id for a permission card, including numeric `0` from Claude ACP. */

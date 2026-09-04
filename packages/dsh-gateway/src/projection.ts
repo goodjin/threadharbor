@@ -120,6 +120,14 @@ function planEntrySummaries(update: Record<string, JsonValue> | undefined): stri
 function projectDsh(frame: Record<string, JsonValue>): ProjectedFragment[] {
   const method = frameMethod(frame)
   const params = object(frame['params'])
+  if (method === '_x.ai/session/prompt_complete') {
+    // Backstop: hold worker may synthesize this for DSH so we do not depend
+    // on a follow-up `session.status=idle` or `turn/end` notification that some
+    // DSH backends occasionally skip after the JSON-RPC response.
+    const stopReason = params?.['stopReason']
+    const failed = stopReason === 'error'
+    return [{ role: 'system', kind: 'status', text: failed ? '远程轮次失败' : '远程轮次完成', turnState: failed ? 'failed' : 'idle' }]
+  }
   if (method === 'session.status') {
     const status = params?.['status']
     const running = status === 'running' || params?.['running'] === true

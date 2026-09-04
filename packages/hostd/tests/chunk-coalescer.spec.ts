@@ -29,8 +29,8 @@ function toolCall(): object {
 }
 
 describe('ChunkCoalescer', () => {
-  it('exposes a 40ms idle flush window for hold workers', () => {
-    expect(CHUNK_COALESCE_IDLE_MS).toBe(40)
+  it('exposes a 200ms idle flush window for hold workers', () => {
+    expect(CHUNK_COALESCE_IDLE_MS).toBe(200)
   })
 
   it('merges consecutive ACP message tokens and flushes before a tool call', () => {

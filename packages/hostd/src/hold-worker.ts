@@ -70,6 +70,9 @@ export function parseConfig(path: string): HoldWorkerConfig {
     statePath: text('statePath'),
     maxJournalEvents: integer('maxJournalEvents'),
     maxJournalBytes: integer('maxJournalBytes'),
+    ...(typeof value['sessionRoot'] === 'string' && value['sessionRoot'] !== ''
+      ? { sessionRoot: value['sessionRoot'] as string }
+      : {}),
     transport,
   }
 }
@@ -229,9 +232,16 @@ export class HoldWorker {
 
   private startStdio(command: string, args: readonly string[]): void {
     const epoch = ++this.stdioEpoch
+    const env: NodeJS.ProcessEnv = { ...process.env }
+    if (this.config.sessionRoot !== undefined) {
+      // DSH writes JSONL under $DSH_SESSION_ROOT/<projectKey(cwd)>/<sessionId>/...
+      // Without this env var the bundled cordis.yml falls back to cwd-relative
+      // ./.sessions and pollutes the project directory.
+      env['DSH_SESSION_ROOT'] = this.config.sessionRoot
+    }
     const child = spawn(command, [...args], {
       cwd: this.config.cwd,
-      env: process.env,
+      env,
       stdio: ['pipe', 'pipe', 'pipe'],
     })
     this.child = child
@@ -310,24 +320,20 @@ export class HoldWorker {
       }
     }
     const journaled = this.journalFrames(this.coalescer.push(frame))
-    if (request?.method === 'session/prompt' && (this.config.backend === 'codex' || this.config.backend === 'claude')) {
-      const responseRecord = record ?? {}
-      const result = responseRecord['result']
-      const resultRecord = result !== null && typeof result === 'object' && !Array.isArray(result) ? result : undefined
-      this.journalFrames([{
-        jsonrpc: '2.0',
-        method: '_x.ai/session/prompt_complete',
-        params: {
-          sessionId: request.sessionId ?? this.nativeSessionId ?? '',
-          stopReason: typeof resultRecord?.['stopReason'] === 'string'
-            ? resultRecord['stopReason']
-            : responseRecord['error'] === undefined ? 'end_turn' : 'error',
-        },
-      }])
+    const isPromptResponse = request?.method === 'session/prompt'
+      && record !== undefined && record['method'] === undefined
+      && (Object.hasOwn(record, 'result') || Object.hasOwn(record, 'error'))
+    const synthesizedCompletion = isPromptResponse && record['error'] === undefined
+      ? this.synthesizePromptCompletion(request, record)
+      : undefined
+    if (isPromptResponse && record['error'] !== undefined) {
       this.promptActive = false
       this.drainPromptQueue()
-    } else if ((request?.method === 'session/prompt' && record?.['error'] !== undefined)
-      || this.completesPrompt(record)) {
+    } else if (synthesizedCompletion !== undefined) {
+      this.journalFrames([synthesizedCompletion])
+      this.promptActive = false
+      this.drainPromptQueue()
+    } else if ((!isPromptResponse && this.completesPrompt(record))) {
       this.promptActive = false
       this.drainPromptQueue()
     }
@@ -567,6 +573,42 @@ export class HoldWorker {
     if (params === null || typeof params !== 'object' || Array.isArray(params)) return false
     const event = params['event']
     return event !== null && typeof event === 'object' && !Array.isArray(event) && event['type'] === 'turn/end'
+  }
+
+  /**
+   * Build a backend-native turn-completion frame for a `session/prompt` JSON-RPC response.
+   * The JSON-RPC response is the only completion signal that all four backends reliably
+   * emit; we synthesize the appropriate native frame so the gateway can flip `turnState`
+   * back to `idle` even if the backend never sends its own follow-up notification.
+   */
+  private synthesizePromptCompletion(
+    request: { method: string; sessionId?: string },
+    responseRecord: Record<string, JsonValue>,
+  ): JsonValue | undefined {
+    const result = responseRecord['result']
+    const resultRecord = result !== null && typeof result === 'object' && !Array.isArray(result) ? result : undefined
+    const explicitStopReason = typeof resultRecord?.['stopReason'] === 'string'
+      ? resultRecord['stopReason'] : undefined
+    const stopReason = explicitStopReason ?? (responseRecord['error'] === undefined ? 'end_turn' : 'error')
+    const sessionId = request.sessionId ?? this.nativeSessionId ?? ''
+    if (this.config.backend === 'dsh') {
+      const failed = stopReason === 'error'
+      const reason: Record<string, JsonValue> = { kind: failed ? 'error' : 'completed' }
+      if (failed) reason['message'] = stopReason
+      return {
+        jsonrpc: '2.0',
+        method: 'session.event',
+        params: {
+          sessionId,
+          event: { type: 'turn/end', data: { reason } },
+        },
+      }
+    }
+    return {
+      jsonrpc: '2.0',
+      method: '_x.ai/session/prompt_complete',
+      params: { sessionId, stopReason },
+    }
   }
 
   private previousDroppedThrough(): number {

@@ -16,6 +16,12 @@ export interface HoldWorkerConfig {
   readonly statePath: string
   readonly maxJournalEvents: number
   readonly maxJournalBytes: number
+  /**
+   * Owner-resolved native-session root for stdio backends. hostd sets this to a
+   * hostd-data-dir-relative path so DSH JSONL never lands in the project cwd;
+   * non-dsh backends leave it undefined.
+   */
+  readonly sessionRoot?: string
   readonly transport:
     | { readonly kind: 'stdio'; readonly command: string; readonly args: readonly string[] }
     | { readonly kind: 'websocket'; readonly url: string; readonly secret?: string }

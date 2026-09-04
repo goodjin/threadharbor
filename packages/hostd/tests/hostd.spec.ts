@@ -172,3 +172,60 @@ describe('RemoteAgentHostd inventory', () => {
     })).rejects.toThrow('confirm')
   })
 })
+
+describe('RemoteAgentHostd fs.list', () => {
+  it('returns the host home directory when path is missing', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'threadharbor-hostd-fs-list-'))
+    roots.push(root)
+    const hostd = new RemoteAgentHostd(options(root))
+    const listing = await hostd.dispatch({
+      id: 'fs1', method: 'fs.list', params: {},
+    }) as { path: string; entries: readonly unknown[] }
+    expect(listing.path).toBe(process.env['HOME'] ?? require('node:os').homedir())
+    expect(Array.isArray(listing.entries)).toBe(true)
+  })
+
+  it('treats an empty path the same as a missing one', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'threadharbor-hostd-fs-list-'))
+    roots.push(root)
+    const hostd = new RemoteAgentHostd(options(root))
+    const listing = await hostd.dispatch({
+      id: 'fs2', method: 'fs.list', params: { path: '   ' },
+    }) as { path: string }
+    expect(listing.path).toBe(process.env['HOME'] ?? require('node:os').homedir())
+  })
+
+  it('lists an explicit absolute directory and exposes a parent link', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'threadharbor-hostd-fs-list-'))
+    roots.push(root)
+    const projectDir = join(root, 'projects', 'demo')
+    await mkdir(projectDir, { recursive: true, mode: 0o700 })
+    await writeFile(join(projectDir, 'README.md'), '# demo')
+    const hostd = new RemoteAgentHostd(options(root))
+    const listing = await hostd.dispatch({
+      id: 'fs3', method: 'fs.list', params: { path: projectDir },
+    }) as {
+      path: string
+      parent: string
+      entries: readonly { name: string; kind: string; path: string }[]
+    }
+    // macOS resolves /var → /private/var inside tmpdir; hostd normalises via realpathSync.
+    const { realpathSync } = await import('node:fs')
+    const resolvedProjectDir = realpathSync(projectDir)
+    expect(listing.path).toBe(resolvedProjectDir)
+    expect(listing.parent).toBe(realpathSync(join(root, 'projects')))
+    expect(listing.entries).toEqual([
+      { name: 'README.md', kind: 'file', path: join(resolvedProjectDir, 'README.md') },
+    ])
+  })
+
+  it('propagates fs errors with the requested path', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'threadharbor-hostd-fs-list-'))
+    roots.push(root)
+    const hostd = new RemoteAgentHostd(options(root))
+    const missing = join(root, 'does-not-exist')
+    await expect(hostd.dispatch({
+      id: 'fs4', method: 'fs.list', params: { path: missing },
+    })).rejects.toThrow(missing)
+  })
+})

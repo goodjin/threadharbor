@@ -22,13 +22,20 @@ import {
   type RemoteAgentPanel, type RemoteAgentStore, type RemotePromptProgress,
 } from './store.ts'
 import {
-  browsableDirectories, buildTranscriptNodes, choiceCancelOutcome, choiceSubmitOutcome,
+  autoApproveOptionId, browsableDirectories, buildTranscriptNodes, choiceCancelOutcome, choiceSubmitOutcome,
   conversationPresentation,
-  isAutoApprovablePermission, isNearScrollBottom, parseChoicePrompt, parsePlanItems, permissionRequestId,
-  preferredProjectBackend, shouldAutoApprovePermissions, toolDisclosurePresentation,
+  isAutoApprovablePermission, isNearScrollBottom, parseChoicePrompt, parsePlanItems, pendingPermissionEntry,
+  permissionRequestId, preferredProjectBackend, shouldAutoApprovePermissions, shouldPinPendingPermission,
+  toolDisclosurePresentation,
   type ChoicePrompt, type ConversationStage, type RemoteTranscriptNode,
 } from './conversation-model.ts'
 import css from './RemoteSurface.module.css'
+import {
+  MAX_AUTO_HIDE_AFTER_DAYS,
+  MAX_SESSIONS_PER_PROJECT_LIMIT,
+  readDisplayPreferences,
+  subscribeDisplayPreferences,
+} from './display-preferences.ts'
 
 /** Props injected by the conversation slot registration. */
 export interface RemoteConversationInjected {
@@ -1028,6 +1035,11 @@ function writePersistedSessionPreferences(map: Record<string, SessionPreferences
   }
 }
 
+/** Last observed scroll position for a remote session. */
+import type { TranscriptScrollMemory } from './transcript-scroll-memory.ts'
+import { readTranscriptScrollMemory, writeTranscriptScrollMemory } from './transcript-scroll-memory.ts'
+export type { TranscriptScrollMemory } from './transcript-scroll-memory.ts'
+
 function sessionPreferencesKey(hostId: string, backend: RemoteAgentBackend): string {
   return `${hostId}-${backend}`
 }
@@ -1507,6 +1519,149 @@ function CatalogSessionTree({
   )
 }
 
+/** Editor for the two sidebar display preferences. The component is purely
+ *  client-side: every change writes through `writeDisplayPreferences` and
+ *  reruns the auto-archive job, so the sidebar re-renders without waiting on
+ *  any server round-trip. The companion `ArchiveNowButton` surfaces the
+ *  outcome of a manual cleanup so the user knows how many sessions retired. */
+function DisplayPreferencesSection({ store }: { store: RemoteAgentStore }) {
+  const prefs = useSyncExternalStore(subscribeDisplayPreferences, readDisplayPreferences, readDisplayPreferences)
+  const [limitDraft, setLimitDraft] = useState(String(prefs.sessionsPerProjectLimit))
+  const [daysDraft, setDaysDraft] = useState(String(prefs.autoHideSessionsAfterDays))
+  const [limitError, setLimitError] = useState('')
+  const [daysError, setDaysError] = useState('')
+  const [sweepStatus, setSweepStatus] = useState<{ readonly state: 'idle' | 'running' | 'done' | 'error'; readonly message: string }>({ state: 'idle', message: '' })
+  // When the preferences change externally (e.g. another tab or a manual save),
+  // keep the controlled inputs in sync so the user never sees stale numbers.
+  useEffect(() => {
+    setLimitDraft(String(prefs.sessionsPerProjectLimit))
+    setDaysDraft(String(prefs.autoHideSessionsAfterDays))
+  }, [prefs.sessionsPerProjectLimit, prefs.autoHideSessionsAfterDays])
+
+  const commitLimit = (raw: string): void => {
+    const trimmed = raw.trim()
+    if (trimmed === '') {
+      setLimitError('请输入 1 到 64 之间的整数。')
+      return
+    }
+    const parsed = Number(trimmed)
+    if (!Number.isFinite(parsed) || parsed < 1 || parsed > MAX_SESSIONS_PER_PROJECT_LIMIT) {
+      setLimitError(`请输入 1 到 ${MAX_SESSIONS_PER_PROJECT_LIMIT} 之间的整数。`)
+      return
+    }
+    setLimitError('')
+    store.updateDisplayPreferences({ sessionsPerProjectLimit: Math.floor(parsed) })
+  }
+
+  const commitDays = (raw: string): void => {
+    const trimmed = raw.trim()
+    if (trimmed === '') {
+      setDaysError('请输入 0 到 365 之间的整数；0 表示关闭自动归档。')
+      return
+    }
+    const parsed = Number(trimmed)
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > MAX_AUTO_HIDE_AFTER_DAYS) {
+      setDaysError(`请输入 0 到 ${MAX_AUTO_HIDE_AFTER_DAYS} 之间的整数。`)
+      return
+    }
+    setDaysError('')
+    store.updateDisplayPreferences({ autoHideSessionsAfterDays: Math.floor(parsed) })
+  }
+
+  const runArchive = (): void => {
+    setSweepStatus({ state: 'running', message: '' })
+    void store.archiveStaleSessions()
+      .then((archived) => {
+        setSweepStatus({
+          state: 'done',
+          message: archived === 0
+            ? '没有需要归档的过期会话。'
+            : `已归档 ${archived} 个过期会话。`,
+        })
+      })
+      .catch((reason: unknown) => {
+        setSweepStatus({ state: 'error', message: String(reason) })
+      })
+  }
+
+  const daysHelp = prefs.autoHideSessionsAfterDays === 0
+    ? '自动归档已关闭。'
+    : `最后更新时间超过 ${prefs.autoHideSessionsAfterDays} 天的未归档会话将被自动归档。`
+
+  return (
+    <section className={css.settingsSection}>
+      <header className={css.settingsSectionHeader}>
+        <h2>列表显示与自动归档</h2>
+        <p>调整侧栏每个项目默认展示的会话数量，并按会话最后更新时间自动归档长期不活跃的会话。</p>
+      </header>
+      <div className={css.settingsForm}>
+        <label className={css.settingsField}>
+          <span>每个项目默认显示的会话数量</span>
+          <input
+            type="number"
+            inputMode="numeric"
+            min={1}
+            max={MAX_SESSIONS_PER_PROJECT_LIMIT}
+            step={1}
+            value={limitDraft}
+            aria-invalid={limitError !== '' || undefined}
+            onChange={(event) => { setLimitDraft(event.target.value); setLimitError('') }}
+            onBlur={(event) => { commitLimit(event.target.value) }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                commitLimit((event.target as HTMLInputElement).value)
+              }
+            }}
+          />
+          <small>超出该数量的会话会被折叠，仅在当前项目内可见。</small>
+          {limitError !== '' && <small className={css.error}>{limitError}</small>}
+        </label>
+        <label className={css.settingsField}>
+          <span>自动隐藏会话的时间阈值（天）</span>
+          <input
+            type="number"
+            inputMode="numeric"
+            min={0}
+            max={MAX_AUTO_HIDE_AFTER_DAYS}
+            step={1}
+            value={daysDraft}
+            aria-invalid={daysError !== '' || undefined}
+            onChange={(event) => { setDaysDraft(event.target.value); setDaysError('') }}
+            onBlur={(event) => { commitDays(event.target.value) }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                commitDays((event.target as HTMLInputElement).value)
+              }
+            }}
+          />
+          <small>{daysHelp}</small>
+          {daysError !== '' && <small className={css.error}>{daysError}</small>}
+        </label>
+        <div className={css.settingsField}>
+          <span>立即清理</span>
+          <div>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={sweepStatus.state === 'running'}
+              onClick={runArchive}
+            >{sweepStatus.state === 'running' ? '清理中…' : '立即清理过期会话'}</Button>
+            {sweepStatus.state === 'done' && sweepStatus.message !== '' && (
+              <p className={css.success}>{sweepStatus.message}</p>
+            )}
+            {sweepStatus.state === 'error' && sweepStatus.message !== '' && (
+              <p className={css.error}>{sweepStatus.message}</p>
+            )}
+          </div>
+        </div>
+      </div>
+    </section>
+  )
+}
+
 /** Settings catalog: visible + hidden hosts/projects and archived sessions as a tree. */
 function CatalogPanel({ store, snapshot, onClose }: {
   store: RemoteAgentStore
@@ -1560,6 +1715,7 @@ function CatalogPanel({ store, snapshot, onClose }: {
       subtitle="按主机 → 项目 → 会话查看全部条目，包括已隐藏的。取消隐藏会话时会一并恢复其所属主机和项目。"
       onClose={onClose}
     >
+      <DisplayPreferencesSection store={store} />
       <section className={css.settingsSection}>
         <header className={css.settingsSectionHeader}>
           <h2>主机、项目和会话</h2>
@@ -1648,12 +1804,11 @@ function CatalogPanel({ store, snapshot, onClose }: {
   )
 }
 
-function DraftConversation({ project, host, projectSessions, store, pending, error, promptProgress }: {
+function DraftConversation({ project, host, projectSessions, store, error, promptProgress }: {
   project: RemoteProjectView
   host: RemoteHostView
   projectSessions: readonly RemoteSessionView[]
   store: RemoteAgentStore
-  pending: boolean
   error: string | undefined
   promptProgress: RemotePromptProgress | undefined
 }) {
@@ -1680,6 +1835,11 @@ function DraftConversation({ project, host, projectSessions, store, pending, err
   const progress = promptProgress?.projectId === project.projectId && promptProgress.sessionId === undefined
     ? promptProgress
     : undefined
+  // Only block this draft while ITS OWN create RPC is in flight. The store's
+  // global `pending` covers every in-flight RPC — including one for a draft
+  // the user has since abandoned — and applying it here would leave a newly
+  // opened draft with a disabled Agent picker and send button.
+  const draftBusy = progress !== undefined && progress.phase !== 'failed'
   const draftStage: ConversationStage = progress?.phase === 'failed'
     ? {
       kind: /timeout|timed out|超时/i.test(progress.message ?? '') ? 'timeout' : 'failed',
@@ -1691,7 +1851,7 @@ function DraftConversation({ project, host, projectSessions, store, pending, err
       : { kind: 'connecting', label: '正在连接 Agent', detail: '正在创建远程会话并建立通信通道。', state: 'ongoing', visible: true }
   const send = (): void => {
     const text = draft.trim()
-    if (text === '' || backend === '') return
+    if (text === '' || backend === '' || draftBusy) return
     void store.promptSessionDraft(backend, text).catch(() => undefined)
   }
   return (
@@ -1723,7 +1883,7 @@ function DraftConversation({ project, host, projectSessions, store, pending, err
             <SessionControls
               backend={backend}
               preferences={preferences}
-              disabled={pending}
+              disabled={draftBusy}
               onChange={(next) => {
                 setPreferences(next)
                 const updated = {
@@ -1738,7 +1898,7 @@ function DraftConversation({ project, host, projectSessions, store, pending, err
             aria-label="发送给远程 Agent"
             value={draft}
             placeholder="输入第一条消息"
-            disabled={pending}
+            disabled={draftBusy}
             onChange={(event) => { setDraft(event.target.value) }}
             onKeyDown={(event) => {
               if (event.key === 'Enter' && !event.shiftKey) {
@@ -1753,7 +1913,7 @@ function DraftConversation({ project, host, projectSessions, store, pending, err
               <select
                 aria-label="选择 Agent"
                 value={backend}
-                disabled={pending || backends.length === 0}
+                disabled={draftBusy || backends.length === 0}
                 onChange={(event) => { setBackend(event.target.value as RemoteAgentBackend) }}
               >
                 <option value="">{backends.length === 0 ? '没有可用 Agent，请检查远端安装和登录状态' : '选择 Agent'}</option>
@@ -1761,7 +1921,7 @@ function DraftConversation({ project, host, projectSessions, store, pending, err
               </select>
             </label>
             <span>首次发送后不可更改</span>
-            <Button size="sm" variant="primary" icon={<IconSendOutline16 />} aria-label="发送" disabled={backend === '' || draft.trim() === '' || pending} onClick={send} />
+            <Button size="sm" variant="primary" icon={<IconSendOutline16 />} aria-label="发送" disabled={backend === '' || draft.trim() === '' || draftBusy} onClick={send} />
           </div>
         </div>
       </div>
@@ -1781,6 +1941,7 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
   const observedTopRef = useRef(0)
   const lastSessionIdRef = useRef<string>()
   const followSignatureRef = useRef('')
+  const persistTimerRef = useRef<number | undefined>(undefined)
   const answeredPermissionsRef = useRef(new Set<string>())
   const [showJumpToLatest, setShowJumpToLatest] = useState(false)
   const session = snapshot.state.sessions.find(candidate => candidate.sessionId === snapshot.currentSessionId)
@@ -1810,27 +1971,69 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
     })
   const stage = presentation?.turn
   const lastNode = transcript.at(-1)
+  const pendingPermission = session?.turnState === 'waiting-permission'
+    ? pendingPermissionEntry(sessionEntries)
+    : undefined
+  const pinPendingPermission = shouldPinPendingPermission(
+    session?.turnState ?? 'idle',
+    pendingPermission,
+    lastNode?.kind === 'entry' ? lastNode.entry.transcriptId : lastNode?.id,
+  )
   const nodeSignature = lastNode === undefined
     ? 'empty'
     : lastNode.kind === 'tool'
       ? `${lastNode.id}:${lastNode.entries.length}:${lastNode.entries.at(-1)?.text.length ?? 0}`
       : `${lastNode.id}:${lastNode.entry.text.length}`
-  const followSignature = `${nodeSignature}:${stage?.kind ?? 'none'}`
+  const followSignature = `${nodeSignature}:${stage?.kind ?? 'none'}:${pinPendingPermission ? pendingPermission?.transcriptId ?? 'pin' : 'none'}`
+  const pendingRestoreRef = useRef<TranscriptScrollMemory | undefined>(undefined)
   const scrollToBottom = (element: HTMLDivElement): void => {
     element.scrollTop = element.scrollHeight
     observedTopRef.current = element.scrollTop
     followBottomRef.current = true
     setShowJumpToLatest(false)
+    if (session !== undefined) {
+      writeTranscriptScrollMemory(session.sessionId, {
+        scrollTop: element.scrollTop,
+        followBottom: true,
+      })
+    }
   }
   useLayoutEffect(() => {
     const element = scrollRef.current
-    const sessionChanged = lastSessionIdRef.current !== session?.sessionId
+    const sessionId = session?.sessionId
+    const sessionChanged = lastSessionIdRef.current !== sessionId
     const tipMoved = followSignatureRef.current !== followSignature
-    lastSessionIdRef.current = session?.sessionId
+    lastSessionIdRef.current = sessionId
     followSignatureRef.current = followSignature
-    if (element !== null && (sessionChanged || (tipMoved && followBottomRef.current))) {
+    if (element === null || sessionId === undefined) return
+    if (sessionChanged) {
+      pendingRestoreRef.current = readTranscriptScrollMemory(sessionId)
+    }
+    if (pendingRestoreRef.current !== undefined) {
+      const memory = pendingRestoreRef.current
+      const floor = Math.max(0, element.scrollHeight - element.clientHeight)
+      const ready = memory.followBottom || floor >= memory.scrollTop
+      if (ready) {
+        if (memory.followBottom) {
+          element.scrollTop = element.scrollHeight
+          observedTopRef.current = element.scrollTop
+          followBottomRef.current = true
+          setShowJumpToLatest(false)
+        } else {
+          element.scrollTop = memory.scrollTop
+          observedTopRef.current = element.scrollTop
+          followBottomRef.current = false
+          setShowJumpToLatest(true)
+        }
+        pendingRestoreRef.current = undefined
+        return
+      }
+      // Transcript shorter than the saved offset: defer restoration until more content renders.
+      return
+    }
+    if (tipMoved && followBottomRef.current) {
       scrollToBottom(element)
-    } else if (element !== null && tipMoved && transcript.length > 0) {
+    } else if (tipMoved && transcript.length > 0) {
       setShowJumpToLatest(true)
     }
   }, [followSignature, session?.sessionId, transcript.length])
@@ -1844,6 +2047,12 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
     observer.observe(column)
     return () => { observer.disconnect() }
   }, [session?.sessionId])
+  useEffect(() => () => {
+    if (persistTimerRef.current !== undefined) {
+      window.clearTimeout(persistTimerRef.current)
+      persistTimerRef.current = undefined
+    }
+  }, [])
   const preferences = session === undefined
     ? undefined
     : resolveSessionPreferences(
@@ -1853,32 +2062,40 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
       sessionHost?.hostId,
     )
   useEffect(() => {
-    if (session === undefined || !shouldAutoApprovePermissions(preferences?.approvalChoice)) return
-    for (const entry of sessionEntries) {
-      const requestId = permissionRequestId(entry)
-      if (entry.role !== 'permission' || requestId === undefined || !isAutoApprovablePermission(entry)) continue
-      const action = `permission:${session.sessionId}:${requestId}`
-      if (sessionAction !== undefined || answeredPermissionsRef.current.has(action)) continue
-      const prompt = parseChoicePrompt(entry)
-      const first = prompt?.questions[0]?.options[0]?.id
-      answeredPermissionsRef.current.add(action)
-      setSessionAction(action)
-      void store.permission(
-        session.sessionId,
-        requestId,
-        first === undefined ? { outcome: 'selected' } : { outcome: 'selected', optionId: first },
-      )
-        .catch(() => undefined)
-        .finally(() => { setSessionAction(current => current === action ? undefined : current) })
-      break
-    }
-  }, [session, sessionEntries, preferences?.approvalChoice, sessionAction, store])
+    if (session === undefined || session.turnState !== 'waiting-permission') return
+    if (!shouldAutoApprovePermissions(preferences?.approvalChoice, preferences?.permissionMode)) return
+    const entry = pendingPermissionEntry(sessionEntries)
+    const requestId = entry === undefined ? undefined : permissionRequestId(entry)
+    if (entry === undefined || requestId === undefined || !isAutoApprovablePermission(entry)) return
+    const action = `permission:${session.sessionId}:${requestId}`
+    if (sessionAction !== undefined || answeredPermissionsRef.current.has(action)) return
+    const optionId = autoApproveOptionId(parseChoicePrompt(entry), {
+      ...(preferences?.approvalChoice === undefined ? {} : { approvalChoice: preferences.approvalChoice }),
+      ...(preferences?.permissionMode === undefined ? {} : { permissionMode: preferences.permissionMode }),
+    })
+    answeredPermissionsRef.current.add(action)
+    setSessionAction(action)
+    void store.permission(
+      session.sessionId,
+      requestId,
+      optionId === undefined ? { outcome: 'selected' } : { outcome: 'selected', optionId },
+    )
+      .catch(() => { answeredPermissionsRef.current.delete(action) })
+      .finally(() => { setSessionAction(current => current === action ? undefined : current) })
+  }, [
+    session,
+    sessionEntries,
+    preferences?.approvalChoice,
+    preferences?.permissionMode,
+    sessionAction,
+    store,
+  ])
 
   if (snapshot.panel !== undefined) {
     return <OperationPanel panel={snapshot.panel} store={store} snapshot={snapshot} />
   }
 
-  if (snapshot.draftSession !== undefined) {
+  if (snapshot.draftSession !== undefined && snapshot.currentSessionId === undefined) {
     const project = snapshot.state.projects.find(candidate => candidate.projectId === snapshot.draftSession?.projectId)
     const host = project === undefined ? undefined : snapshot.state.hosts.find(candidate => candidate.hostId === project.hostId)
     if (project !== undefined && host !== undefined) {
@@ -1889,7 +2106,6 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
           host={host}
           projectSessions={snapshot.state.sessions.filter(candidate => candidate.projectId === project.projectId)}
           store={store}
-          pending={snapshot.pending}
           error={snapshot.error}
           promptProgress={snapshot.promptProgress}
         />
@@ -1960,10 +2176,27 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
   }
   const send = (): void => {
     const text = draft.trim()
-    if (text === '' || actions?.canSend !== true) return
+    if (text === '') return
+    if (actions?.canSend === true) {
+      followBottomRef.current = true
+      setDraft('')
+      void store.prompt(session.sessionId, text).catch(() => { setDraft(text) })
+      return
+    }
+    // turnBusy / waiting / connecting / permission → park locally and let the
+    // browser auto-drain once the live turn settles.
+    if (snapshot.queuedPrompt?.sessionId === session.sessionId) return
     followBottomRef.current = true
     setDraft('')
-    void store.prompt(session.sessionId, text).catch(() => { setDraft(text) })
+    store.enqueuePrompt(session.sessionId, text)
+  }
+  const cancelQueued = (): void => {
+    if (session === undefined) return
+    if (snapshot.queuedPrompt?.sessionId !== session.sessionId) return
+    const text = snapshot.queuedPrompt.text
+    store.cancelQueuedPrompt()
+    setDraft(text)
+    followBottomRef.current = true
   }
   const resend = (text: string): void => {
     const payload = text.trim()
@@ -1977,7 +2210,7 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
     answeredPermissionsRef.current.add(action)
     setSessionAction(action)
     void store.permission(session.sessionId, requestId, outcome)
-      .catch(() => undefined)
+      .catch(() => { answeredPermissionsRef.current.delete(action) })
       .finally(() => { setSessionAction(current => current === action ? undefined : current) })
   }
   const stop = (): void => {
@@ -2037,6 +2270,16 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
             followBottomRef.current = follows
             setShowJumpToLatest(!follows)
             observedTopRef.current = element.scrollTop
+            const persistSessionId = session.sessionId
+            const persistTop = element.scrollTop
+            if (persistTimerRef.current !== undefined) window.clearTimeout(persistTimerRef.current)
+            persistTimerRef.current = window.setTimeout(() => {
+              persistTimerRef.current = undefined
+              writeTranscriptScrollMemory(persistSessionId, {
+                scrollTop: persistTop,
+                followBottom: follows,
+              })
+            }, 200)
           }}
         >
           <div ref={transcriptColumnRef} className={css.transcriptColumn}>
@@ -2052,6 +2295,36 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
                 onResend={resend}
               />
             ))}
+            {snapshot.queuedPrompt !== undefined && snapshot.queuedPrompt.sessionId === session.sessionId && (
+              <article className={`${css.userTurn} ${css.queuedTurn}`} aria-label="排队中的消息">
+                <div className={`${css.userBubble} ${css.queuedBubble}`}>
+                  <span className={css.queuedBadge} title="上一轮还未结束，这条消息会在它结束后自动发送">排队中</span>
+                  <MessageText text={snapshot.queuedPrompt.text} />
+                </div>
+                <div className={css.messageActions}>
+                  <button
+                    type="button"
+                    className={css.messageAction}
+                    aria-label="取消排队"
+                    title="取消排队，把消息放回输入框"
+                    onClick={cancelQueued}
+                  >
+                    <IconTrashOutline16 />
+                  </button>
+                </div>
+              </article>
+            )}
+            {pinPendingPermission && pendingPermission !== undefined && (
+              <TranscriptRow
+                key={`pending:${pendingPermission.transcriptId}`}
+                node={{ kind: 'entry', id: `pending:${pendingPermission.transcriptId}`, entry: pendingPermission }}
+                active={false}
+                permissionPending={permissionRequestId(pendingPermission) !== undefined
+                  && sessionAction === `permission:${session.sessionId}:${permissionRequestId(pendingPermission)}`}
+                resendDisabled
+                onPermission={submitPermission}
+              />
+            )}
             {channelStage?.visible === true && (
               <ConversationActivity
                 stage={channelStage}

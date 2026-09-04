@@ -20,6 +20,7 @@ interface FakeHold {
   nextSeq: number
   pages: RemoteJournalPage[]
   waiters: Array<{ resolve: (response: HoldResponse) => void; timer: NodeJS.Timeout }>
+  dead?: boolean
 }
 
 interface FakeHostd {
@@ -64,6 +65,7 @@ function makeHostd(): FakeHostd {
     holdRequest: vi.fn(async (record: HostdSessionRecord, request: Parameters<RemoteAgentHostd['holdRequest']>[1]) => {
       const hold = holds.get(record.holdId)
       if (hold === undefined) throw new Error(`unknown hold ${record.holdId}`)
+      if (hold.dead === true) throw new Error('connect ECONNREFUSED /tmp/th-501/h-dead.sock')
       if (request.operation === 'ping') {
         return { ok: true, result: { latestSeq: hold.nextSeq - 1 } } as HoldResponse
       }
@@ -288,6 +290,28 @@ describe('HostdWsHub', () => {
       })
       const collector = attachCollector(socket)
       collector.send({ direction: 'subscribe', sessionId, generation: 'g-old', lastSeq: 0 })
+      await collector.waitFor(frames => frames.some(frame =>
+        frame.direction === 'push' && frame.event.type === 'journal.gap' && frame.event.sessionId === sessionId))
+      socket.close()
+    } finally {
+      await h.close()
+    }
+  })
+
+  it('emits journal.gap when the hold socket is dead so the gateway can leave running', async () => {
+    const h = await makeWsHarness()
+    try {
+      const sessionId = 's-dead'
+      const record = makeSessionRecord(sessionId)
+      h.fake.sessions.set(sessionId, record)
+      h.fake.holds.set(record.holdId, { nextSeq: 0, pages: [], waiters: [], dead: true })
+      const socket = await new Promise<WebSocket>((resolveOpen, rejectOpen) => {
+        const ws = h.connect()
+        ws.once('open', () => resolveOpen(ws))
+        ws.once('error', rejectOpen)
+      })
+      const collector = attachCollector(socket)
+      collector.send({ direction: 'subscribe', sessionId, generation: 'g1', lastSeq: 0 })
       await collector.waitFor(frames => frames.some(frame =>
         frame.direction === 'push' && frame.event.type === 'journal.gap' && frame.event.sessionId === sessionId))
       socket.close()

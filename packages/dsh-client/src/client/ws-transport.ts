@@ -30,11 +30,11 @@ interface PendingRequest {
   readonly reject: (error: Error) => void
 }
 
-const HEARTBEAT_INTERVAL_MS = 30_000
-const HEARTBEAT_TIMEOUT_MS = 60_000
+const HEARTBEAT_INTERVAL_MS = 10_000
+const HEARTBEAT_TIMEOUT_MS = 10_000
 const REQUEST_TIMEOUT_MS = 75_000
-const LIVE_WAIT_MS = 5_000
-const BACKOFF_STEPS_MS = [500, 1_000, 2_000, 5_000, 10_000] as const
+const LIVE_WAIT_MS = 15_000
+const BACKOFF_STEPS_MS = [200, 500, 1_000, 2_000, 5_000] as const
 
 /** Build the WebSocket URL for the gateway control channel. */
 function buildWsUrl(): string {
@@ -56,6 +56,7 @@ type DecodedFrame =
   | { readonly direction: 'push'; readonly seq: number; readonly event: JsonValue }
   | { readonly direction: 'response'; readonly id: string; readonly ok: true; readonly result: JsonValue }
   | { readonly direction: 'response'; readonly id: string; readonly ok: false; readonly message: string }
+  | { readonly direction: 'closing' }
 
 /** Decode one frame or null on parse failure. */
 function decodeFrame(raw: string): DecodedFrame | null {
@@ -64,6 +65,7 @@ function decodeFrame(raw: string): DecodedFrame | null {
   try {
     const record = jsonObject(parsed, 'ws frame')
     const direction = record['direction']
+    if (direction === 'closing') return { direction: 'closing' }
     if (direction === 'push') {
       const seq = record['seq']
       if (typeof seq !== 'number') return null
@@ -224,6 +226,10 @@ export class WsTransport {
     if (this.phase !== 'live' || this.socket === undefined) {
       await this.waitForLive(LIVE_WAIT_MS)
     }
+    const socket = this.socket
+    if (socket === undefined || this.phase !== 'live') {
+      throw new Error('ws did not reach live phase in time')
+    }
     return await new Promise<JsonValue>((resolve, reject) => {
       const id = crypto.randomUUID()
       const timer = window.setTimeout(() => {
@@ -236,7 +242,7 @@ export class WsTransport {
         reject: (error) => { window.clearTimeout(timer); reject(error) },
       })
       try {
-        this.socket?.send(encodeRequest(id, method, params))
+        socket.send(encodeRequest(id, method, params))
       } catch (error) {
         this.pending.delete(id)
         window.clearTimeout(timer)
@@ -291,6 +297,12 @@ export class WsTransport {
       if (raw.includes('"direction":"pong"')) return
       const frame = decodeFrame(raw)
       if (frame === null) return
+      if (frame.direction === 'closing') {
+        this.attempt = 0
+        this.scheduleReconnect()
+        try { socket.close() } catch { /* noop */ }
+        return
+      }
       if (frame.direction === 'response') {
         const pending = this.pending.get(frame.id)
         if (pending === undefined) return

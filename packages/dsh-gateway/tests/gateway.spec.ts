@@ -249,10 +249,9 @@ function request(method: RemoteControlRequest['method'], params: Record<string, 
   return { id: `${method}-${++nextRequest}`, method, params }
 }
 
-// session.start now returns a connecting row immediately while the gateway
-// finishes talking to hostd in the background. Tests that need the binding
-// (or a failed terminal state) before issuing session.prompt / events.read
-// must wait for the inflight completion to settle first.
+// session.start waits for the hold outside the catalog lock, then returns the
+// bound row. Tests that race follow/prompt against a delayed hostd still use
+// waitForSessionBinding.
 async function readTranscript(gateway: RemoteAgentGateway, sessionId: string, extra: Record<string, JsonValue> = {}) {
   return await gateway.dispatch(request('transcript.read', { sessionId, ...extra })) as {
     sessionId: string
@@ -302,7 +301,7 @@ describe('RemoteAgentGateway', () => {
     }
   })
 
-  it('stores the first user message when the session row is created, before the hold is bound', async () => {
+  it('stores the first user message when the session row is created and returns after the hold is bound', async () => {
     const { ctx, gateway } = await harness()
     try {
       const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4301' })) as unknown as { hostId: string }
@@ -311,12 +310,13 @@ describe('RemoteAgentGateway', () => {
         projectId: project.projectId, title: 'hello there', backend: 'codex',
         text: 'hello there', clientId: 'browser', requestId: 'first',
       })) as unknown as { sessionId: string; channelState: string; latestTranscriptSeq?: number }
-      expect(session.channelState).toBe('connecting')
+      expect(session.channelState).toBe('open')
       expect(session.latestTranscriptSeq).toBe(0)
       const page = await readTranscript(gateway, session.sessionId)
       expect(page.entries).toEqual([expect.objectContaining({
         sessionId: session.sessionId, role: 'user', kind: 'message', text: 'hello there', requestId: 'first',
       })])
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.binding?.state).toBe('active')
     } finally {
       await ctx.fiber.dispose()
     }
@@ -488,6 +488,33 @@ describe('RemoteAgentGateway', () => {
     }
   })
 
+  it('returns newly created sessions at the top of the project list in state()', async () => {
+    const { ctx, gateway } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4401' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const first = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'first', backend: 'codex' })) as unknown as { sessionId: string }
+      // Spread the `updatedAt` timestamps so the sort has a stable ordering
+      // even on hosts where `Date.now()` would otherwise tie within a single
+      // millisecond.
+      await new Promise(resolve => setTimeout(resolve, 5))
+      const second = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'second', backend: 'codex' })) as unknown as { sessionId: string }
+      await new Promise(resolve => setTimeout(resolve, 5))
+      const third = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'third', backend: 'codex' })) as unknown as { sessionId: string }
+
+      const state = gateway.state()
+      // Most-recently created (largest `updatedAt`) must be first so the sidebar
+      // shows the just-created session at the top instead of at the bottom.
+      expect(state.sessions.map(session => session.sessionId)).toEqual([
+        RemoteSessionId(third.sessionId),
+        RemoteSessionId(second.sessionId),
+        RemoteSessionId(first.sessionId),
+      ])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('uses stable prompt admissions and projects native ACP journal entries into its own transcript', async () => {
     const events: JsonValue[] = [
       { jsonrpc: '2.0', id: 9, method: 'session/request_permission', params: { title: 'Allow?', options: [] } },
@@ -541,12 +568,37 @@ describe('RemoteAgentGateway', () => {
       }))
       await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
       expect(gateway.state().transcript).toEqual([])
-      const tail = await readTranscript(gateway, session.sessionId, { limit: 2 })
-      expect(tail.hasMore).toBe(true)
-      expect(tail.entries.map(entry => entry.text)).toEqual(['answer', '远程轮次完成'])
-      const older = await readTranscript(gateway, session.sessionId, { beforeSeq: tail.fromSeq, limit: 2 })
-      expect(older.entries.map(entry => entry.text)).toEqual(['hello', 'Allow?'])
-      expect(older.hasMore).toBe(false)
+      const currentTurn = await readTranscript(gateway, session.sessionId, { limit: 2 })
+      expect(currentTurn.hasMore).toBe(true)
+      expect(currentTurn.entries.map(entry => entry.text)).toEqual(['hello', 'Allow?'])
+      const rest = await readTranscript(gateway, session.sessionId, { afterSeq: currentTurn.toSeq, limit: 2 })
+      expect(rest.entries.map(entry => entry.text)).toEqual(['answer', '远程轮次完成'])
+      expect(rest.hasMore).toBe(false)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('default transcript.read starts at the latest user message when the turn is longer than the page', async () => {
+    const events: JsonValue[] = Array.from({ length: 12 }, (_, index) => ({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'tool_call', toolCallId: `call-${index}`, title: `Load skill ${index}` } },
+    }))
+    const { ctx, gateway } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4215' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'long-turn', text: '构建打包重启一下',
+      }))
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      const page = await readTranscript(gateway, session.sessionId, { limit: 3 })
+      expect(page.entries[0]).toMatchObject({ role: 'user', text: '构建打包重启一下' })
+      expect(page.entries.some(entry => entry.role === 'tool')).toBe(true)
+      expect(page.hasMore).toBe(true)
     } finally {
       await ctx.fiber.dispose()
     }
@@ -814,6 +866,46 @@ describe('RemoteAgentGateway', () => {
     }
   })
 
+  it('flips a DSH turn to idle from the synthesized prompt_complete when the backend never sends session.status=idle', async () => {
+    // Regression for the asymmetric end-of-turn detection: DSH backends (and
+    // test fixtures like fake-dsh.mjs) sometimes return only the JSON-RPC
+    // response followed by `session.status=running`, never `idle`. Hold worker
+    // synthesizes `_x.ai/session/prompt_complete` for DSH so the gateway
+    // projector can flip `turnState` back to `idle` without depending on a
+    // follow-up notification the backend may skip.
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', method: 'session.event', params: {
+        sessionId: 'native-4215', event: {
+          type: 'assistant/chunk', data: { chunk: { type: 'text', text: 'done' } },
+        },
+      } },
+      // Synthesized by hold-worker when the JSON-RPC prompt response arrives
+      // and the backend never emits native `session.status=idle` / `turn/end`.
+      { jsonrpc: '2.0', method: '_x.ai/session/prompt_complete', params: { stopReason: 'end_turn' } },
+    ]
+    const { ctx, gateway } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4215',
+      })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'repo', cwd: '/repo',
+      })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'dsh',
+      })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'dsh-complete', text: 'hello',
+      }))
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState)
+        .toBe('idle')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('reattaches a reconnecting session when the browser follows it again', async () => {
     const { ctx, gateway, calls } = await harness()
     try {
@@ -888,6 +980,68 @@ describe('RemoteAgentGateway', () => {
       const hello = await gateway.dispatch(request('browser.hello', { browserId: 'alice', lastSeenSeqs: { [session.sessionId]: 0 } })) as unknown as { missed: unknown[] }
       expect(hello.missed).toEqual([])
       expect(calls.slice(callsBefore).every(call => call.request.method === 'events.read' || call.request.method === 'session.attach')).toBe(true)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('replays the projected transcript tail when a browser follows after live pushes were dropped', async () => {
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { text: 'late answer' } } } },
+    ]
+    const { ctx, gateway } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4411' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'replay-1', text: 'hello',
+      }))
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      const browser = makeBrowserSocket()
+      gateway.registerBrowserForTesting(browser as unknown as WebSocket, 'alice')
+      await gateway.dispatch(request('session.follow', { browserId: 'alice', sessionId: session.sessionId }))
+      const frames = browser.sent.map(payload => JSON.parse(payload) as {
+        event?: { type?: string; entries?: Array<{ text: string }>; entry?: { text: string } }
+      })
+      const texts = frames.flatMap(frame => {
+        if (frame.event?.type === 'transcript.batch') return (frame.event.entries ?? []).map(entry => entry.text)
+        if (frame.event?.type === 'transcript.append') return frame.event.entry?.text === undefined ? [] : [frame.event.entry.text]
+        return []
+      })
+      expect(texts).toContain('hello')
+      expect(texts).toContain('late answer')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('hello reports missed transcript seqs and replays the tail to that browser', async () => {
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { text: 'missed' } } } },
+    ]
+    const { ctx, gateway } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4412' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'hello-miss', text: 'hello',
+      }))
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      const browser = makeBrowserSocket()
+      gateway.registerBrowserForTesting(browser as unknown as WebSocket, 'alice')
+      const hello = await gateway.dispatch(request('browser.hello', {
+        browserId: 'alice', lastSeenSeqs: { [session.sessionId]: 0 },
+      })) as unknown as { missed: Array<{ sessionId: string; fromSeq: number }> }
+      expect(hello.missed).toEqual([{ sessionId: session.sessionId, fromSeq: 0 }])
+      const frames = browser.sent.map(payload => JSON.parse(payload) as {
+        event?: { type?: string; entries?: Array<{ text: string }>; toSeq?: number }
+      })
+      const batch = frames.find(frame => frame.event?.type === 'transcript.batch')
+      expect(batch?.event?.entries?.some(entry => entry.text === 'missed')).toBe(true)
     } finally {
       await ctx.fiber.dispose()
     }

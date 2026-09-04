@@ -71,6 +71,19 @@ describe('WsBroadcaster', () => {
     broadcaster.registerForTesting(ws as unknown as WebSocket, browserId, supportsTranscriptBatch)
   }
 
+  it('tells every browser the process is closing before dropping sockets', () => {
+    const alice = makeSocket()
+    const bob = makeSocket()
+    register(alice, 'alice')
+    register(bob, 'bob')
+    broadcaster.follow('alice', RemoteSessionId('session-a'))
+    broadcaster.shutdown()
+    expect(parseSent(alice)).toEqual([{ direction: 'closing', reason: 'shutdown' }])
+    expect(parseSent(bob)).toEqual([{ direction: 'closing', reason: 'shutdown' }])
+    expect(broadcaster.size()).toBe(0)
+    expect(broadcaster.hasFollowers(RemoteSessionId('session-a'))).toBe(false)
+  })
+
   it('logs when a transcript batch has no live follower', () => {
     const writes: string[] = []
     const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
@@ -207,6 +220,30 @@ describe('WsBroadcaster', () => {
     expect(JSON.parse(alice.sent[0]!)).toMatchObject({
       direction: 'response', id: 'req-1', ok: true, result: { sessionId: 'session-a', fromSeq: 4 },
     })
+  })
+
+  it('marks the socket as a follower before a slow follow handler returns', async () => {
+    const alice = makeSocket()
+    register(alice, 'alice')
+    let release: () => void = () => undefined
+    const blocked = new Promise<void>((resolve) => { release = resolve })
+    broadcaster.setRequestHandler(async (request) => {
+      expect(request.method).toBe('session.follow')
+      await blocked
+      return { sessionId: 'session-a', fromSeq: 0 }
+    })
+    alice.emit('message', JSON.stringify({
+      direction: 'request', id: 'req-slow', method: 'session.follow',
+      params: { browserId: 'alice', sessionId: 'session-a' },
+    }))
+    await Promise.resolve()
+    expect(alice.sent.length).toBe(0)
+    broadcaster.broadcastTranscriptBatch(RemoteSessionId('session-a'), [{
+      transcriptId: 't1', sessionId: RemoteSessionId('session-a'), seq: 1,
+      role: 'assistant', kind: 'message', text: 'early', createdAt: 'now',
+    }])
+    expect(parseSent(alice).map(frame => frame.event.type)).toEqual(['transcript.append'])
+    release()
   })
 
   it('summary events go to every subscriber without debounce', () => {

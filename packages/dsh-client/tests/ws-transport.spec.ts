@@ -180,6 +180,25 @@ describe('WsTransport', () => {
     transport.close()
   })
 
+  it('does not hang when phase is live but the socket was already cleared', async () => {
+    vi.useFakeTimers()
+    const ctor = vi.fn((url: string) => new MockWebSocket(url))
+    vi.stubGlobal('WebSocket', ctor)
+    const transport = new WsTransport({ url: 'ws://test/ws' })
+    try {
+      transport.connect()
+      MockWebSocket.instances[0]!.fakeOpen()
+      MockWebSocket.instances[0]!.close()
+      const pending = transport.call('session.start', { projectId: 'p', title: 'work', backend: 'codex' })
+      const expected = expect(pending).rejects.toThrow('ws did not reach live phase in time')
+      await vi.advanceTimersByTimeAsync(15_000)
+      await expected
+    } finally {
+      transport.close()
+      vi.useRealTimers()
+    }
+  })
+
   it('does not send live RPCs over HTTP while reconnecting', async () => {
     vi.useFakeTimers()
     const ctor = vi.fn((url: string) => new MockWebSocket(url))
@@ -197,7 +216,7 @@ describe('WsTransport', () => {
       transport.connect()
       const pending = transport.call('session.prompt', { sessionId: 's1', text: 'hi' })
       const expected = expect(pending).rejects.toThrow('ws did not reach live phase in time')
-      await vi.advanceTimersByTimeAsync(5_000)
+      await vi.advanceTimersByTimeAsync(15_000)
       await expected
       expect(calls).toEqual([])
     } finally {
@@ -247,6 +266,27 @@ describe('WsTransport', () => {
       const hello = second.sent.map((line) => JSON.parse(line) as { method?: string; params?: { lastSeenSeqs?: Record<string, number> } })
         .find(frame => frame.method === 'browser.hello')
       expect(hello?.params?.lastSeenSeqs).toEqual({ s1: 4, s2: 6 })
+    } finally {
+      transport.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it('reconnects immediately when the gateway announces it is closing', async () => {
+    vi.useFakeTimers()
+    const ctor = vi.fn((url: string) => new MockWebSocket(url))
+    vi.stubGlobal('WebSocket', ctor)
+    const transport = new WsTransport({ url: 'ws://test/ws' })
+    try {
+      transport.connect()
+      const first = MockWebSocket.instances[0]!
+      first.fakeOpen()
+      first.fakeMessage(JSON.stringify({ direction: 'closing', reason: 'shutdown' }))
+      expect(transport.getPhase()).toBe('reconnecting')
+      await vi.advanceTimersByTimeAsync(200)
+      expect(MockWebSocket.instances.length).toBe(2)
+      MockWebSocket.instances.at(-1)!.fakeOpen()
+      expect(transport.getPhase()).toBe('live')
     } finally {
       transport.close()
       vi.useRealTimers()

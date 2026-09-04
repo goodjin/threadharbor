@@ -233,7 +233,7 @@ describe('HoldWorker', () => {
     }
   })
 
-  it.each(['grok', 'dsh'] as const)('waits for %s native turn completion before admitting the next prompt', async (backend) => {
+  it.each(['grok', 'dsh'] as const)('synthesizes a turn-completion frame from the %s JSON-RPC response so the next prompt is admitted', async (backend) => {
     const root = await mkdtemp(join(tmpdir(), `dsh-hold-${backend}-`))
     roots.push(root)
     const socketPath = join(root, 'control.sock')
@@ -260,22 +260,27 @@ describe('HoldWorker', () => {
     try {
       await send(socketPath, admission('p1'))
       await send(socketPath, admission('p2'))
-      await vi.waitFor(async () => { expect(await readFile(output, 'utf8')).toBe('p1\n') })
-      await writeFile(gate, 'go')
+      // The fake ACP backend returns the JSON-RPC response immediately; once the
+      // hold worker sees the response, it synthesizes a completion frame and the
+      // queued p2 admission runs without waiting for the native notification.
       await vi.waitFor(async () => { expect(await readFile(output, 'utf8')).toBe('p1\np2\n') })
-      if (backend === 'grok') {
-        const page = await send(socketPath, { operation: 'read', afterSeq: 0, generation: 'generation' })
-        if (!page.ok) throw new Error(page.error)
-        const frames = (page.result as { events: readonly { frame: unknown }[] }).events
-          .map(event => event.frame)
-          .filter((frame): frame is Record<PropertyKey, unknown> => frame !== null && typeof frame === 'object' && !Array.isArray(frame)
-            && Reflect.get(frame, 'method') === '_x.ai/session/prompt_complete')
-        expect(frames).toHaveLength(2)
-        expect(frames.every((frame) => {
-          const params = Reflect.get(frame, 'params')
-          return params !== null && typeof params === 'object' && Reflect.get(params, 'source') === 'fake'
-        })).toBe(true)
-      }
+      await writeFile(gate, 'go')
+      const page = await send(socketPath, { operation: 'read', afterSeq: 0, generation: 'generation' })
+      if (!page.ok) throw new Error(page.error)
+      const frames = (page.result as { events: readonly { frame: unknown }[] }).events
+        .map(event => event.frame)
+        .filter((frame): frame is Record<PropertyKey, unknown> => frame !== null && typeof frame === 'object' && !Array.isArray(frame))
+      const completion = backend === 'grok'
+        ? frames.filter(frame => Reflect.get(frame, 'method') === '_x.ai/session/prompt_complete')
+        : frames.filter(frame => {
+            const method = Reflect.get(frame, 'method')
+            if (method !== 'session.event') return false
+            const params = Reflect.get(frame, 'params')
+            if (params === null || typeof params !== 'object') return false
+            const event = Reflect.get(params, 'event')
+            return event !== null && typeof event === 'object' && Reflect.get(event, 'type') === 'turn/end'
+          })
+      expect(completion).toHaveLength(2)
     } finally {
       await worker.close()
     }
@@ -420,7 +425,7 @@ describe('HoldWorker', () => {
     }
   })
 
-  it('merges consecutive thought chunks across the 40ms idle window', async () => {
+  it('merges consecutive thought chunks across the idle flush window', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-hold-coalesce-'))
     roots.push(root)
     const socketPath = join(root, 'control.sock')
@@ -460,6 +465,68 @@ describe('HoldWorker', () => {
         const update = Reflect.get(Reflect.get(thoughts[0]!.frame, 'params') as object, 'update') as { content: { text: string } }
         expect(update.content.text).toBe('The user wants to add outline')
       }, { timeout: 1000, interval: 20 })
+    } finally {
+      await worker.close()
+    }
+  })
+
+  it('exports DSH_SESSION_ROOT into the stdio child env when sessionRoot is configured', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-hold-session-root-'))
+    roots.push(root)
+    const socketPath = join(root, 'control.sock')
+    const snapshot = join(root, 'env.txt')
+    const sessionRoot = join(root, 'dsh-sessions')
+    const config: HoldWorkerConfig = {
+      version: 1,
+      holdId: 'hold',
+      generation: 'generation',
+      backend: 'dsh',
+      cwd: root,
+      socketPath,
+      journalPath: join(root, 'journal.jsonl'),
+      statePath: join(root, 'state.json'),
+      maxJournalEvents: 20,
+      maxJournalBytes: 100_000,
+      sessionRoot,
+      transport: {
+        kind: 'stdio', command: process.execPath,
+        args: [new URL('./fixtures/fake-env-snapshot.mjs', import.meta.url).pathname, snapshot],
+      },
+    }
+    const worker = new HoldWorker(config)
+    await worker.start()
+    try {
+      await vi.waitFor(async () => { expect((await readFile(snapshot, 'utf8')).trim()).toBe(sessionRoot) })
+    } finally {
+      await worker.close()
+    }
+  })
+
+  it('leaves DSH_SESSION_ROOT unset when the config does not provide one', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-hold-no-session-root-'))
+    roots.push(root)
+    const socketPath = join(root, 'control.sock')
+    const snapshot = join(root, 'env.txt')
+    const config: HoldWorkerConfig = {
+      version: 1,
+      holdId: 'hold',
+      generation: 'generation',
+      backend: 'codex',
+      cwd: root,
+      socketPath,
+      journalPath: join(root, 'journal.jsonl'),
+      statePath: join(root, 'state.json'),
+      maxJournalEvents: 20,
+      maxJournalBytes: 100_000,
+      transport: {
+        kind: 'stdio', command: process.execPath,
+        args: [new URL('./fixtures/fake-env-snapshot.mjs', import.meta.url).pathname, snapshot],
+      },
+    }
+    const worker = new HoldWorker(config)
+    await worker.start()
+    try {
+      await vi.waitFor(async () => { expect((await readFile(snapshot, 'utf8')).trim()).toBe('') })
     } finally {
       await worker.close()
     }
@@ -514,5 +581,48 @@ describe('parseConfig', () => {
     const parsed = parseConfig(configPath)
     if (parsed.transport.kind !== 'websocket') throw new Error('expected websocket transport')
     expect(parsed.transport.secret).toBeUndefined()
+  })
+
+  it('preserves an explicit sessionRoot for stdio dsh backends', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-hold-parse-session-root-'))
+    roots.push(root)
+    const configPath = join(root, 'config.json')
+    await writeFile(configPath, JSON.stringify({
+      version: 1,
+      holdId: 'hold',
+      generation: 'gen',
+      backend: 'dsh',
+      cwd: root,
+      socketPath: join(root, 'control.sock'),
+      journalPath: join(root, 'journal.jsonl'),
+      statePath: join(root, 'state.json'),
+      maxJournalEvents: 10,
+      maxJournalBytes: 1024,
+      sessionRoot: join(root, 'dsh-sessions'),
+      transport: { kind: 'stdio', command: 'echo', args: [] },
+    }))
+    const parsed = parseConfig(configPath)
+    expect(parsed.sessionRoot).toBe(join(root, 'dsh-sessions'))
+  })
+
+  it('omits sessionRoot when the field is absent', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-hold-parse-no-session-root-'))
+    roots.push(root)
+    const configPath = join(root, 'config.json')
+    await writeFile(configPath, JSON.stringify({
+      version: 1,
+      holdId: 'hold',
+      generation: 'gen',
+      backend: 'codex',
+      cwd: root,
+      socketPath: join(root, 'control.sock'),
+      journalPath: join(root, 'journal.jsonl'),
+      statePath: join(root, 'state.json'),
+      maxJournalEvents: 10,
+      maxJournalBytes: 1024,
+      transport: { kind: 'stdio', command: 'echo', args: [] },
+    }))
+    const parsed = parseConfig(configPath)
+    expect(parsed.sessionRoot).toBeUndefined()
   })
 })

@@ -199,6 +199,18 @@ export class WsBroadcaster {
     return this.subscribers.size
   }
 
+  /** Tell browsers this process is going away so they reconnect immediately. */
+  shutdown(): void {
+    const payload = JSON.stringify({ direction: 'closing', reason: 'shutdown' })
+    const sockets = [...this.subscribers.keys()]
+    for (const ws of sockets) {
+      this.send(ws, payload)
+      try { ws.close() } catch { /* already gone */ }
+    }
+    this.subscribers.clear()
+    this.followedByBrowser.clear()
+  }
+
   /** Register a raw socket for a given browser; only used by tests. */
   registerForTesting(ws: WebSocket, browserId: string, supportsTranscriptBatch = false): void {
     this.registerConnection(ws, browserId, supportsTranscriptBatch)
@@ -287,6 +299,14 @@ export class WsBroadcaster {
     if ((record['method'] === 'browser.hello' || record['method'] === 'session.follow' || record['method'] === 'session.unfollow')
       && typeof claimedBrowserId === 'string' && claimedBrowserId !== '') {
       this.rebindBrowser(ws, claimedBrowserId)
+    }
+    // Mark the socket as a follower before the (possibly queued) gateway
+    // handler runs. Otherwise prompt projection can start while follow is
+    // still waiting on the catalog lock, and every early token is dropped.
+    if (record['method'] === 'session.follow'
+      && typeof claimedBrowserId === 'string' && claimedBrowserId !== ''
+      && typeof params['sessionId'] === 'string' && params['sessionId'] !== '') {
+      this.follow(claimedBrowserId, params['sessionId'] as RemoteSessionId)
     }
     try {
       const result = await handler({ id, method: record['method'], params })
