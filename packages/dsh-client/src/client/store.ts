@@ -698,7 +698,11 @@ export class RemoteAgentStore {
         ? { ...current.unreadCounts, [sessionId]: unread + freshEntries.length }
         : current.unreadCounts,
     }
-    const nextSnapshot = { ...withoutError(this.snapshot), state: nextState }
+    const nextSnapshot = {
+      ...withoutError(this.snapshot),
+      state: nextState,
+      ...(this.snapshot.phase === 'error' && this.connectionPhase === 'ready' ? { phase: 'ready' as const } : {}),
+    }
     const promptProgress = this.reconcilePromptProgress(nextState, { ...this.snapshot, state: nextState })
     const { promptProgress: _cleared, ...rest } = nextSnapshot
     this.publish(promptProgress === undefined ? rest : { ...rest, promptProgress })
@@ -1056,26 +1060,30 @@ export class RemoteAgentStore {
           projectId: draft.projectId,
           title: promptTitle(text),
           backend,
+          text,
+          clientId,
+          requestId,
         })
         const session = parseSession(result)
         const nextState = withSessionView(this.snapshot.state, session)
-        const progress: RemotePromptProgress = {
-          projectId: draft.projectId, sessionId: session.sessionId, phase: 'sending', startedAt, baselineSeq: -1,
+        const connecting: RemotePromptProgress = {
+          projectId: draft.projectId, sessionId: session.sessionId, phase: 'connecting', startedAt, baselineSeq: -1,
         }
         const { draftSession: _draftSession, panel: _panel, ...snapshot } = withoutError(this.snapshot)
         this.publish({
           ...snapshot,
           state: nextState,
           currentSessionId: session.sessionId,
-          promptProgress: progress,
+          promptProgress: connecting,
           pending: true,
         })
         this.liveBackoffIndex = 0
+        await this.catchupTranscript(session.sessionId, 'high')
         this.ensureLiveTranscriptSync()
-        // session.start now returns as soon as the gateway durably records the
-        // session, before the remote hold exists. Wait for the WS push that
-        // announces the binding so session.prompt can find a live channel.
+        // Hold readiness arrives as session.view.changed over the live socket.
         await this.awaitSessionOpen(session.sessionId)
+        const progress: RemotePromptProgress = { ...connecting, phase: 'sending' }
+        this.publish({ ...withoutError(this.snapshot), promptProgress: progress, pending: true })
         try {
           await this.call('session.prompt', { sessionId: session.sessionId, clientId, requestId, text })
         } finally {
@@ -1191,9 +1199,56 @@ export class RemoteAgentStore {
     return this.mutate('session.rename', { sessionId, title })
   }
 
-  /** Hide one browser-catalogued session from the normal session tree while preserving data. */
-  archiveSession(sessionId: ReturnType<typeof RemoteSessionId>): Promise<void> {
-    return this.mutate('session.archive', { sessionId })
+  /** Hide one browser-catalogued session from the normal session tree while preserving data.
+   * The session is dropped from the sidebar immediately; if it was the current session, the
+   * most-recent sibling session under the same project is selected, or — if no siblings
+   * remain — a fresh draft is opened so the user lands on the create-session surface.
+   */
+  async archiveSession(sessionId: ReturnType<typeof RemoteSessionId>): Promise<void> {
+    const target = this.snapshot.state.sessions.find(candidate => candidate.sessionId === sessionId)
+    if (target === undefined) {
+      // Session is not in the local snapshot (already hidden on the server or never visible);
+      // fall back to the plain mutate so the server side still records the archive.
+      await this.mutate('session.archive', { sessionId })
+      return
+    }
+    const wasCurrent = this.snapshot.currentSessionId === sessionId
+    const projectId = target.projectId
+    await this.run(async () => {
+      await this.call('session.archive', { sessionId })
+    })
+    const remaining = this.snapshot.state.sessions.filter(candidate => candidate.sessionId !== sessionId)
+    if (wasCurrent) {
+      // Pick the most-recent sibling under the same project so the user stays in context.
+      const siblings = remaining
+        .filter(candidate => candidate.projectId === projectId)
+        .slice()
+        .sort((left, right) => (right.updatedAt ?? '').localeCompare(left.updatedAt ?? ''))
+      const next = siblings[0]?.sessionId
+      if (next !== undefined) {
+        this.publish({
+          ...withoutError(this.snapshot),
+          state: { ...this.snapshot.state, sessions: remaining },
+          currentSessionId: next,
+        })
+        await this.selectSession(next)
+        return
+      }
+      // No sibling left: clear the current selection and open a fresh draft for this
+      // project so the create-session surface (DraftConversation) is visible.
+      const { currentSessionId: _stale, ...cleared } = withoutError(this.snapshot)
+      this.publish({
+        ...cleared,
+        state: { ...this.snapshot.state, sessions: remaining },
+        draftSession: { projectId, title: '新会话' },
+      })
+      return
+    }
+    // Non-current session: just drop it from the visible sidebar.
+    this.publish({
+      ...withoutError(this.snapshot),
+      state: { ...this.snapshot.state, sessions: remaining },
+    })
   }
 
   /** Restore a previously archived session to the normal session tree. */
@@ -1438,13 +1493,9 @@ export class RemoteAgentStore {
       ...(promptProgress === undefined ? {} : { promptProgress }),
       ...(current === undefined ? {} : { currentSessionId: current }),
     })
-    if (current !== undefined) {
-      void this.catchupTranscript(current, 'high')
-      this.ensureLiveTranscriptSync()
-    }
   }
 
-  /** Rebuild catalog over HTTP while the socket is down, then page in transcript. */
+  /** One HTTP `state` snapshot while the socket is down. Not a live journal loop. */
   private rebuildFromHttp(): void {
     if (this.disposed || this.rebuildInFlight) return
     this.rebuildInFlight = true
@@ -1555,10 +1606,10 @@ export class RemoteAgentStore {
     for (const listener of this.listeners) listener()
   }
 
-  /** Catalog reloads must not clobber a reconnecting transport phase. */
+  /** Catalog reloads and RPC errors must not clobber a reconnecting transport phase. */
   private withConnectionPhase(snapshot: RemoteAgentSnapshot): RemoteAgentSnapshot {
-    if (snapshot.phase === 'error' || snapshot.phase === 'loading') return snapshot
-    if (this.connectionPhase === 'reconnecting' && snapshot.phase === 'ready') {
+    if (snapshot.phase === 'loading') return snapshot
+    if (this.connectionPhase === 'reconnecting' && snapshot.phase !== 'reconnecting') {
       return { ...snapshot, phase: 'reconnecting' }
     }
     return snapshot

@@ -15,39 +15,33 @@
 - gateway 日志整段都是：
   `transcript push dropped reason=no-follower sockets=0 liveFollowers=0 followedBrowsers=1`
 - 浏览器没有挂上 gateway WebSocket，推送全部丢掉。
-- 客户端 live RPC 只走 WebSocket：`transcript.read` / `session.prompt` 在断线时干等，不会用 HTTP 把已投影的 transcript 拉回来。
+- 浏览器没有挂上 gateway WebSocket，推送全部丢掉。
 - `applyJournalPage` 在 `prompt_complete` 把轮次写成 idle 之后，拒绝后续 `waiting-permission`，所以即使用户后来补到日志，AskUserQuestion 也不再是待确认状态。
 
 ## 根因分析
 - 问题位置:
-  - `packages/dsh-client/src/client/ws-transport.ts` `call` / `follow`
-  - `packages/dsh-client/src/client/store.ts` `reload`
+  - gateway `WsBroadcaster` 当时 `sockets=0`（这条实时连接不在）
   - `packages/dsh-gateway/src/index.ts` `applyJournalPage`
 - 原因:
-  1. 2026-09-02 之后控制面变成「live 只走 WS，HTTP 只重建 `state`」。WS 没挂上 follower 时，gateway 仍在投影 journal，浏览器却既收不到 push，也不能 `transcript.read`。
-  2. `followedBrowsers=1` 来自 HTTP `session.follow`，`sockets=0` 表示这条 TCP 升级连接不在同一份 `WsBroadcaster` 上。推送按 socket 过滤，于是从 seq 0 开始全部 drop。
-  3. Claude 会先发 `_x.ai/session/prompt_complete`，再发 `elicitation/create`。空闲锁把后到的询问打回 idle，界面看起来像「本轮已经结束、没有下文」。
-
-开启会话不稳定，是因为新会话的第一轮最依赖「WS 已 live + follow 已绑到该 socket」。任何一边没就绪，Agent 都在跑，页面都是空白。
+  1. 整轮大约两分钟，投影该会话的 gateway 上没有浏览器 WebSocket。推送只发给活 socket，从 seq 0 全部 drop。
+  2. 没 live 时不发 `transcript.read` 是合理的：通道不通，应等同一条 WS 连上后再 follow + 按 seq 补拉。HTTP 补拉和 WS 拉取是同一条控制指令，没有额外语义，不作为退路。
+  3. Claude 会先发 `_x.ai/session/prompt_complete`，再发 `elicitation/create`。空闲锁把后到的询问打回 idle。
 
 ## 修复方案
-- WS 未 live 或 socket 中途断开时，控制 RPC（含 `session.prompt` / `session.follow` / `transcript.read`）立刻走 HTTP，不再干等 5 秒。
-- 断线期间 `follow` 也走 HTTP，gateway 继续投影；重连后仍由 WS 再 follow 一次。
-- catalog `reload` 后对当前会话补拉 transcript，避免只拿到空目录。
+- 去掉「没 live 也用 HTTP 拉 transcript / prompt / follow」。断线只保留 HTTP 重建 `state` 目录快照。
+- live RPC 仍等 WS；连上后 hello + follow + `transcript.read`。
 - idle 不再锁死后续 `running` / `waiting-permission`；`failed` 和用户 `stopped` 仍是终态。
 
 ## 验证步骤
-1. ✅ `packages/dsh-client/tests/ws-transport.spec.ts`：断线时 prompt / follow / transcript.read 走 HTTP
-2. ✅ `packages/dsh-client/tests/store.client.spec.ts`：reconnecting 时能把已有 transcript 拉进快照
-3. ✅ `packages/dsh-gateway/tests/gateway.spec.ts`：`prompt_complete` 之后的 elicitation 保持 `waiting-permission`
-4. ⚠️ 重启 3081 后硬刷新，打开该会话应能看到已生成的回复和询问卡片；新开会话在 WS 抖动时不应再空白
+1. ✅ `packages/dsh-client/tests/ws-transport.spec.ts`：断线时只有 `state` 走 HTTP，prompt / follow 不走 HTTP
+2. ✅ `packages/dsh-gateway/tests/gateway.spec.ts`：`prompt_complete` 之后的 elicitation 保持 `waiting-permission`
+3. ⚠️ 根因仍是当时 WS 为什么不是 live，需要浏览器侧通道日志才能钉死
 
 ## 相关测试
 - `packages/dsh-client/tests/ws-transport.spec.ts`
-- `packages/dsh-client/tests/store.client.spec.ts`
 - `packages/dsh-gateway/tests/gateway.spec.ts`
 
 ## 设计建议
-- WS 是快路径，不是唯一控制面。Agent 产出必须能通过 `transcript.read` 补齐。
+- 一条 WS 复用控制与推送。没 live 就等，不要平行开 HTTP 拉同一份数据。
 - 不要把 Claude 的 `prompt_complete` 当成「不会再有询问」。
-- 该会话里的 AskUserQuestion 仍卡在 hold 上；补到 UI 后需要用户作答，或点停止后再开一轮。
+- 该会话里的 AskUserQuestion 仍卡在 hold 上。

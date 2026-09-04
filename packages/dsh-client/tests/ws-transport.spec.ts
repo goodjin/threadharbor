@@ -121,7 +121,7 @@ describe('WsTransport', () => {
     transport.close()
   })
 
-  it('sends follow and other control RPCs over HTTP while reconnecting', async () => {
+  it('rebuilds state over HTTP while reconnecting and does not follow over HTTP', async () => {
     vi.stubGlobal('WebSocket', () => { throw new Error('protocol not supported') })
     const calls: { method: string }[] = []
     vi.stubGlobal('fetch', async (_input: string, init?: RequestInit) => {
@@ -136,9 +136,8 @@ describe('WsTransport', () => {
     expect(transport.getPhase()).toBe('reconnecting')
     transport.follow('session-1')
     await expect(transport.call('state', {})).resolves.toEqual({ pollIntervalMs: 1 })
-    await vi.waitFor(() => {
-      expect(calls.map(call => call.method).sort()).toEqual(['session.follow', 'state'])
-    })
+    await Promise.resolve()
+    expect(calls).toEqual([{ method: 'state' }])
     transport.close()
   })
 
@@ -181,7 +180,8 @@ describe('WsTransport', () => {
     transport.close()
   })
 
-  it('falls back to HTTP for prompt and transcript.read while reconnecting', async () => {
+  it('does not send live RPCs over HTTP while reconnecting', async () => {
+    vi.useFakeTimers()
     const ctor = vi.fn((url: string) => new MockWebSocket(url))
     vi.stubGlobal('WebSocket', ctor)
     const calls: { method: string }[] = []
@@ -189,18 +189,20 @@ describe('WsTransport', () => {
       const body = JSON.parse(String(init?.body ?? '{}')) as { id: string; method: string }
       calls.push({ method: body.method })
       return {
-        json: async () => ({ id: body.id, ok: true, result: { accepted: true } }),
+        json: async () => ({ id: body.id, ok: true, result: {} }),
       }
     })
     const transport = new WsTransport({ url: 'ws://test/ws', browserId: 'browser-1' })
     try {
       transport.connect()
-      expect(transport.getPhase()).toBe('connecting')
-      await expect(transport.call('session.prompt', { sessionId: 's1', text: 'hi' })).resolves.toEqual({ accepted: true })
-      await expect(transport.call('transcript.read', { sessionId: 's1' })).resolves.toEqual({ accepted: true })
-      expect(calls.map(call => call.method)).toEqual(['session.prompt', 'transcript.read'])
+      const pending = transport.call('session.prompt', { sessionId: 's1', text: 'hi' })
+      const expected = expect(pending).rejects.toThrow('ws did not reach live phase in time')
+      await vi.advanceTimersByTimeAsync(5_000)
+      await expected
+      expect(calls).toEqual([])
     } finally {
       transport.close()
+      vi.useRealTimers()
     }
   })
 
@@ -245,6 +247,55 @@ describe('WsTransport', () => {
       const hello = second.sent.map((line) => JSON.parse(line) as { method?: string; params?: { lastSeenSeqs?: Record<string, number> } })
         .find(frame => frame.method === 'browser.hello')
       expect(hello?.params?.lastSeenSeqs).toEqual({ s1: 4, s2: 6 })
+    } finally {
+      transport.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it('ignores a delayed close from the previous socket after reconnect is live', async () => {
+    vi.useFakeTimers()
+    const ctor = vi.fn((url: string) => new MockWebSocket(url))
+    vi.stubGlobal('WebSocket', ctor)
+    const transport = new WsTransport({ url: 'ws://test/ws' })
+    const phases: TransportPhase[] = []
+    transport.onPhase((phase) => { phases.push(phase) })
+    try {
+      transport.connect()
+      const first = MockWebSocket.instances[0]!
+      first.fakeOpen()
+      first.close()
+      await vi.advanceTimersByTimeAsync(500)
+      const second = MockWebSocket.instances.at(-1)!
+      second.fakeOpen()
+      expect(transport.getPhase()).toBe('live')
+      first.dispatch('close', {})
+      expect(transport.getPhase()).toBe('live')
+      expect(phases.at(-1)).toBe('live')
+    } finally {
+      transport.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it('treats traffic on the current socket as live even if phase was reconnecting', async () => {
+    vi.useFakeTimers()
+    const ctor = vi.fn((url: string) => new MockWebSocket(url))
+    vi.stubGlobal('WebSocket', ctor)
+    const transport = new WsTransport({ url: 'ws://test/ws' })
+    try {
+      transport.connect()
+      const first = MockWebSocket.instances[0]!
+      first.fakeOpen()
+      first.close()
+      expect(transport.getPhase()).toBe('reconnecting')
+      await vi.advanceTimersByTimeAsync(500)
+      const current = MockWebSocket.instances.at(-1)!
+      expect(transport.getPhase()).toBe('reconnecting')
+      current.fakeMessage(JSON.stringify({
+        direction: 'push', seq: 1, event: { type: 'transcript.append', sessionId: 's1', seq: 1 },
+      }))
+      expect(transport.getPhase()).toBe('live')
     } finally {
       transport.close()
       vi.useRealTimers()

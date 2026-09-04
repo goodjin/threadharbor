@@ -1,4 +1,4 @@
-/** Browser-side WebSocket transport. HTTP is the control fallback while reconnecting. */
+/** Browser-side WebSocket transport. HTTP is only used to rebuild `state` while reconnecting. */
 
 import {
   REMOTE_AGENT_GATEWAY_PATH,
@@ -33,6 +33,7 @@ interface PendingRequest {
 const HEARTBEAT_INTERVAL_MS = 30_000
 const HEARTBEAT_TIMEOUT_MS = 60_000
 const REQUEST_TIMEOUT_MS = 75_000
+const LIVE_WAIT_MS = 5_000
 const BACKOFF_STEPS_MS = [500, 1_000, 2_000, 5_000, 10_000] as const
 
 /** Build the WebSocket URL for the gateway control channel. */
@@ -122,13 +123,13 @@ function readBrowserId(): string {
   }
 }
 
-/** HTTP POST used when the live socket is down. Same control plane as WS RPC. */
-async function httpControl(method: string, params: Record<string, JsonValue>): Promise<JsonValue> {
+/** One-shot HTTP POST used only to rebuild catalog `state` while the socket is down. */
+async function httpRebuildState(params: Record<string, JsonValue>): Promise<JsonValue> {
   const id = crypto.randomUUID()
   const response = await fetch(REMOTE_AGENT_GATEWAY_PATH, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ id, method, params }),
+    body: JSON.stringify({ id, method: 'state', params }),
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   })
   const raw: unknown = await response.json()
@@ -141,12 +142,6 @@ async function httpControl(method: string, params: Record<string, JsonValue>): P
   const result = record['result']
   if (result === undefined) throw new Error('remote-agent response omitted result')
   return result
-}
-
-/** True when a WS RPC failed because the socket dropped, not because the gateway rejected it. */
-function isTransportFailure(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error)
-  return message.includes('实时通道已断开') || message === 'transport closed' || message.includes('ws did not reach')
 }
 
 /** Browser-side WebSocket transport. Live RPCs and pushes share one socket. */
@@ -196,13 +191,15 @@ export class WsTransport {
   /** Subscribe a session; subsequent transcript frames flow into the snapshot. */
   follow(sessionId: string): void {
     this.followSessions.add(sessionId)
-    void this.call('session.follow', { browserId: this.browserId, sessionId }).catch(() => undefined)
+    if (this.phase === 'live') {
+      void this.call('session.follow', { browserId: this.browserId, sessionId }).catch(() => undefined)
+    }
   }
 
   /** Stop pushing transcript frames for this session. */
   unfollow(sessionId: string): void {
     this.followSessions.delete(sessionId)
-    void this.call('session.unfollow', { browserId: this.browserId, sessionId }).catch(() => undefined)
+    if (this.phase === 'live') void this.call('session.unfollow', { browserId: this.browserId, sessionId }).catch(() => undefined)
   }
 
   /** Follow at most one session; used when the visible conversation changes. */
@@ -219,23 +216,15 @@ export class WsTransport {
     this.open()
   }
 
-  /** Send a control request on the live socket; HTTP when the socket is down.
-   *  Prompt/follow/transcript.read must not wait on reconnect — the Agent can
-   *  finish a turn while the browser has no follower, and the UI would stay blank. */
+  /** Send a control request on the live socket.
+   *  `state` may rebuild over HTTP while reconnecting; every other method waits for WS. */
   async call(method: string, params: Record<string, JsonValue>): Promise<JsonValue> {
     if (this.closed) throw new Error('transport closed')
-    if (this.phase === 'live' && this.socket !== undefined) {
-      try {
-        return await this.wsRequest(method, params)
-      } catch (error) {
-        if (this.closed || !isTransportFailure(error)) throw error
-      }
+    if (method === 'state' && this.phase !== 'live') return httpRebuildState(params)
+    if (this.phase !== 'live' || this.socket === undefined) {
+      await this.waitForLive(LIVE_WAIT_MS)
     }
-    return await httpControl(method, params)
-  }
-
-  private wsRequest(method: string, params: Record<string, JsonValue>): Promise<JsonValue> {
-    return new Promise<JsonValue>((resolve, reject) => {
+    return await new Promise<JsonValue>((resolve, reject) => {
       const id = crypto.randomUUID()
       const timer = window.setTimeout(() => {
         this.pending.delete(id)
@@ -282,6 +271,7 @@ export class WsTransport {
     }
     this.socket = socket
     socket.addEventListener('open', () => {
+      if (this.socket !== socket) return
       this.attempt = 0
       this.setPhase('live')
       this.sendHello()
@@ -291,6 +281,11 @@ export class WsTransport {
       }
     })
     socket.addEventListener('message', (event) => {
+      if (this.socket !== socket) return
+      if (this.phase !== 'live' && this.phase !== 'closed') {
+        this.attempt = 0
+        this.setPhase('live')
+      }
       this.armHeartbeat()
       const raw = typeof event.data === 'string' ? event.data : ''
       if (raw.includes('"direction":"pong"')) return
@@ -309,7 +304,10 @@ export class WsTransport {
         for (const sink of this.sinks.push) sink({ seq: frame.seq, event: frame.event })
       }
     })
-    socket.addEventListener('close', () => this.scheduleReconnect())
+    socket.addEventListener('close', () => {
+      if (this.socket !== socket) return
+      this.scheduleReconnect()
+    })
     socket.addEventListener('error', () => { /* close will follow */; })
   }
 
@@ -317,7 +315,7 @@ export class WsTransport {
     if (this.closed) return
     if (this.heartbeatTimer !== undefined) { window.clearTimeout(this.heartbeatTimer); this.heartbeatTimer = undefined }
     if (this.heartbeatTimeoutTimer !== undefined) { window.clearTimeout(this.heartbeatTimeoutTimer); this.heartbeatTimeoutTimer = undefined }
-    if (this.socket !== undefined) { this.socket = undefined }
+    this.socket = undefined
     this.rejectPending(new Error('实时通道已断开，正在重连'))
     if (this.reconnectTimer !== undefined) return
     this.setPhase('reconnecting')
@@ -340,6 +338,7 @@ export class WsTransport {
   }
 
   private armHeartbeat(): void {
+    const socket = this.socket
     if (this.heartbeatTimer !== undefined) window.clearTimeout(this.heartbeatTimer)
     if (this.heartbeatTimeoutTimer !== undefined) {
       window.clearTimeout(this.heartbeatTimeoutTimer)
@@ -347,14 +346,39 @@ export class WsTransport {
     }
     this.heartbeatTimer = window.setTimeout(() => {
       this.heartbeatTimer = undefined
-      try { this.socket?.send(JSON.stringify({ direction: 'ping' })) } catch { /* socket will close */ }
+      if (this.socket !== socket) return
+      try { socket?.send(JSON.stringify({ direction: 'ping' })) } catch { /* socket will close */ }
       this.heartbeatTimeoutTimer = window.setTimeout(() => {
-        try { this.socket?.close() } catch { /* noop */ }
+        if (this.socket !== socket) return
+        try { socket?.close() } catch { /* noop */ }
       }, HEARTBEAT_TIMEOUT_MS)
     }, HEARTBEAT_INTERVAL_MS)
   }
 
   private sendHello(): void {
     void this.call('browser.hello', { browserId: this.browserId, lastSeenSeqs: { ...this.lastSeenSeqs } }).catch(() => undefined)
+  }
+
+  private waitForLive(timeoutMs: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (this.phase === 'live') { resolve(); return }
+      const timer = window.setTimeout(() => {
+        unsubscribe()
+        reject(new Error('ws did not reach live phase in time'))
+      }, timeoutMs)
+      const unsubscribe = this.onPhase((phase) => {
+        if (phase === 'live') {
+          window.clearTimeout(timer)
+          unsubscribe()
+          resolve()
+          return
+        }
+        if (phase === 'closed') {
+          window.clearTimeout(timer)
+          unsubscribe()
+          reject(new Error('transport closed'))
+        }
+      })
+    })
   }
 }

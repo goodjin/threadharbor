@@ -178,14 +178,6 @@ function channelStage(input: {
       state: 'warning', visible: true,
     }
   }
-  if (input.transportPhase === 'error') {
-    return {
-      kind: 'transport',
-      label: '实时通道失败',
-      detail: input.error ?? '浏览器无法连上网关。稍后会自动重试。',
-      state: 'error', visible: true,
-    }
-  }
   if (input.channelState === 'connecting' || input.creating) {
     return {
       kind: 'connecting',
@@ -228,7 +220,8 @@ function sessionActionGates(input: {
   readonly pending: boolean
   readonly child: boolean
 }): SessionActionGates {
-  const live = input.channelState === 'open' && (input.transportPhase === 'ready' || input.transportPhase === undefined)
+  const transportDown = input.transportPhase === 'reconnecting' || input.transportPhase === 'loading'
+  const live = input.channelState === 'open' && !transportDown
   const turnBusy = input.turnState === 'running' || input.turnState === 'waiting-permission'
   const canCompose = !input.child && live
   return {
@@ -251,7 +244,10 @@ export function conversationPresentation(input: {
   readonly transportPhase?: 'loading' | 'ready' | 'reconnecting' | 'error'
   readonly pending?: boolean
 }): ConversationPresentation {
-  const creating = input.progress?.sessionId === input.session.sessionId && input.progress.phase === 'connecting'
+  const creating = input.progress !== undefined
+    && (input.progress.sessionId === undefined || input.progress.sessionId === input.session.sessionId)
+    && (input.progress.phase === 'connecting'
+      || (input.progress.phase === 'sending' && input.session.channelState === 'connecting'))
   const channel = channelStage({
     channelState: input.session.channelState,
     creating,
@@ -259,6 +255,9 @@ export function conversationPresentation(input: {
     ...(input.error === undefined ? {} : { error: input.error }),
   })
   const turn = turnStage(input)
+  const hideTurn = channel.visible && channel.kind === 'connecting'
+    && (turn.kind === 'sending' || turn.kind === 'waiting' || turn.kind === 'idle')
+  const visibleTurn = hideTurn ? { ...turn, visible: false } : turn
   const actions = sessionActionGates({
     channelState: input.session.channelState,
     turnState: input.session.turnState,
@@ -268,12 +267,12 @@ export function conversationPresentation(input: {
   })
   const headerParts = [
     ...(channel.visible ? [channel.label] : []),
-    ...(turn.visible ? [turn.label] : []),
+    ...(visibleTurn.visible ? [visibleTurn.label] : []),
   ]
   return {
-    turn, channel, actions,
+    turn: visibleTurn, channel, actions,
     headerLabel: headerParts.length === 0 ? '已就绪' : headerParts.join(' · '),
-    headerState: rankState(channel.state) >= rankState(turn.state) ? channel.state : turn.state,
+    headerState: rankState(channel.state) >= rankState(visibleTurn.state) ? channel.state : visibleTurn.state,
   }
 }
 

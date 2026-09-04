@@ -148,6 +148,19 @@ describe('remote conversation view model', () => {
     expect(view.turn.visible).toBe(false)
   })
 
+  it('shows one connecting banner while the first prompt waits for the hold', () => {
+    const view = conversationPresentation({
+      session: session({ channelState: 'connecting', turnState: 'idle' }),
+      entries: [],
+      now: 10_000,
+      progress: { sessionId: 'session', phase: 'sending', startedAt: 1_000, baselineSeq: -1 },
+    })
+    expect(view.channel.label).toBe('正在连接 Agent')
+    expect(view.channel.visible).toBe(true)
+    expect(view.turn.visible).toBe(false)
+    expect(view.headerLabel).toBe('正在连接 Agent')
+  })
+
   it('keeps running and completed tool calls collapsed to one status row by default', () => {
     expect(toolDisclosurePresentation(false, true)).toEqual({ initialOpen: false, status: '运行中' })
     expect(toolDisclosurePresentation(true, false)).toEqual({ initialOpen: false, status: '已完成' })
@@ -283,6 +296,17 @@ describe('remote conversation view model', () => {
     })).toMatchObject({
       channel: { kind: 'transport', label: '实时通道断开，正在自动重连' },
       actions: { canReconnect: false, canSend: false, canCompose: false },
+    })
+    expect(conversationPresentation({
+      session: session({ channelState: 'open', turnState: 'running' }),
+      entries: [entry('1', 'assistant', 'message', '正在输出')],
+      now: 0,
+      transportPhase: 'error',
+      error: 'Error: ws did not reach live phase in time',
+    })).toMatchObject({
+      channel: { visible: false },
+      turn: { kind: 'responding', visible: true },
+      actions: { canCompose: true, canSend: false, canStop: true },
     })
     expect(conversationStage({ session: session({ turnState: 'failed' }), entries: [], now: 0 }))
       .toMatchObject({ kind: 'failed', label: '本轮执行失败' })

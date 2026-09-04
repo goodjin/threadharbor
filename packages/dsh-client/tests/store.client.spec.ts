@@ -10,6 +10,8 @@ beforeEach(() => {
   vi.stubGlobal('window', {
     setTimeout: globalThis.setTimeout.bind(globalThis),
     clearTimeout: globalThis.clearTimeout.bind(globalThis),
+    setInterval: globalThis.setInterval.bind(globalThis),
+    clearInterval: globalThis.clearInterval.bind(globalThis),
     sessionStorage: {
       getItem: (key: string) => session.get(key) ?? null,
       setItem: (key: string, value: string) => { session.set(key, value) },
@@ -272,10 +274,10 @@ describe('RemoteAgentStore', () => {
     const store = new RemoteAgentStore()
     try {
       await store.start()
+      expect(store.getSnapshot().state.transcript).toEqual([])
       await vi.waitFor(() => {
         expect(store.getSnapshot().state.transcript.map(entry => entry.text)).toEqual(['late'])
       })
-      expect(reads).toBeGreaterThan(1)
     } finally {
       store.dispose()
     }
@@ -564,7 +566,11 @@ describe('RemoteAgentStore', () => {
       expect(store.getSnapshot().state.sessions.map(entry => entry.sessionId)).toEqual(['s-new'])
       expect(calls.map(call => call.method).filter(method => method !== 'transcript.read'))
         .toEqual(['state', 'session.start', 'session.prompt', 'state'])
-      expect(calls[1]?.params).toMatchObject({ projectId: 'p', backend: 'grok', title: 'first question' })
+      expect(calls[1]?.params).toMatchObject({
+        projectId: 'p', backend: 'grok', title: 'first question', text: 'first question',
+      })
+      expect(calls[1]?.params).toHaveProperty('clientId')
+      expect(calls[1]?.params).toHaveProperty('requestId')
     } finally {
       store.dispose()
     }
@@ -635,6 +641,7 @@ describe('RemoteAgentStore', () => {
         expect(store.getSnapshot().currentSessionId).toBe('s-new')
       })
       expect(store.getSnapshot().draftSession).toBeUndefined()
+      expect(store.getSnapshot().promptProgress?.phase).toBe('connecting')
       expect(store.getSnapshot().state.sessions).toEqual([expect.objectContaining({
         sessionId: 's-new', channelState: 'connecting',
       })])
@@ -750,43 +757,6 @@ describe('RemoteAgentStore', () => {
       await store.start()
       expect(store.getSnapshot().phase).toBe('reconnecting')
       expect(calls.every(method => method === 'state')).toBe(true)
-    } finally {
-      store.dispose()
-    }
-  })
-
-  it('pages transcript over HTTP after a reconnecting catalog rebuild', async () => {
-    const session = {
-      sessionId: 's-live', projectId: 'p', title: 'work', backend: 'codex',
-      channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
-      latestTranscriptSeq: 1,
-      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 4 },
-    }
-    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
-      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
-      if (body.method === 'transcript.read') {
-        return Response.json({
-          id: body.id, ok: true,
-          result: {
-            sessionId: 's-live',
-            entries: [{
-              transcriptId: 't1', sessionId: 's-live', seq: 1, role: 'assistant',
-              kind: 'message', text: 'answer', createdAt: 'a',
-            }],
-            latestSeq: 1, fromSeq: 1, toSeq: 1, hasMore: false, afterSeq: -1,
-          },
-        })
-      }
-      return Response.json({ id: body.id, ok: true, result: { ...EMPTY, sessions: [session] } })
-    }))
-    const store = new RemoteAgentStore()
-    try {
-      store.setPhase('reconnecting')
-      await store.start()
-      await vi.waitFor(() => {
-        expect(store.getSnapshot().state.transcript.some(entry => entry.text === 'answer')).toBe(true)
-      })
-      expect(store.getSnapshot().phase).toBe('reconnecting')
     } finally {
       store.dispose()
     }
@@ -925,6 +895,43 @@ describe('RemoteAgentStore', () => {
       expect(publishes).toBe(1)
     } finally {
       unsubscribe()
+      store.dispose()
+    }
+  })
+
+  it('clears a stale RPC error phase when live transcript arrives', async () => {
+    const session = {
+      sessionId: 's-live', projectId: 'p', title: 'work', backend: 'codex',
+      channelState: 'open', turnState: 'running', createdAt: 'a', updatedAt: 'b',
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+    }
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      if (body.method === 'host.add') {
+        return Response.json({ id: body.id, ok: false, error: { message: 'ws did not reach live phase in time' } })
+      }
+      return Response.json({ id: body.id, ok: true, result: { ...EMPTY, sessions: [session] } })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      await expect(store.addHost('box', 'http://127.0.0.1:9')).rejects.toThrow('ws did not reach live phase in time')
+      expect(store.getSnapshot().phase).toBe('error')
+      store.consume({
+        type: 'transcript.append',
+        sessionId: 's-live',
+        seq: 1,
+        entry: {
+          transcriptId: 't1', sessionId: 's-live', seq: 1, role: 'assistant', kind: 'message',
+          text: 'still streaming', createdAt: 'a',
+        },
+      })
+      expect(store.getSnapshot()).toMatchObject({
+        phase: 'ready',
+        state: { transcript: [{ text: 'still streaming' }] },
+      })
+      expect(store.getSnapshot().error).toBeUndefined()
+    } finally {
       store.dispose()
     }
   })
