@@ -17,6 +17,8 @@ import { ChunkCoalescer, CHUNK_COALESCE_IDLE_MS } from './chunk-coalescer.ts'
 
 const JOURNAL_COMPACT_APPEND_INTERVAL = 512
 const JOURNAL_LOG_APPEND_INTERVAL = 128
+const STDIO_RESTART_TIMEOUT_MS = 8_000
+const STDIO_REINITIALIZE_TIMEOUT_MS = 10_000
 
 export function parseConfig(path: string): HoldWorkerConfig {
   const raw: unknown = JSON.parse(readFileSync(path, 'utf8'))
@@ -140,6 +142,10 @@ export class HoldWorker {
   private readonly coalescer = new ChunkCoalescer()
   private coalesceTimer: ReturnType<typeof setTimeout> | undefined
   private appendsSinceCompact = 0
+  private stdioEpoch = 0
+  private restartingStdio = false
+  private stdioGate: Promise<void> = Promise.resolve()
+  private lastInitializeFrame: JsonValue | undefined
 
   /** @param config - immutable owner-only launch record. */
   constructor(private readonly config: HoldWorkerConfig) {
@@ -222,6 +228,7 @@ export class HoldWorker {
   }
 
   private startStdio(command: string, args: readonly string[]): void {
+    const epoch = ++this.stdioEpoch
     const child = spawn(command, [...args], {
       cwd: this.config.cwd,
       env: process.env,
@@ -231,18 +238,23 @@ export class HoldWorker {
     child.stderr.pipe(process.stderr)
     this.backendPid = child.pid
     child.on('error', (error) => {
+      if (epoch !== this.stdioEpoch) return
       this.append({
         jsonrpc: '2.0', method: '_dsh/transport_error', params: { message: String(error) },
       })
     })
     child.on('exit', (code, signal) => {
+      if (epoch !== this.stdioEpoch || this.restartingStdio) return
       this.recordTransportEnd({
         jsonrpc: '2.0', method: '_dsh/transport_closed', params: {
           code: code ?? null, signal: signal ?? null,
         },
       })
     })
-    createInterface({ input: child.stdout }).on('line', (line) => { this.receiveText(line) })
+    createInterface({ input: child.stdout }).on('line', (line) => {
+      if (epoch !== this.stdioEpoch) return
+      this.receiveText(line)
+    })
   }
 
   private async startWebSocket(baseUrl: string): Promise<void> {
@@ -425,17 +437,79 @@ export class HoldWorker {
     process.stderr.write(`threadharbor-hold-journal ${JSON.stringify(payload)}\n`)
   }
 
-  private applyNativeCancel(frame: JsonValue): void {
+  private isNativeCancel(frame: JsonValue): boolean {
     const record = frame !== null && typeof frame === 'object' && !Array.isArray(frame) ? frame : undefined
-    if (record?.['method'] !== 'session/cancel') return
+    return record?.['method'] === 'session/cancel'
+  }
+
+  private applyNativeCancel(frame: JsonValue): void {
+    if (!this.isNativeCancel(frame)) return
     this.promptQueue.length = 0
     this.promptActive = false
+  }
+
+  private enqueueStdio<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.stdioGate.then(task, task)
+    this.stdioGate = run.then(() => {}, () => {})
+    return run
+  }
+
+  private waitForClose(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve()
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        child.kill('SIGKILL')
+        reject(new Error('stdio backend did not exit after cancel'))
+      }, timeoutMs)
+      child.once('close', () => {
+        clearTimeout(timer)
+        resolve()
+      })
+    })
+  }
+
+  private async waitUntilInitialized(timeoutMs: number): Promise<void> {
+    if (this.initialized) return
+    const deadline = Date.now() + timeoutMs
+    while (!this.initialized && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
+    if (!this.initialized) throw new Error('stdio backend did not re-initialize after cancel')
+  }
+
+  /** DSH's SDK JSON-RPC server has no session/cancel; abandoning a turn requires a new process. */
+  private async restartStdioBackend(): Promise<void> {
+    if (this.config.transport.kind !== 'stdio') return
+    this.restartingStdio = true
+    this.initialized = false
+    try {
+      const child = this.child
+      this.child = undefined
+      if (child !== undefined) {
+        child.kill('SIGTERM')
+        try {
+          await this.waitForClose(child, STDIO_RESTART_TIMEOUT_MS)
+        } catch {
+          child.kill('SIGKILL')
+          await this.waitForClose(child, 1_000).catch(() => undefined)
+        }
+      }
+      this.startStdio(this.config.transport.command, this.config.transport.args)
+      if (this.lastInitializeFrame !== undefined) {
+        this.sendFrame(this.lastInitializeFrame)
+        await this.waitUntilInitialized(STDIO_REINITIALIZE_TIMEOUT_MS)
+      }
+      this.writeState(true)
+    } finally {
+      this.restartingStdio = false
+    }
   }
 
   private sendFrame(frame: JsonValue): void {
     const record = frame !== null && typeof frame === 'object' && !Array.isArray(frame) ? frame : undefined
     const id = record?.['id']
     const method = record?.['method']
+    if (method === 'initialize') this.lastInitializeFrame = frame
     if (record !== undefined && (typeof id === 'string' || typeof id === 'number') && typeof method === 'string') {
       const params = record['params']
       const paramsRecord = params !== null && typeof params === 'object' && !Array.isArray(params) ? params : undefined
@@ -560,20 +634,34 @@ export class HoldWorker {
         this.reply(socket, { ok: true, result: this.page(request.afterSeq, request.generation) })
         return
       case 'send': {
-        const key = `${request.admission.clientId}:${request.admission.requestId}`
-        if (this.admissions.has(key)) {
-          this.reply(socket, { ok: true, result: { accepted: true, duplicate: true } })
-          return
-        }
-        this.admissions.add(key)
-        this.admitPrompt(request.admission.frame)
-        this.reply(socket, { ok: true, result: { accepted: true, duplicate: false } })
+        void this.enqueueStdio(async () => {
+          const key = `${request.admission.clientId}:${request.admission.requestId}`
+          if (this.admissions.has(key)) {
+            this.reply(socket, { ok: true, result: { accepted: true, duplicate: true } })
+            return
+          }
+          this.admissions.add(key)
+          this.admitPrompt(request.admission.frame)
+          this.reply(socket, { ok: true, result: { accepted: true, duplicate: false } })
+        }).catch((error: unknown) => {
+          this.reply(socket, { ok: false, error: String(error) })
+        })
         return
       }
       case 'send-frame':
-        this.applyNativeCancel(request.frame)
-        this.sendFrame(request.frame)
-        this.reply(socket, { ok: true, result: { accepted: true } })
+        void this.enqueueStdio(async () => {
+          this.applyNativeCancel(request.frame)
+          if (this.isNativeCancel(request.frame) && this.config.backend === 'dsh'
+            && this.config.transport.kind === 'stdio') {
+            await this.restartStdioBackend()
+            this.reply(socket, { ok: true, result: { accepted: true } })
+            return
+          }
+          this.sendFrame(request.frame)
+          this.reply(socket, { ok: true, result: { accepted: true } })
+        }).catch((error: unknown) => {
+          this.reply(socket, { ok: false, error: String(error) })
+        })
         return
       case 'wait-seq': {
         if (this.nextSeq - 1 > request.afterSeq) {

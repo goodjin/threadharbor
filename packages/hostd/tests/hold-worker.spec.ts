@@ -321,6 +321,65 @@ describe('HoldWorker', () => {
     }
   })
 
+  it('restarts a DSH stdio backend on session/cancel because the SDK wire has no cancel', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-hold-dsh-cancel-'))
+    roots.push(root)
+    const socketPath = join(root, 'control.sock')
+    const pidFile = join(root, 'pid')
+    const output = join(root, 'requests.txt')
+    const config: HoldWorkerConfig = {
+      version: 1,
+      holdId: 'hold',
+      generation: 'generation',
+      backend: 'dsh',
+      cwd: root,
+      socketPath,
+      journalPath: join(root, 'journal.jsonl'),
+      statePath: join(root, 'state.json'),
+      maxJournalEvents: 20,
+      maxJournalBytes: 100_000,
+      transport: {
+        kind: 'stdio', command: process.execPath,
+        args: [new URL('./fixtures/fake-dsh.mjs', import.meta.url).pathname, pidFile, output],
+      },
+    }
+    const worker = new HoldWorker(config)
+    await worker.start()
+    try {
+      expect(await send(socketPath, {
+        operation: 'send-frame',
+        frame: {
+          jsonrpc: '2.0', id: 'init-1', method: 'initialize',
+          params: { cwd: root, provider: 'deepseek-official', model: 'deepseek-official' },
+        },
+      })).toMatchObject({ ok: true })
+      expect(await send(socketPath, {
+        operation: 'wait', rpcId: 'init-1', afterSeq: 0, timeoutMs: 2_000,
+      })).toMatchObject({ ok: true })
+      await vi.waitFor(async () => { expect((await readFile(pidFile, 'utf8')).trim()).toMatch(/^\d+$/) })
+      const firstPid = (await readFile(pidFile, 'utf8')).trim()
+      expect(await send(socketPath, admission('p1'))).toMatchObject({ ok: true, result: { duplicate: false } })
+      await vi.waitFor(async () => {
+        expect(await readFile(output, 'utf8')).toContain(`prompt:p1:${firstPid}`)
+      })
+      expect(await send(socketPath, {
+        operation: 'send-frame',
+        frame: { jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: 'native' } },
+      })).toMatchObject({ ok: true })
+      await vi.waitFor(async () => {
+        expect((await readFile(pidFile, 'utf8')).trim()).not.toBe(firstPid)
+      })
+      const secondPid = (await readFile(pidFile, 'utf8')).trim()
+      expect(await send(socketPath, admission('p2'))).toMatchObject({ ok: true, result: { duplicate: false } })
+      await vi.waitFor(async () => {
+        expect(await readFile(output, 'utf8')).toContain(`prompt:p2:${secondPid}`)
+      })
+      expect(await readFile(output, 'utf8')).not.toContain(`cancel-ignored:${firstPid}`)
+    } finally {
+      await worker.close()
+    }
+  })
+
   it('synthesizes prompt_complete for Claude ACP prompt results', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-hold-claude-complete-'))
     roots.push(root)
