@@ -74,7 +74,7 @@ ThreadHarbor 把 Agent 的 cwd 设成了项目路径，并通过 hold-worker 直
 - **目录归属**：DSH JSONL 放在 hostd dataDir 下的 `dsh-sessions/`，跟 hold journal 同级，符合「hostd 拥有自己的 dataDir」的设计，比塞进 Web 的 `$DSH_HOME` 更稳——不绑通道、不绑通道布局。
 - **跨 hold 共享**：`dsh-sessions/` 不是按 hold 隔离的，DSH 用 `cwd` 当 projectKey，所有同一项目的 hold 共享同一棵子树；这样 attach / fork 续上历史不会因为 hold 目录被清掉而丢 JSONL。
 - **迁移问题**：`packages/hostd/src/dsh-sessions.ts` `migrateProjectDshSessions` 在每次 DSH `spawnHold` 时把项目 `.sessions` 迁到 `dataDir/dsh-sessions`。同名会话以目标为准，避免覆盖已经在独立目录里写入的活副本。`.sessions` 若是指向 session root 的 symlink 则跳过。
-- **dataDir 漂移（未解决，后续 ticket）**：本机当前 hostd 实际用的是 `/private/tmp/threadharbor-hostd-run.XXXX/`，跟设计默认 `~/.local/state/threadharbor` 不一致。`/tmp` 在重启后会被清掉，hold journal 也会丢；这跟本 fix 是独立问题，应该分开处理。
-  - **升级路径会延续坏路径**：`packages/dsh-gateway/src/local-hostd.ts:33` 的 `restartLoopbackHostd` 会用 `lsof`+`ps` 读出当前 hostd 进程的 `--data-dir` 再原样回传，所以「升级 hostd」按钮不会自动把 dataDir 迁回 `~/.local/state/threadharbor`。
-  - **代码里没有 `/tmp` 入口**：grep 全仓 `--data-dir` 只在 `bin.ts:54`（默认 `~/.local/state/threadharbor`）、`ssh-manager.ts:265/267`（SSH 远端，`$state/hostd`）和 `local-hostd.ts:33`（续传）出现。也就是说 `/private/tmp/threadharbor-hostd-run.XXX/` 是某次手工启动（很可能是 `mktemp -d` 之类）留下的，gateway 自己不会建这个路径。
-  - **修复方向（不在本轮）**：手动 kill 当前 hostd 后用默认 `--data-dir`（或不传）重启；或在 `restartLoopbackHostd` 里加一道「检测到 `/tmp` 或 `/private/tmp` 前缀则改写到 `~/.local/state/threadharbor`」的迁移逻辑。
+- **dataDir 漂移（已通过 restart 自愈）**：`packages/dsh-gateway/src/local-hostd.ts` 的 `resolveLoopbackHostdDataDir` 检测 `--data-dir` 是否落在 `/tmp`、`/private/tmp`、`/var/folders/...` 或 OS `tmpdir()` 这些会被清掉的临时目录里，是的话把内容 `cpSync` 到 `~/.local/state/threadharbor` 再让新 hostd 起来时用新路径。目标目录已经存在则跳过迁移（避免覆盖已经在写的活副本），仅 stderr 记一笔。
+  - **升级路径自愈**：`hostdRestartArgv` 走 `resolveLoopbackHostdDataDir` 拿最终路径再生成 argv，所以「升级 hostd」按钮按一次之后坏路径就消失，再按也不会回来。
+  - **`/tmp` 入口在哪**：原 `/private/tmp/threadharbor-hostd-run.XXX/` 是某次手工 `mktemp -d` 留下的（gateway 自己代码里没有 `/tmp` 入口，全仓 `--data-dir` 只在 `bin.ts:54`、`ssh-manager.ts:265/267`、`local-hostd.ts` 出现）。下一次点升级就会自动搬到 `~/.local/state/threadharbor/`。
+  - **未覆盖的情况**：测试用 `mkdtemp` 传 `persistentRoot` 选项隔离宿主 home；运行时只命中「`~/.local/state/threadharbor` 不存在 → copy 迁移」或「已存在 → 跳过迁移」两种。SSH 远端 host（`ssh-manager.ts` 的 `--data-dir $state/hostd`）不在这条路径上，路径已经在 `~/.local/state/threadharbor/<channel>/hostd` 下不走自愈。
