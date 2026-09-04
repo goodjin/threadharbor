@@ -934,7 +934,6 @@ export class RemoteAgentGateway extends Service {
   private async startSession(params: Record<string, JsonValue>): Promise<RemoteSessionView> {
     const tables = this.requireTables()
     const project = this.requireProject(RemoteProjectId(stringField(params, 'projectId')))
-    const host = this.requireHost(project.hostId)
     const parentIdValue = optionalString(params, 'parentSessionId')
     const parent = parentIdValue === undefined ? undefined : this.requireSession(RemoteSessionId(parentIdValue))
     if (parent !== undefined && parent.projectId !== project.projectId) throw new Error('child session must use its parent project')
@@ -944,8 +943,11 @@ export class RemoteAgentGateway extends Service {
     if (parent !== undefined && requestedBackend !== undefined && requestedBackend !== parent.backend) {
       throw new Error('child session backend is immutable and must equal its parent backend')
     }
-    const refreshed = await this.refreshHostInventory(host)
-    const available = refreshed.inventory?.backends.find(entry => entry.backend === backend)
+    const cached = this.requireHost(project.hostId)
+    const host = cached.inventoryError === undefined && cached.inventory?.healthy === true
+      ? cached
+      : await this.refreshHostInventory(cached)
+    const available = host.inventory?.backends.find(entry => entry.backend === backend)
     if (available === undefined || !available.installed) throw new Error(`backend ${backend} is not installed on host ${host.title}`)
     if (!available.sessionCapable) throw new Error(`backend ${backend} has no configured ThreadHarbor session adapter`)
     if (backend === 'dsh' && !available.authenticated) throw new Error('DSH 需要先在主机设置中配置 API Key')
@@ -966,14 +968,27 @@ export class RemoteAgentGateway extends Service {
     await tables.sessions.put(sessionId, session)
     const state = this.requireGlobal().get()
     await this.requireGlobal().set({ ...state, sessionIds: [...state.sessionIds, sessionId] })
+    const text = optionalString(params, 'text')
+    const clientId = optionalString(params, 'clientId')
+    const requestId = optionalString(params, 'requestId')
+    if (text !== undefined && clientId !== undefined && requestId !== undefined) {
+      await this.appendTranscript(sessionId, {
+        transcriptId: RemoteTranscriptId(`user:${sessionId}:${clientId}:${requestId}`),
+        role: 'user',
+        kind: 'message',
+        text,
+        requestId,
+      })
+    }
     // Persist and announce the connecting-state row immediately so the caller
     // (and any future re-attach from a refreshed browser) sees the session
     // before the remote hold exists. The hostd call runs after we return.
-    this.broadcastSessionView(session)
+    const announced = this.withTranscriptHead(session)
+    this.broadcastSessionView(announced)
     const completion = this.completeStart(host, session, parent?.binding?.nativeSessionId)
     this.inflightStarts.set(sessionId, completion)
     void completion.finally(() => { this.inflightStarts.delete(sessionId) })
-    return session
+    return announced
   }
 
   /** In-flight session.start completions keyed by session id, so callers
@@ -1369,6 +1384,23 @@ export class RemoteAgentGateway extends Service {
     return this.state()
   }
 
+  /** Serialize journal projection with user-stop / failure markers for one session. */
+  private async withSessionJournalApply<T>(
+    sessionId: ReturnType<typeof RemoteSessionId>,
+    task: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.journalApply.get(sessionId) ?? Promise.resolve()
+    let release: () => void = () => undefined
+    const gate = new Promise<void>(resolve => { release = resolve })
+    this.journalApply.set(sessionId, previous.then(() => gate, () => gate))
+    await previous.catch(() => undefined)
+    try {
+      return await task()
+    } finally {
+      release()
+    }
+  }
+
   /** Apply one journal page (catchup or live push) to the durable projection.
    *  Shared by `syncEvents` (HTTP catchup) and the WS push listener. */
   private async applyJournalPage(
@@ -1376,19 +1408,12 @@ export class RemoteAgentGateway extends Service {
     binding: NonNullable<RemoteSessionView['binding']>,
     page: RemoteJournalPage,
   ): Promise<number> {
-    const previous = this.journalApply.get(session.sessionId) ?? Promise.resolve()
-    let release: () => void = () => undefined
-    const gate = new Promise<void>(resolve => { release = resolve })
-    this.journalApply.set(session.sessionId, previous.then(() => gate, () => gate))
-    await previous.catch(() => undefined)
-    try {
+    return await this.withSessionJournalApply(session.sessionId, async () => {
       const latest = this.requireTables().sessions.get(session.sessionId) ?? session
       const currentBinding = latest.binding ?? binding
       if (currentBinding.state !== 'active') return currentBinding.lastSeq
       return await this.projectJournalPage(latest, currentBinding, page)
-    } finally {
-      release()
-    }
+    })
   }
 
   private async projectJournalPage(
@@ -1414,9 +1439,11 @@ export class RemoteAgentGateway extends Service {
     const events = page.events
       .filter(event => event.seq > binding.lastSeq)
       .slice(0, MAX_JOURNAL_EVENTS_PER_SYNC)
+    const suppressNativeTranscript = session.turnState === 'stopped'
     for (const event of events) {
       const child = nativeChildUpdate(event.frame)
       if (child !== undefined) await this.upsertNativeChild(session, child)
+      if (suppressNativeTranscript) continue
       const targetSessionId = nativeFrameSessionId(event.frame)
       const nativeSessionId = binding.nativeSessionId ?? session.sessionId
       if (targetSessionId !== nativeSessionId
@@ -1441,20 +1468,20 @@ export class RemoteAgentGateway extends Service {
     }
     await this.appendTranscriptBatch(session.sessionId, transcript)
     const processedThrough = events.at(-1)?.seq ?? binding.lastSeq
-    const latest = this.requireTables().sessions.get(session.sessionId)
-    if (latest?.turnState === 'stopped' && turnState !== 'failed') {
+    const latest = this.requireTables().sessions.get(session.sessionId) ?? session
+    if (latest.turnState === 'stopped' && turnState !== 'failed') {
       // User-initiated stop is a durable marker until the next prompt.
       // A later native end_turn must not rewrite it back to idle/running.
       turnState = 'stopped'
-    } else if (latest?.turnState === 'failed'
+    } else if (latest.turnState === 'failed'
       && (turnState === 'running' || turnState === 'waiting-permission')) {
       // Hold-unreachable / transport failure is terminal until the next prompt.
       // Idle is not: Claude may emit prompt_complete and then AskUserQuestion.
       turnState = 'failed'
     }
     const updated: RemoteSessionView = {
-      ...session,
-      channelState: latest?.channelState === 'lost' ? 'lost' : 'open',
+      ...latest,
+      channelState: latest.channelState === 'lost' ? 'lost' : 'open',
       turnState,
       binding: { ...binding, lastSeq: processedThrough },
       updatedAt: new Date().toISOString(),
@@ -1522,22 +1549,24 @@ export class RemoteAgentGateway extends Service {
     text: string,
     channelState?: RemoteChannelState,
   ): Promise<void> {
-    const current = this.requireTables().sessions.get(session.sessionId) ?? session
-    if (current.turnState !== 'running' && current.turnState !== 'waiting-permission') return
-    const next: RemoteSessionView = {
-      ...current,
-      turnState,
-      channelState: channelState ?? current.channelState,
-      updatedAt: new Date().toISOString(),
-    }
-    await this.requireTables().sessions.put(session.sessionId, next)
-    this.broadcastSessionView(next)
-    const transcriptId = RemoteTranscriptId(`turn:${session.sessionId}:${turnState}:${current.binding?.generation ?? 'none'}:${current.binding?.lastSeq ?? 0}`)
-    if (this.requireTables().transcript.get(transcriptId) === undefined) {
-      await this.appendTranscript(session.sessionId, {
-        transcriptId, role: 'system', kind: 'status', text,
-      })
-    }
+    await this.withSessionJournalApply(session.sessionId, async () => {
+      const current = this.requireTables().sessions.get(session.sessionId) ?? session
+      if (current.turnState !== 'running' && current.turnState !== 'waiting-permission') return
+      const next: RemoteSessionView = {
+        ...current,
+        turnState,
+        channelState: channelState ?? current.channelState,
+        updatedAt: new Date().toISOString(),
+      }
+      await this.requireTables().sessions.put(session.sessionId, next)
+      this.broadcastSessionView(next)
+      const transcriptId = RemoteTranscriptId(`turn:${session.sessionId}:${turnState}:${current.binding?.generation ?? 'none'}:${current.binding?.lastSeq ?? 0}`)
+      if (this.requireTables().transcript.get(transcriptId) === undefined) {
+        await this.appendTranscript(session.sessionId, {
+          transcriptId, role: 'system', kind: 'status', text,
+        })
+      }
+    })
   }
 
   private withTranscriptHead(
@@ -1640,10 +1669,13 @@ export class RemoteAgentGateway extends Service {
     const browserId = stringField(params, 'browserId')
     const sessionId = RemoteSessionId(stringField(params, 'sessionId'))
     this.wsBroadcaster.follow(browserId, sessionId)
+    const starting = this.inflightStarts.get(sessionId)
+    if (starting !== undefined) await starting.catch(() => undefined)
     const session = this.requireSession(sessionId)
-    if (session.binding?.state !== 'active'
-      || session.channelState === 'reconnecting'
-      || session.channelState === 'lost') {
+    if (session.channelState !== 'connecting'
+      && (session.binding?.state !== 'active'
+        || session.channelState === 'reconnecting'
+        || session.channelState === 'lost')) {
       try { await this.attachSession({ sessionId }) } catch { /* follow loop will retry */ }
     }
     this.ensureFollowedSync(sessionId)

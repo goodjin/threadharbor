@@ -302,6 +302,26 @@ describe('RemoteAgentGateway', () => {
     }
   })
 
+  it('stores the first user message when the session row is created, before the hold is bound', async () => {
+    const { ctx, gateway } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4301' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'hello there', backend: 'codex',
+        text: 'hello there', clientId: 'browser', requestId: 'first',
+      })) as unknown as { sessionId: string; channelState: string; latestTranscriptSeq?: number }
+      expect(session.channelState).toBe('connecting')
+      expect(session.latestTranscriptSeq).toBe(0)
+      const page = await readTranscript(gateway, session.sessionId)
+      expect(page.entries).toEqual([expect.objectContaining({
+        sessionId: session.sessionId, role: 'user', kind: 'message', text: 'hello there', requestId: 'first',
+      })])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('refuses to treat an SSH tunnel port as a local hostd upgrade target', async () => {
     const { ctx, gateway } = await harness()
     try {
@@ -747,6 +767,47 @@ describe('RemoteAgentGateway', () => {
       await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
       expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState).toBe('stopped')
       const page = await readTranscript(gateway, session.sessionId)
+      expect(page.entries.some(entry => entry.kind === 'status' && entry.text === '用户主动停止')).toBe(true)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps a DSH user-stop and drops later native chunks from the dying turn', async () => {
+    const events: JsonValue[] = []
+    const { ctx, gateway } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4214',
+      })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'repo', cwd: '/repo',
+      })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'dsh',
+      })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'dsh-stop', text: 'hello',
+      }))
+      await gateway.dispatch(request('session.cancel', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState).toBe('stopped')
+      const nativeSessionId = `native-4214-${session.sessionId}`
+      events.push({
+        jsonrpc: '2.0', method: 'session.event',
+        params: {
+          sessionId: nativeSessionId,
+          event: { type: 'assistant/chunk', data: { chunk: { type: 'text', text: 'still going' } } },
+        },
+      })
+      events.push({
+        jsonrpc: '2.0', method: 'session.status',
+        params: { sessionId: nativeSessionId, status: 'running' },
+      })
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState).toBe('stopped')
+      const page = await readTranscript(gateway, session.sessionId)
+      expect(page.entries.some(entry => entry.text.includes('still going'))).toBe(false)
       expect(page.entries.some(entry => entry.kind === 'status' && entry.text === '用户主动停止')).toBe(true)
     } finally {
       await ctx.fiber.dispose()
