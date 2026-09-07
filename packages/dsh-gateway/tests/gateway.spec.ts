@@ -72,7 +72,7 @@ function respondToRequest(request: RemoteControlRequest, port: string, events: J
   switch (request.method) {
     case 'inventory':
       return {
-        protocolVersion: 1, hostdVersion: 'test', hostId: `hostd-${port}`, healthy: true,
+        protocolVersion: 1, hostdVersion: process.env['TEST_HOSTD_VERSION'] ?? 'test', hostId: `hostd-${port}`, healthy: true,
         backends: ['grok', 'codex', 'claude', 'dsh'].map(backend => ({
           backend, installed: true, authenticated: true, running: false, sessionCapable: backend !== 'claude',
         })),
@@ -419,6 +419,74 @@ describe('RemoteAgentGateway', () => {
         title: 'bad', endpoint: 'http://user:secret@127.0.0.1:4101',
       }))).rejects.toThrow('must not contain credentials')
     } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('short-circuits a re-deploy when the remote hostd already matches the gateway artifact version', async () => {
+    const { ctx, gateway, calls } = await harness()
+    const previous = process.env['TEST_HOSTD_VERSION']
+    const previousArtifact = process.env['THREADHARBOR_TEST_HOSTD_DIR']
+    try {
+      const expected = hostdArtifactVersionFromDirectory(join(process.cwd(), 'packages/hostd/lib'))
+      process.env['TEST_HOSTD_VERSION'] = expected
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4101',
+      })) as unknown as { hostId: string }
+      await vi.waitFor(() => {
+        const inventory = gateway.state().hosts.find(candidate => candidate.hostId === host.hostId)?.inventory
+        if (inventory?.healthy !== true) throw new Error('inventory not healthy yet')
+      }, { timeout: 2000, interval: 10 })
+      expect(gateway.state().hostdArtifactVersion).toBe(expected)
+      const started = await gateway.dispatch(request('operation.start', {
+        kind: 'host-ssh-deploy',
+        title: 'host',
+        hostId: host.hostId,
+        ssh: { target: '127.0.0.1', user: 'agent', identityFile: '/dev/null', hostKeyFingerprint: 'SHA256:fake' },
+        confirm: true,
+      })) as unknown as { operationId: string; status: string; detail: string }
+      expect(started.status).toBe('succeeded')
+      expect(started.detail).toMatch(/已是最新版本/)
+      // No SSH deploy was enqueued: there should be no inventory refresh storm
+      // and the test's mock socket never saw a deploy-related call.
+      const inventoryCalls = calls.filter(call => call.request.method === 'inventory')
+      expect(inventoryCalls.length).toBeLessThan(3)
+      void previousArtifact
+    } finally {
+      if (previous === undefined) delete process.env['TEST_HOSTD_VERSION']
+      else process.env['TEST_HOSTD_VERSION'] = previous
+      if (previousArtifact === undefined) delete process.env['THREADHARBOR_TEST_HOSTD_DIR']
+      else process.env['THREADHARBOR_TEST_HOSTD_DIR'] = previousArtifact
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('still queues a re-deploy when the remote hostd version is behind the gateway artifact', async () => {
+    const { ctx, gateway } = await harness()
+    const previous = process.env['TEST_HOSTD_VERSION']
+    try {
+      process.env['TEST_HOSTD_VERSION'] = '0.0.0-stale'
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4101',
+      })) as unknown as { hostId: string }
+      await vi.waitFor(() => {
+        const inventory = gateway.state().hosts.find(candidate => candidate.hostId === host.hostId)?.inventory
+        if (inventory?.healthy !== true) throw new Error('inventory not healthy yet')
+      }, { timeout: 2000, interval: 10 })
+      const started = await gateway.dispatch(request('operation.start', {
+        kind: 'host-ssh-deploy',
+        title: 'host',
+        hostId: host.hostId,
+        ssh: { target: '127.0.0.1', user: 'agent', identityFile: '/dev/null', hostKeyFingerprint: 'SHA256:fake' },
+        confirm: true,
+      })) as unknown as { operationId: string; status: string }
+      expect(started.status).toBe('queued')
+      // The deploy path will fail in this harness because there is no real SSH
+      // host; we only assert that the operation entered the queue rather than
+      // being short-circuited.
+    } finally {
+      if (previous === undefined) delete process.env['TEST_HOSTD_VERSION']
+      else process.env['TEST_HOSTD_VERSION'] = previous
       await ctx.fiber.dispose()
     }
   })

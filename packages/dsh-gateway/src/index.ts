@@ -692,6 +692,14 @@ export class RemoteAgentGateway extends Service {
       const target = hostId === undefined
         ? `ssh:${ssh.user ?? ''}@${ssh.target}:${ssh.port ?? 22}`
         : `host:${hostId}`
+      if (hostId !== undefined) {
+        const idempotentView = this.idempotentUpToDateOperation({
+          hostId,
+          title: `重新部署 ${title}`,
+          target,
+        })
+        if (idempotentView !== undefined) return idempotentView
+      }
       return this.launchOperation({
         kind,
         title: hostId === undefined ? `部署 ${title}` : `重新部署 ${title}`,
@@ -737,6 +745,49 @@ export class RemoteAgentGateway extends Service {
       })
     }
     throw new Error('operation kind must be host-ssh-deploy or agent-install')
+  }
+
+  /**
+   * Short-circuit a re-deploy operation when the remote host is already on
+   * the gateway's hostd artifact version. Without this, a DSH restart that
+   * drops the in-memory operations map would re-prompt "升级 hostd" and
+   * re-queue a full SSH deploy even though the remote is up to date.
+   *
+   * Returns a synthetic `succeeded` operation view when the host has a
+   * healthy inventory whose `hostdVersion` matches the local artifact
+   * stamp, or `undefined` when the caller should fall through to the
+   * normal launch path.
+   */
+  private idempotentUpToDateOperation(input: {
+    hostId: ReturnType<typeof RemoteHostId>
+    title: string
+    target: string
+  }): RemoteOperationView | undefined {
+    const host = this.requireHost(input.hostId)
+    if (host.inventoryError !== undefined) return undefined
+    if (host.inventory === undefined || host.inventory.healthy !== true) return undefined
+    const artifact = hostdArtifactVersion()
+    if (artifact === '' || artifact === 'unknown') return undefined
+    if (host.inventory.hostdVersion !== artifact) return undefined
+    const operationId = RemoteOperationId(randomUUID())
+    const now = new Date().toISOString()
+    const view: RemoteOperationView = {
+      operationId,
+      kind: 'host-ssh-deploy',
+      status: 'succeeded',
+      phase: 'completed',
+      title: input.title,
+      detail: '远端 hostd 已是最新版本，无需重新部署。',
+      target: input.target,
+      cancellable: false,
+      hostId: input.hostId,
+      startedAt: now,
+      updatedAt: now,
+      finishedAt: now,
+    }
+    this.operations.set(operationId, view)
+    this.pruneOperations()
+    return view
   }
 
   /** Register one background task, serialize its mutation, and retain a safe result summary. */
