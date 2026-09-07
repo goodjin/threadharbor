@@ -63,16 +63,16 @@ function safeVersion(value) {
   return value
 }
 
-function channelConfig(value) {
+export function channelConfig(value) {
   if (value !== 'stable' && value !== 'test') fail('channel must be stable or test')
   return channels[value]
 }
 
-function releaseRoot(options) {
+export function releaseRoot(options) {
   return resolve(options.root ?? process.env['THREADHARBOR_RELEASE_ROOT'] ?? join(homedir(), '.local', 'share', 'threadharbor'))
 }
 
-function channelHome(channel, options) {
+export function channelHome(channel, options) {
   const configured = options.home ?? process.env[`THREADHARBOR_${channel.toUpperCase()}_HOME`]
   return resolve(configured ?? channelConfig(channel).defaultHome)
 }
@@ -388,7 +388,7 @@ async function waitForHealth(port, pid, timeoutMs = 30_000) {
   fail(`DSH Web on port ${port} did not become healthy: ${lastError}`)
 }
 
-async function startChannel(channel, options) {
+export async function startChannel(channel, options) {
   const config = channelConfig(channel)
   const home = channelHome(channel, options)
   const existing = readPid(home)
@@ -418,7 +418,7 @@ async function startChannel(channel, options) {
   return { channel, home, port: config.port, pid: child.pid, target, logPath }
 }
 
-async function stopChannel(channel, options) {
+export async function stopChannel(channel, options) {
   const home = channelHome(channel, options)
   const pid = readPid(home)
   if (pid === undefined) return { channel, stopped: false }
@@ -432,7 +432,7 @@ async function stopChannel(channel, options) {
   return { channel, stopped: true, pid }
 }
 
-async function channelStatus(channel, options) {
+export async function channelStatus(channel, options) {
   const config = channelConfig(channel)
   const home = channelHome(channel, options)
   const pid = readPid(home)

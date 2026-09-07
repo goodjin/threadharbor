@@ -29,6 +29,29 @@ dsh plugin --profile web remove threadharbor
 
 修改 profile 后需要重启对应的 `dsh --profile web` 进程。
 
+## 日常发布（源码本地 build / release snapshot）
+
+不通过 npm，而是把当前 checkout 的代码作为不可变快照发布到 `~/.local/share/threadharbor/releases/`，并把对应 channel（stable 3080 / test 3081）的 DSH Web 平滑切到新快照。完整链路在 `scripts/release-promote.mjs`：
+
+```sh
+pnpm run release:candidate                       # npm run build -> pnpm deploy -> 写 manifest + 校验和
+pnpm run release:promote  -- --channel stable    # stop -> promoteRelease -> startChannel
+pnpm run release:status    -- --channel stable   # 健康检查
+```
+
+`release:promote` 是一次原子事务：成功时 DSH Web 服务的就是新快照；失败时会自动回滚到上一个快照并把老 DSH Web 重新拉起，DSH 不会中断。失败信息会区分"已回滚"还是"需要手工恢复"。发布失败回滚的具体步骤：
+
+```sh
+node scripts/release-channel.mjs status   --channel stable
+node scripts/release-channel.mjs rollback --channel stable
+node scripts/release-channel.mjs start    --channel stable
+```
+
+发布机（`release-promote.mjs`）和发布仓库（`release-channel.mjs`）的分工：
+
+- `release-channel.mjs`：8 个原子子命令（candidate / verify / promote / rollback / bootstrap / start / stop / status），可以单独调用。
+- `release-promote.mjs`：把 candidate、promote、start 串成一个 release；默认要求 clean working tree（manifest 里 `source.dirty=true` 会被 `promoteRelease` 拒掉，需要 `--allow-dirty`）。
+
 ## 从 GitHub 源码安装
 
 尚未使用 npm 发行包时，使用 pnpm 安装工作区依赖并构建全部五个包，再让 DSH profile 链接根 bundle：

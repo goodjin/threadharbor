@@ -56,6 +56,9 @@
     "typecheck": "tsc -b tsconfig.json",
     "build": "bash scripts/build.sh",
     "test": "vitest run",
+    "release:candidate": "node scripts/release-promote.mjs candidate",
+    "release:promote": "node scripts/release-promote.mjs promote",
+    "release:status": "node scripts/release-promote.mjs status",
     "check": "npm run typecheck && npm run test && npm run build"
   },
   "devDependencies": {

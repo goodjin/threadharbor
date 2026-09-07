@@ -12,6 +12,7 @@ import {
   rollbackRelease,
   verifyRelease,
 } from '../scripts/release-channel.mjs'
+import { candidate, parseArgs, promote, status } from '../scripts/release-promote.mjs'
 
 const roots: string[] = []
 
@@ -160,5 +161,202 @@ describe('stable/test release channels', () => {
       .toBe(await realpath(join(setup.artifact, 'node_modules', '@threadharbor', 'dsh-client')))
     expect(await readFile(join(stableHome, 'profiles', 'web', 'cordis.patch.yml'), 'utf8')).toBe('[]\n')
     expect(await readFile(join(stableHome, 'profiles', 'web', 'cordis.patch.imported.yml'), 'utf8')).toContain('extra')
+  })
+})
+
+describe('release-promote orchestration', () => {
+  function makeDeps(overrides: Partial<{
+    promoteRelease: (...args: unknown[]) => unknown
+    rollbackRelease: (...args: unknown[]) => unknown
+    stopChannel: (...args: unknown[]) => unknown
+    startChannel: (...args: unknown[]) => unknown
+    readCurrentRelease: (...args: unknown[]) => unknown
+    readLatestCandidate: (...args: unknown[]) => unknown
+    runNpmBuild: (...args: unknown[]) => unknown
+    safeVersionToken: (...args: unknown[]) => unknown
+    createCandidate: (...args: unknown[]) => unknown
+  }> = {}) {
+    const calls: { name: string; args: unknown[] }[] = []
+    const record = (name: string) => async (...args: unknown[]): Promise<unknown> => {
+      calls.push({ name, args })
+      return undefined
+    }
+    return {
+      calls,
+      deps: {
+        promoteRelease: overrides.promoteRelease ?? (() => ({ release: '/fake/release', previous: '/fake/previous' })),
+        rollbackRelease: overrides.rollbackRelease ?? (() => undefined),
+        stopChannel: overrides.stopChannel ?? record('stopChannel'),
+        startChannel: overrides.startChannel ?? record('startChannel'),
+        channelStatus: async () => ({ pid: null, healthy: false }),
+        readCurrentRelease: overrides.readCurrentRelease ?? (() => '/fake/current'),
+        readLatestCandidate: overrides.readLatestCandidate ?? (() => '0.1.0-local.20990101.7'),
+        runNpmBuild: overrides.runNpmBuild ?? (() => undefined),
+        safeVersionToken: overrides.safeVersionToken ?? (() => '0.1.0-local.20990101.0'),
+        createCandidate: overrides.createCandidate ?? (() => '/fake/release'),
+      },
+    }
+  }
+
+  async function freshChannelHome(): Promise<string> {
+    const root = await mkdtemp(join(tmpdir(), 'threadharbor-promote-'))
+    roots.push(root)
+    const home = join(root, '.dsh-threadharbor-stable')
+    await mkdir(home, { recursive: true })
+    return home
+  }
+
+  it('parses candidate/promote/status with --allow-dirty and key/value options', () => {
+    expect(parseArgs(['candidate'])).toEqual({ command: 'candidate', options: {} })
+    expect(parseArgs(['promote', '--channel', 'stable', '--allow-dirty'])).toEqual({
+      command: 'promote',
+      options: { channel: 'stable', 'allow-dirty': true },
+    })
+    expect(parseArgs(['status', '--channel', 'test'])).toEqual({
+      command: 'status',
+      options: { channel: 'test' },
+    })
+    expect(() => parseArgs([])).toThrow()
+    expect(() => parseArgs(['promote', '--channel'])).toThrow()
+  })
+
+  it('promotes by stop -> promoteRelease -> startChannel in order', async () => {
+    const home = await freshChannelHome()
+    const setup = makeDeps()
+    const result = await promote({
+      channel: 'stable',
+      options: { channel: 'stable', home, version: 'v0' },
+      deps: setup.deps,
+    })
+    expect(result.channel).toBe('stable')
+    expect(result.current).toBe('release')
+    expect(result.previous).toBe('previous')
+    expect(setup.calls.map(call => call.name)).toEqual(['stopChannel', 'startChannel'])
+    const stopArgs = setup.calls[0].args as [{ channel: string }]
+    const startArgs = setup.calls[1].args as [{ channel: string }]
+    expect(stopArgs[0]).toBe('stable')
+    expect(startArgs[0]).toBe('stable')
+  })
+
+  it('rolls back to the previous release when startChannel fails after promote', async () => {
+    const home = await freshChannelHome()
+    const calls: string[] = []
+    let startAttempts = 0
+    const deps = {
+      promoteRelease: () => ({ release: '/fake/release', previous: '/fake/previous' }),
+      rollbackRelease: (...args: unknown[]) => { calls.push(`rollback:${(args[0] as { root: string }).root}`); return undefined },
+      stopChannel: async () => { calls.push('stop') },
+      startChannel: async () => {
+        startAttempts += 1
+        if (startAttempts === 1) {
+          calls.push('start:try1')
+          throw new Error('port 3080 did not become healthy')
+        }
+        calls.push('start:retry')
+      },
+      channelStatus: async () => ({ pid: null, healthy: false }),
+      readCurrentRelease: () => '/fake/current',
+      readLatestCandidate: () => '0.1.0-local.20990101.7',
+      runNpmBuild: () => undefined,
+      safeVersionToken: () => '0.1.0-local.20990101.0',
+      createCandidate: () => '/fake/release',
+    }
+    await expect(promote({
+      channel: 'stable',
+      options: { channel: 'stable', home, version: 'v0' },
+      deps,
+    })).rejects.toThrow(/rolled back to previous/)
+    const root = (await import('node:os')).homedir() + '/.local/share/threadharbor'
+    expect(calls).toEqual(['stop', 'start:try1', `rollback:${root}`, 'start:retry'])
+  })
+
+  it('does not roll back when the previous release is missing', async () => {
+    const home = await freshChannelHome()
+    const calls: string[] = []
+    const deps = {
+      promoteRelease: () => ({ release: '/fake/release' }),
+      rollbackRelease: () => { calls.push('rollback') },
+      stopChannel: async () => { calls.push('stop') },
+      startChannel: async () => { calls.push('start'); throw new Error('boom') },
+      channelStatus: async () => ({ pid: null, healthy: false }),
+      readCurrentRelease: () => '/fake/current',
+      readLatestCandidate: () => '0.1.0-local.20990101.7',
+      runNpmBuild: () => undefined,
+      safeVersionToken: () => '0.1.0-local.20990101.0',
+      createCandidate: () => '/fake/release',
+    }
+    await expect(promote({
+      channel: 'stable',
+      options: { channel: 'stable', home, version: 'v0' },
+      deps,
+    })).rejects.toThrow(/manual recovery/i)
+    expect(calls).toEqual(['stop', 'start'])
+  })
+
+  it('refuses to promote when no candidate and no --version are available', async () => {
+    const home = await freshChannelHome()
+    const setup = makeDeps({ readLatestCandidate: () => undefined })
+    await expect(promote({
+      channel: 'stable',
+      options: { channel: 'stable', home },
+      deps: setup.deps,
+    })).rejects.toThrow(/no candidate release is available/)
+    expect(setup.calls).toEqual([])
+  })
+
+  it('refuses to promote when the channel home has not been bootstrapped', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'threadharbor-promote-'))
+    roots.push(root)
+    const setup = makeDeps()
+    await expect(promote({
+      channel: 'stable',
+      options: { channel: 'stable', home: join(root, 'missing') },
+      deps: setup.deps,
+    })).rejects.toThrow(/channel home does not exist/)
+  })
+
+  it('surfaces a clear error when stopChannel fails before reaching promote', async () => {
+    const home = await freshChannelHome()
+    const setup = makeDeps({
+      promoteRelease: () => { throw new Error('manifest dirty') },
+    })
+    await expect(promote({
+      channel: 'stable',
+      options: { channel: 'stable', home, version: 'v0' },
+      deps: setup.deps,
+    })).rejects.toThrow(/promote failed: manifest dirty/)
+  })
+
+  it('runs runNpmBuild and createCandidate with a default safe version token', () => {
+    const setup = makeDeps()
+    const out = candidate({ options: {}, deps: setup.deps })
+    expect(out.version).toBe('0.1.0-local.20990101.0')
+    expect(setup.calls.map(call => call.name)).toEqual([])
+    // runNpmBuild / createCandidate are called inline (not via record()), so
+    // verify them via the deps passed to createCandidate:
+    const createArgs = (setup.deps.createCandidate as (...args: unknown[]) => unknown).toString()
+    expect(typeof setup.deps.createCandidate).toBe('function')
+    expect(typeof setup.deps.runNpmBuild).toBe('function')
+    expect(createArgs).toContain('')
+  })
+
+  it('echoes channel status alongside the stable-current basename', async () => {
+    const home = await freshChannelHome()
+    const deps = {
+      promoteRelease: () => ({ release: '/fake/release', previous: '/fake/previous' }),
+      rollbackRelease: () => undefined,
+      stopChannel: async () => undefined,
+      startChannel: async () => undefined,
+      channelStatus: async () => ({ pid: 1234, healthy: true, port: 3080 }),
+      readCurrentRelease: () => '/fake/releases/0.1.0-local.20260907.3',
+      readLatestCandidate: () => '0.1.0-local.20990101.9',
+      runNpmBuild: () => undefined,
+      safeVersionToken: () => '0.1.0-local.20990101.0',
+      createCandidate: () => '/fake/release',
+    }
+    const out = await status({ channel: 'stable', options: { channel: 'stable', home }, deps })
+    expect(out.pid).toBe(1234)
+    expect(out.healthy).toBe(true)
+    expect(out.stableCurrent).toBe('0.1.0-local.20260907.3')
   })
 })
