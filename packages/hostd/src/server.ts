@@ -59,6 +59,13 @@ export interface HostdOptions {
   readonly maxDirectoryEntries: number
   readonly authTimeoutMs: number
   readonly installTimeoutMs: number
+  /**
+   * Maximum wall-clock time the hold-worker waits for the Agent backend to respond
+   * to a single `session/prompt`. On expiry the worker synthesizes a timeout
+   * completion frame so journal readers unblock and the prompt queue drains
+   * instead of hanging until the backend process eventually dies.
+   */
+  readonly promptTimeoutMs: number
   readonly agentConfigHome: string
   readonly maxAgentConfigBytes: number
   readonly codexCliCommand: string
@@ -751,6 +758,7 @@ export class RemoteAgentHostd {
       statePath: join(directory, 'state.json'),
       maxJournalEvents: this.options.maxJournalEvents,
       maxJournalBytes: this.options.maxJournalBytes,
+      promptTimeoutMs: this.options.promptTimeoutMs,
       ...(sessionRoot === undefined ? {} : { sessionRoot }),
       transport: record.backend === 'grok'
         ? {

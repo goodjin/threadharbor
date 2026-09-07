@@ -36,6 +36,7 @@ export function parseConfig(path: string): HoldWorkerConfig {
   }
   const backend = text('backend')
   if (backend !== 'grok' && backend !== 'codex' && backend !== 'claude' && backend !== 'dsh') throw new Error('invalid hold backend')
+  const promptTimeoutMs = integer('promptTimeoutMs')
   const transportValue = jsonObject(value['transport'], 'hold worker transport')
   const kind = transportValue['kind']
   const transport: HoldWorkerConfig['transport'] = kind === 'stdio'
@@ -70,6 +71,7 @@ export function parseConfig(path: string): HoldWorkerConfig {
     statePath: text('statePath'),
     maxJournalEvents: integer('maxJournalEvents'),
     maxJournalBytes: integer('maxJournalBytes'),
+    promptTimeoutMs,
     ...(typeof value['sessionRoot'] === 'string' && value['sessionRoot'] !== ''
       ? { sessionRoot: value['sessionRoot'] as string }
       : {}),
@@ -143,6 +145,10 @@ export class HoldWorker {
     readonly timer: NodeJS.Timeout
   }>()
   private readonly coalescer = new ChunkCoalescer()
+  /** RpcId of the in-flight session/prompt; cleared when its response lands or it times out. */
+  private currentPromptRpcId: string | undefined
+  /** Wall-clock guard for `currentPromptRpcId`. Fires when the Agent backend stalls. */
+  private currentPromptTimer: ReturnType<typeof setTimeout> | undefined
   private coalesceTimer: ReturnType<typeof setTimeout> | undefined
   private appendsSinceCompact = 0
   private stdioEpoch = 0
@@ -206,6 +212,7 @@ export class HoldWorker {
 
   private async performClose(): Promise<void> {
     this.clearCoalesceTimer()
+    this.clearPromptTimeout()
     for (const frame of this.coalescer.flush()) this.append(frame)
     process.off('SIGTERM', this.stopFromSignal)
     process.off('SIGINT', this.stopFromSignal)
@@ -308,7 +315,10 @@ export class HoldWorker {
     const request = rpcId === undefined ? undefined : this.requests.get(rpcId)
     if (request !== undefined && record !== undefined && record['method'] === undefined
       && (Object.hasOwn(record, 'result') || Object.hasOwn(record, 'error'))) {
-      if (rpcId !== undefined) this.requests.delete(rpcId)
+      if (rpcId !== undefined) {
+        this.requests.delete(rpcId)
+        if (request.method === 'session/prompt') this.clearPromptTimeout()
+      }
       if (request.method === 'initialize' && record['error'] === undefined) {
         this.initialized = true
         this.initializeResult = record['result']
@@ -347,6 +357,7 @@ export class HoldWorker {
   }
 
   private recordTransportEnd(frame: JsonValue): void {
+    this.clearPromptTimeout()
     const journaled = this.journalFrames(frame ? [frame] : [])
     if (journaled.length > 0) {
       this.resolveWaiters(journaled[journaled.length - 1]!)
@@ -523,6 +534,7 @@ export class HoldWorker {
         method,
         ...(typeof paramsRecord?.['sessionId'] === 'string' ? { sessionId: paramsRecord['sessionId'] } : {}),
       })
+      if (method === 'session/prompt') this.armPromptTimeout(String(id))
     }
     const line = jsonLine(frame)
     if (this.child !== undefined) {
@@ -531,6 +543,58 @@ export class HoldWorker {
     }
     if (this.upstream?.readyState !== WebSocket.OPEN) throw new Error('backend websocket is not open')
     this.upstream.send(JSON.stringify(frame))
+  }
+
+  /** Start the wall-clock guard for a single in-flight session/prompt. */
+  private armPromptTimeout(rpcId: string): void {
+    this.clearPromptTimeout()
+    this.currentPromptRpcId = rpcId
+    this.currentPromptTimer = setTimeout(() => {
+      this.currentPromptTimer = undefined
+      this.timeoutPrompt(rpcId)
+    }, this.config.promptTimeoutMs)
+  }
+
+  /** Cancel the wall-clock guard if one is armed. Safe to call when no prompt is in flight. */
+  private clearPromptTimeout(): void {
+    if (this.currentPromptTimer !== undefined) {
+      clearTimeout(this.currentPromptTimer)
+      this.currentPromptTimer = undefined
+    }
+    this.currentPromptRpcId = undefined
+  }
+
+  /**
+   * Synthesize a timeout completion when the Agent backend stalls. Drops the in-flight
+   * request, appends a JSON-RPC error response so journal waiters unblock, appends the
+   * backend-native completion frame so the gateway flips turnState back to idle, then
+   * drains the prompt queue.
+   */
+  private timeoutPrompt(rpcId: string): void {
+    if (this.currentPromptRpcId !== rpcId) return
+    const request = this.requests.get(rpcId)
+    this.currentPromptRpcId = undefined
+    this.requests.delete(rpcId)
+    const reason = `prompt timed out after ${this.config.promptTimeoutMs}ms`
+    const errorResponse: JsonValue = {
+      jsonrpc: '2.0', id: rpcId, error: { code: -32000, message: reason },
+    }
+    const completionFrame = this.synthesizePromptCompletion(
+      request ?? { method: 'session/prompt' },
+      { error: { code: -32000, message: reason } },
+    )
+    const frames: JsonValue[] = [errorResponse]
+    if (completionFrame !== undefined) frames.push(completionFrame)
+    const journaled = this.journalFrames(frames)
+    this.promptActive = false
+    this.drainPromptQueue()
+    if (journaled.length > 0) {
+      this.resolveWaiters(journaled[journaled.length - 1]!)
+      this.resolveSeqWaiters()
+      this.writeState(true)
+    } else {
+      this.scheduleCoalesceFlush()
+    }
   }
 
   private admitPrompt(frame: JsonValue): void {

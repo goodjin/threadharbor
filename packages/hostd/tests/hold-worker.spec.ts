@@ -51,6 +51,7 @@ describe('HoldWorker', () => {
       statePath: join(root, 'state.json'),
       maxJournalEvents: 20,
       maxJournalBytes: 100_000,
+      promptTimeoutMs: 60_000,
       transport: {
         kind: 'stdio', command: process.execPath,
         args: [new URL('./fixtures/fake-acp.mjs', import.meta.url).pathname, output, gate],
@@ -91,6 +92,7 @@ describe('HoldWorker', () => {
       statePath: join(root, 'state.json'),
       maxJournalEvents: 20,
       maxJournalBytes: 100_000,
+      promptTimeoutMs: 60_000,
       transport: {
         kind: 'stdio', command: process.execPath,
         args: [new URL('./fixtures/fake-acp.mjs', import.meta.url).pathname, join(root, 'requests.txt'), join(root, 'gate')],
@@ -125,6 +127,7 @@ describe('HoldWorker', () => {
       statePath: join(root, 'state.json'),
       maxJournalEvents: 20,
       maxJournalBytes: 100_000,
+      promptTimeoutMs: 60_000,
       transport: {
         kind: 'stdio', command: process.execPath,
         args: [new URL('./fixtures/fake-acp.mjs', import.meta.url).pathname, join(root, 'requests.txt'), gate],
@@ -162,6 +165,7 @@ describe('HoldWorker', () => {
       statePath: join(root, 'state.json'),
       maxJournalEvents: 20,
       maxJournalBytes: 100_000,
+      promptTimeoutMs: 60_000,
       transport: {
         kind: 'stdio', command: process.execPath,
         args: [new URL('./fixtures/fake-acp.mjs', import.meta.url).pathname, join(root, 'requests.txt'), join(root, 'gate')],
@@ -206,6 +210,7 @@ describe('HoldWorker', () => {
       statePath: join(root, 'state.json'),
       maxJournalEvents: 3,
       maxJournalBytes: 100_000,
+      promptTimeoutMs: 60_000,
       transport: {
         kind: 'stdio', command: process.execPath,
         args: [new URL('./fixtures/fake-acp.mjs', import.meta.url).pathname, join(root, 'requests.txt'), gate],
@@ -250,6 +255,7 @@ describe('HoldWorker', () => {
       statePath: join(root, 'state.json'),
       maxJournalEvents: 20,
       maxJournalBytes: 100_000,
+      promptTimeoutMs: 60_000,
       transport: {
         kind: 'stdio', command: process.execPath,
         args: [new URL('./fixtures/fake-acp.mjs', import.meta.url).pathname, output, gate, backend],
@@ -303,6 +309,7 @@ describe('HoldWorker', () => {
       statePath: join(root, 'state.json'),
       maxJournalEvents: 20,
       maxJournalBytes: 100_000,
+      promptTimeoutMs: 60_000,
       transport: {
         kind: 'stdio', command: process.execPath,
         args: [new URL('./fixtures/fake-acp.mjs', import.meta.url).pathname, output, gate],
@@ -326,6 +333,101 @@ describe('HoldWorker', () => {
     }
   })
 
+  it('synthesizes a timeout completion when an Agent never responds so the queue drains', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-hold-prompt-timeout-'))
+    roots.push(root)
+    const socketPath = join(root, 'control.sock')
+    const output = join(root, 'requests.txt')
+    const config: HoldWorkerConfig = {
+      version: 1,
+      holdId: 'hold',
+      generation: 'generation',
+      backend: 'codex',
+      cwd: root,
+      socketPath,
+      journalPath: join(root, 'journal.jsonl'),
+      statePath: join(root, 'state.json'),
+      maxJournalEvents: 50,
+      maxJournalBytes: 100_000,
+      promptTimeoutMs: 100,
+      transport: {
+        kind: 'stdio', command: process.execPath,
+        args: [new URL('./fixtures/fake-acp-hung.mjs', import.meta.url).pathname, output],
+      },
+    }
+    const worker = new HoldWorker(config)
+    await worker.start()
+    try {
+      expect(await send(socketPath, admission('p1'))).toMatchObject({ ok: true, result: { duplicate: false } })
+      await vi.waitFor(async () => { expect(await readFile(output, 'utf8')).toBe('p1\n') })
+      // The hung fixture never writes a response; within ~100ms the worker must
+      // synthesize the timeout completion and free the queue.
+      await vi.waitFor(async () => {
+        const page = await send(socketPath, { operation: 'read', afterSeq: 0, generation: 'generation' })
+        if (!page.ok) throw new Error(page.error)
+        const events = (page.result as { events: readonly { frame: unknown }[] }).events
+        const frames = events.map(event => event.frame).filter(frame => frame !== null && typeof frame === 'object')
+        const timeoutError = frames.find(frame => !Array.isArray(frame) && Reflect.get(frame, 'error')
+          && JSON.stringify(Reflect.get(frame, 'error')).includes('timed out'))
+        const completion = frames.find(frame => !Array.isArray(frame) && Reflect.get(frame, 'method') === '_x.ai/session/prompt_complete')
+        expect(timeoutError).toBeDefined()
+        expect(completion).toBeDefined()
+      }, { timeout: 1000, interval: 10 })
+      // After the timeout the next admission must be forwarded to the backend.
+      expect(await send(socketPath, admission('p2'))).toMatchObject({ ok: true, result: { duplicate: false } })
+      await vi.waitFor(async () => { expect(await readFile(output, 'utf8')).toBe('p1\np2\n') })
+    } finally {
+      await worker.close()
+    }
+  })
+
+  it('synthesizes a DSH turn/end timeout frame when the DSH Agent stalls', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-hold-dsh-timeout-'))
+    roots.push(root)
+    const socketPath = join(root, 'control.sock')
+    const output = join(root, 'requests.txt')
+    const config: HoldWorkerConfig = {
+      version: 1,
+      holdId: 'hold',
+      generation: 'generation',
+      backend: 'dsh',
+      cwd: root,
+      socketPath,
+      journalPath: join(root, 'journal.jsonl'),
+      statePath: join(root, 'state.json'),
+      maxJournalEvents: 50,
+      maxJournalBytes: 100_000,
+      promptTimeoutMs: 80,
+      transport: {
+        kind: 'stdio', command: process.execPath,
+        args: [new URL('./fixtures/fake-acp-hung.mjs', import.meta.url).pathname, output],
+      },
+    }
+    const worker = new HoldWorker(config)
+    await worker.start()
+    try {
+      expect(await send(socketPath, admission('p1'))).toMatchObject({ ok: true, result: { duplicate: false } })
+      await vi.waitFor(async () => { expect(await readFile(output, 'utf8')).toBe('p1\n') })
+      await vi.waitFor(async () => {
+        const page = await send(socketPath, { operation: 'read', afterSeq: 0, generation: 'generation' })
+        if (!page.ok) throw new Error(page.error)
+        const events = (page.result as { events: readonly { frame: unknown }[] }).events
+        const turnEnd = events.find(event => {
+          const f = event.frame
+          if (f === null || typeof f !== 'object' || Array.isArray(f)) return false
+          if (Reflect.get(f, 'method') !== 'session.event') return false
+          const params = Reflect.get(f, 'params')
+          if (params === null || typeof params !== 'object' || Array.isArray(params)) return false
+          const ev = Reflect.get(params, 'event')
+          return ev !== null && typeof ev === 'object' && !Array.isArray(ev) && Reflect.get(ev, 'type') === 'turn/end'
+        })
+        expect(turnEnd).toBeDefined()
+      }, { timeout: 1000, interval: 10 })
+    } finally {
+      await worker.close()
+    }
+  })
+
   it('restarts a DSH stdio backend on session/cancel because the SDK wire has no cancel', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-hold-dsh-cancel-'))
     roots.push(root)
@@ -343,6 +445,7 @@ describe('HoldWorker', () => {
       statePath: join(root, 'state.json'),
       maxJournalEvents: 20,
       maxJournalBytes: 100_000,
+      promptTimeoutMs: 60_000,
       transport: {
         kind: 'stdio', command: process.execPath,
         args: [new URL('./fixtures/fake-dsh.mjs', import.meta.url).pathname, pidFile, output],
@@ -402,6 +505,7 @@ describe('HoldWorker', () => {
       statePath: join(root, 'state.json'),
       maxJournalEvents: 20,
       maxJournalBytes: 100_000,
+      promptTimeoutMs: 60_000,
       transport: {
         kind: 'stdio', command: process.execPath,
         args: [new URL('./fixtures/fake-acp.mjs', import.meta.url).pathname, output, gate],
@@ -440,6 +544,7 @@ describe('HoldWorker', () => {
       statePath: join(root, 'state.json'),
       maxJournalEvents: 20,
       maxJournalBytes: 100_000,
+      promptTimeoutMs: 60_000,
       transport: {
         kind: 'stdio', command: process.execPath,
         args: [new URL('./fixtures/fake-acp-thoughts.mjs', import.meta.url).pathname],
@@ -518,6 +623,7 @@ describe('HoldWorker', () => {
       statePath: join(root, 'state.json'),
       maxJournalEvents: 20,
       maxJournalBytes: 100_000,
+      promptTimeoutMs: 60_000,
       transport: {
         kind: 'stdio', command: process.execPath,
         args: [new URL('./fixtures/fake-env-snapshot.mjs', import.meta.url).pathname, snapshot],
@@ -549,6 +655,7 @@ describe('parseConfig', () => {
       statePath: join(root, 'state.json'),
       maxJournalEvents: 10,
       maxJournalBytes: 1024,
+      promptTimeoutMs: 60_000,
       transport: {
         kind: 'websocket',
         url: 'ws://127.0.0.1:1/ws',
@@ -576,6 +683,7 @@ describe('parseConfig', () => {
       statePath: join(root, 'state.json'),
       maxJournalEvents: 10,
       maxJournalBytes: 1024,
+      promptTimeoutMs: 60_000,
       transport: { kind: 'websocket', url: 'ws://127.0.0.1:1/ws' },
     }))
     const parsed = parseConfig(configPath)
@@ -598,11 +706,33 @@ describe('parseConfig', () => {
       statePath: join(root, 'state.json'),
       maxJournalEvents: 10,
       maxJournalBytes: 1024,
+      promptTimeoutMs: 60_000,
       sessionRoot: join(root, 'dsh-sessions'),
       transport: { kind: 'stdio', command: 'echo', args: [] },
     }))
     const parsed = parseConfig(configPath)
     expect(parsed.sessionRoot).toBe(join(root, 'dsh-sessions'))
+  })
+
+  it('rejects promptTimeoutMs that is not a positive integer', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-hold-parse-bad-prompt-timeout-'))
+    roots.push(root)
+    const configPath = join(root, 'config.json')
+    await writeFile(configPath, JSON.stringify({
+      version: 1,
+      holdId: 'hold',
+      generation: 'gen',
+      backend: 'codex',
+      cwd: root,
+      socketPath: join(root, 'control.sock'),
+      journalPath: join(root, 'journal.jsonl'),
+      statePath: join(root, 'state.json'),
+      maxJournalEvents: 10,
+      maxJournalBytes: 1024,
+      promptTimeoutMs: 0,
+      transport: { kind: 'stdio', command: 'echo', args: [] },
+    }))
+    expect(() => parseConfig(configPath)).toThrow(/promptTimeoutMs/)
   })
 
   it('omits sessionRoot when the field is absent', async () => {
@@ -620,6 +750,7 @@ describe('parseConfig', () => {
       statePath: join(root, 'state.json'),
       maxJournalEvents: 10,
       maxJournalBytes: 1024,
+      promptTimeoutMs: 60_000,
       transport: { kind: 'stdio', command: 'echo', args: [] },
     }))
     const parsed = parseConfig(configPath)

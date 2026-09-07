@@ -17,6 +17,12 @@ export interface HoldWorkerConfig {
   readonly maxJournalEvents: number
   readonly maxJournalBytes: number
   /**
+   * Maximum wall-clock time the worker waits for the Agent backend to respond to a
+   * single `session/prompt` JSON-RPC request. On expiry the worker synthesizes a
+   * timeout completion frame so journal readers unblock and the prompt queue drains.
+   */
+  readonly promptTimeoutMs: number
+  /**
    * Owner-resolved native-session root for stdio backends. hostd sets this to a
    * hostd-data-dir-relative path so DSH JSONL never lands in the project cwd;
    * non-dsh backends leave it undefined.
