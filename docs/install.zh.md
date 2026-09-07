@@ -39,7 +39,16 @@ pnpm run release:promote  -- --channel stable    # stop -> promoteRelease -> sta
 pnpm run release:status    -- --channel stable   # 健康检查
 ```
 
-`release:promote` 是一次原子事务：成功时 DSH Web 服务的就是新快照；失败时会自动回滚到上一个快照并把老 DSH Web 重新拉起，DSH 不会中断。失败信息会区分"已回滚"还是"需要手工恢复"。发布失败回滚的具体步骤：
+`release:promote` 是一次原子事务：成功时 DSH Web 服务的就是新快照；失败时会自动回滚到上一个快照并把老 DSH Web 重新拉起，DSH 不会中断。失败信息会区分"已回滚"还是"需要手工恢复"。
+
+如果 `dsh` 不在 `PATH` 上（例如本地用 `scripts/dsh-wrapper.sh` 启动），先把 dsh 入口导出给发布脚本：
+
+```sh
+export THREADHARBOR_DSH_COMMAND=/absolute/path/to/dsh-wrapper.sh   # 或者 dsh 二进制绝对路径
+pnpm run release:promote -- --channel stable
+```
+
+发布失败回滚的具体步骤：
 
 ```sh
 node scripts/release-channel.mjs status   --channel stable

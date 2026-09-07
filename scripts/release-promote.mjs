@@ -172,6 +172,12 @@ export const defaultDeps = {
  * @param {object} input.options - forwarded to release-channel.mjs helpers
  * @param {object} [input.deps] - overrides for tests
  */
+export function withDshCommand(options) {
+  if (options['dsh-command'] !== undefined) return options
+  if (process.env['THREADHARBOR_DSH_COMMAND'] === undefined) return options
+  return { ...options, 'dsh-command': process.env['THREADHARBOR_DSH_COMMAND'] }
+}
+
 export async function promote({ channel, options, deps = defaultDeps }) {
   const root = releaseRoot(options)
   const home = channelHome(channel, options)
@@ -203,21 +209,22 @@ export async function promote({ channel, options, deps = defaultDeps }) {
   }
   process.stderr.write(`promoted: ${basename(promoteResult.release)} (previous: ${promoteResult.previous === undefined ? 'none' : basename(promoteResult.previous)})\n`)
 
+  const startOptions = withDshCommand(options)
   try {
-    await deps.stopChannel(channel, options)
+    await deps.stopChannel(channel, startOptions)
   } catch (error) {
     fail(`could not stop existing DSH Web on ${channel}: ${error instanceof Error ? error.message : String(error)}.\nManual recovery: run 'release-channel.mjs rollback --channel ${channel}' then 'release-channel.mjs start --channel ${channel}'.`)
   }
 
   try {
-    await deps.startChannel(channel, options)
+    await deps.startChannel(channel, startOptions)
   } catch (startError) {
     process.stderr.write(`start after promote failed: ${startError instanceof Error ? startError.message : String(startError)}\n`)
     if (promoteResult.previous !== undefined) {
       let rollbackError
       try {
         deps.rollbackRelease({ root, stableHome: home })
-        await deps.startChannel(channel, options)
+        await deps.startChannel(channel, startOptions)
       } catch (error) {
         rollbackError = error
       }
@@ -253,7 +260,8 @@ export function candidate({ options, deps = defaultDeps }) {
 }
 
 export async function status({ channel, options, deps = defaultDeps }) {
-  const statusResult = await deps.channelStatus(channel, options)
+  const startOptions = withDshCommand(options)
+  const statusResult = await deps.channelStatus(channel, startOptions)
   const current = deps.readCurrentRelease(options)
   return {
     ...statusResult,

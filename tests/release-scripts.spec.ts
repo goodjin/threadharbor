@@ -12,7 +12,7 @@ import {
   rollbackRelease,
   verifyRelease,
 } from '../scripts/release-channel.mjs'
-import { candidate, parseArgs, promote, status } from '../scripts/release-promote.mjs'
+import { candidate, parseArgs, promote, status, withDshCommand } from '../scripts/release-promote.mjs'
 
 const roots: string[] = []
 
@@ -358,5 +358,19 @@ describe('release-promote orchestration', () => {
     expect(out.pid).toBe(1234)
     expect(out.healthy).toBe(true)
     expect(out.stableCurrent).toBe('0.1.0-local.20260907.3')
+  })
+
+  it('withDshCommand forwards THREADHARBOR_DSH_COMMAND unless --dsh-command is set', () => {
+    const previous = process.env['THREADHARBOR_DSH_COMMAND']
+    try {
+      process.env['THREADHARBOR_DSH_COMMAND'] = '/tmp/dsh-wrapper.sh'
+      expect(withDshCommand({ channel: 'stable' })).toEqual({ channel: 'stable', 'dsh-command': '/tmp/dsh-wrapper.sh' })
+      expect(withDshCommand({ channel: 'stable', 'dsh-command': '/explicit' })).toEqual({ channel: 'stable', 'dsh-command': '/explicit' })
+      delete process.env['THREADHARBOR_DSH_COMMAND']
+      expect(withDshCommand({ channel: 'stable' })).toEqual({ channel: 'stable' })
+    } finally {
+      if (previous === undefined) delete process.env['THREADHARBOR_DSH_COMMAND']
+      else process.env['THREADHARBOR_DSH_COMMAND'] = previous
+    }
   })
 })
