@@ -19,6 +19,7 @@ interface CliOptions {
   maxDirectoryEntries: string
   authTimeoutMs: string
   installTimeoutMs: string
+  promptTimeoutMs: string
   maxAgentConfigBytes: string
   codexCliCommand?: string
   codexCommand?: string
@@ -60,6 +61,7 @@ export async function runHostd(argv: readonly string[] = process.argv): Promise<
     .option('--max-directory-entries <count>', 'fs.list entry limit', '1000')
     .option('--auth-timeout-ms <ms>', 'detached login timeout', '900000')
     .option('--install-timeout-ms <ms>', 'agent installation timeout', '600000')
+    .option('--prompt-timeout-ms <ms>', 'session/prompt response timeout; on expiry the hold-worker synthesizes a timeout completion', '600000')
     .option('--max-agent-config-bytes <bytes>', 'maximum Agent user configuration size', '262144')
     .option('--codex-cli-command <path>', 'Codex CLI executable; defaults to codex on PATH')
     .option('--codex-command <path>', 'Codex ACP executable; defaults to codex-acp on PATH')
@@ -91,6 +93,7 @@ export async function runHostd(argv: readonly string[] = process.argv): Promise<
     maxDirectoryEntries: integer(cli.maxDirectoryEntries, 'max-directory-entries', 1),
     authTimeoutMs: integer(cli.authTimeoutMs, 'auth-timeout-ms', 1),
     installTimeoutMs: integer(cli.installTimeoutMs, 'install-timeout-ms', 1),
+    promptTimeoutMs: integer(cli.promptTimeoutMs, 'prompt-timeout-ms', 1),
     agentConfigHome: homedir(),
     maxAgentConfigBytes: integer(cli.maxAgentConfigBytes, 'max-agent-config-bytes', 1),
     codexCliCommand: cli.codexCliCommand ?? 'codex',

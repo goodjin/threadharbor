@@ -20,6 +20,7 @@ function options(dataDir: string, overrides: Partial<HostdOptions> = {}): HostdO
     maxDirectoryEntries: 20,
     authTimeoutMs: 100,
     installTimeoutMs: 100,
+    promptTimeoutMs: 60_000,
     agentConfigHome: dataDir,
     maxAgentConfigBytes: 4096,
     codexCliCommand: '/missing/codex',
