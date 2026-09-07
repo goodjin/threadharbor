@@ -312,6 +312,14 @@ function operationFailureDetail(kind: RemoteOperationView['kind'], error: unknow
   if (/host key changed|approved fingerprint/i.test(message)) return 'SSH 主机密钥与已批准的指纹不一致。'
   if (/Node\.js 22/i.test(message)) return '远端主机需要 Node.js 22 或更高版本。'
   if (/configured SSH credentials/i.test(message)) return '无法使用当前 SSH 配置连接远端主机。'
+  // post-deploy inventory check failed — surface the underlying reason so the
+  // user is not punted to "check the remote service logs" without context.
+  if (/inventory health check/i.test(message)) {
+    const reason = message.replace(/^[^:]+:\s*/, '').trim()
+    return reason.length > 0
+      ? `部署后 hostd 健康检查未通过：${reason}`
+      : '部署后 hostd 健康检查未通过，请检查远端 hostd.log。'
+  }
   return 'SSH 部署失败，请检查主机连接和远端服务日志。'
 }
 
@@ -697,7 +705,9 @@ export class RemoteAgentGateway extends Service {
           : await this.updateHost(input, report)
         report({ phase: 'refreshing', detail: '正在刷新主机和 Agent 状态。' })
         if (host.inventoryError !== undefined || host.inventory?.healthy !== true) {
-          throw new Error('deployed hostd did not pass its inventory health check')
+          const reason = host.inventoryError
+            ?? (host.inventory?.healthy === false ? 'hostd returned healthy=false' : 'inventory missing')
+          throw new Error(`deployed hostd did not pass its inventory health check: ${reason}`)
         }
         return { hostId: host.hostId }
       })

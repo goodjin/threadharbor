@@ -264,7 +264,18 @@ export class SshManager {
       'service="$HOME/.config/systemd/user/$service_name"',
       'args="--port ' + port + ' --data-dir $state/hostd"',
       "printf '%s\\n' '[Unit]' \"Description=ThreadHarbor host daemon ($channel)\" 'After=network-online.target' '' '[Service]' 'Type=simple' \"EnvironmentFile=-$state/hostd.env\" \"Environment=PATH=$common_path\" \"ExecStart=$node $bin $args\" 'Restart=on-failure' 'RestartSec=2' '' '[Install]' 'WantedBy=default.target' > \"$service\"",
-      'if command -v systemctl >/dev/null 2>&1; then systemctl --user daemon-reload && systemctl --user enable --now "$service_name" && systemctl --user restart "$service_name"; else pid_file="$state/hostd.pid"; if [ -f "$pid_file" ]; then old_pid="$(cat "$pid_file")"; case "$old_pid" in (*[!0-9]*|"") ;; (*) kill "$old_pid" 2>/dev/null || true ;; esac; fi; set -a; [ -f "$envfile" ] && . "$envfile"; set +a; PATH="$common_path" nohup "$node" "$bin" --port ' + port + ' --data-dir "$state/hostd" >>"$state/hostd.log" 2>&1 </dev/null & printf \'%s\\n\' "$!" > "$pid_file"; fi',
+      'if command -v systemctl >/dev/null 2>&1; then systemctl --user daemon-reload && systemctl --user enable --now "$service_name" && systemctl --user restart "$service_name"',
+      'else pid_file="$state/hostd.pid"',
+      // 1) kill whatever pid the previous run left in $state/hostd.pid (if any)
+      'if [ -f "$pid_file" ]; then old_pid="$(cat "$pid_file")"; case "$old_pid" in (*[!0-9]*|"") ;; (*) kill "$old_pid" 2>/dev/null || true ;; esac; fi',
+      // 2) on macOS / non-systemd hosts the previous hostd may have been started
+      //    outside this script (manual launch, older deploy, lost pid file).
+      //    Reclaim the port by killing whatever still listens on it, then wait
+      //    up to 5s for the kernel to release it before nohup spawns the new one.
+      'if command -v lsof >/dev/null 2>&1; then port_pid="$(lsof -nP -iTCP:' + port + ' -sTCP:LISTEN -t 2>/dev/null | head -n 1 | xargs)"; case "$port_pid" in (*[!0-9]*|"") ;; *) kill "$port_pid" 2>/dev/null || true ;; esac; for _ in 1 2 3 4 5 6 7 8 9 10; do lsof -nP -iTCP:' + port + ' -sTCP:LISTEN >/dev/null 2>&1 || break; sleep 0.5; done; fi',
+      'set -a; [ -f "$envfile" ] && . "$envfile"; set +a',
+      'PATH="$common_path" nohup "$node" "$bin" --port ' + port + ' --data-dir "$state/hostd" >>"$state/hostd.log" 2>&1 </dev/null & printf \'%s\\n\' "$!" > "$pid_file"',
+      'fi',
     ].join('; ')
     onProgress({ phase: 'starting-hostd', detail: '正在安装并启动远端 hostd 服务。' })
     const deploy = await run('ssh', [...this.sshArgs(config), this.destination(config), script], this.options.installTimeoutMs)

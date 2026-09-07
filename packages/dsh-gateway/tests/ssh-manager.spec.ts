@@ -45,4 +45,32 @@ describe('SshManager configuration', () => {
     expect(source).toContain('https_proxy')
     expect(source).not.toContain('agent-bundle')
   })
+
+  it('reclaims the hostd port on macOS / non-systemd hosts before nohup', () => {
+    // macOS lacks `systemctl --user`, so the fallback path can run into an
+    // orphaned listener holding the target port (manual launch, missing pid
+    // file, older deploy). Without reclaim the new hostd exits on EADDRINUSE
+    // and the post-deploy inventory check silently fails. The script must
+    // (a) look up the port-holder via lsof, (b) SIGTERM it, (c) wait for the
+    // kernel to release the port, then (d) nohup the new process.
+    const source = readFileSync(new URL('../src/ssh-manager.ts', import.meta.url), 'utf8')
+    expect(source).toContain('lsof -nP -iTCP:')
+    expect(source).toContain('-sTCP:LISTEN -t')
+    expect(source).toContain('-sTCP:LISTEN >/dev/null')
+    expect(source).toContain('sleep 0.5')
+    // pid-file path must still run first — the lsof step is the *fallback* for
+    // the case where the pid file is missing or stale.
+    expect(source.indexOf('cat "$pid_file"')).toBeLessThan(source.indexOf('lsof -nP'))
+    // systemd restart path is preserved for hosts that do have it.
+    expect(source).toContain('systemctl --user restart "$service_name"')
+  })
+
+  it('post-deploy inventory failure surfaces the underlying reason', () => {
+    const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+    expect(source).toContain('deployed hostd did not pass its inventory health check')
+    expect(source).toContain('inventory health check')
+    // The reason suffix must come from the host's inventoryError or healthy
+    // flag, not a generic placeholder, so the user can act on it.
+    expect(source).toContain('host.inventoryError')
+  })
 })
