@@ -18,6 +18,12 @@ import type { RemoteAgentStore } from './store.ts'
 import { describeHostConnectFailure, hostConnectionLabel, hostDeploymentBadge, hostIpLabel } from './store.ts'
 import css from './RemoteSurface.module.css'
 
+/** Hard ceiling on how long one archive click can leave the menu button on
+ *  "归档中…". The store's `call()` path already times out at 75 s per RPC, so
+ *  this only fires when something else in the chain (e.g. an IndexedDB request
+ *  that never settles) strands the promise. */
+const ARCHIVE_TIMEOUT_MS = 90_000
+
 /** Props injected by the sidebar slot registration. */
 export interface RemoteSidebarInjected {
   readonly store: RemoteAgentStore
@@ -222,7 +228,13 @@ function SessionRow({
             disabled={archiving}
             onClick={() => {
               setArchiving(true)
-              void store.archiveSession(session.sessionId)
+              const work = store.archiveSession(session.sessionId)
+              void Promise.race([
+                work,
+                new Promise<never>((_, reject) => {
+                  window.setTimeout(() => { reject(new Error('归档请求超时')) }, ARCHIVE_TIMEOUT_MS)
+                }),
+              ])
                 .then(() => { setMenuOpen(false) })
                 .catch(() => undefined)
                 .finally(() => { setArchiving(false) })

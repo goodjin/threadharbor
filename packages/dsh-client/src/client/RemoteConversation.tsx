@@ -1014,6 +1014,11 @@ function normalizeSessionPreferences(backend: RemoteAgentBackend, current: Sessi
 
 const SESSION_PREFERENCES_STORAGE_KEY = 'dsh.remote-agent.session-preferences'
 
+/** Hard ceiling on how long "立即清理过期会话" can leave the panel on
+ *  "清理中…". The store already caps a single sweep at 60 s; this outer
+ *  guard catches whatever the sweep budget missed. */
+const ARCHIVE_TIMEOUT_MS = 90_000
+
 function readPersistedSessionPreferences(): Record<string, SessionPreferences> {
   if (typeof window === 'undefined') return {}
   try {
@@ -1571,8 +1576,18 @@ function DisplayPreferencesSection({ store }: { store: RemoteAgentStore }) {
 
   const runArchive = (): void => {
     setSweepStatus({ state: 'running', message: '' })
-    void store.archiveStaleSessions()
+    const work = store.archiveStaleSessions()
+    void Promise.race([
+      work,
+      new Promise<number>((resolve) => {
+        window.setTimeout(() => { resolve(-1) }, ARCHIVE_TIMEOUT_MS)
+      }),
+    ])
       .then((archived) => {
+        if (archived === -1) {
+          setSweepStatus({ state: 'error', message: '归档请求超时，未完成的会话会在下次自动清理时再试。' })
+          return
+        }
         setSweepStatus({
           state: 'done',
           message: archived === 0
@@ -1695,8 +1710,25 @@ function CatalogPanel({ store, snapshot, onClose }: {
     setPending(key)
     setError('')
     setSuccess('')
-    void action()
-      .then(() => { setSuccess(successMessage); refresh() })
+    // The watchdog stops blocking the UI after ARCHIVE_TIMEOUT_MS even if
+    // `action()` itself never settles (e.g. an IndexedDB hang on the
+    // archive-then-select path). The store still keeps its own promise
+    // alive and will publish a fresh snapshot when it eventually resolves.
+    let settled = false
+    const work = action()
+    work.then(() => { settled = true })
+    void Promise.race([
+      work,
+      new Promise<void>((resolve) => {
+        window.setTimeout(() => { resolve() }, ARCHIVE_TIMEOUT_MS)
+      }),
+    ])
+      .then(() => {
+        if (settled) {
+          setSuccess(successMessage)
+          refresh()
+        }
+      })
       .catch((reason: unknown) => { setError(String(reason)) })
       .finally(() => { setPending(undefined) })
   }

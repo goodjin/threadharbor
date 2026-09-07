@@ -1827,6 +1827,149 @@ describe('RemoteAgentStore', () => {
       store.dispose()
     }
   })
+
+  it('archiveSession on the current session does not wait for sibling catchup', async () => {
+    // Reproduces the regression where the archive button could stay on
+    // "归档中…" forever: archiving the current session used to await
+    // selectSession(next) which transitively awaited the IndexedDB cache.
+    // The archive promise must resolve once the catalog row is dropped,
+    // independent of whether the sibling's transcript catchup has finished.
+    const initialState = {
+      ...EMPTY,
+      hosts: [{ hostId: 'h', title: 'box', endpoint: 'http://127.0.0.1:3091', createdAt: 'a', updatedAt: 'b',
+        inventory: {
+          protocolVersion: 1, hostdVersion: '0.1.0', hostId: 'native-h', healthy: true,
+          backends: [{ backend: 'codex', installed: true, authenticated: true, running: true, sessionCapable: true }],
+        },
+      }],
+      projects: [{ projectId: 'p', hostId: 'h', title: 'repo', cwd: '/repo', createdAt: 'a', updatedAt: 'b' }],
+      sessions: [
+        { sessionId: 'cur', projectId: 'p', title: 'current', backend: 'codex',
+          channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'a' },
+        { sessionId: 'next', projectId: 'p', title: 'sibling', backend: 'codex',
+          channelState: 'open', turnState: 'idle', createdAt: 'b', updatedAt: '2026-09-04T12:00:00.000Z' },
+      ],
+      // Pre-seed the current session's transcript so `selectSession('cur')`
+      // does not have to hit transcript.read and we can isolate the regression
+      // to the archive → selectSession(next) path.
+      transcript: [
+        { transcriptId: 'cur-1', sessionId: 'cur', seq: 0, role: 'assistant', kind: 'message', text: 'seeded', createdAt: 'a' },
+      ],
+    }
+    let resolveTranscriptRead: (response: Response) => void = () => undefined
+    const transcriptReadGate = new Promise<Response>(resolve => { resolveTranscriptRead = resolve })
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string; params: Record<string, unknown> }
+      if (body.method === 'session.archive') return Response.json({ id: body.id, ok: true, result: {} })
+      if (body.method === 'transcript.read') {
+        // Only the *next* session's read hangs; the current session is
+        // already cached so its read returns an empty page.
+        if (body.params['sessionId'] === 'next') return transcriptReadGate
+        return Response.json({
+          id: body.id, ok: true, result: {
+            entries: [], latestSeq: 0, hasMore: false,
+          },
+        })
+      }
+      return Response.json({ id: body.id, ok: true, result: initialState })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      // selectSession('cur') is satisfied from the seeded transcript; the gate
+      // for `next` is still armed and will hang forever.
+      await store.selectSession(RemoteSessionId('cur'))
+      // archiveSession must resolve even though selectSession(next) inside it
+      // is now awaiting a transcript.read that never returns.
+      const archived = store.archiveSession(RemoteSessionId('cur'))
+      await expect(archived).resolves.toBeUndefined()
+      // Catalog dropped the archived row and switched current to the sibling,
+      // regardless of whether the sibling's transcript catchup finished.
+      const snap = store.getSnapshot()
+      expect(snap.state.sessions.some(session => session.sessionId === 'cur')).toBe(false)
+      expect(snap.currentSessionId).toBe('next')
+      // Release the stranded transcript.read so the test fixture unwinds.
+      resolveTranscriptRead(Response.json({
+        id: 'late', ok: true, result: { transcriptId: 't', sessionId: 'next', seq: 0, role: 'assistant', kind: 'message', text: '', createdAt: 'b' },
+      }))
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('archiveStaleSessions respects the wall-clock budget', async () => {
+    // Reproduces the report where "立即清理过期会话" left the panel on
+    // "清理中…" while every per-session RPC timed out individually.
+    // The sweep budget must cap the wall clock so the UI can re-render,
+    // even if many RPCs are slow enough to starve subsequent targets.
+    const stale = '2026-07-15T12:00:00.000Z'
+    const initialState = {
+      ...EMPTY,
+      hosts: [{ hostId: 'h', title: 'box', endpoint: 'http://127.0.0.1:3091', createdAt: 'a', updatedAt: 'b',
+        inventory: {
+          protocolVersion: 1, hostdVersion: '0.1.0', hostId: 'native-h', healthy: true,
+          backends: [{ backend: 'codex', installed: true, authenticated: true, running: true, sessionCapable: true }],
+        },
+      }],
+      projects: [{ projectId: 'p', hostId: 'h', title: 'repo', cwd: '/repo', createdAt: 'a', updatedAt: 'b' }],
+      sessions: Array.from({ length: 4 }, (_, index) => ({
+        sessionId: `stale-${index}`, projectId: 'p', title: `s${index}`, backend: 'codex',
+        channelState: 'open' as const, turnState: 'idle' as const,
+        createdAt: stale, updatedAt: stale,
+      })),
+    }
+    let fakeNow = Date.now()
+    let budgetFired = false
+    let archiveCount = 0
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => fakeNow)
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      if (body.method === 'session.archive') {
+        // Each successful archive advances the clock so subsequent targets
+        // bump into the budget and the rest are deferred to the next sweep.
+        fakeNow += 30_000
+        archiveCount += 1
+        return Response.json({ id: body.id, ok: true, result: {} })
+      }
+      if (body.method === 'state') {
+        // Reflect whatever the gateway has already archived so subsequent
+        // sweeps skip the rows that succeeded earlier.
+        const remaining = initialState.sessions.map((session, index) =>
+          index < archiveCount ? { ...session, archivedAt: '2026-09-07T00:00:00.000Z' } : session,
+        )
+        return Response.json({ id: body.id, ok: true, result: { ...initialState, sessions: remaining } })
+      }
+      return Response.json({ id: body.id, ok: true, result: initialState })
+    }))
+    const store = new RemoteAgentStore({ cache: null })
+    try {
+      // Disable auto-archive while bootstrapping so the test owns the timing.
+      store.updateDisplayPreferences({ autoHideSessionsAfterDays: 0 })
+      await store.start()
+      // Hook the budget warning to flip our state-tracking flag.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation((message: unknown) => {
+        if (typeof message === 'string' && message.includes('auto-archive budget exceeded')) {
+          budgetFired = true
+        }
+      })
+      try {
+        // Manually drive the sweep with the threshold active. The loop must
+        // bail out at the 60 s budget even though four stale rows are pending.
+        store.updateDisplayPreferences({ autoHideSessionsAfterDays: 30 })
+        await vi.waitFor(() => { expect(budgetFired).toBe(true) })
+        // The first sweep ran three archives (30s + 30s + 30s = 90s of
+        // accumulated clock), then the budget broke on the fourth iteration.
+        // The reload that follows refreshes the catalog from the gateway,
+        // which now reports the row as already archived.
+        expect(archiveCount).toBeGreaterThanOrEqual(3)
+      } finally {
+        warnSpy.mockRestore()
+      }
+    } finally {
+      nowSpy.mockRestore()
+      store.dispose()
+    }
+  })
 })
 
 /** In-memory transcript cache for store-level tests. Mirrors the production

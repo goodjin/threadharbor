@@ -234,6 +234,11 @@ const EMPTY_STATE: RemoteAgentState = {
 const CONTROL_REQUEST_TIMEOUT_MS = 75_000
 /** Maximum time to wait for session.start to publish an open binding. */
 const SESSION_OPEN_TIMEOUT_MS = 75_000
+/** Wall-clock cap for one auto-archive sweep. Anything still pending is left
+ *  for the next reload — the goal is to never strand the settings panel on
+ *  "清理中…" longer than this, not to guarantee every stale row is retired
+ *  in one pass. */
+const ARCHIVE_BUDGET_MS = 60_000
 const LIVE_BACKOFF_MS = [250, 500, 1_000, 2_000, 4_000, 8_000] as const
 const CURRENT_SESSION_STORAGE_KEY = 'dsh.remote-agent.current-session-id'
 
@@ -1459,7 +1464,14 @@ export class RemoteAgentStore {
           state: { ...this.snapshot.state, sessions: remaining },
           currentSessionId: next,
         })
-        await this.selectSession(next)
+        // Fire-and-forget: pulling the next session's transcript is unrelated
+        // to the archive action the user just confirmed. Awaiting here couples
+        // the archive button's UI reset to whatever `selectSession` happens to
+        // do (catchupTranscript → applyCacheToSession → IndexedDB), and an
+        // IndexedDB request that never settles in this browser would freeze
+        // the button on "归档中…" forever. Let selectSession settle on its
+        // own clock; its own call() timeout caps the worst case.
+        void this.selectSession(next).catch(() => undefined)
         return
       }
       // No sibling left: clear the current selection and open a fresh draft for this
@@ -1514,7 +1526,9 @@ export class RemoteAgentStore {
    *  it twice with the same threshold archives nothing on the second pass
    *  because the gateway filter drops archived sessions from the projection.
    *  Failures from individual archives are caught and logged but never bubble
-   *  up: one stale session with a broken transport must not block the rest. */
+   *  up: one stale session with a broken transport must not block the rest.
+   *  A wall-clock budget caps how long one sweep can keep the settings panel
+   *  button on "清理中…"; whatever is left is picked up by the next reload. */
   async archiveStaleSessions(): Promise<number> {
     if (this.autoArchiveInFlight) return 0
     const prefs = readDisplayPreferences()
@@ -1527,7 +1541,12 @@ export class RemoteAgentStore {
         return session.updatedAt < cutoff
       })
       let archived = 0
+      const startedAt = Date.now()
       for (const session of targets) {
+        if (Date.now() - startedAt > ARCHIVE_BUDGET_MS) {
+          console.warn('threadharbor: auto-archive budget exceeded; deferring remaining sessions to the next sweep')
+          break
+        }
         try {
           await this.call('session.archive', { sessionId: session.sessionId })
           archived += 1
