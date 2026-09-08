@@ -7,6 +7,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { connect, createConnection } from 'node:net'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
+import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
@@ -148,6 +149,21 @@ function ownerSuffix(): string {
 
 /** Unix domain socket paths are short; keep the directory well under the platform limit. */
 const HOLD_RUNTIME_DIR_MAX = 48
+
+/** Trace toggle: default ON in non-test runs so latency investigations always
+ *  have data; explicit `THREADHARBOR_TRACE=0` silences. */
+function traceEnabled(): boolean {
+  return process.env['THREADHARBOR_TRACE'] !== '0' && process.env['NODE_ENV'] !== 'test'
+}
+
+/** Emit one structured trace line for an in-process stage. */
+function trace(stage: string, fields: Record<string, unknown>): void {
+  if (!traceEnabled()) return
+  const parts = Object.entries(fields)
+    .map(([key, value]) => `${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`)
+    .join(' ')
+  process.stderr.write(`threadharbor-hostd ${stage} ${parts}\n`)
+}
 
 function holdRuntimeDirectory(): string {
   const uid = ownerSuffix()
@@ -326,6 +342,29 @@ export class RemoteAgentHostd {
    * @returns the JSON result for the request method.
    */
   async dispatch(request: RemoteControlRequest): Promise<JsonValue> {
+    const dispatchStartedAt = performance.now()
+    const sessionId = typeof request.params['sessionId'] === 'string' ? request.params['sessionId'] : undefined
+    const finishDispatch = (ok: boolean, error?: unknown): void => {
+      trace('dispatch', {
+        method: request.method,
+        ...(sessionId === undefined ? {} : { sessionId }),
+        elapsedMs: Number((performance.now() - dispatchStartedAt).toFixed(2)),
+        ok,
+        ...(error === undefined ? {} : { error: error instanceof Error ? error.message : String(error) }),
+      })
+    }
+    try {
+      const result = await this.dispatchInner(request)
+      finishDispatch(true)
+      return result
+    } catch (error) {
+      finishDispatch(false, error)
+      throw error
+    }
+  }
+
+  /** Switch over the validated control request. Wrapped by `dispatch` for tracing. */
+  private async dispatchInner(request: RemoteControlRequest): Promise<JsonValue> {
     switch (request.method) {
       case 'inventory':
         return await this.inventory() as unknown as JsonValue
@@ -476,10 +515,13 @@ export class RemoteAgentHostd {
       updatedAt: now,
     }
     await this.spawnHold(record)
+    trace('session.start', { stage: 'spawnHold', sessionId: record.sessionId, backend: record.backend })
     await this.initializeHold(record)
+    trace('session.start', { stage: 'initializeHold', sessionId: record.sessionId })
     const ready = await this.bindNativeSession(record, {
       ...(spec.parentNativeSessionId === undefined ? {} : { parentNativeSessionId: spec.parentNativeSessionId }),
     })
+    trace('session.start', { stage: 'bindNativeSession', sessionId: record.sessionId })
     return await this.snapshotHold(ready.record)
   }
 
@@ -876,16 +918,43 @@ export class RemoteAgentHostd {
     socketPath: string,
     signal: AbortSignal | undefined,
   ): Promise<HoldResponse> {
+    const holdStartedAt = performance.now()
     return await new Promise<HoldResponse>((resolveResponse, reject) => {
       const socket = createConnection(socketPath)
       let settled = false
       let text = ''
+      const finishTrace = (ok: boolean, error?: unknown): void => {
+        const fields: Record<string, unknown> = {
+          op: request.operation,
+          holdId: record.holdId,
+          elapsedMs: Number((performance.now() - holdStartedAt).toFixed(2)),
+          ok,
+          ...(error === undefined ? {} : { error: error instanceof Error ? error.message : String(error) }),
+        }
+        if (request.operation === 'wait') {
+          fields['rpcId'] = request.rpcId
+          fields['afterSeq'] = request.afterSeq
+          fields['timeoutMs'] = request.timeoutMs
+        } else if (request.operation === 'wait-seq') {
+          fields['afterSeq'] = request.afterSeq
+          fields['timeoutMs'] = request.timeoutMs
+        } else if (request.operation === 'wait-page') {
+          fields['afterSeq'] = request.afterSeq
+          fields['timeoutMs'] = request.timeoutMs
+          if (request.generation !== undefined) fields['generation'] = request.generation
+        } else if (request.operation === 'read') {
+          fields['afterSeq'] = request.afterSeq
+          if (request.generation !== undefined) fields['generation'] = request.generation
+        }
+        trace('holdRequest', fields)
+      }
       const finishError = (error: unknown): void => {
         if (settled) return
         settled = true
         clearTimeout(timer)
         signal?.removeEventListener('abort', onAbort)
         socket.destroy()
+        finishTrace(false, error)
         reject(error instanceof Error ? error : new Error(String(error)))
       }
       const onAbort = (): void => {
@@ -911,8 +980,11 @@ export class RemoteAgentHostd {
         signal?.removeEventListener('abort', onAbort)
         settled = true
         try {
-          resolveResponse(JSON.parse(text) as HoldResponse)
+          const parsed = JSON.parse(text) as HoldResponse
+          finishTrace(parsed.ok, parsed.ok ? undefined : parsed.error)
+          resolveResponse(parsed)
         } catch (error) {
+          finishTrace(false, error)
           reject(error instanceof Error ? error : new Error(String(error)))
         }
       })

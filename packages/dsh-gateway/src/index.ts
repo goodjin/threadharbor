@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { existsSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
+import { performance } from 'node:perf_hooks'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { HOSTD_ARTIFACT_FILES, hostdArtifactVersionFromDirectory } from '@threadharbor/hostd/version'
@@ -106,6 +107,21 @@ type TranscriptInput = Omit<RemoteTranscriptEntry, 'sessionId' | 'seq' | 'create
 
 /** Bound each durability slice so a large recovered journal cannot starve the Web event loop. */
 const MAX_JOURNAL_EVENTS_PER_SYNC = 100
+
+/** Trace toggle: default ON in non-test runs so latency investigations always
+ *  have data; explicit `THREADHARBOR_TRACE=0` silences. */
+function traceEnabled(): boolean {
+  return process.env['THREADHARBOR_TRACE'] !== '0' && process.env['NODE_ENV'] !== 'test'
+}
+
+/** Emit one structured trace line for an in-process stage. */
+function trace(stage: string, fields: Record<string, unknown>): void {
+  if (!traceEnabled()) return
+  const parts = Object.entries(fields)
+    .map(([key, value]) => `${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`)
+    .join(' ')
+  process.stderr.write(`threadharbor-gateway ${stage} ${parts}\n`)
+}
 
 function jsonRecord(value: JsonValue | undefined): Record<string, JsonValue> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : undefined
@@ -463,6 +479,29 @@ export class RemoteAgentGateway extends Service {
    * @returns the JSON result for the request method.
    */
   async dispatch(request: RemoteControlRequest): Promise<JsonValue> {
+    const sessionId = typeof request.params['sessionId'] === 'string' ? request.params['sessionId'] : undefined
+    const dispatchStartedAt = performance.now()
+    const finishDispatch = (ok: boolean, error?: unknown): void => {
+      trace('dispatch', {
+        method: request.method,
+        ...(sessionId === undefined ? {} : { sessionId }),
+        elapsedMs: Number((performance.now() - dispatchStartedAt).toFixed(2)),
+        ok,
+        ...(error === undefined ? {} : { error: error instanceof Error ? error.message : String(error) }),
+      })
+    }
+    try {
+      const result = await this.dispatchInner(request)
+      finishDispatch(true)
+      return result
+    } catch (error) {
+      finishDispatch(false, error)
+      throw error
+    }
+  }
+
+  /** Switch over the validated browser request. Wrapped by `dispatch` for tracing. */
+  private async dispatchInner(request: RemoteControlRequest): Promise<JsonValue> {
     switch (request.method) {
       case 'state':
         return this.state() as unknown as JsonValue
@@ -865,7 +904,7 @@ export class RemoteAgentGateway extends Service {
     return await this.refreshHostInventory(host)
   }
 
-  private async refreshHostInventory(host: RemoteHostView, retried = false): Promise<RemoteHostView> {
+  private async refreshHostInventory(host: RemoteHostView): Promise<RemoteHostView> {
     try {
       const inventory = await this.callHostd(host, 'inventory', {}) as unknown as RemoteHostInventory
       const { inventoryError: _inventoryError, ...current } = this.requireHost(host.hostId)
@@ -873,10 +912,10 @@ export class RemoteAgentGateway extends Service {
       await this.requireTables().hosts.put(host.hostId, updated)
       return updated
     } catch (error) {
-      if (host.ssh !== undefined && !retried) {
-        this.sshManager.releaseTunnel(host.ssh)
-        return await this.refreshHostInventory(this.requireHost(host.hostId), true)
-      }
+      // Do NOT release the SSH tunnel here: the tunnel is a shared resource the
+      // persistent hostd connection re-resolves on every request. Killing it on
+      // one failed inventory only forces the next request to open a fresh port,
+      // which churns tunnels and strands every later RPC on the dead one.
       const current = this.requireHost(host.hostId)
       const { inventory: _inventory, inventoryError: _inventoryError, ...rest } = current
       const updated: RemoteHostView = {
@@ -945,11 +984,13 @@ export class RemoteAgentGateway extends Service {
     const now = new Date().toISOString()
     const hidden: RemoteHostView = { ...current, hiddenAt: now, updatedAt: now }
     await tables.hosts.put(hostId, hidden)
+    const newlyHidden: Array<ReturnType<typeof RemoteProjectId>> = []
     for (const [projectId, project] of tables.projects.entries()) {
       if (project.hostId !== hostId || project.hiddenAt !== undefined) continue
       await tables.projects.put(projectId, { ...project, hiddenAt: now, updatedAt: now })
-      await this.archiveProjectSessions(projectId, now)
+      newlyHidden.push(projectId)
     }
+    this.deferSessionArchival(newlyHidden, now)
     return hidden
   }
 
@@ -1005,7 +1046,7 @@ export class RemoteAgentGateway extends Service {
     const now = new Date().toISOString()
     const hidden: RemoteProjectView = { ...current, hiddenAt: now, updatedAt: now }
     await this.requireTables().projects.put(projectId, hidden)
-    await this.archiveProjectSessions(projectId, now)
+    this.deferSessionArchival([projectId], now)
     return hidden
   }
 
@@ -1044,10 +1085,15 @@ export class RemoteAgentGateway extends Service {
   /** Persist the connecting row under the catalog lock, then wait for the hold
    *  outside that lock so other RPCs are not blocked on agent spawn. */
   private async startSessionAndWait(params: Record<string, JsonValue>): Promise<RemoteSessionView> {
+    const stageStartedAt = performance.now()
     const started = await this.enqueue(() => this.startSession(params))
+    trace('session.start', { stage: 'catalog', elapsedMs: Number((performance.now() - stageStartedAt).toFixed(2)) })
     try {
+      const holdStartedAt = performance.now()
       await started.completion
+      trace('session.start', { stage: 'holdReady', elapsedMs: Number((performance.now() - holdStartedAt).toFixed(2)) })
     } catch (error) {
+      trace('session.start', { stage: 'holdReady', elapsedMs: Number((performance.now() - stageStartedAt).toFixed(2)), ok: false })
       throw new Error(displayError(error))
     }
     return this.withTranscriptHead(this.requireSession(started.sessionId))
@@ -1288,6 +1334,29 @@ export class RemoteAgentGateway extends Service {
       return session !== undefined && session.projectId === projectId && session.archivedAt === undefined
     })
     await this.archiveSessionIds(ids, archivedAt)
+  }
+
+  /** Archive every session of projects that were just hidden. Runs as its own
+   *  step on the shared mutation tail instead of inside the hide RPC: the hide
+   *  response returns as soon as the rows are marked hidden (archiving a large
+   *  project is a long tail of table writes that must not hold the browser's
+   *  hide confirm), while anything queued afterwards (unhide, unarchive,
+   *  delete, ...) still waits for the sweep — so a later operation can never
+   *  observe a half-archived tree. Errors are logged and contained per sweep. */
+  private deferSessionArchival(
+    projectIds: readonly ReturnType<typeof RemoteProjectId>[],
+    archivedAt: string,
+  ): void {
+    if (projectIds.length === 0) return
+    void this.enqueue(async () => {
+      try {
+        for (const projectId of projectIds) {
+          await this.archiveProjectSessions(projectId, archivedAt)
+        }
+      } catch (error) {
+        console.error('threadharbor: session archival after hide failed', error)
+      }
+    })
   }
 
   private async archiveSessionIds(
@@ -2075,7 +2144,32 @@ export class RemoteAgentGateway extends Service {
     params: Record<string, JsonValue>,
     timeoutMs?: number,
   ): Promise<JsonValue> {
-    return await this.hostdConnections.request(host, method, params, timeoutMs)
+    const sessionId = typeof params['sessionId'] === 'string' ? params['sessionId'] : undefined
+    const hostdStartedAt = performance.now()
+    trace('hostd.call.start', {
+      method,
+      ...(sessionId === undefined ? {} : { sessionId }),
+      ...(host.ssh === undefined ? {} : { via: 'ssh-tunnel' }),
+    })
+    try {
+      const result = await this.hostdConnections.request(host, method, params, timeoutMs)
+      trace('hostd.call.end', {
+        method,
+        ...(sessionId === undefined ? {} : { sessionId }),
+        elapsedMs: Number((performance.now() - hostdStartedAt).toFixed(2)),
+        ok: true,
+      })
+      return result
+    } catch (error) {
+      trace('hostd.call.end', {
+        method,
+        ...(sessionId === undefined ? {} : { sessionId }),
+        elapsedMs: Number((performance.now() - hostdStartedAt).toFixed(2)),
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      throw error
+    }
   }
 
   private requireHost(id: ReturnType<typeof RemoteHostId>): RemoteHostView {
@@ -2131,7 +2225,19 @@ export class RemoteAgentGateway extends Service {
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
-    const current = this.operationTail.then(operation, operation)
+    const enqueuedAt = performance.now()
+    const startOp = (): Promise<T> => {
+      const opStartedAt = performance.now()
+      const waitMs = Number((opStartedAt - enqueuedAt).toFixed(2))
+      if (waitMs > 5) trace('enqueue.wait', { waitMs })
+      return operation().finally(() => {
+        trace('enqueue.run', {
+          waitMs,
+          runMs: Number((performance.now() - opStartedAt).toFixed(2)),
+        })
+      })
+    }
+    const current = this.operationTail.then(startOp, startOp)
     this.operationTail = current.then(() => {}, () => {})
     return current
   }

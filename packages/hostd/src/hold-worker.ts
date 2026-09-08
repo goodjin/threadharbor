@@ -109,6 +109,21 @@ function journalMetricsEnabled(): boolean {
   return process.env['THREADHARBOR_HOLD_JOURNAL_METRICS'] !== '0' && process.env['NODE_ENV'] !== 'test'
 }
 
+/** Trace toggle: default ON in non-test runs so latency investigations always
+ *  have data; explicit `THREADHARBOR_TRACE=0` silences. */
+function traceEnabled(): boolean {
+  return process.env['THREADHARBOR_TRACE'] !== '0' && process.env['NODE_ENV'] !== 'test'
+}
+
+/** Emit one structured trace line for an in-process stage. */
+function trace(stage: string, fields: Record<string, unknown>): void {
+  if (!traceEnabled()) return
+  const parts = Object.entries(fields)
+    .map(([key, value]) => `${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`)
+    .join(' ')
+  process.stderr.write(`threadharbor-hostd ${stage} ${parts}\n`)
+}
+
 /** Live worker runtime. Its process lifetime is intentionally independent from hostd. */
 export class HoldWorker {
   private readonly journal: RemoteJournalEvent[]
@@ -732,25 +747,59 @@ export class HoldWorker {
   }
 
   private handleRequest(socket: Socket, request: HoldRequest): void {
+    const requestStartedAt = performance.now()
+    const traceFields = (extra: Record<string, unknown>): Record<string, unknown> => {
+      const base: Record<string, unknown> = {
+        op: request.operation,
+        elapsedMs: Number((performance.now() - requestStartedAt).toFixed(2)),
+        ...extra,
+      }
+      if (request.operation === 'wait') {
+        base['rpcId'] = request.rpcId
+        base['afterSeq'] = request.afterSeq
+        base['timeoutMs'] = request.timeoutMs
+      } else if (request.operation === 'wait-seq') {
+        base['afterSeq'] = request.afterSeq
+        base['timeoutMs'] = request.timeoutMs
+      } else if (request.operation === 'wait-page') {
+        base['afterSeq'] = request.afterSeq
+        base['timeoutMs'] = request.timeoutMs
+        if (request.generation !== undefined) base['generation'] = request.generation
+      } else if (request.operation === 'read') {
+        base['afterSeq'] = request.afterSeq
+        if (request.generation !== undefined) base['generation'] = request.generation
+      }
+      return base
+    }
+    const traceOp = (ok: boolean, extra: Record<string, unknown> = {}): void => {
+      trace('hold-worker.handle', traceFields({ ok, ...extra }))
+    }
     switch (request.operation) {
       case 'ping':
         this.reply(socket, { ok: true, result: { generation: this.config.generation, latestSeq: this.nextSeq - 1 } })
+        traceOp(true)
         return
-      case 'read':
-        this.reply(socket, { ok: true, result: this.page(request.afterSeq, request.generation) })
+      case 'read': {
+        const page = this.page(request.afterSeq, request.generation)
+        this.reply(socket, { ok: true, result: page })
+        traceOp(true, { events: page.events.length })
         return
+      }
       case 'send': {
         void this.enqueueStdio(async () => {
           const key = `${request.admission.clientId}:${request.admission.requestId}`
           if (this.admissions.has(key)) {
             this.reply(socket, { ok: true, result: { accepted: true, duplicate: true } })
+            traceOp(true, { duplicate: true })
             return
           }
           this.admissions.add(key)
           this.admitPrompt(request.admission.frame)
           this.reply(socket, { ok: true, result: { accepted: true, duplicate: false } })
+          traceOp(true, { duplicate: false })
         }).catch((error: unknown) => {
           this.reply(socket, { ok: false, error: String(error) })
+          traceOp(false, { error: String(error) })
         })
         return
       }
@@ -761,17 +810,21 @@ export class HoldWorker {
             && this.config.transport.kind === 'stdio') {
             await this.restartStdioBackend()
             this.reply(socket, { ok: true, result: { accepted: true } })
+            traceOp(true, { restart: true })
             return
           }
           this.sendFrame(request.frame)
           this.reply(socket, { ok: true, result: { accepted: true } })
+          traceOp(true)
         }).catch((error: unknown) => {
           this.reply(socket, { ok: false, error: String(error) })
+          traceOp(false, { error: String(error) })
         })
         return
       case 'wait-seq': {
         if (this.nextSeq - 1 > request.afterSeq) {
           this.reply(socket, { ok: true, result: { latestSeq: this.nextSeq - 1, timedOut: false } })
+          traceOp(true, { timedOut: false })
           return
         }
         const timer = setTimeout(() => {
@@ -779,6 +832,7 @@ export class HoldWorker {
             if (waiter.socket !== socket) continue
             this.seqWaiters.delete(waiter)
             this.reply(socket, { ok: true, result: { latestSeq: this.nextSeq - 1, timedOut: true } })
+            traceOp(true, { timedOut: true })
             break
           }
         }, request.timeoutMs)
@@ -794,14 +848,18 @@ export class HoldWorker {
       }
       case 'wait-page': {
         if (this.nextSeq - 1 > request.afterSeq) {
-          this.reply(socket, { ok: true, result: this.page(request.afterSeq, request.generation) })
+          const page = this.page(request.afterSeq, request.generation)
+          this.reply(socket, { ok: true, result: page })
+          traceOp(true, { events: page.events.length, immediate: true })
           return
         }
         const timer = setTimeout(() => {
           for (const waiter of this.pageWaiters) {
             if (waiter.socket !== socket) continue
             this.pageWaiters.delete(waiter)
-            this.reply(socket, { ok: true, result: this.page(waiter.afterSeq, waiter.generation) })
+            const page = this.page(waiter.afterSeq, waiter.generation)
+            this.reply(socket, { ok: true, result: page })
+            traceOp(true, { events: page.events.length, timedOut: true })
             break
           }
         }, request.timeoutMs)
@@ -824,6 +882,7 @@ export class HoldWorker {
         const existing = this.findResponse(request.rpcId, request.afterSeq)
         if (existing !== undefined) {
           this.reply(socket, { ok: true, result: existing.frame })
+          traceOp(true, { immediate: true })
           return
         }
         const timer = setTimeout(() => {
@@ -831,6 +890,7 @@ export class HoldWorker {
             if (waiter.socket !== socket) continue
             this.waiters.delete(waiter)
             this.reply(socket, { ok: false, error: `timed out waiting for RPC ${request.rpcId}` })
+            traceOp(false, { timedOut: true })
             break
           }
         }, request.timeoutMs)
@@ -876,6 +936,15 @@ export class HoldWorker {
       clearTimeout(waiter.timer)
       this.waiters.delete(waiter)
       this.reply(waiter.socket, { ok: true, result: event.frame })
+      trace('hold-worker.handle', {
+        op: 'wait',
+        rpcId: waiter.rpcId,
+        afterSeq: waiter.afterSeq,
+        elapsedMs: 0,
+        ok: true,
+        resolved: true,
+        seq: event.seq,
+      })
     }
   }
 
@@ -886,12 +955,31 @@ export class HoldWorker {
       clearTimeout(waiter.timer)
       this.seqWaiters.delete(waiter)
       this.reply(waiter.socket, { ok: true, result: { latestSeq, timedOut: false } })
+      trace('hold-worker.handle', {
+        op: 'wait-seq',
+        afterSeq: waiter.afterSeq,
+        elapsedMs: 0,
+        ok: true,
+        resolved: true,
+        seq: latestSeq,
+      })
     }
     for (const waiter of this.pageWaiters) {
       if (latestSeq <= waiter.afterSeq) continue
       clearTimeout(waiter.timer)
       this.pageWaiters.delete(waiter)
-      this.reply(waiter.socket, { ok: true, result: this.page(waiter.afterSeq, waiter.generation) })
+      const page = this.page(waiter.afterSeq, waiter.generation)
+      this.reply(waiter.socket, { ok: true, result: page })
+      trace('hold-worker.handle', {
+        op: 'wait-page',
+        ...(waiter.generation === undefined ? {} : { generation: waiter.generation }),
+        afterSeq: waiter.afterSeq,
+        elapsedMs: 0,
+        ok: true,
+        resolved: true,
+        seq: latestSeq,
+        events: page.events.length,
+      })
     }
   }
 

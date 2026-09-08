@@ -676,6 +676,23 @@ export class RemoteAgentStore {
   private autoArchiveInFlight = false
   private readonly cache: TranscriptCache | null
 
+  /** Emit one trace line for a promptProgress phase transition so devtools
+   *  shows the user-visible latency breakdown. Suppressed in test runs. */
+  private tracePromptPhase(
+    phase: 'connecting' | 'sending' | 'waiting' | 'reconnecting' | 'failed',
+    startedAt: number,
+    extra: Record<string, unknown> = {},
+  ): void {
+    if (process.env['NODE_ENV'] === 'test') return
+    const elapsedMs = Number((Date.now() - startedAt).toFixed(1))
+    const fields: Record<string, unknown> = { phase, elapsedMs, ...extra }
+    const parts = Object.entries(fields)
+      .map(([key, value]) => `${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`)
+      .join(' ')
+    // eslint-disable-next-line no-console
+    console.debug(`threadharbor-store promptProgress ${parts}`)
+  }
+
   /** Build a controller. Pass `{ cache }` to inject a custom transcript cache
    *  (tests use an in-memory shim) or `{ cache: null }` to disable the cache
    *  entirely. Defaults to a fresh `TranscriptCache` that talks to IndexedDB. */
@@ -1183,6 +1200,7 @@ export class RemoteAgentStore {
       ...withoutError(this.snapshot),
       promptProgress: { projectId: draft.projectId, phase: 'connecting', startedAt, baselineSeq: -1 },
     })
+    this.tracePromptPhase('connecting', startedAt, { projectId: draft.projectId })
     try {
       await this.run(async () => {
         const result = await this.call('session.start', {
@@ -1206,6 +1224,7 @@ export class RemoteAgentStore {
           promptProgress: connecting,
           pending: true,
         })
+        this.tracePromptPhase('connecting', startedAt, { sessionId: session.sessionId, stage: 'rpcReturned' })
         this.applyTranscriptEntries(session.sessionId, [{
           transcriptId: RemoteTranscriptId(`user:${session.sessionId}:${clientId}:${requestId}`),
           sessionId: session.sessionId,
@@ -1222,8 +1241,10 @@ export class RemoteAgentStore {
         // session.start waits for the hold. Only wait on a later view.changed
         // if this response is still the connecting placeholder.
         await this.awaitSessionOpen(session.sessionId)
+        this.tracePromptPhase('connecting', startedAt, { sessionId: session.sessionId, stage: 'holdOpen' })
         const progress: RemotePromptProgress = { ...connecting, phase: 'sending' }
         this.publish({ ...withoutError(this.snapshot), promptProgress: progress, pending: true })
+        this.tracePromptPhase('sending', startedAt, { sessionId: session.sessionId })
         try {
           await this.deliverPrompt(session.sessionId, clientId, requestId, text)
         } finally {
@@ -1233,6 +1254,7 @@ export class RemoteAgentStore {
         const current = this.snapshot.state.sessions.find(candidate => candidate.sessionId === session.sessionId)
         if (current?.turnState === 'running') {
           this.publish({ ...withoutError(this.snapshot), promptProgress: { ...progress, phase: 'waiting' } })
+          this.tracePromptPhase('waiting', startedAt, { sessionId: session.sessionId })
         } else {
           const { promptProgress: _promptProgress, ...snapshot } = withoutError(this.snapshot)
           this.publish(snapshot)
@@ -1248,6 +1270,7 @@ export class RemoteAgentStore {
           phase: 'failed', startedAt, baselineSeq: progress?.baselineSeq ?? -1, message: errorText(error),
         },
       })
+      this.tracePromptPhase('failed', startedAt, { message: errorText(error) })
       throw error
     }
   }
@@ -1333,6 +1356,7 @@ export class RemoteAgentStore {
       baselineSeq,
     }
     this.publish({ ...withoutError(this.snapshot), promptProgress: progress })
+    this.tracePromptPhase('sending', progress.startedAt, { sessionId })
     this.liveBackoffIndex = 0
     this.ensureLiveTranscriptSync()
     try {
@@ -1347,6 +1371,7 @@ export class RemoteAgentStore {
         const current = this.snapshot.state.sessions.find(candidate => candidate.sessionId === sessionId)
         if (current?.turnState === 'running') {
           this.publish({ ...withoutError(this.snapshot), promptProgress: { ...progress, phase: 'waiting' } })
+          this.tracePromptPhase('waiting', progress.startedAt, { sessionId })
         } else {
           const { promptProgress: _promptProgress, ...snapshot } = withoutError(this.snapshot)
           this.publish(snapshot)
@@ -1357,6 +1382,7 @@ export class RemoteAgentStore {
         ...this.snapshot,
         promptProgress: { ...progress, phase: 'failed', message: errorText(error) },
       })
+      this.tracePromptPhase('failed', progress.startedAt, { sessionId, message: errorText(error) })
       throw error
     }
   }
@@ -1564,9 +1590,29 @@ export class RemoteAgentStore {
     }
   }
 
-  /** Hide one catalogued host from the normal projection while preserving its data. */
-  hideHost(hostId: ReturnType<typeof RemoteHostId>): Promise<void> {
-    return this.mutate('host.hide', { hostId })
+  /** Hide one catalogued host from the normal projection while preserving its data.
+   * Only the `host.hide` RPC is awaited: once the server confirms, the host
+   * (and its projects and sessions) leave the sidebar through a local projection
+   * commit, and the follow-up catalog reload runs fire-and-forget. A slow
+   * `state` round-trip can therefore never hold the hide UI on "隐藏中…".
+   */
+  async hideHost(hostId: ReturnType<typeof RemoteHostId>): Promise<void> {
+    const target = this.snapshot.state.hosts.find(candidate => candidate.hostId === hostId)
+    if (target === undefined) {
+      // Host is not in the local projection (already hidden on the server or
+      // never visible); fall back to the plain mutate so the server side still
+      // records the hide.
+      await this.mutate('host.hide', { hostId })
+      return
+    }
+    await this.run(async () => {
+      await this.call('host.hide', { hostId })
+      const hiddenProjects = new Set(this.snapshot.state.projects
+        .filter(project => project.hostId === hostId)
+        .map(project => project.projectId))
+      this.dropHiddenRows(new Set([hostId]), hiddenProjects)
+    })
+    void this.reload().catch(() => undefined)
   }
 
   /** Restore a previously hidden host so it shows up in the sidebar again. */
@@ -1579,9 +1625,24 @@ export class RemoteAgentStore {
     return this.mutate('host.delete', { hostId })
   }
 
-  /** Hide one catalogued project from the normal projection while preserving its data. */
-  hideProject(projectId: ReturnType<typeof RemoteProjectId>): Promise<void> {
-    return this.mutate('project.hide', { projectId })
+  /** Hide one catalogued project from the normal projection while preserving its data.
+   * Same convergence contract as `hideHost`: the row leaves the sidebar as soon
+   * as the `project.hide` RPC confirms; the catalog reload is background work.
+   */
+  async hideProject(projectId: ReturnType<typeof RemoteProjectId>): Promise<void> {
+    const target = this.snapshot.state.projects.find(candidate => candidate.projectId === projectId)
+    if (target === undefined) {
+      // Project is not in the local projection (already hidden on the server or
+      // never visible); fall back to the plain mutate so the server side still
+      // records the hide.
+      await this.mutate('project.hide', { projectId })
+      return
+    }
+    await this.run(async () => {
+      await this.call('project.hide', { projectId })
+      this.dropHiddenRows(new Set(), new Set([projectId]))
+    })
+    void this.reload().catch(() => undefined)
   }
 
   /** Restore a previously hidden project so it shows up in the sidebar again. */
@@ -1592,6 +1653,32 @@ export class RemoteAgentStore {
   /** Permanently delete one catalogued project and every session that lives on it. */
   deleteProject(projectId: ReturnType<typeof RemoteProjectId>): Promise<void> {
     return this.mutate('project.delete', { projectId })
+  }
+
+  /** Remove rows whose hide the server just confirmed from the local projection,
+   *  mirroring the way a server `state()` refresh drops them: hidden host and
+   *  project rows vanish along with every session of a removed project, and a
+   *  draft whose project row vanished is discarded (its create surface needs a
+   *  visible project). `commitProjection` re-anchors current selection and
+   *  prompt progress under the same rules a catalog reload would apply. */
+  private dropHiddenRows(
+    hostIds: ReadonlySet<ReturnType<typeof RemoteHostId>>,
+    projectIds: ReadonlySet<ReturnType<typeof RemoteProjectId>>,
+  ): void {
+    const state = this.snapshot.state
+    const draft = this.snapshot.draftSession !== undefined && projectIds.has(this.snapshot.draftSession.projectId)
+      ? undefined
+      : this.snapshot.draftSession
+    this.commitProjection(
+      {
+        ...state,
+        hosts: state.hosts.filter(host => !hostIds.has(host.hostId)),
+        projects: state.projects.filter(project => !projectIds.has(project.projectId)),
+        sessions: state.sessions.filter(session => !projectIds.has(session.projectId)),
+      },
+      undefined,
+      draft,
+    )
   }
 
   /** Answer one backend-native permission request.
@@ -1802,25 +1889,50 @@ export class RemoteAgentStore {
     const serial = ++this.reloadSerial
     const catalog = parseRemoteAgentState(await this.call('state', {}))
     if (this.disposed || serial !== this.reloadSerial) return
+    this.commitProjection(catalog, preferredSessionId)
+    // Every successful catalog reload is a chance to retire sessions that have
+    // been quiet past the auto-hide threshold. Run it fire-and-forget so a slow
+    // archive call never blocks the next reload tick.
+    void this.archiveStaleSessions().catch(() => undefined)
+  }
+
+  /** Merge a fresh catalog projection into the snapshot under one set of rules.
+   *  Sessions the projection no longer lists but that are the current selection
+   *  or are driving prompt progress survive as in-flight rows (a `session.start`
+   *  catalog race must not yank a live turn), and current/draft/prompt progress
+   *  are re-anchored so nothing points at a vanished row. Shared by full catalog
+   *  reloads and by the optimistic local removal after a hide, so both paths
+   *  converge on identical projection semantics.
+   * @param projection - authoritative rows: the server `state()` result, or the
+   *  current snapshot minus rows whose hide the server just confirmed.
+   * @param preferredSessionId - session to prefer when re-anchoring current.
+   * @param draft - draft to keep; pass `undefined` to discard a draft whose
+   *  project row was just removed.
+   */
+  private commitProjection(
+    projection: RemoteAgentState,
+    preferredSessionId?: ReturnType<typeof RemoteSessionId>,
+    draft: RemoteSessionDraft | undefined = this.snapshot.draftSession,
+  ): void {
     const inFlight = this.snapshot.state.sessions.filter(session => {
-      if (catalog.sessions.some(existing => existing.sessionId === session.sessionId)) return false
+      if (projection.sessions.some(existing => existing.sessionId === session.sessionId)) return false
       return session.sessionId === this.snapshot.currentSessionId
         || this.snapshot.promptProgress?.sessionId === session.sessionId
     })
     const state = {
-      ...catalog,
+      ...projection,
       transcript: this.snapshot.state.transcript,
       // Prepend in-flight sessions so a session the server has not yet
       // committed (rare, but possible if `session.start` and the resulting
       // catalog reload race) still shows up at the top of the project list
       // rather than disappearing behind the existing rows.
-      sessions: inFlight.length === 0 ? catalog.sessions : [...inFlight, ...catalog.sessions],
+      sessions: inFlight.length === 0 ? projection.sessions : [...inFlight, ...projection.sessions],
     }
     const persisted = readPersistedCurrentSessionId()
     const adopted = inFlightCreatedSessionId(
-      state, this.snapshot.draftSession, this.snapshot.promptProgress, this.snapshot.currentSessionId,
+      state, draft, this.snapshot.promptProgress, this.snapshot.currentSessionId,
     )
-    const keepDraft = this.snapshot.draftSession !== undefined && adopted === undefined
+    const keepDraft = draft !== undefined && adopted === undefined
     const current = adopted
       ?? (keepDraft
         ? undefined
@@ -1831,7 +1943,7 @@ export class RemoteAgentStore {
     this.publish({
       phase: 'ready', state, pending: this.snapshot.pending,
       ...(this.snapshot.panel === undefined ? {} : { panel: this.snapshot.panel }),
-      ...(keepDraft ? { draftSession: this.snapshot.draftSession } : {}),
+      ...(keepDraft ? { draftSession: draft } : {}),
       ...(this.snapshot.attachingSessionId === undefined ? {} : { attachingSessionId: this.snapshot.attachingSessionId }),
       ...(promptProgress === undefined ? {} : { promptProgress }),
       ...(current === undefined ? {} : { currentSessionId: current }),
@@ -1842,10 +1954,6 @@ export class RemoteAgentStore {
       this.ensureLiveTranscriptSync()
     }
     this.drainQueuedPromptIfIdle()
-    // Every successful catalog reload is a chance to retire sessions that have
-    // been quiet past the auto-hide threshold. Run it fire-and-forget so a slow
-    // archive call never blocks the next reload tick.
-    void this.archiveStaleSessions().catch(() => undefined)
   }
 
   /** One HTTP `state` snapshot while the socket is down. Not a live journal loop. */

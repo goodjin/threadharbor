@@ -36,6 +36,33 @@ const REQUEST_TIMEOUT_MS = 75_000
 const LIVE_WAIT_MS = 15_000
 const BACKOFF_STEPS_MS = [200, 500, 1_000, 2_000, 5_000] as const
 
+/** Browser trace toggle: ON by default in non-test runs. Set
+ *  `THREADHARBOR_TRACE=0` in `window.localStorage` to silence. */
+function browserTraceEnabled(): boolean {
+  try {
+    if (window.localStorage?.getItem('THREADHARBOR_TRACE') === '0') return false
+  } catch {
+    // localStorage may be unavailable (SSR, privacy mode); fall through
+  }
+  return true
+}
+
+function nowMs(): number {
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') return performance.now()
+  return Date.now()
+}
+
+/** Emit one structured trace line for the browser transport. Goes through
+ *  `console.debug` so devtools can filter by `threadharbor-ws`. */
+function traceBrowser(stage: string, fields: Record<string, unknown>): void {
+  if (!browserTraceEnabled()) return
+  const parts = Object.entries(fields)
+    .map(([key, value]) => `${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`)
+    .join(' ')
+  // eslint-disable-next-line no-console
+  console.debug(`threadharbor-ws ${stage} ${parts}`)
+}
+
 /** Build the WebSocket URL for the gateway control channel. */
 function buildWsUrl(): string {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -222,31 +249,94 @@ export class WsTransport {
    *  `state` may rebuild over HTTP while reconnecting; every other method waits for WS. */
   async call(method: string, params: Record<string, JsonValue>): Promise<JsonValue> {
     if (this.closed) throw new Error('transport closed')
-    if (method === 'state' && this.phase !== 'live') return httpRebuildState(params)
+    const sessionId = typeof params['sessionId'] === 'string' ? params['sessionId'] : undefined
+    const callStartedAt = nowMs()
+    const finishTrace = (ok: boolean, extra: { waitForLiveMs?: number; roundtripMs?: number; error?: string }): void => {
+      const totalMs = Number((nowMs() - callStartedAt).toFixed(2))
+      const fields: Record<string, unknown> = {
+        method,
+        ...(sessionId === undefined ? {} : { sessionId }),
+        phase: this.phase,
+        totalMs,
+        ok,
+        ...(extra.waitForLiveMs !== undefined ? { waitForLiveMs: extra.waitForLiveMs } : {}),
+        ...(extra.roundtripMs !== undefined ? { roundtripMs: extra.roundtripMs } : {}),
+        ...(extra.error !== undefined ? { error: extra.error } : {}),
+      }
+      traceBrowser('ws.call', fields)
+    }
+    if (method === 'state' && this.phase !== 'live') {
+      try {
+        const result = await httpRebuildState(params)
+        finishTrace(true, {})
+        return result
+      } catch (error) {
+        finishTrace(false, { error: String(error) })
+        throw error
+      }
+    }
+    let waitForLiveMs: number | undefined
     if (this.phase !== 'live' || this.socket === undefined) {
-      await this.waitForLive(LIVE_WAIT_MS)
+      const waitStartedAt = nowMs()
+      try {
+        await this.waitForLive(LIVE_WAIT_MS)
+      } catch (error) {
+        finishTrace(false, { waitForLiveMs: Number((nowMs() - waitStartedAt).toFixed(2)), error: String(error) })
+        throw error
+      }
+      waitForLiveMs = Number((nowMs() - waitStartedAt).toFixed(2))
     }
     const socket = this.socket
     if (socket === undefined || this.phase !== 'live') {
-      throw new Error('ws did not reach live phase in time')
+      const err = 'ws did not reach live phase in time'
+      finishTrace(false, { ...(waitForLiveMs === undefined ? {} : { waitForLiveMs }), error: err })
+      throw new Error(err)
     }
     return await new Promise<JsonValue>((resolve, reject) => {
+      const sendStartedAt = nowMs()
       const id = crypto.randomUUID()
       const timer = window.setTimeout(() => {
         this.pending.delete(id)
-        reject(new Error(`request ${method} timed out`))
+        const err = `request ${method} timed out`
+        finishTrace(false, {
+          ...(waitForLiveMs === undefined ? {} : { waitForLiveMs }),
+          roundtripMs: Number((nowMs() - sendStartedAt).toFixed(2)),
+          error: err,
+        })
+        reject(new Error(err))
       }, REQUEST_TIMEOUT_MS)
       this.pending.set(id, {
         method,
-        resolve: (result) => { window.clearTimeout(timer); resolve(result) },
-        reject: (error) => { window.clearTimeout(timer); reject(error) },
+        resolve: (result) => {
+          window.clearTimeout(timer)
+          finishTrace(true, {
+            ...(waitForLiveMs === undefined ? {} : { waitForLiveMs }),
+            roundtripMs: Number((nowMs() - sendStartedAt).toFixed(2)),
+          })
+          resolve(result)
+        },
+        reject: (error) => {
+          window.clearTimeout(timer)
+          finishTrace(false, {
+            ...(waitForLiveMs === undefined ? {} : { waitForLiveMs }),
+            roundtripMs: Number((nowMs() - sendStartedAt).toFixed(2)),
+            error: error instanceof Error ? error.message : String(error),
+          })
+          reject(error)
+        },
       })
       try {
         socket.send(encodeRequest(id, method, params))
       } catch (error) {
         this.pending.delete(id)
         window.clearTimeout(timer)
-        reject(error instanceof Error ? error : new Error(String(error)))
+        const message = error instanceof Error ? error.message : String(error)
+        finishTrace(false, {
+          ...(waitForLiveMs === undefined ? {} : { waitForLiveMs }),
+          roundtripMs: 0,
+          error: message,
+        })
+        reject(error instanceof Error ? error : new Error(message))
       }
     })
   }
