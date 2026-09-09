@@ -1617,21 +1617,21 @@ export class RemoteAgentStore {
     this.ensureLiveTranscriptSync()
     try {
       await this.run(async () => {
-        try {
-          await this.deliverPrompt(sessionId, clientId, requestId, text)
-        } finally {
-          await this.reload(sessionId)
-          void this.catchupTranscript(sessionId, 'high')
-          this.ensureLiveTranscriptSync()
-        }
-        const current = this.snapshot.state.sessions.find(candidate => candidate.sessionId === sessionId)
-        if (current?.turnState === 'running') {
-          this.publish({ ...withoutError(this.snapshot), promptProgress: { ...progress, phase: 'waiting' } })
-          this.tracePromptPhase('waiting', progress.startedAt, { sessionId })
-        } else {
-          const { promptProgress: _promptProgress, ...snapshot } = withoutError(this.snapshot)
-          this.publish(snapshot)
-        }
+        await this.deliverPrompt(sessionId, clientId, requestId, text)
+        // Admission accepted. Leave "正在发送" immediately — the turn's transcript
+        // and its idle/failed conclusion arrive over the live push stream, so the
+        // header must not block on the tunnel-bound reload+catchup below (a busy
+        // host used to strand this on "正在把请求提交到远程 Agent"). reconcile-
+        // PromptProgress clears this 'waiting' once the session goes idle or a
+        // backend event lands.
+        this.publish({ ...withoutError(this.snapshot), promptProgress: { ...progress, phase: 'waiting' } })
+        this.tracePromptPhase('waiting', progress.startedAt, { sessionId })
+        this.ensureLiveTranscriptSync()
+        // Reconcile catalog + transcript in the background; never block the UI
+        // transition on it.
+        void this.reload(sessionId)
+          .then(() => this.catchupTranscript(sessionId, 'high'))
+          .catch(() => undefined)
       }, true)
     } catch (error) {
       if (isRedeliverableError(error)) {

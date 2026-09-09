@@ -79,6 +79,9 @@ export interface Config {
   hostdRequestTimeoutMs: number
   /** Browser journal refresh cadence. */
   pollIntervalMs: number
+  /** Ceiling of journal-silence before a `running` turn is concluded as stuck.
+   *  Optional; defaults to RUNNING_TURN_IDLE_TIMEOUT_MS. */
+  runningTurnIdleTimeoutMs?: number
   /** Durable projected entries retained per session. */
   maxTranscriptEntriesPerSession: number
   /** Web-service-owned OpenSSH known_hosts file. */
@@ -121,6 +124,22 @@ type TranscriptInput = Omit<RemoteTranscriptEntry, 'sessionId' | 'seq' | 'create
 
 /** Bound each durability slice so a large recovered journal cannot starve the Web event loop. */
 const MAX_JOURNAL_EVENTS_PER_SYNC = 100
+
+/** Safety-net catchup cadence while a turn is running. The hostd push
+ *  subscription is the primary, low-latency path; this poll only covers
+ *  missed/silent pushes, so it starts sparse and backs off toward a ceiling, and
+ *  a freshly-projected frame resets it. Keeps a shared SSH tunnel free for real
+ *  RPCs instead of a tight per-tick events.read loop. */
+const RUNNING_CATCHUP_BASE_MS = 500
+const RUNNING_CATCHUP_MAX_MS = 5_000
+/** A `running` turn that produces no new journal frame for this long is treated
+ *  as stuck — a dead hold, a lost completion frame, or a pre-fix zombie whose
+ *  journal never carried a completion — and is concluded so it stops driving the
+ *  tunnel loop forever. `waiting-permission` is exempt: the user may take
+ *  arbitrarily long to answer. This is a backstop above the hold-worker's own
+ *  prompt timeout, which normally synthesizes a completion the gateway observes
+ *  first. */
+const RUNNING_TURN_IDLE_TIMEOUT_MS = 180_000
 
 /** Trace toggle: default ON in non-test runs so latency investigations always
  *  have data; explicit `THREADHARBOR_TRACE=0` silences. */
@@ -376,6 +395,7 @@ export class RemoteAgentGateway extends Service {
     maxRequestBytes: z.natural().min(1).required(),
     hostdRequestTimeoutMs: z.natural().min(1).required(),
     pollIntervalMs: z.natural().min(1).required(),
+    runningTurnIdleTimeoutMs: z.natural().min(1),
     maxTranscriptEntriesPerSession: z.natural().min(1).required(),
     sshKnownHostsPath: z.string().required(),
     sshConnectTimeoutMs: z.natural().min(1).required(),
@@ -2284,8 +2304,12 @@ export class RemoteAgentGateway extends Service {
   private sessionNeedsSync(sessionId: ReturnType<typeof RemoteSessionId>): boolean {
     if (this.syncStopped) return false
     if (this.wsBroadcaster.hasFollowers(sessionId)) return true
-    const turnState = this.requireTables().sessions.get(sessionId)?.turnState
-    return turnState === 'running' || turnState === 'waiting-permission'
+    const session = this.requireTables().sessions.get(sessionId)
+    // A gone or archived session with no live follower must never drive a
+    // background tunnel loop — an archived session is dormant regardless of the
+    // turnState it was left in.
+    if (session === undefined || session.archivedAt !== undefined) return false
+    return session.turnState === 'running' || session.turnState === 'waiting-permission'
   }
 
   private async runFollowedLoop(sessionId: ReturnType<typeof RemoteSessionId>): Promise<void> {
@@ -2381,7 +2405,12 @@ export class RemoteAgentGateway extends Service {
       try {
         // Stay subscribed until the session stops needing projection, a gap
         // is reported, or hostd's WS gives up. The tick is local-only — no
-        // HTTP traffic — so it just wakes us to re-evaluate session state.
+        // HTTP traffic — so it just wakes us to flush pushed pages and re-check
+        // state. The tunnel-bound catchup below is throttled independently.
+        let catchupDelay = RUNNING_CATCHUP_BASE_MS
+        let nextCatchupAt = performance.now() + catchupDelay
+        let lastProgressSeq = liveBinding.lastSeq
+        let lastProgressAt = performance.now()
         while (this.sessionNeedsSync(sessionId) && !lost) {
           await new Promise<void>((resolveWait) => {
             const timer = setTimeout(resolveWait, this.config.pollIntervalMs)
@@ -2389,10 +2418,35 @@ export class RemoteAgentGateway extends Service {
           })
           await flushQueue()
           const waiting = this.requireTables().sessions.get(sessionId)
-          // Catch up on the poll tick so a dead hold is not stuck in `running`
-          // forever waiting for a push that will never come. applyJournalPage
-          // ignores seq <= lastSeq, so this does not re-project live frames.
-          if (waiting?.turnState === 'running' || waiting?.turnState === 'waiting-permission') {
+          const active = waiting?.turnState === 'running' || waiting?.turnState === 'waiting-permission'
+          // Idle/settled turns need no catchup at all — the push subscription
+          // alone keeps a followed idle session current.
+          if (!active) continue
+          const now = performance.now()
+          // A newly-projected frame (via push flush or a prior catchup) advanced
+          // lastSeq: reset the backoff and the stuck-turn clock so a live
+          // streaming turn never trips either.
+          const curSeq = waiting?.binding?.lastSeq ?? -1
+          if (curSeq > lastProgressSeq) {
+            lastProgressSeq = curSeq
+            lastProgressAt = now
+            catchupDelay = RUNNING_CATCHUP_BASE_MS
+            nextCatchupAt = now + catchupDelay
+          }
+          // Stuck-turn backstop: a `running` turn with zero journal activity for
+          // the ceiling is concluded so it stops polling the tunnel forever.
+          const idleTimeoutMs = this.config.runningTurnIdleTimeoutMs ?? RUNNING_TURN_IDLE_TIMEOUT_MS
+          if (waiting?.turnState === 'running' && now - lastProgressAt > idleTimeoutMs) {
+            await this.concludeTurn(waiting, 'failed', '远程轮次长时间无响应，已结束本轮。可重新发送。')
+            process.stderr.write(
+              `threadharbor-gateway: turn timed out session=${sessionId} idleMs=${Math.round(now - lastProgressAt)}\n`,
+            )
+            break
+          }
+          // Backed-off catchup — the push is the fast path, so this only covers
+          // missed/silent pushes and need not be tight. applyJournalPage ignores
+          // seq <= lastSeq, so this does not re-project live frames.
+          if (now >= nextCatchupAt) {
             try {
               await this.catchupSessionJournal(sessionId)
             } catch (error) {
@@ -2404,6 +2458,8 @@ export class RemoteAgentGateway extends Service {
                 lost = true
               }
             }
+            catchupDelay = Math.min(catchupDelay * 2, RUNNING_CATCHUP_MAX_MS)
+            nextCatchupAt = performance.now() + catchupDelay
           }
         }
       } finally {

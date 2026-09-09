@@ -109,7 +109,7 @@ function respondToRequest(request: RemoteControlRequest, port: string, events: J
   }
 }
 
-async function harness(events: JsonValue[] = []) {
+async function harness(events: JsonValue[] = [], configOverride: Partial<typeof CONFIG> = {}) {
   const ctx = new Context()
   await ctx.plugin(Storage)
   ctx.storage.backend.register('memory', new MemoryStorageBackend())
@@ -223,7 +223,7 @@ async function harness(events: JsonValue[] = []) {
     }
   }
 
-  await ctx.plugin(RemoteAgentGateway, CONFIG).await()
+  await ctx.plugin(RemoteAgentGateway, { ...CONFIG, ...configOverride }).await()
   ctx.remoteAgentGateway.setHostdSocketFactory(socketFactory as unknown as (url: string) => import('ws').WebSocket)
   return {
     ctx, gateway: ctx.remoteAgentGateway, calls,
@@ -557,6 +557,35 @@ describe('RemoteAgentGateway', () => {
     } finally {
       if (previous === undefined) delete process.env['TEST_HOSTD_VERSION']
       else process.env['TEST_HOSTD_VERSION'] = previous
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('concludes a running turn that goes silent past the idle ceiling so it stops polling the tunnel forever', async () => {
+    // No events are ever emitted for this session, so its journal never advances
+    // and no completion frame arrives — the pre-fix zombie shape. The follow loop
+    // must conclude the stuck turn instead of polling events.read forever.
+    const { ctx, gateway, calls } = await harness([], { runningTurnIdleTimeoutMs: 150 })
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4360' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'stuck', backend: 'codex',
+        text: 'hello?', clientId: 'c', requestId: 'r1',
+      })) as unknown as { sessionId: string }
+      // The turn goes running on delivery, then the idle backstop concludes it.
+      await vi.waitFor(() => {
+        const s = gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)
+        if (s?.turnState !== 'failed') throw new Error(`turn state ${s?.turnState ?? 'missing'}`)
+      }, { timeout: 4000, interval: 25 })
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState).toBe('failed')
+      // And once concluded (turnState no longer running, no followers), the loop
+      // stops issuing events.read — the count stabilizes.
+      const before = calls.filter(call => call.request.method === 'events.read').length
+      await new Promise(resolve => setTimeout(resolve, 400))
+      const after = calls.filter(call => call.request.method === 'events.read').length
+      expect(after).toBe(before)
+    } finally {
       await ctx.fiber.dispose()
     }
   })
