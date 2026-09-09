@@ -74,6 +74,36 @@ npm run build
 
 需要 loopback TCP 或 Unix socket 的 hostd 测试在受限沙箱中可能得到 `EPERM`，应在允许本机 IPC 的环境原样重跑。
 
+## 开发环境管理（web / hostd）
+
+`scripts/dev.sh` 管理本地两个 dev 服务，动作统一为 `start | stop | restart | status`，目标为 `web | hostd | all`（默认 `all`）：
+
+- **web** —— ThreadHarbor 测试 GUI（默认 channel `test`、端口 `3081`；每个 channel 有独立的 DSH home 与频道补丁 `deploy/channels/<channel>.patch.yml`）。
+- **hostd** —— 本地开发 hostd（默认端口 `62846`，数据目录通过 `--data-dir` 指定）。
+
+```sh
+# 状态（不指定目标则显示两个）
+scripts/dev.sh status web
+scripts/dev.sh status
+
+# 启动/重启 3081 测试 GUI（重启前先 npm run build，让 gateway/client 用上新构建）
+scripts/dev.sh start web
+scripts/dev.sh restart web
+
+# 管理本地 dev hostd（--data-dir 必须指向持有 holds/journal 的原数据目录）
+scripts/dev.sh start hostd --data-dir /tmp/threadharbor-hostd-run.mA1zJL
+scripts/dev.sh restart hostd --data-dir /tmp/threadharbor-hostd-run.mA1zJL
+scripts/dev.sh stop hostd --data-dir /tmp/threadharbor-hostd-run.mA1zJL
+
+# 带原生帧日志启动 hostd（THREADHARBOR_FRAME_LOG=1；只对启动后新建的会话生效）
+scripts/dev.sh start hostd --data-dir /tmp/threadharbor-hostd-run.mA1zJL --frame-log
+
+# 两个一起
+scripts/dev.sh restart all --data-dir /tmp/threadharbor-hostd-run.mA1zJL
+```
+
+`start` 在服务已运行时是幂等 no-op；`stop`/`restart` 先读各自 pid 文件发 `SIGTERM` 并等待端口释放；**不会**杀已 detach 的 hold worker（旧会话的 worker 继续独立运行）。常用覆盖变量见脚本头部注释：`THREADHARBOR_DSH_BIN`（默认走 `scripts/dsh-wrapper.sh`）、`THREADHARBOR_CHANNEL` / `THREADHARBOR_WEB_PORT` / `THREADHARBOR_DSH_HOME`、`THREADHARBOR_HOSTD_PORT` / `THREADHARBOR_HOSTD_DATA_DIR` 等。web 的日志/pid 在 `$DSH_HOME/threadharbor-runtime/{web.log,web.pid}`；hostd 的默认在 `/tmp/threadharbor-hostd-<port>.{log,pid}`。若端口被非脚本启动的进程占用，脚本会拒绝代杀并提示先手动处理或把 pid 文件指过去。
+
 ## 安全原则
 
 - SSH 私钥只以 Web 服务上的文件路径引用，默认不上传、不持久化密钥内容。

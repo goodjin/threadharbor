@@ -196,4 +196,89 @@ describe('RemoteAgentHostd session control', () => {
       await shutdownHolds(root)
     }
   })
+
+  it('reports session.start sub-stages through the dispatch progress sink', async () => {
+    vi.stubEnv('GROK_AGENT_SECRET', 'host-only-grok-secret')
+    vi.stubEnv('CODEX_API_KEY', 'host-only-codex-key')
+    const root = await mkdtemp(join(tmpdir(), 'threadharbor-hostd-stages-'))
+    roots.push(root)
+    const project = await mkdtemp(join(tmpdir(), 'threadharbor-hostd-project-'))
+    roots.push(project)
+    const grok = await listenLoopback()
+    const options: HostdOptions = {
+      host: '127.0.0.1', port: 0, dataDir: root,
+      maxRequestBytes: 1024 * 1024, operationTimeoutMs: 1000, workerStartupTimeoutMs: 3000,
+      maxJournalEvents: 100, maxJournalBytes: 100_000, maxDirectoryEntries: 100,
+      authTimeoutMs: 1000, installTimeoutMs: 1000, promptTimeoutMs: 60_000,
+      agentConfigHome: root, maxAgentConfigBytes: 4096,
+      codexCliCommand: process.execPath,
+      codexCommand: process.execPath, codexArgs: [],
+      claudeCommand: '/missing/claude',
+      claudeAcpCommand: '/missing/claude-agent-acp', claudeAcpArgs: [],
+      dshCommand: process.execPath, dshArgs: [], dshProvider: 'deepseek-official', dshModel: 'test',
+      grokCommand: process.execPath, grokServeHost: '127.0.0.1', grokServePort: grok.port, grokArgs: [],
+      workerScript: new URL('./fixtures/fake-hold-worker.mjs', import.meta.url).pathname,
+      hostdHttpFallback: false,
+    }
+    const hostd = new RemoteAgentHostd(options)
+    await hostd.start()
+    try {
+      const stages: Array<{ stage: string; sessionId: string }> = []
+      await hostd.dispatch(
+        request('session.start', { sessionId: 'stage-session', backend: 'codex', cwd: project }),
+        (stage, sessionId) => { stages.push({ stage, sessionId }) },
+      )
+      expect(stages.map(entry => entry.stage)).toEqual(['spawn-hold', 'initialize-agent', 'bind-session'])
+      expect(stages.every(entry => entry.sessionId === 'stage-session')).toBe(true)
+    } finally {
+      await hostd.close()
+      await shutdownHolds(root)
+    }
+  })
+
+  it('force-restarts a hold on confirmed session.restart and refuses without confirm', async () => {
+    vi.stubEnv('GROK_AGENT_SECRET', 'host-only-grok-secret')
+    vi.stubEnv('CODEX_API_KEY', 'host-only-codex-key')
+    const root = await mkdtemp(join(tmpdir(), 'threadharbor-hostd-force-'))
+    roots.push(root)
+    const project = await mkdtemp(join(tmpdir(), 'threadharbor-hostd-force-cwd-'))
+    roots.push(project)
+    const options: HostdOptions = {
+      host: '127.0.0.1', port: 0, dataDir: root,
+      maxRequestBytes: 1024 * 1024, operationTimeoutMs: 1000, workerStartupTimeoutMs: 3000,
+      maxJournalEvents: 100, maxJournalBytes: 100_000, maxDirectoryEntries: 100,
+      authTimeoutMs: 1000, installTimeoutMs: 1000, promptTimeoutMs: 60_000,
+      agentConfigHome: root, maxAgentConfigBytes: 4096,
+      codexCliCommand: process.execPath,
+      codexCommand: process.execPath, codexArgs: [],
+      claudeCommand: '/missing/claude',
+      claudeAcpCommand: '/missing/claude-agent-acp', claudeAcpArgs: [],
+      dshCommand: process.execPath, dshArgs: [], dshProvider: 'deepseek-official', dshModel: 'test',
+      grokCommand: process.execPath, grokServeHost: '127.0.0.1', grokServePort: 65_499, grokArgs: [],
+      workerScript: new URL('./fixtures/fake-hold-worker.mjs', import.meta.url).pathname,
+      hostdHttpFallback: false,
+    }
+    const hostd = new RemoteAgentHostd(options)
+    await hostd.start()
+    try {
+      const started = await hostd.dispatch(request('session.start', {
+        sessionId: 'force-session', backend: 'codex', cwd: project,
+      })) as unknown as { generation: string }
+      // The destructive kill must be user-confirmed.
+      await expect(hostd.dispatch(request('session.restart', { sessionId: 'force-session' })))
+        .rejects.toThrow(/confirm: true/)
+      const restarted = await hostd.dispatch(request('session.restart', {
+        sessionId: 'force-session', confirm: true,
+      })) as unknown as { generation: string; holdId: string; nativeSessionId?: string }
+      expect(restarted.generation).toBe(started.generation)
+      // A fresh worker answers after the forced stop + revive.
+      const page = await hostd.dispatch(request('events.read', {
+        sessionId: 'force-session', afterSeq: 0, generation: restarted.generation,
+      })) as unknown as RemoteJournalPage
+      expect(page.gap).toBe(false)
+    } finally {
+      await hostd.close()
+      await shutdownHolds(root)
+    }
+  })
 })

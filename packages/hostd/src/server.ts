@@ -1,8 +1,8 @@
 /** Persistent remote-agent host daemon and native-frame control endpoint. */
 
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { connect, createConnection } from 'node:net'
 import { dirname, join } from 'node:path'
@@ -20,6 +20,7 @@ import {
   parseRemoteControlRequest,
   remoteAgentBackend,
   remoteAgentConfigBackend,
+  remoteErrorFixMessage,
   stringField,
   type JsonValue,
   type RemoteControlRequest,
@@ -32,12 +33,24 @@ import {
   type RemoteSessionAttachResult,
   type RemoteSessionStartSpec,
   type RemoteAgentBackend,
+  type RemoteHostdSessionStartStage,
 } from '@threadharbor/protocol'
 import { AgentManager, requireInstallConfirmation } from './agent-manager.ts'
 import { migrateProjectDshSessions } from './dsh-sessions.ts'
 import type { HoldRequest, HoldResponse, HoldWorkerConfig } from './hold-protocol.ts'
 import { HostdWsHub } from './ws-hub.ts'
 import { runningHostdVersion } from './version.ts'
+import {
+  findTcpListenerPid,
+  grokServeSecretFromCommandLine,
+  looksLikeGrokAgentServe,
+  persistGrokServeSecret,
+  probeGrokServe,
+  readFileTail,
+  readProcessCommandLine,
+  resolveGrokServeSecret,
+  stopProcess,
+} from './grok-serve.ts'
 
 export {
   HOSTD_ARTIFACT_FILES,
@@ -246,6 +259,12 @@ export class RemoteAgentHostd {
   private readonly wsHub: HostdWsHub
   private readonly holdLocks = new Map<string, Promise<unknown>>()
   private readonly codeVersion: string
+  /** hostd-owned Grok serve secret; resolved lazily from file → env → new. */
+  private grokServeSecretValue: string | undefined
+  /** Listener pid whose Grok reachability was already verified this process. */
+  private grokServeVerifiedPid: number | undefined
+  /** Worker pids hostd spawned per hold; `session.restart` force-stops a wedged agent. */
+  private readonly workerPids = new Map<string, number>()
 
   /** @param options - fully resolved deployment configuration. */
   constructor(readonly options: HostdOptions) {
@@ -339,9 +358,15 @@ export class RemoteAgentHostd {
 
   /** Dispatch one already-parsed control request.
    * @param request - validated hostd request.
+   * @param onProgress - optional per-stage progress sink used by streaming
+   *  requests (currently `session.start`). Invoked as each backend phase is
+   *  entered so a WebSocket caller can relay progress before the RPC resolves.
    * @returns the JSON result for the request method.
    */
-  async dispatch(request: RemoteControlRequest): Promise<JsonValue> {
+  async dispatch(
+    request: RemoteControlRequest,
+    onProgress?: (stage: RemoteHostdSessionStartStage, sessionId: string, message: string) => void,
+  ): Promise<JsonValue> {
     const dispatchStartedAt = performance.now()
     const sessionId = typeof request.params['sessionId'] === 'string' ? request.params['sessionId'] : undefined
     const finishDispatch = (ok: boolean, error?: unknown): void => {
@@ -354,7 +379,7 @@ export class RemoteAgentHostd {
       })
     }
     try {
-      const result = await this.dispatchInner(request)
+      const result = await this.dispatchInner(request, onProgress)
       finishDispatch(true)
       return result
     } catch (error) {
@@ -364,12 +389,15 @@ export class RemoteAgentHostd {
   }
 
   /** Switch over the validated control request. Wrapped by `dispatch` for tracing. */
-  private async dispatchInner(request: RemoteControlRequest): Promise<JsonValue> {
+  private async dispatchInner(
+    request: RemoteControlRequest,
+    onProgress?: (stage: RemoteHostdSessionStartStage, sessionId: string, message: string) => void,
+  ): Promise<JsonValue> {
     switch (request.method) {
       case 'inventory':
         return await this.inventory() as unknown as JsonValue
       case 'agent.install.plan':
-        return this.agentManager.installPlan(remoteAgentBackend(request.params['backend'])) as unknown as JsonValue
+        return await this.agentManager.installPlan(remoteAgentBackend(request.params['backend'])) as unknown as JsonValue
       case 'agent.install':
         requireInstallConfirmation(request.params['confirm'])
         return await this.agentManager.install(remoteAgentBackend(request.params['backend'])) as unknown as JsonValue
@@ -402,11 +430,14 @@ export class RemoteAgentHostd {
         this.agentManager.cancelAuth(stringField(request.params, 'flowId'))
         return { cancelled: true }
       case 'session.start':
-        return await this.startSession(request.params) as unknown as JsonValue
+        return await this.startSession(request.params, onProgress) as unknown as JsonValue
       case 'session.adopt':
         return await this.adoptSession(request.params) as unknown as JsonValue
       case 'session.attach':
         return await this.attachSession(request.params) as unknown as JsonValue
+      case 'session.restart':
+        if (request.params['confirm'] !== true) throw new Error('session.restart requires confirm: true')
+        return await this.restartSession(request.params) as unknown as JsonValue
       case 'session.prompt':
         return await this.sendAdmission(request.params)
       case 'session.cancel':
@@ -416,6 +447,12 @@ export class RemoteAgentHostd {
         return await this.readEvents(request.params) as unknown as JsonValue
       case 'fs.list':
         return this.listDirectory(request.params) as unknown as JsonValue
+      case 'grok.serve.inspect':
+        return await this.grokServeInspect() as unknown as JsonValue
+      case 'grok.serve.adopt':
+        return await this.adoptGrokServe() as unknown as JsonValue
+      case 'grok.serve.restart':
+        return await this.restartGrokServe() as unknown as JsonValue
       default:
         throw new Error(`hostd does not implement method ${request.method}`)
     }
@@ -486,7 +523,10 @@ export class RemoteAgentHostd {
     res.end(body)
   }
 
-  private async startSession(params: Record<string, JsonValue>): Promise<RemoteSessionAttachResult> {
+  private async startSession(
+    params: Record<string, JsonValue>,
+    onProgress?: (stage: RemoteHostdSessionStartStage, sessionId: string, message: string) => void,
+  ): Promise<RemoteSessionAttachResult> {
     const parentNativeSessionId = optionalString(params, 'parentNativeSessionId')
     const spec: RemoteSessionStartSpec = {
       sessionId: RemoteSessionId(stringField(params, 'sessionId')),
@@ -514,10 +554,13 @@ export class RemoteAgentHostd {
       createdAt: now,
       updatedAt: now,
     }
+    onProgress?.('spawn-hold', record.sessionId, '正在启动远端会话进程')
     await this.spawnHold(record)
     trace('session.start', { stage: 'spawnHold', sessionId: record.sessionId, backend: record.backend })
+    onProgress?.('initialize-agent', record.sessionId, '正在初始化 Agent 连接')
     await this.initializeHold(record)
     trace('session.start', { stage: 'initializeHold', sessionId: record.sessionId })
+    onProgress?.('bind-session', record.sessionId, '正在创建原生会话')
     const ready = await this.bindNativeSession(record, {
       ...(spec.parentNativeSessionId === undefined ? {} : { parentNativeSessionId: spec.parentNativeSessionId }),
     })
@@ -591,6 +634,47 @@ export class RemoteAgentHostd {
     await this.initializeHold(record)
     const ready = await this.bindNativeSession(record, { loadExisting: true })
     return await this.snapshotHold(ready.record, ready.reopened)
+  }
+
+  /**
+   * User-confirmed force restart of one wedged session: stop its hold worker
+   * (and stdio backend child), then attach again — which revives a fresh
+   * worker under the same hold/generation and reloads the native session.
+   * Grok serves are shared and never touched; only this hold's process is.
+   */
+  private async restartSession(params: Record<string, JsonValue>): Promise<RemoteSessionAttachResult> {
+    const record = this.requireSession(params)
+    await this.withHoldLock(record.holdId, async () => {
+      await this.forceStopHold(record)
+      // Hold lock released by withHoldLock; attachRecord takes it again. That
+      // is fine — nothing else can be waiting on a dead worker's lock queue.
+    })
+    return await this.attachRecord(record)
+  }
+
+  /** Kill the hold worker and its stdio backend child, then drop stale sockets. */
+  private async forceStopHold(record: HostdSessionRecord): Promise<void> {
+    const pids = new Set<number>()
+    const spawned = this.workerPids.get(record.holdId)
+    if (spawned !== undefined && spawned > 0) pids.add(spawned)
+    // Worker-written state.json carries both its own pid and the stdio backend
+    // child; prefer it when available so the agent is stopped before the
+    // worker (a detached child would otherwise be orphaned).
+    const statePath = join(this.options.dataDir, 'holds', record.holdId, 'state.json')
+    try {
+      const state = jsonObject(readJson(statePath), 'hold worker state')
+      for (const key of ['backendPid', 'pid'] as const) {
+        const value = state[key]
+        if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) pids.add(value)
+      }
+    } catch {
+      // state.json may be absent while the worker is mid-startup; the
+      // spawnHold pid map above is authoritative in that case.
+    }
+    for (const pid of pids) {
+      if (pid !== process.pid) await stopProcess(pid)
+    }
+    this.unlinkStaleHoldSockets(record.holdId)
   }
 
   private async withHoldLock<T>(holdId: string, task: () => Promise<T>): Promise<T> {
@@ -806,10 +890,7 @@ export class RemoteAgentHostd {
         ? {
           kind: 'websocket',
           url: `ws://${this.options.grokServeHost}:${this.options.grokServePort}/ws`,
-          ...(typeof process.env['GROK_AGENT_SECRET'] === 'string'
-            && process.env['GROK_AGENT_SECRET'] !== ''
-            ? { secret: process.env['GROK_AGENT_SECRET'] }
-            : {}),
+          secret: this.grokServeSecret(),
         }
         : record.backend === 'codex'
           ? { kind: 'stdio', command: this.options.codexCommand, args: this.options.codexArgs }
@@ -829,17 +910,43 @@ export class RemoteAgentHostd {
     ) {
       env['DSH_CORDIS_CONFIG'] = dshLaunch.configPath
     }
+    // Every detached worker writes to an owner-only worker.log so startup
+    // failures (bad command, rejected Grok handshake, corrupt state) are
+    // diagnosable instead of vanishing into the hostd parent's stdio.
+    const workerLogPath = join(directory, 'worker.log')
+    let workerLogFd = -1
+    try {
+      workerLogFd = openSync(workerLogPath, 'w', 0o600)
+    } catch {
+      // Logging must never prevent the worker from starting.
+    }
     const child = spawn(process.execPath, [this.options.workerScript, configPath], {
       cwd: record.cwd,
       detached: process.platform !== 'win32',
       env,
-      stdio: ['ignore', 'ignore', 'inherit'],
+      stdio: workerLogFd >= 0 ? ['ignore', 'ignore', workerLogFd] : ['ignore', 'ignore', 'ignore'],
       windowsHide: true,
     })
+    if (workerLogFd >= 0) closeSync(workerLogFd)
     child.unref()
+    if (child.pid !== undefined) this.workerPids.set(record.holdId, child.pid)
+    let spawnError: unknown
+    let workerExited = false
+    child.once('error', (error) => { spawnError = error })
+    // A worker that boots then dies (bad command, missing config, startup
+    // crash) will never answer ping; surface that immediately instead of
+    // making every caller wait out the full workerStartupTimeoutMs window.
+    child.once('exit', () => { workerExited = true })
     const deadline = Date.now() + this.options.workerStartupTimeoutMs
     let lastError: unknown
     while (Date.now() < deadline) {
+      if (spawnError !== undefined) {
+        throw new Error(`hold ${record.holdId} did not start: ${String(spawnError)}`)
+      }
+      if (workerExited && !this.holdSocketExists(socketPath)) {
+        lastError = new Error(`worker exited before its socket ${socketPath} appeared`)
+        break
+      }
       try {
         await this.holdRequest(record, { operation: 'ping' }, socketPath)
         return
@@ -848,7 +955,20 @@ export class RemoteAgentHostd {
         await wait(50)
       }
     }
-    throw new Error(`hold ${record.holdId} did not start: ${String(lastError)}`)
+    const tail = readFileTail(workerLogPath)
+    const cause = String(lastError ?? spawnError ?? 'unknown')
+    throw new Error(tail === undefined || tail === ''
+      ? `hold ${record.holdId} did not start: ${cause}`
+      : `hold ${record.holdId} did not start: ${cause}；worker 日志尾部：${tail}`)
+  }
+
+  private holdSocketExists(socketPath: string): boolean {
+    try {
+      statSync(socketPath)
+      return true
+    } catch {
+      return false
+    }
   }
 
   private holdSocket(record: HostdSessionRecord): string {
@@ -1005,26 +1125,166 @@ export class RemoteAgentHostd {
     return frame
   }
 
+  /** hostd-owned Grok serve secret: persisted file → parent env → generated. */
+  private grokServeSecret(): string {
+    if (this.grokServeSecretValue === undefined) {
+      this.grokServeSecretValue = resolveGrokServeSecret(
+        this.options.dataDir,
+        process.env['GROK_AGENT_SECRET'],
+      )
+    }
+    return this.grokServeSecretValue
+  }
+
+  /**
+   * Ensure a reachable `grok agent serve` bound to the configured port.
+   *
+   * Unlike a bare TCP check, this verifies the WebSocket handshake with the
+   * hostd-owned secret — but only for listeners that are actually a Grok serve
+   * (identified from the owning process command line). Anything else is left
+   * untouched: probing an unrelated service would open a stray connection and
+   * we have no repair for a foreign listener. A serve started by an earlier
+   * hostd generation (whose secret this process lost) is detected here instead
+   * of surfacing as a mysterious 15-second "hold did not start" on the next
+   * reopen, and the caller can offer adopt/restart as a confirm-to-fix action.
+   */
   private async ensureGrokServer(): Promise<void> {
-    if (await tcpOpen(this.options.grokServeHost, this.options.grokServePort)) return
-    const secret = process.env['GROK_AGENT_SECRET']
-    if (secret === undefined || secret === '') throw new Error('GROK_AGENT_SECRET is required to start Grok')
-    const child = spawn(this.options.grokCommand, [
-      ...this.options.grokArgs,
-      'agent', 'serve', '--bind', `${this.options.grokServeHost}:${this.options.grokServePort}`, '--secret', secret,
-    ], {
-      detached: process.platform !== 'win32',
-      env: process.env,
-      stdio: 'ignore',
-      windowsHide: true,
-    })
+    const host = this.options.grokServeHost
+    const port = this.options.grokServePort
+    if (!(await tcpOpen(host, port))) {
+      await this.startGrokServe()
+      return
+    }
+    const pid = await findTcpListenerPid(port)
+    if (pid !== undefined && this.grokServeVerifiedPid === pid) return
+    const commandLine = pid === undefined ? undefined : await readProcessCommandLine(pid)
+    if (!looksLikeGrokAgentServe(commandLine, port)) return
+    if (await probeGrokServe(host, port, this.grokServeSecret())) {
+      if (pid !== undefined) this.grokServeVerifiedPid = pid
+      return
+    }
+    // A keyed Grok serve this hostd cannot talk to. Destructive (restart) and
+    // non-destructive (adopt) repairs exist, so surface an actionable error.
+    throw new Error(remoteErrorFixMessage('grok-serve',
+      `${host}:${port} 上已有一个由旧 hostd 启动的 Grok 服务，但当前 hostd 不知道它的密钥，会话无法连接。`
+      + '可点「接管现有服务」读取该服务的密钥（不中断其他会话），或点「重启服务」用 hostd 自己的密钥重新启动（会中断该主机正在运行的 Grok 会话）。'))
+  }
+
+  /** Spawn a detached `grok agent serve` with the hostd-owned secret. */
+  private async startGrokServe(): Promise<void> {
+    const host = this.options.grokServeHost
+    const port = this.options.grokServePort
+    const secret = this.grokServeSecret()
+    let child: ChildProcess
+    try {
+      child = spawn(this.options.grokCommand, [
+        ...this.options.grokArgs,
+        'agent', 'serve', '--bind', `${host}:${port}`, '--secret', secret,
+      ], {
+        detached: process.platform !== 'win32',
+        env: process.env,
+        stdio: 'ignore',
+        windowsHide: true,
+      })
+    } catch (error) {
+      throw this.grokServeFailure(error)
+    }
+    let spawnError: unknown
+    child.once('error', (error) => { spawnError = error })
     child.unref()
     const deadline = Date.now() + this.options.workerStartupTimeoutMs
     while (Date.now() < deadline) {
-      if (await tcpOpen(this.options.grokServeHost, this.options.grokServePort)) return
+      if (spawnError !== undefined) throw this.grokServeFailure(spawnError)
+      if (await tcpOpen(host, port)) {
+        const pid = await findTcpListenerPid(port)
+        if (pid !== undefined) this.grokServeVerifiedPid = pid
+        return
+      }
       await wait(50)
     }
-    throw new Error('Grok agent server did not become ready')
+    throw this.grokServeFailure(new Error('Grok agent server did not become ready'))
+  }
+
+  /** Translate a Grok serve launch failure into an actionable hostd error. */
+  private grokServeFailure(error: unknown): Error {
+    const detail = error instanceof Error ? error.message : String(error)
+    const mention = /ENOENT|not found|Cannot find module/i.test(detail)
+      ? `找不到 Grok 可执行文件（${this.options.grokCommand}）`
+      : 'Grok 服务无法启动'
+    return new Error(remoteErrorFixMessage('agent-missing',
+      `${mention}：${detail}。请到「主机设置」安装 Grok 或确认 grok 命令可用后重试。`))
+  }
+
+  /** Read-only Grok serve diagnostics for the Web UI (no secret is returned). */
+  private async grokServeInspect(): Promise<Record<string, JsonValue>> {
+    const host = this.options.grokServeHost
+    const port = this.options.grokServePort
+    const listening = await tcpOpen(host, port)
+    const pid = listening ? await findTcpListenerPid(port) : undefined
+    const commandLine = pid === undefined ? undefined : await readProcessCommandLine(pid)
+    const grokAgentServe = looksLikeGrokAgentServe(commandLine, port)
+    const secret = this.grokServeSecret()
+    // Only probe an attributed Grok serve; probing a foreign listener would
+    // open a stray connection for no actionable answer.
+    const reachable = grokAgentServe ? await probeGrokServe(host, port, secret) : false
+    return {
+      host, port, listening,
+      ...(pid === undefined ? {} : { pid }),
+      grokAgentServe,
+      secretAdoptable: grokServeSecretFromCommandLine(commandLine) !== undefined,
+      reachable,
+      ours: pid !== undefined && pid === this.grokServeVerifiedPid,
+    }
+  }
+
+  /**
+   * Non-destructive repair: adopt the secret of the serve already listening on
+   * the Grok port by reading its command line. Only touches hostd state; live
+   * sessions on that serve keep running.
+   */
+  private async adoptGrokServe(): Promise<Record<string, JsonValue>> {
+    const host = this.options.grokServeHost
+    const port = this.options.grokServePort
+    if (!(await tcpOpen(host, port))) {
+      throw new Error(`端口 ${port} 上没有正在运行的 Grok 服务，无需接管。`)
+    }
+    const pid = await findTcpListenerPid(port)
+    if (pid === undefined) throw new Error(`无法识别 ${port} 端口上服务的进程。`)
+    const commandLine = await readProcessCommandLine(pid)
+    if (!looksLikeGrokAgentServe(commandLine, port)) {
+      throw new Error(`端口 ${port} 上的进程（pid ${pid}）不是 Grok agent serve，hostd 不会接管它。`)
+    }
+    const secret = grokServeSecretFromCommandLine(commandLine)
+    if (secret === undefined) {
+      throw new Error(`端口 ${port} 上的 Grok 服务命令行里没有可读取的 --secret，无法接管。可改用「重启 Grok 服务」。`)
+    }
+    persistGrokServeSecret(this.options.dataDir, secret)
+    this.grokServeSecretValue = secret
+    this.grokServeVerifiedPid = pid
+    if (!(await probeGrokServe(host, port, secret))) {
+      throw new Error('已保存该服务的密钥，但 WebSocket 握手仍然失败。可改用「重启 Grok 服务」。')
+    }
+    return { adopted: true, host, port, pid }
+  }
+
+  /**
+   * Destructive repair (user-confirmed in the Web UI): stop the Grok serve on
+   * the configured port and start a fresh one with the hostd-owned secret.
+   * Refuses to terminate a listener that does not look like `grok agent serve`.
+   */
+  private async restartGrokServe(): Promise<Record<string, JsonValue>> {
+    const host = this.options.grokServeHost
+    const port = this.options.grokServePort
+    const pid = await findTcpListenerPid(port)
+    if (pid !== undefined) {
+      const commandLine = await readProcessCommandLine(pid)
+      if (!looksLikeGrokAgentServe(commandLine, port)) {
+        throw new Error(`无法重启：${port} 被一个非 Grok 的进程占用（pid ${pid}），hostd 不会终止它。请手动释放端口后重试。`)
+      }
+      await stopProcess(pid)
+    }
+    await this.startGrokServe()
+    return { restarted: true, host, port }
   }
 
   private loadSessions(): void {

@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentManager, type AgentManagerOptions } from '../src/agent-manager.ts'
 
@@ -26,6 +26,31 @@ afterEach(async () => {
   vi.unstubAllEnvs()
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
+
+/** npm stub: reports <root> as the global prefix, records a marker, and links codex/codex-acp. */
+async function fakeNpm(root: string): Promise<string> {
+  const npm = join(root, 'npm')
+  await writeFile(npm, [
+    '#!/usr/bin/env node',
+    "const { mkdirSync, writeFileSync, chmodSync, rmSync } = require('node:fs')",
+    "const { join } = require('node:path')",
+    'const args = process.argv.slice(2)',
+    `const prefix = ${JSON.stringify(root)}`,
+    "if (args[0] === 'prefix') { process.stdout.write(prefix + '\\n'); process.exit(0) }",
+    "const bin = join(prefix, 'bin')",
+    'mkdirSync(bin, { recursive: true, mode: 0o700 })',
+    "writeFileSync(join(prefix, 'npm-ran.marker'), 'ran\\n')",
+    "for (const name of ['codex', 'codex-acp']) {",
+    '  const dest = join(bin, name)',
+    '  rmSync(dest, { force: true })',
+    "  writeFileSync(dest, '#!/bin/sh\\n')",
+    '  chmodSync(dest, 0o700)',
+    '}',
+    '',
+  ].join('\n'))
+  await chmod(npm, 0o700)
+  return npm
+}
 
 describe('AgentManager', () => {
   it('keeps a device login worker alive and exposes only its URL, code, and status', async () => {
@@ -85,7 +110,7 @@ describe('AgentManager', () => {
       npmCommand: [process.execPath, npm],
     })
 
-    const plan = manager.installPlan('grok')
+    const plan = await manager.installPlan('grok')
     expect(plan).toMatchObject({
       component: 'grok', alreadyInstalled: false, requiresConfirmation: true,
     })
@@ -109,7 +134,7 @@ describe('AgentManager', () => {
       grokCommand: process.execPath,
       npmCommand: [npm],
     })
-    const plan = manager.installPlan('grok')
+    const plan = await manager.installPlan('grok')
     expect(plan.alreadyInstalled).toBe(true)
     await expect(manager.install('grok')).resolves.toMatchObject({ alreadyInstalled: true })
   })
@@ -140,7 +165,7 @@ describe('AgentManager', () => {
       dshCommand: 'dsh-jsonrpc-agent',
       pythonCommand: python,
     })
-    const plan = manager.installPlan('dsh')
+    const plan = await manager.installPlan('dsh')
     expect(plan.version).toBe('deepseek-harness-runtime-bin==0.1.1rc1')
     expect(plan.steps).toHaveLength(1)
     expect(plan.steps[0]?.command).toContain('pip install --user --upgrade --break-system-packages')
@@ -271,5 +296,147 @@ describe('AgentManager', () => {
     expect((await manager.inventory(new Set())).find(entry => entry.backend === 'codex'))
       .toMatchObject({ installed: true, authenticated: true })
     expect(existsSync(marker)).toBe(false)
+  })
+
+  it('moves a foreign global bin aside and completes the install so one deploy click suffices', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'threadharbor-agent-eexist-relocate-'))
+    roots.push(root)
+    // Isolate from agent binaries that may exist on this host's PATH.
+    vi.stubEnv('PATH', join(root, 'empty-path'))
+    // A foreign package (codex-cli, as seen on jin's Mac mini) already owns the `codex` bin name.
+    const foreign = join(root, 'lib', 'node_modules', 'codex-cli', 'bin', 'codex')
+    await mkdir(dirname(foreign), { recursive: true })
+    await writeFile(foreign, '#!/bin/sh\n')
+    await chmod(foreign, 0o700)
+    const bin = join(root, 'bin')
+    await mkdir(bin)
+    await symlink(foreign, join(bin, 'codex'))
+    const npm = await fakeNpm(root)
+    const manager = new AgentManager({
+      ...options(root, '/missing/agent'),
+      codexCliCommand: 'codex',
+      codexAcpCommand: 'codex-acp',
+      npmCommand: [process.execPath, npm],
+    })
+
+    // The reviewable plan previews the relocation step before the npm command.
+    const plan = await manager.installPlan('codex')
+    const backupPath = join(bin, 'codex.threadharbor-backup')
+    expect(plan.steps[0]?.command).toBe(`mv '${join(bin, 'codex')}' '${backupPath}'`)
+    expect(plan.steps[1]?.command).toContain('npm install -g @openai/codex')
+
+    // One install call: the conflict is moved aside, npm installs the pinned
+    // packages, and the agent ends fully installed instead of failing EEXIST.
+    const installed = await manager.install('codex')
+    expect(installed.alreadyInstalled).toBe(true)
+    expect(existsSync(join(root, 'npm-ran.marker'))).toBe(true)
+    // The foreign tool keeps its file at the backup name; npm now owns `codex`.
+    expect(existsSync(backupPath)).toBe(true)
+    expect(existsSync(join(bin, 'codex'))).toBe(true)
+  })
+
+  it('restores a moved foreign bin when npm itself still fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'threadharbor-agent-eexist-restore-'))
+    roots.push(root)
+    // Isolate from agent binaries that may exist on this host's PATH.
+    vi.stubEnv('PATH', join(root, 'empty-path'))
+    const foreign = join(root, 'lib', 'node_modules', 'codex-cli', 'bin', 'codex')
+    await mkdir(dirname(foreign), { recursive: true })
+    await writeFile(foreign, '#!/bin/sh\n')
+    await chmod(foreign, 0o700)
+    const bin = join(root, 'bin')
+    await mkdir(bin)
+    await symlink(foreign, join(bin, 'codex'))
+    const npm = join(root, 'npm')
+    await writeFile(npm, [
+      '#!/usr/bin/env node',
+      "const { join } = require('node:path')",
+      'const args = process.argv.slice(2)',
+      `const prefix = ${JSON.stringify(root)}`,
+      "if (args[0] === 'prefix') { process.stdout.write(prefix + '\\n'); process.exit(0) }",
+      "process.stderr.write('boom\\n')",
+      'process.exit(1)',
+      '',
+    ].join('\n'))
+    await chmod(npm, 0o700)
+    const manager = new AgentManager({
+      ...options(root, '/missing/agent'),
+      codexCliCommand: 'codex',
+      codexAcpCommand: 'codex-acp',
+      npmCommand: [process.execPath, npm],
+    })
+
+    const error = await manager.install('codex').then(() => undefined, (value: unknown) => value)
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toContain('installer exited with status 1')
+    // The foreign shim is put back so the host is not left half-moved.
+    expect(existsSync(join(bin, 'codex'))).toBe(true)
+    expect(existsSync(join(bin, 'codex.threadharbor-backup'))).toBe(false)
+  })
+
+  it('allows an existing npm link that already targets the package being installed', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'threadharbor-agent-eexist-own-link-'))
+    roots.push(root)
+    // Isolate from agent binaries that may exist on this host's PATH.
+    vi.stubEnv('PATH', join(root, 'empty-path'))
+    const bin = join(root, 'bin')
+    await mkdir(bin)
+    // Prior hostd installs link into the same pinned packages; these must not block a reinstall.
+    await symlink(join(root, 'lib', 'node_modules', '@openai', 'codex', 'bin', 'codex.js'), join(bin, 'codex'))
+    await symlink(
+      join(root, 'lib', 'node_modules', '@agentclientprotocol', 'codex-acp', 'bin', 'codex-acp.js'),
+      join(bin, 'codex-acp'),
+    )
+    const npm = await fakeNpm(root)
+    const manager = new AgentManager({
+      ...options(root, '/missing/agent'),
+      codexCliCommand: 'codex',
+      codexAcpCommand: 'codex-acp',
+      npmCommand: [process.execPath, npm],
+    })
+
+    const installed = await manager.install('codex')
+    expect(installed.alreadyInstalled).toBe(true)
+    expect(existsSync(join(root, 'npm-ran.marker'))).toBe(true)
+  })
+
+  it('translates a residual npm EEXIST failure when no conflict existed at preflight time', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'threadharbor-agent-eexist-fallback-'))
+    roots.push(root)
+    // Isolate from agent binaries that may exist on this host's PATH.
+    vi.stubEnv('PATH', join(root, 'empty-path'))
+    const npm = join(root, 'npm')
+    await writeFile(npm, [
+      '#!/usr/bin/env node',
+      "const { mkdirSync, writeFileSync } = require('node:fs')",
+      "const { join } = require('node:path')",
+      'const args = process.argv.slice(2)',
+      `const prefix = ${JSON.stringify(root)}`,
+      "if (args[0] === 'prefix') { process.stdout.write(prefix + '\\n'); process.exit(0) }",
+      // No `bin/codex` exists yet, so the preflight passes; npm itself then hits the conflict.
+      "const bin = join(prefix, 'bin')",
+      'mkdirSync(bin, { recursive: true })',
+      "writeFileSync(join(bin, 'codex'), '#!/bin/sh\\n')",
+      "process.stderr.write('npm error code EEXIST\\n')",
+      "process.stderr.write('npm error path ' + join(bin, 'codex') + '\\n')",
+      "process.stderr.write('npm error EEXIST: file already exists\\n')",
+      'process.exit(1)',
+      '',
+    ].join('\n'))
+    await chmod(npm, 0o700)
+    const manager = new AgentManager({
+      ...options(root, '/missing/agent'),
+      codexCliCommand: 'codex',
+      codexAcpCommand: 'codex-acp',
+      npmCommand: [process.execPath, npm],
+    })
+
+    const error = await manager.install('codex').then(() => undefined, (value: unknown) => value)
+    expect(error).toBeInstanceOf(Error)
+    const message = (error as Error).message
+    expect(message).toContain('EEXIST')
+    expect(message).toContain(join(root, 'bin', 'codex'))
+    expect(message).toContain("mv '")
+    expect(message).not.toContain('installer exited with status')
   })
 })

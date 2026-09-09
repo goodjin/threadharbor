@@ -3,9 +3,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import {
-  accessSync, chmodSync, constants, existsSync, mkdirSync, readFileSync, statSync, writeFileSync,
+  accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, renameSync, statSync, writeFileSync,
 } from 'node:fs'
-import { delimiter, dirname, join, resolve } from 'node:path'
+import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import {
   RemoteAuthFlowId,
   type JsonValue,
@@ -44,6 +44,77 @@ const DSH_PIP_SPEC = 'deepseek-harness-runtime-bin==0.1.1rc1'
 const DSH_PIP_ARGS = ['-m', 'pip', 'install', '--user', '--upgrade', '--break-system-packages', DSH_PIP_SPEC] as const
 /** Official locator: the wheel ships `dsh-jsonrpc-agent-pkg-<platform>-<arch>`, not a PATH entry. */
 const DSH_RESOLVE_SCRIPT = 'from deepseek_harness_runtime import bundled_runtime_path, bundled_default_config_path; print(bundled_runtime_path()); print(bundled_default_config_path())'
+
+/** npm global bin names the pinned official recipes link into the npm global prefix. */
+const NPM_BIN_NAMES: Readonly<Partial<Record<RemoteAgentBackend, readonly string[]>>> = {
+  codex: ['codex', 'codex-acp'],
+  claude: ['claude', 'claude-agent-acp'],
+  grok: ['grok'],
+}
+
+/** Which pinned npm package owns each global bin link; links that already point at the same
+ * package are recognized as prior hostd installs and do not block a reinstall. */
+const NPM_BIN_OWNER: Readonly<Record<string, string>> = {
+  codex: '@openai/codex',
+  'codex-acp': '@agentclientprotocol/codex-acp',
+  claude: '@anthropic-ai/claude-code',
+  'claude-agent-acp': '@agentclientprotocol/claude-agent-acp',
+  grok: '@xai-official/grok',
+}
+
+/** Read the owning npm package out of a bin symlink target such as `../lib/node_modules/codex-cli/bin/codex`. */
+function ownerPackageFromLinkTarget(target: string): string | undefined {
+  const match = target.match(/node_modules[\\/]((?:@[^\\/]+[\\/])?[^\\/]+)/)
+  return match?.[1]
+}
+
+/** Describe what currently occupies an npm global bin path, or return undefined when the path is
+ * free or already owned by the package this install is about to link. */
+function describeOccupiedNpmBin(path: string, binName: string): string | undefined {
+  let stats: ReturnType<typeof lstatSync>
+  try {
+    stats = lstatSync(path)
+  } catch {
+    return undefined // absent (or unreadable); nothing blocks npm here
+  }
+  const expectedOwner = NPM_BIN_OWNER[binName]
+  if (stats.isSymbolicLink()) {
+    let target = ''
+    try {
+      target = readlinkSync(path)
+    } catch {
+      return '一个无法读取目标的符号链接'
+    }
+    const owner = ownerPackageFromLinkTarget(target)
+    if (expectedOwner !== undefined && owner === expectedOwner) return undefined // our own prior link
+    const provenance = owner === undefined
+      ? `指向 ${target}，不属于本次要安装的 ${expectedOwner ?? binName}`
+      : `属于 ${owner} 包，不是本次要安装的 ${expectedOwner ?? binName}`
+    return `符号链接（${provenance}）`
+  }
+  if (stats.isDirectory()) return '一个目录'
+  return `一个普通文件${expectedOwner === undefined ? '' : `（不是 npm 为 ${expectedOwner} 创建的符号链接）`}`
+}
+
+/** Suffix used when hostd moves a conflicting npm global bin entry out of the way before installing. */
+const THREADHARBOR_BIN_BACKUP_SUFFIX = '.threadharbor-backup'
+
+/** First free sibling name `<path>.threadharbor-backup[.N]`. */
+function nextBackupPath(path: string): string {
+  let candidate = `${path}${THREADHARBOR_BIN_BACKUP_SUFFIX}`
+  for (let index = 1; existsSync(candidate); index += 1) {
+    candidate = `${path}${THREADHARBOR_BIN_BACKUP_SUFFIX}.${index}`
+  }
+  return candidate
+}
+
+/** One npm global bin entry that must be moved aside so the official recipe can link its own command. */
+interface NpmBinConflict {
+  readonly binName: string
+  readonly path: string
+  readonly backupPath: string
+  readonly description: string
+}
 
 interface DshLaunch {
   readonly command: string
@@ -295,10 +366,14 @@ export class AgentManager {
   }
 
   /** Return the exact host-owned install recipe before mutation.
+   *  When another package or installer owns one of the npm global bin names the
+   *  recipe must link (e.g. a stale `codex` from codex-cli, or the standalone
+   *  Claude Code `claude` link), the plan first moves that entry aside to a
+   *  `.threadharbor-backup` name so the pinned install can complete.
    * @param backend - requested agent.
    * @returns a reviewable plan.
    */
-  installPlan(backend: RemoteAgentBackend): RemoteInstallPlan {
+  async installPlan(backend: RemoteAgentBackend): Promise<RemoteInstallPlan> {
     const alreadyInstalled = this.backendInstalled(backend)
     if (backend === 'dsh') {
       const python = this.options.pythonCommand ?? resolvePython()
@@ -340,21 +415,31 @@ export class AgentManager {
       : backend === 'claude'
         ? 'Install Claude Code and its ACP adapter from npm'
         : 'Install the official Grok Build CLI from npm'
+    const conflicts = alreadyInstalled ? [] : await this.npmBinConflicts(backend)
+    const npmStep = planStep(title, ['npm', 'install', '-g', ...packages].map(quoteDisplay).join(' '))
+    const moveSteps = conflicts.map(conflict => planStep(
+      `Move the existing '${conflict.binName}' entry (${conflict.description}) out of the npm global bin so the official package can link its own command`,
+      `mv '${conflict.path}' '${conflict.backupPath}'`,
+    ))
     return {
       component: backend,
       version: packages.join(' + '),
       alreadyInstalled,
       requiresConfirmation: true,
-      steps: [planStep(title, ['npm', 'install', '-g', ...packages].map(quoteDisplay).join(' '))],
+      steps: [...moveSteps, npmStep],
     }
   }
 
   /** Execute a previously reviewable built-in recipe on this host.
+   *  Conflicting npm global bin entries are moved to a `.threadharbor-backup`
+   *  name right before npm runs (the same step the plan preview shows), and are
+   *  restored if the installer itself fails, so a foreign `codex`/`claude`
+   *  shim never leaves the host broken.
    * @param backend - requested agent.
    * @returns the completed plan.
    */
   async install(backend: RemoteAgentBackend): Promise<RemoteInstallPlan> {
-    const plan = this.installPlan(backend)
+    const plan = await this.installPlan(backend)
     if (plan.unavailableReason !== undefined) throw new Error(plan.unavailableReason)
     if (plan.alreadyInstalled) return plan
     if (backend === 'dsh') {
@@ -362,6 +447,16 @@ export class AgentManager {
     } else {
       const packages = npmPackages(backend)
       if (packages === undefined) throw new Error('no installer is configured')
+      const conflicts = await this.npmBinConflicts(backend)
+      const moved: Array<{ readonly path: string; readonly backupPath: string }> = []
+      for (const conflict of conflicts) {
+        try {
+          renameSync(conflict.path, conflict.backupPath)
+          moved.push({ path: conflict.path, backupPath: conflict.backupPath })
+        } catch {
+          // The entry vanished between plan and execution; npm can link freely.
+        }
+      }
       const npm = this.npmInstaller()
       const result = await run(
         npm.command,
@@ -370,12 +465,22 @@ export class AgentManager {
         this.extraBinDirs,
       )
       if (result.code !== 0) {
-        throw new Error(`installer exited with status ${result.code}: ${result.output.trim().slice(-2000) || 'no output'}`)
+        // npm failed: put every moved entry back so the foreign tool keeps its
+        // shim and the user sees an honest EEXIST reason, not a half-moved bin.
+        for (const item of moved) {
+          try {
+            renameSync(item.backupPath, item.path)
+          } catch {
+            // Leave the backup in place for manual cleanup.
+          }
+        }
+        const translated = this.npmInstallEexistMessage(result.output)
+        throw new Error(translated ?? `installer exited with status ${result.code}: ${result.output.trim().slice(-2000) || 'no output'}`)
       }
     }
     await this.refreshExtraBins(true)
     if (backend === 'dsh') await this.refreshDshLaunch(true)
-    const installed = this.installPlan(backend)
+    const installed = await this.installPlan(backend)
     if (!installed.alreadyInstalled) {
       throw new Error(backend === 'dsh'
         ? 'pip installed deepseek-harness-runtime-bin but bundled_runtime_path() did not resolve a runtime executable'
@@ -638,6 +743,49 @@ export class AgentManager {
     if (result.code !== 0) {
       throw new Error(`DSH installer exited with status ${result.code}: ${result.output.trim().slice(-2000) || 'no output'}`)
     }
+  }
+
+  /** Resolve the npm global bin directory using the same installer the recipe would run. */
+  private async npmGlobalBinDir(): Promise<string | undefined> {
+    const npm = this.npmInstaller()
+    try {
+      const prefix = await run(npm.command, [...npm.args, 'prefix', '-g'], 5_000, this.extraBinDirs)
+      const value = prefix.output.trim().split(/\r?\n/).at(-1)?.trim()
+      if (prefix.code !== 0 || value === undefined || value === '') return undefined
+      return process.platform === 'win32' ? value : join(value, 'bin')
+    } catch {
+      // npm may be missing or unreachable; the install itself will fail with the real reason.
+      return undefined
+    }
+  }
+
+  /** npm global bin entries a backend install must link that are occupied by
+   *  another package or installer. Entries already owned by the pinned package
+   *  (prior hostd installs) are not conflicts and are never moved. */
+  private async npmBinConflicts(backend: RemoteAgentBackend): Promise<readonly NpmBinConflict[]> {
+    const binNames = NPM_BIN_NAMES[backend]
+    if (binNames === undefined) return []
+    const binDir = await this.npmGlobalBinDir()
+    if (binDir === undefined) return []
+    const conflicts: NpmBinConflict[] = []
+    for (const binName of binNames) {
+      const path = join(binDir, binName)
+      const description = describeOccupiedNpmBin(path, binName)
+      if (description === undefined) continue
+      conflicts.push({ binName, path, backupPath: nextBackupPath(path), description })
+    }
+    return conflicts
+  }
+
+  /** Translate a residual npm EEXIST failure (e.g. the conflict changed between
+   *  plan review and execution, so nothing was moved aside in time). */
+  private npmInstallEexistMessage(output: string): string | undefined {
+    if (!/\bnpm error code EEXIST\b/.test(output)) return undefined
+    const match = output.match(/npm error path (.+)/)
+    const path = match?.[1]?.trim()
+    if (path === undefined || path === '') return undefined
+    const description = describeOccupiedNpmBin(path, basename(path)) ?? '已被其它文件占用'
+    return `npm 全局安装失败（EEXIST）：${path} 已存在（${description}），自动让位没有成功。请先在目标主机的终端手动处理这个旧文件，再重新点部署：mv '${path}' '${path}${THREADHARBOR_BIN_BACKUP_SUFFIX}'（确认不再需要时可改为 rm '${path}'）。`
   }
 
   private authCommand(backend: RemoteAgentBackend): readonly [string, readonly string[]] {

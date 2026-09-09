@@ -20,6 +20,7 @@ import {
   RemoteSessionId,
   type JsonValue,
   type RemoteHostdMethod,
+  type RemoteHostdSessionStartStage,
   type RemoteHostdWsEvent,
   type RemoteHostdWsFrame,
   type RemoteJournalPage,
@@ -179,8 +180,22 @@ export class HostdWsHub {
       if (ws.readyState !== WS_OPEN) return
       ws.send(JSON.stringify(frame))
     }
+    // Relay fine-grained session.start progress to the requesting gateway
+    // before the final response arrives (only session.start emits stages).
+    const onProgress = (stage: RemoteHostdSessionStartStage, sessionId: string, message: string): void => {
+      if (ws.readyState !== WS_OPEN) return
+      const sessionIdBranded = RemoteSessionId(sessionId)
+      const event: RemoteHostdWsEvent = {
+        type: 'session.start.progress',
+        requestId: id,
+        sessionId: sessionIdBranded,
+        stage,
+        message,
+      }
+      reply({ direction: 'push', seq: ++this.pushSeq, event })
+    }
     try {
-      const result = await this.hostd.dispatch({ id, method, params })
+      const result = await this.hostd.dispatch({ id, method, params }, method === 'session.start' ? onProgress : undefined)
       reply({ direction: 'response', id, ok: true, result })
     } catch (error) {
       reply({
