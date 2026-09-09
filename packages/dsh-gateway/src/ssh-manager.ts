@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { dirname, isAbsolute, join } from 'node:path'
+import { readHostdPackageVersion } from '@threadharbor/hostd/version'
 import {
   type RemoteOperationPhase,
   type RemoteSshConfig,
@@ -162,6 +163,9 @@ async function freePort(): Promise<number> {
 /** Owns SSH subprocesses for the Web service; browser disconnects do not affect them. */
 export class SshManager {
   private readonly tunnels = new Map<string, OwnedTunnel>()
+  /** Serializes tunnel opening per host alias so concurrent callers (deploy and
+   *  per-request pool probes) never open two replacements for one host. */
+  private readonly tunnelOps = new Map<string, Promise<void>>()
 
   /** @param options - deployment settings controlled by the DSH profile. */
   constructor(private readonly options: SshManagerOptions) {
@@ -246,6 +250,21 @@ export class SshManager {
       ], this.options.installTimeoutMs, readFileSync(artifact, 'utf8'))
       if (upload.code !== 0) throw new Error(`unable to upload the hostd ${file} artifact`)
     }
+    // Stamp the version manifest next to the release directory so the remote
+    // hostd resolves `here/../package.json` exactly like the local artifact
+    // directory does. Without it the remote reports `unknown+<digest>` and
+    // upgrade prompts compare labels that never match even though the artifact
+    // bytes are identical. `type: module` keeps Node from re-parsing the
+    // uploaded ESM hostd files as CommonJS first.
+    const hostdVersion = readHostdPackageVersion(join(this.options.hostdArtifactDirectory, '..', 'package.json'))
+    if (hostdVersion !== 'unknown') {
+      const manifest = `${JSON.stringify({ name: 'threadharbor-hostd', version: hostdVersion, type: 'module', private: true })}\n`
+      const manifestUpload = await run('ssh', [
+        ...this.sshArgs(config), this.destination(config),
+        `umask 077; channel=${shellQuote(channel)}; dir="$HOME/.local/share/threadharbor/$channel"; mkdir -p "$dir"; cat > "$dir/package.json"`,
+      ], this.options.installTimeoutMs, manifest)
+      if (manifestUpload.code !== 0) throw new Error('unable to upload the hostd version manifest')
+    }
     const script = [
       'set -eu',
       `channel=${shellQuote(channel)}`,
@@ -264,7 +283,14 @@ export class SshManager {
       'service="$HOME/.config/systemd/user/$service_name"',
       'args="--port ' + port + ' --data-dir $state/hostd"',
       "printf '%s\\n' '[Unit]' \"Description=ThreadHarbor host daemon ($channel)\" 'After=network-online.target' '' '[Service]' 'Type=simple' \"EnvironmentFile=-$state/hostd.env\" \"Environment=PATH=$common_path\" \"ExecStart=$node $bin $args\" 'Restart=on-failure' 'RestartSec=2' '' '[Install]' 'WantedBy=default.target' > \"$service\"",
-      'if command -v systemctl >/dev/null 2>&1; then systemctl --user daemon-reload && systemctl --user enable --now "$service_name" && systemctl --user restart "$service_name"',
+      // `command -v systemctl` only proves the binary exists. Container hosts
+      // (LXC/OpenVZ, docker+tini as PID 1) ship the binary but do not run
+      // systemd as init, so `systemctl --user` fails with "Failed to connect to
+      // user scope bus" and the whole deploy aborts. `/run/systemd/system`
+      // exists only when systemd is actually the running init (this is what
+      // libsystemd's sd_booted() checks), so gate the systemd path on it and
+      // let everything else fall through to the nohup supervisor below.
+      'if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then systemctl --user daemon-reload && systemctl --user enable --now "$service_name" && systemctl --user restart "$service_name"',
       'else pid_file="$state/hostd.pid"',
       // 1) kill whatever pid the previous run left in $state/hostd.pid (if any)
       'if [ -f "$pid_file" ]; then old_pid="$(cat "$pid_file")"; case "$old_pid" in (*[!0-9]*|"") ;; (*) kill "$old_pid" 2>/dev/null || true ;; esac; fi',
@@ -272,7 +298,19 @@ export class SshManager {
       //    outside this script (manual launch, older deploy, lost pid file).
       //    Reclaim the port by killing whatever still listens on it, then wait
       //    up to 5s for the kernel to release it before nohup spawns the new one.
-      'if command -v lsof >/dev/null 2>&1; then port_pid="$(lsof -nP -iTCP:' + port + ' -sTCP:LISTEN -t 2>/dev/null | head -n 1 | xargs)"; case "$port_pid" in (*[!0-9]*|"") ;; *) kill "$port_pid" 2>/dev/null || true ;; esac; for _ in 1 2 3 4 5 6 7 8 9 10; do lsof -nP -iTCP:' + port + ' -sTCP:LISTEN >/dev/null 2>&1 || break; sleep 0.5; done; fi',
+      //    Probe with whatever socket tool exists — a minimal Debian container
+      //    ships no lsof; `ss` (iproute2) is the common fallback, `fuser` the
+      //    last resort. Two helpers: `port_pids` needs `ss -p` to name the
+      //    holder for the kill sweep; `port_busy` only detects a listener (no
+      //    `-p`, so it works even where pid columns are hidden) and drives the
+      //    release wait. That wait is UNCONDITIONAL: gating it on lsof (as
+      //    before) meant lsof-less hosts skipped it, so nohup raced the just-
+      //    killed process and the new hostd died on EADDRINUSE while the stale
+      //    one kept serving — a redeploy that silently changed nothing.
+      'port_pids() { { if command -v lsof >/dev/null 2>&1; then lsof -nP -iTCP:' + port + ' -sTCP:LISTEN -t 2>/dev/null; elif command -v ss >/dev/null 2>&1; then ss -ltnpH "sport = :' + port + '" 2>/dev/null | grep -o "pid=[0-9]*" | cut -d= -f2; elif command -v fuser >/dev/null 2>&1; then fuser ' + port + '/tcp 2>/dev/null; fi; } | tr " " "\\n" | grep -E "^[0-9]+$" | sort -u; }',
+      'port_busy() { if command -v ss >/dev/null 2>&1; then [ -n "$(ss -ltnH "sport = :' + port + '" 2>/dev/null)" ]; elif command -v lsof >/dev/null 2>&1; then lsof -nP -iTCP:' + port + ' -sTCP:LISTEN >/dev/null 2>&1; elif command -v fuser >/dev/null 2>&1; then fuser ' + port + '/tcp >/dev/null 2>&1; else return 1; fi; }',
+      'for pid in $(port_pids); do kill "$pid" 2>/dev/null || true; done',
+      'for _ in 1 2 3 4 5 6 7 8 9 10; do port_busy || break; sleep 0.5; done',
       'set -a; [ -f "$envfile" ] && . "$envfile"; set +a',
       'PATH="$common_path" nohup "$node" "$bin" --port ' + port + ' --data-dir "$state/hostd" >>"$state/hostd.log" 2>&1 </dev/null & printf \'%s\\n\' "$!" > "$pid_file"',
       'fi',
@@ -281,9 +319,12 @@ export class SshManager {
     const deploy = await run('ssh', [...this.sshArgs(config), this.destination(config), script], this.options.installTimeoutMs)
     if (deploy.code !== 0) throw new Error(`hostd deployment failed: ${deploy.stderr.trim() || `status ${deploy.code}`}`)
     onProgress({ phase: 'opening-tunnel', detail: '正在建立本机安全隧道。' })
-    const localPort = await freePort()
-    await this.startTunnel(config, localPort)
-    return `http://127.0.0.1:${localPort}`
+    // Reuse the live tunnel when one is already up: the local forward only
+    // targets the hostd port, which a redeploy does not change, so replacing
+    // the tunnel here would kill the endpoint every persistent connection is
+    // using and make the post-deploy health check time out against a dead
+    // port. `ensureTunnel` opens a fresh tunnel only when none is alive.
+    return await this.ensureTunnel(config)
   }
 
   /** Ensure a previously catalogued host still has an owned SSH tunnel.
@@ -291,11 +332,18 @@ export class SshManager {
    * @param endpoint - persisted loopback endpoint.
    */
   async ensureTunnel(config: RemoteSshConfig): Promise<string> {
-    const existing = this.tunnels.get(alias(config))
-    if (existing !== undefined && existing.child.exitCode === null) return `http://127.0.0.1:${existing.localPort}`
-    const localPort = await freePort()
-    await this.startTunnel(config, localPort)
-    return `http://127.0.0.1:${localPort}`
+    const key = alias(config)
+    const prior = this.tunnelOps.get(key) ?? Promise.resolve()
+    const run = prior.then(async () => {
+      const existing = this.tunnels.get(key)
+      if (existing !== undefined && existing.child.exitCode === null) return `http://127.0.0.1:${existing.localPort}`
+      const localPort = await freePort()
+      await this.startTunnel(config, localPort)
+      return `http://127.0.0.1:${localPort}`
+    })
+    // The settled link keeps the chain moving even when a caller rejects.
+    this.tunnelOps.set(key, run.then(() => {}, () => {}))
+    return run
   }
 
   /** Stop the tunnel owned for one no-longer-catalogued SSH connection. */
