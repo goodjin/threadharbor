@@ -92,6 +92,14 @@ const sessionRecord = z.object({
    *  Absent when the session has never been trimmed. */
   droppedThrough: z.number().int().nonnegative().optional(),
 }) as unknown as z.ZodType<RemoteSessionView>
+const transcriptUsage = z.object({
+  inputTokens: z.number().nonnegative().optional(),
+  outputTokens: z.number().nonnegative().optional(),
+  cachedReadTokens: z.number().nonnegative().optional(),
+  cachedWriteTokens: z.number().nonnegative().optional(),
+  reasoningTokens: z.number().nonnegative().optional(),
+  totalTokens: z.number().nonnegative().optional(),
+})
 const transcriptRecord: z.ZodType<RemoteTranscriptEntry> = z.object({
   transcriptId: z.string().transform(RemoteTranscriptId),
   sessionId,
@@ -102,6 +110,7 @@ const transcriptRecord: z.ZodType<RemoteTranscriptEntry> = z.object({
   createdAt: z.string(),
   nativeFrame: z.json().optional(),
   requestId: z.string().optional(),
+  usage: transcriptUsage.optional(),
 }) as z.ZodType<RemoteTranscriptEntry>
 
 /** Durable domain: remote catalog and transcript projection, separate from dsh-workspace/session. */

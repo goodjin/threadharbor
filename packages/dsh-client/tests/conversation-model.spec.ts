@@ -4,7 +4,8 @@ import type { RemoteDirectoryEntry, RemoteSessionView, RemoteTranscriptEntry } f
 import { RemoteSessionId, RemoteTranscriptId } from '@threadharbor/protocol'
 import {
   browsableDirectories, buildTranscriptNodes, choiceCancelOutcome, choiceSubmitOutcome,
-  conversationPresentation, conversationStage,
+  conversationPresentation, conversationStage, conversationStatsGroups, deriveConversationStats,
+  formatCacheHitPercent, formatCompactDuration, formatTokenCount,
   isAutoApprovablePermission, isNearScrollBottom, mergeTranscriptEntries, parseChoicePrompt, parsePlanItems,
   autoApproveOptionId, pendingPermissionEntry, permissionRequestId, preferredProjectBackend,
   shouldAutoApprovePermissions, shouldPinPendingPermission, toolDisclosurePresentation,
@@ -198,6 +199,59 @@ describe('remote conversation view model', () => {
     expect(view.headerLabel).toBe('正在连接 Agent')
   })
 
+  it('surfaces the current session-start stage message on the connecting banner', () => {
+    const view = conversationPresentation({
+      session: session({ channelState: 'connecting', turnState: 'idle' }),
+      entries: [],
+      now: 10_000,
+      progress: {
+        sessionId: 'session', phase: 'sending', startedAt: 1_000, baselineSeq: -1,
+        message: '正在初始化 Agent 连接',
+      },
+    })
+    expect(view.channel.label).toBe('正在连接 Agent')
+    expect(view.channel.detail).toContain('正在初始化 Agent 连接')
+    expect(view.channel.state).toBe('ongoing')
+    expect(view.turn.visible).toBe(false)
+  })
+
+  it('shows the reconnect banner instead of an eternal create banner while the socket is down', () => {
+    const view = conversationPresentation({
+      session: session({ channelState: 'connecting', turnState: 'idle' }),
+      entries: [],
+      now: 10_000,
+      transportPhase: 'reconnecting',
+      progress: {
+        sessionId: 'session', phase: 'sending', startedAt: 1_000, baselineSeq: -1,
+        message: '通道已断开，正在等待重连后自动重发。',
+      },
+    })
+    expect(view.channel).toMatchObject({
+      kind: 'transport',
+      label: '实时通道断开，正在自动重连',
+      state: 'warning',
+      visible: true,
+    })
+    expect(view.channel.detail).toContain('自动重发')
+    expect(view.turn.visible).toBe(false)
+    expect(view.headerLabel).toBe('实时通道断开，正在自动重连')
+  })
+
+  it('surfaces a failed prompt instead of the connecting banner', () => {
+    const view = conversationPresentation({
+      session: session({ channelState: 'connecting', turnState: 'idle' }),
+      entries: [],
+      now: 10_000,
+      progress: {
+        sessionId: 'session', phase: 'failed', startedAt: 1_000, baselineSeq: -1,
+        message: 'request timed out',
+      },
+    })
+    expect(view.channel.kind).not.toBe('connecting')
+    expect(view.turn).toMatchObject({ kind: 'timeout', label: '请求超时', state: 'error', visible: true })
+    expect(view.headerLabel).toContain('请求超时')
+  })
+
   it('keeps running and completed tool calls collapsed to one status row by default', () => {
     expect(toolDisclosurePresentation(false, true)).toEqual({ initialOpen: false, status: '运行中' })
     expect(toolDisclosurePresentation(true, false)).toEqual({ initialOpen: false, status: '已完成' })
@@ -368,5 +422,97 @@ describe('remote conversation view model', () => {
     expect(browsableDirectories(entries)).toEqual([
       { name: 'repo', path: '/home/me/repo', kind: 'directory' },
     ])
+  })
+
+  it('counts rounds and coalesced assistant steps from the projected transcript', () => {
+    const entries = [
+      entry('1', 'user', 'message', '修复测试失败'),
+      entry('2', 'assistant', 'message', '我来查看'),
+      entry('3', 'assistant', 'message', '失败原因如下'), // same run as seq 2 (split journal pages)
+      entry('4', 'tool', 'tool-call', 'bash'),
+      entry('5', 'tool', 'tool-result', 'bash 完成'),
+      entry('6', 'assistant', 'reasoning', '先分析'),
+      entry('7', 'assistant', 'message', '问题在于超时'), // reasoning + message, still one run
+      entry('8', 'tool', 'tool-call', 'web_search'),
+      entry('9', 'tool', 'tool-result', 'web_search 完成'),
+      entry('10', 'assistant', 'message', '已修复'),
+      entry('11', 'user', 'message', '再跑一次'),
+      entry('12', 'assistant', 'message', '测试通过'),
+    ]
+    // Deliberately shuffled: derivation sorts by seq before counting.
+    const shuffled = [...entries].reverse()
+    expect(deriveConversationStats(shuffled)).toMatchObject({ turns: 2, steps: 4, toolCalls: 2 })
+    expect(deriveConversationStats(entries)).toEqual({ turns: 2, steps: 4, toolCalls: 2, toolMs: 0 })
+  })
+
+  it('sums wall time only for matched tool call→result pairs with ordered timestamps', () => {
+    const at = (seq: number, role: RemoteTranscriptEntry['role'], kind: RemoteTranscriptEntry['kind'],
+      text: string, offsetMs: number): RemoteTranscriptEntry => ({
+        ...entry(String(seq), role, kind, text),
+        createdAt: new Date(Date.parse('2026-08-29T00:00:00.000Z') + offsetMs).toISOString(),
+      })
+    const stats = deriveConversationStats([
+      at(1, 'user', 'message', '执行任务', 0),
+      at(2, 'assistant', 'message', '开始', 10),
+      at(3, 'tool', 'tool-call', 'bash', 1_000),
+      at(4, 'tool', 'tool-result', 'bash 完成', 2_300), // +1.3s
+      at(5, 'assistant', 'message', '继续', 2_400),
+      at(6, 'tool', 'tool-call', 'ls', 3_000),
+      at(7, 'tool', 'tool-result', 'ls 完成', 3_000), // same batch timestamp → no duration
+      at(8, 'tool', 'tool-call', 'interrupted', 4_000), // never returns → ignored
+      at(9, 'assistant', 'message', '收尾', 4_100),
+    ])
+    expect(stats).toEqual({ turns: 1, steps: 3, toolCalls: 2, toolMs: 1_300 })
+  })
+
+  it('renders stats groups the same shape as the DSH StatsLine and drops empty groups', () => {
+    expect(conversationStatsGroups({ turns: 2, steps: 4, toolCalls: 2, toolMs: 1_300 }))
+      .toEqual(['2 轮 · 4 步', '工具调用 1.3秒'])
+    expect(conversationStatsGroups({ turns: 1, steps: 1, toolCalls: 1, toolMs: 0 }).join(' | '))
+      .toBe('1 轮 · 1 步')
+    // No measurable data → the strip renders nothing at all.
+    expect(conversationStatsGroups({ turns: 1, steps: 0, toolCalls: 0, toolMs: 0 })).toEqual([])
+    // Window opened mid-round after older history was rotated away.
+    expect(conversationStatsGroups({ turns: 0, steps: 3, toolCalls: 1, toolMs: 0 })).toEqual(['3 步'])
+  })
+
+  it('formats compact durations with the DSH zh wording', () => {
+    expect(formatCompactDuration(700)).toBe('0.7秒')
+    expect(formatCompactDuration(15_000)).toBe('15秒')
+    expect(formatCompactDuration(123_000)).toBe('2分3秒')
+  })
+
+  it('keeps the most recent round usage and renders cache/token groups only when reported', () => {
+    const withUsage = (seqText: string, usage: Record<string, number>): RemoteTranscriptEntry => ({
+      ...entry(seqText, 'system', 'status', '远程轮次完成'),
+      usage,
+    })
+    const stats = deriveConversationStats([
+      entry('1', 'user', 'message', '第一问'),
+      entry('2', 'assistant', 'message', '回答一'),
+      withUsage('3', { inputTokens: 10_000, outputTokens: 50, cachedReadTokens: 7_000 }),
+      entry('4', 'user', 'message', '第二问'),
+      entry('5', 'assistant', 'message', '回答二'),
+      withUsage('6', { inputTokens: 5_000, outputTokens: 40, cachedReadTokens: 0 }),
+    ])
+    expect(stats.usage).toEqual({ inputTokens: 5_000, outputTokens: 40, cachedReadTokens: 0 })
+    expect(conversationStatsGroups({ turns: 2, steps: 2, toolCalls: 0, toolMs: 0, usage: stats.usage }))
+      .toEqual(['2 轮 · 2 步', '输入 5K tok · 输出 40 tok'])
+  })
+
+  it('renders cache-hit and token groups in the DSH wording', () => {
+    const groups = conversationStatsGroups({
+      turns: 1, steps: 1, toolCalls: 0, toolMs: 0,
+      usage: { inputTokens: 100, outputTokens: 5, cachedReadTokens: 900, cachedWriteTokens: 0, totalTokens: 1_005 },
+    })
+    expect(groups.join(' | ')).toBe('1 轮 · 1 步 | 缓存命中 90% | 输入 1K tok · 输出 5 tok')
+    // Just under a full hit keeps decimal precision like the official strip.
+    expect(formatCacheHitPercent(9_995, 10_000)).toBe('99.95')
+    expect(formatCacheHitPercent(10_000, 10_000)).toBe('100')
+    expect(formatCacheHitPercent(0, 10_000)).toBeNull()
+    expect(formatTokenCount(107_000)).toBe('107K')
+    expect(formatTokenCount(1_700)).toBe('1.7K')
+    expect(formatTokenCount(34)).toBe('34')
+    expect(formatTokenCount(1_750_000)).toBe('1.8M')
   })
 })

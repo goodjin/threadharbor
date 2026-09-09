@@ -1648,6 +1648,29 @@
   border-bottom: 1px solid var(--dsw-alias-border-l2);
 }
 
+/* Session stats strip under the composer (DSH StatsLine posture): one
+   centered row of small tertiary text that elides on overflow. Block, not
+   flex: text-overflow only elides a block's inline content. */
+.conversationStats {
+  display: block;
+  width: min(800px, 100%);
+  margin: 6px auto 0;
+  box-sizing: border-box;
+  text-align: center;
+  overflow: hidden;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.conversationStatsSep {
+  color: var(--dsw-alias-label-tertiary);
+  opacity: 0.55;
+  margin: 0 8px;
+}
+
 .agentPicker {
   flex: none;
   display: flex;

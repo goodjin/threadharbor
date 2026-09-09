@@ -2,7 +2,7 @@
 
 import type {
   JsonValue, RemoteAgentBackend, RemoteChannelState, RemoteDirectoryEntry, RemoteSessionView,
-  RemoteTranscriptEntry, RemoteTurnState,
+  RemoteTranscriptEntry, RemoteTranscriptUsage, RemoteTurnState,
 } from '@threadharbor/protocol'
 
 /** Restore the most recently created session backend for a project, with a stable first-option fallback. */
@@ -107,7 +107,13 @@ function turnStage(input: {
     }
   }
   if (progress?.phase === 'sending') {
-    return { kind: 'sending', label: '正在发送消息', detail: '正在把请求提交到远程 Agent。', state: 'ongoing', visible: true }
+    return {
+      kind: 'sending',
+      label: '正在发送消息',
+      detail: progress.message ?? '正在把请求提交到远程 Agent。',
+      state: 'ongoing',
+      visible: true,
+    }
   }
   if (session.turnState === 'failed') {
     return {
@@ -179,22 +185,31 @@ function turnStage(input: {
 function channelStage(input: {
   readonly channelState: RemoteChannelState
   readonly creating: boolean
+  readonly progressPhase?: PromptProgressView['phase']
+  readonly progressMessage?: string
   readonly transportPhase?: 'loading' | 'ready' | 'reconnecting' | 'error'
   readonly error?: string
 }): ConversationStage {
-  if (input.transportPhase === 'reconnecting' && input.channelState !== 'connecting') {
+  // A dropped transport is the live truth even while the gateway session row
+  // still claims `connecting`: without this, a send interrupted by a socket
+  // loss would sit on the eternal “正在创建远程会话” banner instead of telling
+  // the user the channel is reconnecting. A failed prompt outranks it so the
+  // user always sees why the message did not go through.
+  if (input.transportPhase === 'reconnecting' && input.progressPhase !== 'failed') {
     return {
       kind: 'transport',
       label: '实时通道断开，正在自动重连',
-      detail: '浏览器到网关的连接已断开，正在后台重试。无需操作。',
+      detail: input.progressMessage ?? '浏览器到网关的连接已断开，正在后台重试。无需操作。',
       state: 'warning', visible: true,
     }
   }
-  if (input.channelState === 'connecting' || input.creating) {
+  if ((input.channelState === 'connecting' || input.creating) && input.progressPhase !== 'failed') {
     return {
       kind: 'connecting',
       label: input.creating ? '正在连接 Agent' : '正在接入实时通道',
-      detail: input.creating ? '正在创建远程会话并建立通信通道。' : '会话已打开，正在接入 WebSocket 推送。',
+      detail: input.creating
+        ? (input.progressMessage ?? '正在创建远程会话并建立通信通道。')
+        : '会话已打开，正在接入 WebSocket 推送。',
       state: 'ongoing', visible: true,
     }
   }
@@ -263,18 +278,23 @@ export function conversationPresentation(input: {
   readonly transportPhase?: 'loading' | 'ready' | 'reconnecting' | 'error'
   readonly pending?: boolean
 }): ConversationPresentation {
-  const creating = input.progress !== undefined
+  const progress = input.progress !== undefined
     && (input.progress.sessionId === undefined || input.progress.sessionId === input.session.sessionId)
-    && (input.progress.phase === 'connecting'
-      || (input.progress.phase === 'sending' && input.session.channelState === 'connecting'))
+    ? input.progress
+    : undefined
+  const creating = progress !== undefined
+    && (progress.phase === 'connecting'
+      || (progress.phase === 'sending' && input.session.channelState === 'connecting'))
   const channel = channelStage({
     channelState: input.session.channelState,
     creating,
+    ...(progress?.phase === undefined ? {} : { progressPhase: progress.phase }),
+    ...(progress?.message === undefined ? {} : { progressMessage: progress.message }),
     ...(input.transportPhase === undefined ? {} : { transportPhase: input.transportPhase }),
     ...(input.error === undefined ? {} : { error: input.error }),
   })
   const turn = turnStage(input)
-  const hideTurn = channel.visible && channel.kind === 'connecting'
+  const hideTurn = channel.visible && (channel.kind === 'connecting' || channel.kind === 'transport')
     && (turn.kind === 'sending' || turn.kind === 'waiting' || turn.kind === 'idle')
   const visibleTurn = hideTurn ? { ...turn, visible: false } : turn
   const actions = sessionActionGates({
@@ -617,6 +637,162 @@ function enumOptions(schema: Record<string, unknown>): ChoiceOption[] {
     const description = recordText(record['description'])
     return [{ id, label, ...(description === undefined ? {} : { description }) }]
   })
+}
+
+/**
+ * Counts and durations the session stats strip can honestly derive from the
+ * projected transcript alone. Every group whose data is not trustworthy is
+ * left out of the rendered line (mirroring the DSH StatsLine no-data-drop
+ * rule). Token/cache figures appear only when the gateway captured them from
+ * the backend's native frames (gateway `run-usage.ts`) onto the round's
+ * terminal status row; without a capture the groups stay absent.
+ */
+export interface ConversationStats {
+  /** Submitted user rounds ("轮"): user transcript rows in the loaded window. */
+  readonly turns: number
+  /** Assistant activity segments ("步"): each uninterrupted run of assistant
+   *  entries counts one step. Adjacent same-kind deltas are coalesced first
+   *  (the same merge the transcript rows use), so one LLM iteration split
+   *  across journal pages or reasoning/message kinds still counts once. */
+  readonly steps: number
+  /** Tool call→result pairs that both settled inside the loaded window. */
+  readonly toolCalls: number
+  /** Summed wall time between a tool call and its matching result; only pairs
+   *  whose timestamps are ordered contribute. 0 when every pair shares a
+   *  batch timestamp (e.g. a catch-up replay after a disconnect). */
+  readonly toolMs: number
+  /** Token usage of the most recent round whose terminal status row carried
+   *  it; `undefined` when the backend reported nothing (UI drops those
+   *  groups). */
+  readonly usage?: RemoteTranscriptUsage
+}
+
+function entryTimestamp(entry: RemoteTranscriptEntry): number {
+  const time = Date.parse(entry.createdAt)
+  return Number.isFinite(time) ? time : Number.NaN
+}
+
+/**
+ * Fold the session's projected transcript into display counts.
+ * Rounds and steps ride the same coalescing the transcript rows use, so the
+ * numbers match what is on screen; tool duration is summed over matched
+ * call→result pairs in seq order. A call whose result never arrives (an
+ * interrupted tool, or history that was rotated away) contributes neither a
+ * call count nor a duration.
+ */
+export function deriveConversationStats(
+  entries: readonly RemoteTranscriptEntry[],
+): ConversationStats {
+  const ordered = [...entries].sort((left, right) => left.seq - right.seq)
+  const merged = mergeTranscriptEntries(ordered)
+  let turns = 0
+  let steps = 0
+  let inAssistant = false
+  for (const entry of merged) {
+    if (entry.role === 'user') turns += 1
+    if (entry.role === 'assistant') {
+      if (!inAssistant) {
+        inAssistant = true
+        steps += 1
+      }
+    } else if (inAssistant) {
+      inAssistant = false
+    }
+  }
+  let toolCalls = 0
+  let toolMs = 0
+  let openCall: RemoteTranscriptEntry | undefined
+  for (const entry of ordered) {
+    if (entry.kind === 'tool-call') {
+      openCall = entry
+      continue
+    }
+    if (entry.kind !== 'tool-result' || openCall === undefined) continue
+    toolCalls += 1
+    const started = entryTimestamp(openCall)
+    const finished = entryTimestamp(entry)
+    if (Number.isFinite(started) && Number.isFinite(finished) && finished > started) {
+      toolMs += finished - started
+    }
+    openCall = undefined
+  }
+  // Usage rides the round's terminal status row; when the loaded window
+  // covers several rounds, the strip shows the most recent one's numbers.
+  let usage: RemoteTranscriptUsage | undefined
+  for (const entry of ordered) {
+    if (entry.usage !== undefined && Object.keys(entry.usage).length > 0) usage = entry.usage
+  }
+  return { turns, steps, toolCalls, toolMs, ...(usage === undefined ? {} : { usage }) }
+}
+
+/**
+ * Compact token count in the DSH stats wording: `1.2K`, `107K`, `1.7M` —
+ * thousands/millions with at most one decimal, exact small counts verbatim.
+ * @param count - non-negative token count.
+ * @returns display string without the `tok` suffix.
+ */
+export function formatTokenCount(count: number): string {
+  if (!Number.isFinite(count) || count <= 0) return '0'
+  const compact = (scaled: number): string => String(Math.round(scaled * 10) / 10)
+  if (count >= 1_000_000) return `${compact(count / 1_000_000)}M`
+  if (count >= 1_000) return `${compact(count / 1_000)}K`
+  return String(count)
+}
+
+/** Cache-hit share of the billed prompt-side tokens, mirroring the DSH stats
+ *  strip: integer percent, `99.95`-style precision only when a plain integer
+ *  would round up to 100 while the true share is below it. */
+export function formatCacheHitPercent(readTokens: number, billedInputTokens: number): string | null {
+  if (!(readTokens > 0 && billedInputTokens > 0)) return null
+  const share = (readTokens / billedInputTokens) * 100
+  if (share >= 100) return '100'
+  const integer = Math.round(share)
+  if (integer < 100) return String(integer)
+  const fixed = share.toFixed(2)
+  return fixed.replace(/0+$/, '').replace(/\.$/, '')
+}
+
+/**
+ * Compact duration in the DSH stats wording: `45.2秒` under a minute,
+ * `2分3秒` from there on.
+ * @param ms - duration in milliseconds.
+ * @returns display string.
+ */
+export function formatCompactDuration(ms: number): string {
+  const seconds = ms / 1_000
+  if (seconds < 60) return `${Math.round(seconds * 10) / 10}秒`
+  const whole = Math.round(seconds)
+  return `${Math.floor(whole / 60)}分${whole % 60}秒`
+}
+
+/**
+ * Assemble the pipe-separated display groups for the composer stats strip.
+ * Follows the DSH StatsLine layout: one counts group, then one durations
+ * group when a duration was measured, then cache-hit / token groups when the
+ * latest round reported usage; groups with no data drop out whole. When the
+ * loaded window opens mid-round (older history rotated away) the counts group
+ * falls back to the step count alone rather than "0 轮".
+ */
+export function conversationStatsGroups(stats: ConversationStats): readonly string[] {
+  const groups: string[] = []
+  if (stats.steps > 0) {
+    groups.push(stats.turns > 0 ? `${stats.turns} 轮 · ${stats.steps} 步` : `${stats.steps} 步`)
+    if (stats.toolMs > 0) groups.push(`工具调用 ${formatCompactDuration(stats.toolMs)}`)
+    const usage = stats.usage
+    if (usage !== undefined) {
+      const uncached = usage.inputTokens ?? 0
+      const cachedRead = usage.cachedReadTokens ?? 0
+      const cachedWrite = usage.cachedWriteTokens ?? 0
+      const billedInput = uncached + cachedRead + cachedWrite
+      const output = usage.outputTokens ?? 0
+      if (billedInput > 0 || output > 0) {
+        const cacheHit = formatCacheHitPercent(cachedRead, billedInput)
+        if (cacheHit !== null) groups.push(`缓存命中 ${cacheHit}%`)
+        groups.push(`输入 ${formatTokenCount(billedInput)} tok · 输出 ${formatTokenCount(output)} tok`)
+      }
+    }
+  }
+  return groups
 }
 
 /** Directory-picker rows omit dot-directories; a typed path is still accepted by fs.list. */

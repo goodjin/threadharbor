@@ -31,6 +31,8 @@ interface ScriptedResponse {
 interface SocketFactory {
   factory: (url: string) => MockSocket
   sockets: MockSocket[]
+  /** Every URL the factory has been asked to open, in order. */
+  urls: string[]
   /** Register a scripted response for the next request that matches. */
   scriptResponse(script: ScriptedResponse): void
   /** Trigger 'open' on the most recently created socket. */
@@ -43,8 +45,10 @@ interface SocketFactory {
 
 function makeSocketFactory(): SocketFactory {
   const sockets: MockSocket[] = []
+  const urls: string[] = []
   const scripts: ScriptedResponse[] = []
   const factory = (url: string): MockSocket => {
+    urls.push(url)
     void url
     const sent: string[] = []
     const socket = new EventEmitter() as MockSocket
@@ -80,6 +84,7 @@ function makeSocketFactory(): SocketFactory {
   return {
     factory,
     sockets,
+    urls,
     scriptResponse(script) { scripts.push(script) },
     openLatest() {
       const last = sockets.at(-1)
@@ -286,6 +291,53 @@ describe('HostdConnection', () => {
     await conn.close()
   })
 
+  it('routes session.start.progress pushes to the matching request onProgress sink', async () => {
+    const scripts = makeSocketFactory()
+    const conn = new HostdConnection({
+      endpoint: 'http://127.0.0.1:1',
+      requestTimeoutMs: 1000,
+      heartbeatMs: 60_000,
+      reconnectStepsMs: [10, 10, 10],
+      handshakeTimeoutMs: 100,
+      socketFactory: scripts.factory as unknown as (url: string) => import('ws').WebSocket,
+    })
+    conn.open()
+    scripts.openLatest()
+    const stages: string[] = []
+    const messages: string[] = []
+    scripts.scriptResponse({
+      matchRequest: frame => frame['method'] === 'session.start',
+      reply: (frame) => {
+        const id = String(frame['id'])
+        const sessionId = String(frame['params']?.['sessionId'] ?? '')
+        // hostd relays stage progress before answering the RPC.
+        for (const [stage, message] of [
+          ['spawn-hold', '正在启动远端会话进程'],
+          ['initialize-agent', '正在初始化 Agent 连接'],
+          ['bind-session', '正在创建原生会话'],
+        ] as const) {
+          setImmediate(() => {
+            scripts.pushToLatest({
+              direction: 'push', seq: 1,
+              event: { type: 'session.start.progress', requestId: id, sessionId: RemoteSessionId(sessionId), stage, message },
+            })
+          })
+        }
+        return JSON.stringify({ direction: 'response', id, ok: true, result: { accepted: true } })
+      },
+    })
+    const promise = conn.request('session.start', { sessionId: 's-stage' }, 1000, (stage, message) => {
+      stages.push(stage)
+      messages.push(message)
+    })
+    const result = await promise
+    expect(result).toEqual({ accepted: true })
+    expect(stages).toEqual(['spawn-hold', 'initialize-agent', 'bind-session'])
+    expect(messages[0]).toContain('启动')
+    void conn
+    await conn.close()
+  })
+
   it('flushes pending requests after a socket reconnect', async () => {
     const scripts = makeSocketFactory()
     const conn = new HostdConnection({
@@ -311,6 +363,88 @@ describe('HostdConnection', () => {
     scripts.openLatest()
     const result = await promise
     expect(result).toMatchObject({ id: expect.any(String) })
+    void conn
+    await conn.close()
+  })
+
+  it('switchEndpoint reconnects to the new endpoint without dropping pending requests', async () => {
+    const scripts = makeSocketFactory()
+    const conn = new HostdConnection({
+      endpoint: 'http://127.0.0.1:1',
+      requestTimeoutMs: 1000,
+      heartbeatMs: 60_000,
+      reconnectStepsMs: [10, 10, 10],
+      handshakeTimeoutMs: 100,
+      socketFactory: scripts.factory as unknown as (url: string) => import('ws').WebSocket,
+    })
+    conn.open()
+    scripts.openLatest()
+    expect(scripts.urls).toEqual(['ws://127.0.0.1:1/v1/ws'])
+    // Move while the new socket is still connecting, then issue the request:
+    // it must be queued and flushed on the new socket instead of dying with the old one.
+    conn.switchEndpoint('http://127.0.0.1:2')
+    expect(scripts.urls.at(-1)).toBe('ws://127.0.0.1:2/v1/ws')
+    expect(scripts.sockets.at(0)?.readyState).toBe(CLOSED)
+    scripts.scriptResponse({
+      matchRequest: frame => frame['method'] === 'inventory',
+      reply: (frame) => JSON.stringify({ direction: 'response', id: frame['id'] as string, ok: true, result: { moved: true } }),
+    })
+    const pending = conn.request('inventory', {})
+    scripts.openLatest()
+    const result = await pending
+    expect(result).toEqual({ moved: true })
+    expect(conn.currentEndpoint()).toBe('ws://127.0.0.1:2')
+    void conn
+    await conn.close()
+  })
+
+  it('switchEndpoint keeps subscriptions and re-sends them on the new socket', async () => {
+    const scripts = makeSocketFactory()
+    const conn = new HostdConnection({
+      endpoint: 'http://127.0.0.1:1',
+      requestTimeoutMs: 1000,
+      heartbeatMs: 60_000,
+      reconnectStepsMs: [10, 10, 10],
+      handshakeTimeoutMs: 100,
+      socketFactory: scripts.factory as unknown as (url: string) => import('ws').WebSocket,
+    })
+    conn.open()
+    scripts.openLatest()
+    const sessionId = RemoteSessionId('s-switch')
+    const received: string[] = []
+    conn.subscribe(sessionId, 'g1', 0, (event) => { received.push(event.type) })
+    conn.switchEndpoint('http://127.0.0.1:2')
+    scripts.openLatest()
+    const latest = scripts.sockets.at(-1) as MockSocket & { _sent: string[] }
+    const sent = latest._sent.join('\n')
+    expect(sent).toContain('"direction":"subscribe"')
+    expect(sent).toContain('s-switch')
+    // Journal pages still arrive after the move.
+    scripts.pushToLatest({
+      direction: 'push', seq: 1,
+      event: { type: 'journal.page', sessionId, page: { generation: 'g1', latestSeq: 1, droppedThrough: 0, gap: false, events: [] }, subscribers: 1 },
+    })
+    await new Promise(resolveWait => setTimeout(resolveWait, 20))
+    expect(received).toEqual(['journal.page'])
+    void conn
+    await conn.close()
+  })
+
+  it('switchEndpoint is a no-op when the endpoint is unchanged', async () => {
+    const scripts = makeSocketFactory()
+    const conn = new HostdConnection({
+      endpoint: 'http://127.0.0.1:1',
+      requestTimeoutMs: 1000,
+      heartbeatMs: 60_000,
+      reconnectStepsMs: [10, 10, 10],
+      handshakeTimeoutMs: 100,
+      socketFactory: scripts.factory as unknown as (url: string) => import('ws').WebSocket,
+    })
+    conn.open()
+    scripts.openLatest()
+    conn.switchEndpoint('http://127.0.0.1:1')
+    conn.switchEndpoint('ws://127.0.0.1:1')
+    expect(scripts.sockets).toHaveLength(1)
     void conn
     await conn.close()
   })

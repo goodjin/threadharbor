@@ -65,6 +65,8 @@ interface PendingRequest {
   readonly timer: NodeJS.Timeout
   readonly method: RemoteHostdMethod
   readonly params: Record<string, JsonValue>
+  /** Optional per-request progress sink for streaming hostd RPCs such as session.start. */
+  readonly onProgress?: ((stage: string, message: string) => void) | undefined
 }
 
 /** Connection-level push sink used by tests. */
@@ -83,8 +85,54 @@ export class HostdConnection {
   private pongTimer: NodeJS.Timeout | undefined
   private closed = false
   private readonly connectionListeners = new Set<ConnectionListener>()
+  /** Endpoint this connection (re)connects to. The pool switches it when the
+   *  SSH tunnel moves to a new local port; pending RPCs and subscriptions are
+   *  kept and flushed on the next open. */
+  private endpoint: string
 
-  constructor(readonly options: HostdConnectionOptions) {}
+  constructor(readonly options: HostdConnectionOptions) {
+    this.endpoint = wsEndpoint(options.endpoint)
+  }
+
+  /** Point this persistent connection at a different endpoint.
+   *
+   *  When the tunnel behind an SSH host is replaced, the old local port stops
+   *  listening while the new one is already up. Moving the endpoint here
+   *  (instead of waiting for a natural reconnect) lets every subsequent RPC
+   *  land on the live tunnel. In-flight requests and subscriptions survive:
+   *  they are re-sent by `flushPending()` / `sendSubscribe()` on the next
+   *  open, so nothing is lost and no caller sees a failure for the move
+   *  itself. No-op when the endpoint is unchanged.
+   * @param endpoint - HTTP or WS endpoint of the current hostd.
+   */
+  switchEndpoint(endpoint: string): void {
+    const next = wsEndpoint(endpoint)
+    if (next === this.endpoint) return
+    this.endpoint = next
+    if (this.closed) return
+    if (this.reconnectTimer !== undefined) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = undefined
+    }
+    this.clearHeartbeat()
+    const ws = this.ws
+    this.ws = undefined
+    if (ws !== undefined) {
+      // Tear the socket down without rejecting pending requests: `pending` is
+      // flushed on the next open and `subscriptions` are re-sent as well.
+      ws.removeAllListeners()
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        ws.close(1000, 'endpoint changed')
+      }
+    }
+    this.state = 'closed'
+    this.connect()
+  }
+
+  /** Endpoint this connection currently targets; useful for tests. */
+  currentEndpoint(): string {
+    return this.endpoint
+  }
 
   /** Open the underlying WS. Idempotent. */
   open(): void {
@@ -114,11 +162,19 @@ export class HostdConnection {
     this.failPending(new Error('hostd connection closed'))
   }
 
-  /** Issue one RPC and await its result. Throws on timeout or remote error. */
+  /** Issue one RPC and await its result. Throws on timeout or remote error.
+   * @param method - hostd control method.
+   * @param params - JSON request parameters.
+   * @param timeoutMs - per-request timeout override.
+   * @param onProgress - optional progress sink for streaming hostd methods
+   *  (`session.start`); invoked once per stage reported by the daemon before
+   *  the final response resolves.
+   */
   async request(
     method: RemoteHostdMethod,
     params: Record<string, JsonValue>,
     timeoutMs = this.options.requestTimeoutMs,
+    onProgress?: (stage: string, message: string) => void,
   ): Promise<JsonValue> {
     if (this.closed) throw new Error('hostd connection is closed')
     if (this.state === 'closed') this.open()
@@ -129,7 +185,7 @@ export class HostdConnection {
         this.pending.delete(id)
         reject(new Error(`hostd request ${method} timed out`))
       }, timeoutMs)
-      this.pending.set(id, { resolve, reject, timer, method, params })
+      this.pending.set(id, { resolve, reject, timer, method, params, onProgress })
       this.send(frame)
     })
   }
@@ -211,7 +267,7 @@ export class HostdConnection {
     if (this.state !== 'closed') return
     this.state = 'connecting'
     this.emitLifecycle('reconnect')
-    const url = `${wsEndpoint(this.options.endpoint)}${REMOTE_AGENT_HOSTD_WS_PATH}`
+    const url = `${this.endpoint}${REMOTE_AGENT_HOSTD_WS_PATH}`
     const ws = this.options.socketFactory
       ? this.options.socketFactory(url)
       : new WebSocket(url, { handshakeTimeout: this.options.handshakeTimeoutMs })
@@ -337,6 +393,13 @@ export class HostdConnection {
       return
     }
     if (frame.direction === 'push') {
+      if (frame.event.type === 'session.start.progress') {
+        const pending = this.pending.get(frame.event.requestId)
+        if (pending?.onProgress !== undefined) {
+          pending.onProgress(frame.event.stage, frame.event.message)
+        }
+        return
+      }
       this.fanoutPush(frame.seq, frame.event)
       return
     }
