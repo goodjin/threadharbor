@@ -124,6 +124,35 @@ function trace(stage: string, fields: Record<string, unknown>): void {
   process.stderr.write(`threadharbor-hostd ${stage} ${parts}\n`)
 }
 
+/** Opt-in verbatim native frame dump for upstream protocol analysis.
+ *
+ *  Turned off by default; enable with `THREADHARBOR_FRAME_LOG=1` on the hostd
+ *  process (the toggle is inherited by detached hold workers). Intended for
+ *  discovering exactly what fields a real Codex/Grok/Claude/DSH stream
+ *  carries (token usage, timing, cost, tool metadata) before wiring any of
+ *  it into the Web projection — do not run it permanently, and treat every
+ *  logged line as sensitive (frames may embed tool input/output or model
+ *  content). Default per-line cap keeps runaway tool payloads from flooding
+ *  the log; raise it with `THREADHARBOR_FRAME_LOG_MAX` when capturing usage
+ *  frames whose fields sit past the truncation point.
+ */
+function frameLogEnabled(): boolean {
+  return process.env['THREADHARBOR_FRAME_LOG'] === '1' || process.env['THREADHARBOR_FRAME_LOG'] === 'true'
+}
+
+function frameLogMax(): number {
+  const raw = process.env['THREADHARBOR_FRAME_LOG_MAX']
+  const parsed = raw === undefined ? Number.NaN : Number(raw)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 32_768
+}
+
+/** Truncate a serialized frame line without breaking the JSON tail markers
+ *  the analysis tooling greps for. */
+function truncateFrameLine(line: string, max: number): string {
+  if (line.length <= max) return line
+  return `${line.slice(0, Math.max(0, max - 16))}…[truncated ${line.length - max} chars]`
+}
+
 /** Live worker runtime. Its process lifetime is intentionally independent from hostd. */
 export class HoldWorker {
   private readonly journal: RemoteJournalEvent[]
@@ -170,6 +199,8 @@ export class HoldWorker {
   private restartingStdio = false
   private stdioGate: Promise<void> = Promise.resolve()
   private lastInitializeFrame: JsonValue | undefined
+  private readonly frameLog: boolean
+  private readonly frameLogMax: number
 
   /** @param config - immutable owner-only launch record. */
   constructor(private readonly config: HoldWorkerConfig) {
@@ -177,6 +208,8 @@ export class HoldWorker {
     this.journalBytes = this.journal.reduce((sum, event) => sum + Buffer.byteLength(jsonLine(event)), 0)
     this.droppedThrough = this.previousDroppedThrough()
     this.nextSeq = Math.max(this.journal.at(-1)?.seq ?? 0, this.droppedThrough) + 1
+    this.frameLog = frameLogEnabled()
+    this.frameLogMax = frameLogMax()
     this.logJournalMetric('recovered', {})
   }
 
@@ -290,11 +323,15 @@ export class HoldWorker {
   }
 
   private async startWebSocket(baseUrl: string): Promise<void> {
-    const envSecret = process.env['GROK_AGENT_SECRET']
+    // The config secret is hostd-authoritative: hostd resolves the secret once
+    // (file → env → generated) and pins it into every hold config. The parent
+    // env is only a fallback for configs written by an older hostd, so a stale
+    // GROK_AGENT_SECRET can never override the secret hostd actually owns.
     const configSecret = this.config.transport.kind === 'websocket'
       ? this.config.transport.secret
       : undefined
-    const secret = envSecret !== undefined && envSecret !== '' ? envSecret : configSecret
+    const envSecret = process.env['GROK_AGENT_SECRET']
+    const secret = configSecret !== undefined && configSecret !== '' ? configSecret : envSecret
     const url = new URL(baseUrl)
     if (secret !== undefined && secret !== '') url.searchParams.set('server-key', secret)
     const socket = new WebSocket(url)
@@ -316,6 +353,23 @@ export class HoldWorker {
     })
   }
 
+  /** Emit one verbatim native frame line to stderr for upstream protocol
+   *  analysis (opt-in, see `frameLogEnabled`). The frame is dumped as it
+   *  crosses the hold boundary, i.e. before ACP/DSH text-chunk coalescing
+   *  and before any projection, so nothing the Agent emitted is hidden. */
+  private logFrame(direction: 'in' | 'out', frame: JsonValue): void {
+    if (!this.frameLog) return
+    const record = frame !== null && typeof frame === 'object' && !Array.isArray(frame) ? frame : undefined
+    const method = record?.['method']
+    const id = record?.['id']
+    const line = truncateFrameLine(
+      `threadharbor-hostd frame-${direction} ${typeof method === 'string' ? `method=${method}` : 'method='}`
+        + `${id === undefined ? '' : ` id=${typeof id === 'string' ? id : String(id)}`} frame=${jsonLine(frame).trim()}`,
+      this.frameLogMax,
+    )
+    process.stderr.write(`${line}\n`)
+  }
+
   private receiveText(text: string): void {
     let frame: JsonValue
     try {
@@ -324,6 +378,7 @@ export class HoldWorker {
     } catch {
       frame = { raw: text }
     }
+    this.logFrame('in', frame)
     const record = frame !== null && typeof frame === 'object' && !Array.isArray(frame) ? frame : undefined
     const id = record?.['id']
     const rpcId = typeof id === 'string' || typeof id === 'number' ? String(id) : undefined
@@ -348,17 +403,21 @@ export class HoldWorker {
     const isPromptResponse = request?.method === 'session/prompt'
       && record !== undefined && record['method'] === undefined
       && (Object.hasOwn(record, 'result') || Object.hasOwn(record, 'error'))
-    const synthesizedCompletion = isPromptResponse && record['error'] === undefined
+    // A prompt response ends the turn whether it carries `result` OR `error`.
+    // Synthesize the backend-native completion frame for both so the gateway
+    // flips turnState out of `running`. Previously an error response (e.g. a
+    // Codex `usageLimitExceeded` wrapped as -32603 Internal error) only cleared
+    // promptActive without journaling a completion, stranding the browser on
+    // “正在创建远程会话 / running” until the 75s client timeout. This mirrors the
+    // prompt-timeout path, which already synthesizes a completion from an error.
+    const synthesizedCompletion = isPromptResponse
       ? this.synthesizePromptCompletion(request, record)
       : undefined
-    if (isPromptResponse && record['error'] !== undefined) {
-      this.promptActive = false
-      this.drainPromptQueue()
-    } else if (synthesizedCompletion !== undefined) {
+    if (synthesizedCompletion !== undefined) {
       this.journalFrames([synthesizedCompletion])
       this.promptActive = false
       this.drainPromptQueue()
-    } else if ((!isPromptResponse && this.completesPrompt(record))) {
+    } else if (!isPromptResponse && this.completesPrompt(record)) {
       this.promptActive = false
       this.drainPromptQueue()
     }
@@ -551,6 +610,7 @@ export class HoldWorker {
       })
       if (method === 'session/prompt') this.armPromptTimeout(String(id))
     }
+    this.logFrame('out', frame)
     const line = jsonLine(frame)
     if (this.child !== undefined) {
       this.child.stdin.write(line)
@@ -670,10 +730,21 @@ export class HoldWorker {
       ? resultRecord['stopReason'] : undefined
     const stopReason = explicitStopReason ?? (responseRecord['error'] === undefined ? 'end_turn' : 'error')
     const sessionId = request.sessionId ?? this.nativeSessionId ?? ''
+    // Carry the backend's own error text so a failed turn shows *why* (e.g.
+    // "Authentication required") instead of a bare "远程轮次失败". Some backends
+    // stream the reason as an assistant message before erroring (Codex), but
+    // others (Claude ACP auth errors) return it only on the JSON-RPC error, so
+    // the completion frame is the sole place the browser can learn it.
+    const errorRecord = responseRecord['error'] !== null && typeof responseRecord['error'] === 'object'
+      && !Array.isArray(responseRecord['error']) ? responseRecord['error'] as Record<string, JsonValue> : undefined
+    const errorData = errorRecord?.['data'] !== null && typeof errorRecord?.['data'] === 'object'
+      && !Array.isArray(errorRecord?.['data']) ? errorRecord['data'] as Record<string, JsonValue> : undefined
+    const failureMessage = typeof errorData?.['message'] === 'string' ? errorData['message']
+      : typeof errorRecord?.['message'] === 'string' ? errorRecord['message'] : undefined
     if (this.config.backend === 'dsh') {
       const failed = stopReason === 'error'
       const reason: Record<string, JsonValue> = { kind: failed ? 'error' : 'completed' }
-      if (failed) reason['message'] = stopReason
+      if (failed) reason['message'] = failureMessage ?? stopReason
       return {
         jsonrpc: '2.0',
         method: 'session.event',
@@ -686,7 +757,7 @@ export class HoldWorker {
     return {
       jsonrpc: '2.0',
       method: '_x.ai/session/prompt_complete',
-      params: { sessionId, stopReason },
+      params: { sessionId, stopReason, ...(failureMessage === undefined ? {} : { message: failureMessage }) },
     }
   }
 

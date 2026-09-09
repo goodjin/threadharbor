@@ -64,4 +64,19 @@ describe('projectNativeFrame', () => {
       jsonrpc: '2.0', method: '_x.ai/session/prompt_complete', params: { stopReason: 'error' },
     })).toEqual([{ role: 'system', kind: 'status', text: '远程轮次失败', turnState: 'failed' }])
   })
+
+  it('surfaces the backend error reason on a failed turn so the user sees why (e.g. auth required)', () => {
+    // Claude ACP auth failures return the reason only on the JSON-RPC error, so
+    // the hold worker threads it into the synthesized completion's `message`.
+    // Without surfacing it the user just gets a bare "远程轮次失败".
+    expect(projectNativeFrame('claude', {
+      jsonrpc: '2.0', method: '_x.ai/session/prompt_complete',
+      params: { stopReason: 'error', message: 'Authentication required' },
+    })).toEqual([{ role: 'system', kind: 'status', text: '远程轮次失败：Authentication required', turnState: 'failed' }])
+    // DSH carries it on turn/end reason.message.
+    expect(projectNativeFrame('dsh', {
+      jsonrpc: '2.0', method: 'session.event',
+      params: { event: { type: 'turn/end', data: { reason: { kind: 'error', message: 'Authentication required' } } } },
+    })).toEqual([{ role: 'system', kind: 'status', text: '远程轮次失败：Authentication required', turnState: 'failed' }])
+  })
 })

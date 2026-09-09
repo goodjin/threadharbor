@@ -77,6 +77,59 @@ describe('HoldWorker', () => {
     }
   })
 
+  it('dumps verbatim native frames when THREADHARBOR_FRAME_LOG is enabled', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-hold-frame-log-'))
+    roots.push(root)
+    const previousLog = process.env['THREADHARBOR_FRAME_LOG']
+    const previousLogMax = process.env['THREADHARBOR_FRAME_LOG_MAX']
+    process.env['THREADHARBOR_FRAME_LOG'] = '1'
+    process.env['THREADHARBOR_FRAME_LOG_MAX'] = '4096'
+    const lines: string[] = []
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(((chunk: string | Uint8Array) => {
+      const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8')
+      if (text.includes('frame-in') || text.includes('frame-out')) lines.push(text)
+      return true
+    }) as typeof process.stderr.write)
+    const socketPath = join(root, 'control.sock')
+    const config: HoldWorkerConfig = {
+      version: 1,
+      holdId: 'hold',
+      generation: 'generation',
+      backend: 'codex',
+      cwd: root,
+      socketPath,
+      journalPath: join(root, 'journal.jsonl'),
+      statePath: join(root, 'state.json'),
+      maxJournalEvents: 20,
+      maxJournalBytes: 100_000,
+      promptTimeoutMs: 60_000,
+      transport: {
+        kind: 'stdio', command: process.execPath,
+        args: [new URL('./fixtures/fake-acp-thoughts.mjs', import.meta.url).pathname],
+      },
+    }
+    const worker = new HoldWorker(config)
+    await worker.start()
+    try {
+      expect(await send(socketPath, admission('probe'))).toMatchObject({ ok: true, result: { duplicate: false } })
+      await vi.waitFor(() => {
+        expect(lines.some(line => line.includes('frame-out') && line.includes('method=session/prompt'))).toBe(true)
+      })
+      await vi.waitFor(() => {
+        expect(lines.some(line => line.includes('frame-in') && line.includes('agent_thought_chunk'))).toBe(true)
+      })
+      // Verbatim pre-coalesce dump: every streamed delta keeps its own text.
+      expect(lines.some(line => line.includes('frame-in') && line.includes('The '))).toBe(true)
+    } finally {
+      await worker.close()
+      spy.mockRestore()
+      if (previousLog === undefined) delete process.env['THREADHARBOR_FRAME_LOG']
+      else process.env['THREADHARBOR_FRAME_LOG'] = previousLog
+      if (previousLogMax === undefined) delete process.env['THREADHARBOR_FRAME_LOG_MAX']
+      else process.env['THREADHARBOR_FRAME_LOG_MAX'] = previousLogMax
+    }
+  })
+
   it('wakes wait-seq as soon as a new journal event is flushed', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-hold-wait-seq-'))
     roots.push(root)
@@ -287,6 +340,59 @@ describe('HoldWorker', () => {
             return event !== null && typeof event === 'object' && Reflect.get(event, 'type') === 'turn/end'
           })
       expect(completion).toHaveLength(2)
+    } finally {
+      await worker.close()
+    }
+  })
+
+  it('synthesizes an error turn-completion from a JSON-RPC error response so the turn never strands on running', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-hold-error-'))
+    roots.push(root)
+    const socketPath = join(root, 'control.sock')
+    const output = join(root, 'requests.txt')
+    const gate = join(root, 'gate')
+    const config: HoldWorkerConfig = {
+      version: 1,
+      holdId: 'hold',
+      generation: 'generation',
+      backend: 'codex',
+      cwd: root,
+      socketPath,
+      journalPath: join(root, 'journal.jsonl'),
+      statePath: join(root, 'state.json'),
+      maxJournalEvents: 20,
+      maxJournalBytes: 100_000,
+      promptTimeoutMs: 60_000,
+      transport: {
+        kind: 'stdio', command: process.execPath,
+        args: [new URL('./fixtures/fake-acp.mjs', import.meta.url).pathname, output, gate, 'error'],
+      },
+    }
+    const worker = new HoldWorker(config)
+    await worker.start()
+    try {
+      await send(socketPath, admission('p1'))
+      await send(socketPath, admission('p2'))
+      // The backend replies to p1 with a JSON-RPC error (e.g. Codex usage limit).
+      // The hold worker must still synthesize a completion frame so the turn ends
+      // and the queued p2 admission is admitted — without it the browser hangs on
+      // "创建中 / running" forever.
+      await writeFile(gate, 'go')
+      await vi.waitFor(async () => { expect(await readFile(output, 'utf8')).toBe('p1\np2\n') })
+      const page = await send(socketPath, { operation: 'read', afterSeq: 0, generation: 'generation' })
+      if (!page.ok) throw new Error(page.error)
+      const frames = (page.result as { events: readonly { frame: unknown }[] }).events
+        .map(event => event.frame)
+        .filter((frame): frame is Record<PropertyKey, unknown> => frame !== null && typeof frame === 'object' && !Array.isArray(frame))
+      const completions = frames.filter(frame =>
+        Reflect.get(frame, 'method') === '_x.ai/session/prompt_complete'
+        && Reflect.get(Reflect.get(frame, 'params') as object, 'stopReason') === 'error')
+      // One completion per prompt (p1 error + p2 error), both marked stopReason error.
+      expect(completions).toHaveLength(2)
+      // The backend's error text must ride along so the UI can show *why* the
+      // turn failed instead of a bare "远程轮次失败".
+      expect(Reflect.get(Reflect.get(completions[0]!, 'params') as object, 'message'))
+        .toBe("You've hit your usage limit.")
     } finally {
       await worker.close()
     }

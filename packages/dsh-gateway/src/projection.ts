@@ -58,8 +58,10 @@ function projectAcp(frame: Record<string, JsonValue>): ProjectedFragment[] {
   }
   if (method === '_x.ai/session/prompt_complete') {
     const failed = params?.['stopReason'] === 'error'
+    const detail = typeof params?.['message'] === 'string' ? params['message'] : ''
     return [{
-      role: 'system', kind: 'status', text: failed ? '远程轮次失败' : '远程轮次完成',
+      role: 'system', kind: 'status',
+      text: failed ? (detail === '' ? '远程轮次失败' : `远程轮次失败：${detail}`) : '远程轮次完成',
       turnState: failed ? 'failed' : 'idle',
     }]
   }
@@ -126,7 +128,8 @@ function projectDsh(frame: Record<string, JsonValue>): ProjectedFragment[] {
     // DSH backends occasionally skip after the JSON-RPC response.
     const stopReason = params?.['stopReason']
     const failed = stopReason === 'error'
-    return [{ role: 'system', kind: 'status', text: failed ? '远程轮次失败' : '远程轮次完成', turnState: failed ? 'failed' : 'idle' }]
+    const detail = typeof params?.['message'] === 'string' ? params['message'] : ''
+    return [{ role: 'system', kind: 'status', text: failed ? (detail === '' ? '远程轮次失败' : `远程轮次失败：${detail}`) : '远程轮次完成', turnState: failed ? 'failed' : 'idle' }]
   }
   if (method === 'session.status') {
     const status = params?.['status']
@@ -165,7 +168,8 @@ function projectDsh(frame: Record<string, JsonValue>): ProjectedFragment[] {
   if (type === 'turn/end') {
     const reason = object(data?.['reason'])
     const failed = reason?.['kind'] === 'error'
-    return [{ role: 'system', kind: 'status', text: failed ? '远程轮次失败' : '远程轮次完成', turnState: failed ? 'failed' : 'idle' }]
+    const detail = typeof reason?.['message'] === 'string' ? reason['message'] : ''
+    return [{ role: 'system', kind: 'status', text: failed ? (detail === '' ? '远程轮次失败' : `远程轮次失败：${detail}`) : '远程轮次完成', turnState: failed ? 'failed' : 'idle' }]
   }
   return []
 }

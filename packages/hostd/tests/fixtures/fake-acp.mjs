@@ -13,6 +13,13 @@ reader.on('line', (line) => {
   appendFileSync(output, `${String(frame.id)}\n`)
   const write = (value) => process.stdout.write(`${JSON.stringify(value)}\n`)
   const complete = () => {
+    if (completion === 'error') {
+      write({ jsonrpc: '2.0', id: frame.id, error: {
+        code: -32603, message: 'Internal error',
+        data: { message: "You've hit your usage limit.", codexErrorInfo: 'usageLimitExceeded' },
+      } })
+      return
+    }
     if (completion === 'codex') {
       write({ jsonrpc: '2.0', id: frame.id, result: { stopReason: 'end_turn' } })
       return
@@ -23,7 +30,7 @@ reader.on('line', (line) => {
     }
     write({ jsonrpc: '2.0', method: 'session.status', params: { sessionId: 'native', status: 'idle' } })
   }
-  if (completion !== 'codex') write({ jsonrpc: '2.0', id: frame.id, result: { accepted: true } })
+  if (completion !== 'codex' && completion !== 'error') write({ jsonrpc: '2.0', id: frame.id, result: { accepted: true } })
   if (existsSync(gate)) complete()
   else {
     const timer = setInterval(() => {
