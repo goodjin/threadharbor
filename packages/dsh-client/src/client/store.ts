@@ -19,7 +19,9 @@ import {
   RemoteAuthFlowId,
   REMOTE_TRANSCRIPT_PAGE_SIZE,
   isRemoteBackendSessionReady,
+  hostdArtifactSame,
   jsonObject,
+  parseRemoteErrorFix,
   remoteAgentBackend,
   remoteAgentConfigBackend,
   stringField,
@@ -31,7 +33,9 @@ import {
   type RemoteAuthChallenge,
   type RemoteBackendInventory,
   type RemoteDirectoryListing,
+  type RemoteErrorFixKind,
   type RemoteHiddenItems,
+  type RemoteHostDeployState,
   type RemoteHostInventory,
   type RemoteHostView,
   type RemoteInstallPlan,
@@ -40,6 +44,7 @@ import {
   type RemoteSessionView,
   type RemoteTranscriptEntry,
   type RemoteTranscriptPage,
+  type RemoteTranscriptUsage,
   type RemoteSshConfig,
   type RemoteSshInspection,
 } from '@threadharbor/protocol'
@@ -52,6 +57,61 @@ export interface RemoteQueuedPrompt {
   readonly text: string
   readonly requestId: string
   readonly queuedAt: number
+}
+
+/** A prompt whose admission RPC was interrupted by a transport drop before the
+ *  gateway answered. Redelivered automatically once the live channel returns,
+ *  reusing the original requestId so the server can deduplicate the admission
+ *  and the user transcript entry. Browser-local only; a page refresh forgets it
+ *  (the message is then visibly failed and available for a manual resend). */
+interface PendingRedelivery {
+  readonly sessionId: ReturnType<typeof RemoteSessionId>
+  readonly projectId: ReturnType<typeof RemoteProjectId>
+  readonly clientId: string
+  readonly requestId: string
+  readonly text: string
+  readonly baselineSeq: number
+  readonly startedAt: number
+  attempts: number
+}
+
+/** How many reconnect-driven redelivery attempts before giving up (transport
+ *  drops only; hostd-unreachable retries are bounded by age, not this count). */
+const REDELIVERY_MAX_ATTEMPTS = 5
+/** Wall-clock window during which an interrupted prompt may still be redelivered. */
+const REDELIVERY_MAX_AGE_MS = 5 * 60_000
+/** Backoff between redelivery attempts while the remote hostd is unreachable but
+ *  the browser↔gateway socket is still live (a hostd restart/redeploy). Nothing
+ *  else re-pumps the queue in that window, so we drive it on this timer. */
+const REDELIVERY_BACKOFF_MS = 4_000
+
+/** Errors the browser transport raises when a request was dropped before the
+ *  gateway answered — a socket loss or a failed reconnect — where redelivering
+ *  with the same requestId cannot double-admit a prompt the server never saw.
+ *  Deliberately excludes request timeouts: there the far side may already have
+ *  admitted the prompt, so the message is surfaced as failed instead. */
+function isTransportDropError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /实时通道已断开|did not reach live phase|transport closed|connection lost/i.test(message)
+}
+
+/** Errors where the gateway reached us but the remote hostd was momentarily down
+ *  — a hostd restart or redeploy: the SSH tunnel refuses the TCP connection
+ *  (ECONNREFUSED) or the process is not up yet. The prompt was provably NOT
+ *  admitted, so redelivering with the same requestId is safe and succeeds once
+ *  hostd is back. Deliberately NARROW: excludes ambiguous request timeouts (the
+ *  far side may have admitted), backend rejections (auth / usage limit), and a
+ *  genuinely dead hold socket — the gateway rewrites that to the "在当前会话重开"
+ *  reopen hint, which owns its own recovery UX and must not be silently retried. */
+function isHoldUnreachableError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  if (/在当前会话重开|\.sock|named pipe/i.test(message)) return false
+  return /process is not running|did not start|ECONNREFUSED|ENOTSOCK/i.test(message)
+}
+
+/** Any delivery failure safe to auto-redeliver by reusing the same requestId. */
+function isRedeliverableError(error: unknown): boolean {
+  return isTransportDropError(error) || isHoldUnreachableError(error)
 }
 
 /** Browser interaction snapshot. */
@@ -121,8 +181,11 @@ export function hostDeployment(
 ): HostDeploymentState {
   if (host.inventory === undefined && host.inventoryError === undefined) return 'checking'
   if (host.inventoryError !== undefined || host.inventory === undefined || host.inventory.healthy !== true) return 'missing'
+  // Digest comparison, not full-string: an SSH-deployed hostd reports
+  // `unknown+<digest>` (no package.json next to its uploaded artifacts) for
+  // the same artifact bytes the gateway stamps `0.1.0+<digest>`.
   if (artifactVersion !== undefined && artifactVersion !== '' && artifactVersion !== 'unknown'
-    && host.inventory.hostdVersion !== artifactVersion) {
+    && !hostdArtifactSame(host.inventory.hostdVersion, artifactVersion)) {
     return 'outdated'
   }
   return 'deployed'
@@ -131,11 +194,17 @@ export function hostDeployment(
 /** Best-effort human-readable IP or hostname for a host row. */
 export function hostIpLabel(host: RemoteHostView): string {
   if (host.ssh !== undefined && host.ssh.target !== '') return host.ssh.target
+  if (host.endpoint === undefined) return ''
   try { return new URL(host.endpoint).host } catch { return host.endpoint }
 }
 
 /** Localised connection status text for the sidebar host row. */
 export function hostConnectionLabel(host: RemoteHostView, artifactVersion: string | undefined): string {
+  // Deploy lifecycle takes precedence over liveness: a host that has never
+  // finished a deploy is not merely "offline", and a failed deploy needs to
+  // read as actionable rather than a transient disconnect.
+  if (host.deployState === 'deploying' || host.deployState === 'pending') return '部署中…'
+  if (host.deployState === 'failed') return '部署失败'
   const state = hostDeployment(host, artifactVersion)
   if (host.inventoryError !== undefined) return '离线'
   if (state === 'deployed') return '已连接'
@@ -150,6 +219,8 @@ export function hostDeploymentBadge(
   host: RemoteHostView,
   artifactVersion: string | undefined,
 ): HostDeploymentBadge | undefined {
+  if (host.deployState === 'deploying' || host.deployState === 'pending') return { label: '部署中', tone: 'muted' }
+  if (host.deployState === 'failed') return { label: '重试', tone: 'error' }
   if (host.inventoryError !== undefined) return undefined
   const state = hostDeployment(host, artifactVersion)
   if (state === 'missing') return { label: '部署', tone: 'muted' }
@@ -170,7 +241,7 @@ export function isLoopbackHostEndpoint(endpoint: string): boolean {
 export function canUpgradeHostd(host: RemoteHostView, artifactVersion: string | undefined): boolean {
   const state = hostDeployment(host, artifactVersion)
   if (host.ssh?.hostKeyFingerprint !== undefined) return state === 'outdated' || state === 'missing'
-  return state === 'outdated' && isLoopbackHostEndpoint(host.endpoint)
+  return state === 'outdated' && host.endpoint !== undefined && isLoopbackHostEndpoint(host.endpoint)
 }
 
 /** Turn a hostd reachability failure into a short, actionable reason. */
@@ -203,6 +274,44 @@ export function describeSessionReconnectFailure(error: unknown): string {
     return '远程会话进程已停止。可以点「在当前会话重开」，系统会在当前会话上重启 Agent，对话记录会保留。'
   }
   return message
+}
+
+/** A reopen failure the UI can explain, plus the repair it can confirm. */
+export type ReopenFixKind = RemoteErrorFixKind
+
+/** Parsed reopen failure shown on the conversation banner. */
+export interface ReopenFailureIssue {
+  /** Human-readable reason for the failed reopen. */
+  readonly reason: string
+  /** Repair the Web UI can offer when one exists (adopt/restart for Grok, etc.). */
+  readonly fix?: ReopenFixKind
+}
+
+const REOPEN_FIX_FALLBACK_REASON: Record<RemoteErrorFixKind, string> = {
+  'grok-serve': 'Grok 服务无法连接，会话没能重新打开。',
+  'agent-missing': '远程 Agent 组件缺失或未安装，会话没能重新打开。',
+}
+
+/**
+ * Turn a failed reopen error into a banner-visible reason and an optional
+ * confirm-to-fix action. hostd marks actionable failures with
+ * `[th-fix:<kind>] <detail>`; a genuinely dead hold socket keeps the legacy
+ * hint; any other hostd/gateway reply is shown verbatim so a reopen never
+ * hides the real reason behind a generic "click reopen again".
+ */
+export function parseReopenFailure(error: unknown): ReopenFailureIssue {
+  const raw = (error instanceof Error ? error.message : String(error)).replace(/^Error:\s*/u, '').trim()
+  const marker = parseRemoteErrorFix(raw)
+  if (marker !== undefined) {
+    return {
+      fix: marker.kind,
+      reason: marker.detail === '' ? REOPEN_FIX_FALLBACK_REASON[marker.kind] : marker.detail,
+    }
+  }
+  if (isSessionHoldFailure(error) && /\.sock|named pipe/.test(raw)) {
+    return { reason: '远程会话进程已停止。可以点「在当前会话重开」，系统会在当前会话上重启 Agent，对话记录会保留。' }
+  }
+  return { reason: raw }
 }
 
 /** Turn an Agent deploy failure into a short, actionable reason. */
@@ -394,10 +503,13 @@ function parseHost(value: JsonValue): RemoteHostView {
   const identityFile = ssh === undefined ? undefined : optionalText(ssh, 'identityFile')
   const proxyJump = ssh === undefined ? undefined : optionalText(ssh, 'proxyJump')
   const hiddenAt = optionalText(record, 'hiddenAt')
+  const endpoint = optionalText(record, 'endpoint')
+  const deployState = parseHostDeployState(record['deployState'])
+  const deployError = optionalText(record, 'deployError')
   return {
     hostId: RemoteHostId(stringField(record, 'hostId')),
     title: stringField(record, 'title'),
-    endpoint: stringField(record, 'endpoint'),
+    ...(endpoint === undefined ? {} : { endpoint }),
     ...(ssh === undefined ? {} : {
       ssh: {
         target: stringField(ssh, 'target'),
@@ -412,8 +524,19 @@ function parseHost(value: JsonValue): RemoteHostView {
     updatedAt: stringField(record, 'updatedAt'),
     ...(inventory === undefined ? {} : { inventory }),
     ...(inventoryError === undefined ? {} : { inventoryError }),
+    ...(deployState === undefined ? {} : { deployState }),
+    ...(deployError === undefined ? {} : { deployError }),
     ...(hiddenAt === undefined ? {} : { hiddenAt }),
   }
+}
+
+const HOST_DEPLOY_STATES: readonly RemoteHostDeployState[] = ['pending', 'deploying', 'deployed', 'failed']
+function parseHostDeployState(value: JsonValue | undefined): RemoteHostDeployState | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || !HOST_DEPLOY_STATES.includes(value as RemoteHostDeployState)) {
+    throw new TypeError('host.deployState must be a known deploy state')
+  }
+  return value as RemoteHostDeployState
 }
 
 function parseSshInspection(value: JsonValue): RemoteSshInspection {
@@ -512,10 +635,25 @@ function parseSession(value: JsonValue): RemoteSessionView {
   }
 }
 
+function optionalUsage(value: Record<string, unknown>): RemoteTranscriptUsage | undefined {
+  const raw = value['usage']
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const record = raw as Record<string, unknown>
+  const numbers: Record<string, number> = {}
+  for (const key of ['inputTokens', 'outputTokens', 'cachedReadTokens', 'cachedWriteTokens',
+    'reasoningTokens', 'totalTokens'] as const) {
+    const item = record[key]
+    if (typeof item === 'number' && Number.isFinite(item) && item >= 0) numbers[key] = item
+  }
+  if (Object.keys(numbers).length === 0) return undefined
+  return numbers as RemoteTranscriptUsage
+}
+
 function parseTranscript(value: JsonValue): RemoteTranscriptEntry {
   const record = jsonObject(value, 'transcript entry')
   const nativeFrame = record['nativeFrame']
   const requestId = optionalText(record, 'requestId')
+  const usage = optionalUsage(record)
   return {
     transcriptId: RemoteTranscriptId(stringField(record, 'transcriptId')),
     sessionId: RemoteSessionId(stringField(record, 'sessionId')),
@@ -526,6 +664,7 @@ function parseTranscript(value: JsonValue): RemoteTranscriptEntry {
     createdAt: stringField(record, 'createdAt'),
     ...(nativeFrame === undefined ? {} : { nativeFrame }),
     ...(requestId === undefined ? {} : { requestId }),
+    ...(usage === undefined ? {} : { usage }),
   }
 }
 
@@ -675,6 +814,11 @@ export class RemoteAgentStore {
   private reloadSerial = 0
   private autoArchiveInFlight = false
   private readonly cache: TranscriptCache | null
+  /** Prompts interrupted by a transport drop or hostd restart, awaiting automatic redelivery. */
+  private redeliverQueue: PendingRedelivery[] = []
+  private redeliveryBusy = false
+  /** Backoff timer driving redelivery retries while hostd is unreachable. */
+  private redeliveryTimer: number | undefined
 
   /** Emit one trace line for a promptProgress phase transition so devtools
    *  shows the user-visible latency breakdown. Suppressed in test runs. */
@@ -759,6 +903,24 @@ export class RemoteAgentStore {
         const priority = session.sessionId === (adopted ?? this.snapshot.currentSessionId) ? 'high' : 'low'
         void this.catchupTranscript(session.sessionId, priority)
         if (priority === 'high') this.ensureLiveTranscriptSync()
+        return
+      }
+      case 'session.progress': {
+        // The gateway relays each session.start hostd stage as a push so the
+        // UI can show which remote step is currently in flight (spawn hold →
+        // initialize agent → bind native session → prompt delivered).
+        const sessionId = RemoteSessionId(stringField(record, 'sessionId'))
+        const message = stringField(record, 'message')
+        const progress = this.snapshot.promptProgress
+        if (progress?.sessionId === sessionId
+          && (progress.phase === 'connecting' || progress.phase === 'sending')) {
+          const { message: _previousMessage, ...rest } = progress
+          this.publish({
+            ...withoutError(this.snapshot),
+            promptProgress: { ...rest, message },
+            pending: this.snapshot.pending,
+          })
+        }
         return
       }
       case 'session.followed': {
@@ -855,6 +1017,7 @@ export class RemoteAgentStore {
       this.liveWait = undefined
       resolve()
     }
+    void this.pumpPromptRedeliveries()
     const current = this.snapshot.currentSessionId
     if (current === undefined) return
     void this.catchupTranscript(current, 'high')
@@ -899,6 +1062,9 @@ export class RemoteAgentStore {
   /** Stop timers and ignore later in-flight completions. */
   dispose(): void {
     this.disposed = true
+    this.redeliverQueue = []
+    if (this.redeliveryTimer !== undefined) window.clearTimeout(this.redeliveryTimer)
+    this.redeliveryTimer = undefined
     this.transcriptWork += 1
     this.backgroundQueue = []
     if (this.operationTimer !== undefined) window.clearTimeout(this.operationTimer)
@@ -1002,6 +1168,23 @@ export class RemoteAgentStore {
     return this.startOperation({ kind: 'host-ssh-deploy', title, ssh: ssh as unknown as JsonValue, confirm: true })
   }
 
+  /** Add an SSH host immediately; hostd deploys in the background (trust-on-first-use).
+   *
+   * The host is catalogued as soon as this resolves — connectivity and
+   * deployment run afterward and never block the add. A failed deploy leaves
+   * the host with `deployState: 'failed'` for the user to retry.
+   * @param title - browser-visible host name.
+   * @param ssh - SSH connection fields (no fingerprint needed).
+   */
+  addSshHost(title: string, ssh: Omit<RemoteSshConfig, 'hostKeyFingerprint'>): Promise<void> {
+    return this.mutate('host.ssh.add', { title, ssh: ssh as unknown as JsonValue })
+  }
+
+  /** Re-run the background deploy for a catalogued SSH host (retry after failure). */
+  redeploySshHost(hostId: ReturnType<typeof RemoteHostId>): Promise<RemoteOperationView> {
+    return this.run(async () => parseOperation(await this.call('host.ssh.redeploy', { hostId })))
+  }
+
   /** Redeploy and update one catalogued SSH host after its fingerprint is approved.
    * @param hostId - catalogued host to update.
    * @param title - browser-visible host name.
@@ -1011,10 +1194,10 @@ export class RemoteAgentStore {
     return this.startOperation({ kind: 'host-ssh-deploy', hostId, title, ssh: ssh as unknown as JsonValue, confirm: true })
   }
 
-  /** Upgrade hostd: SSH hosts redeploy; loopback endpoint hosts restart the local process. */
+  /** Upgrade hostd: SSH hosts redeploy (trust-on-first-use); loopback endpoint hosts restart the local process. */
   upgradeHostd(hostId: ReturnType<typeof RemoteHostId>): Promise<RemoteOperationView | void> {
     const host = this.snapshot.state.hosts.find(candidate => candidate.hostId === hostId)
-    if (host?.ssh !== undefined) return this.updateSshHost(hostId, host.title, host.ssh)
+    if (host?.ssh !== undefined) return this.redeploySshHost(hostId)
     return this.mutate('host.upgrade', { hostId, confirm: true })
   }
 
@@ -1128,7 +1311,61 @@ export class RemoteAgentStore {
       try {
         await this.call('session.attach', { sessionId })
       } catch (error) {
-        throw new Error(describeSessionReconnectFailure(error))
+        // Explicit reopen: propagate the raw hostd/gateway reason (including
+        // `[th-fix:...]` markers) instead of collapsing it into the generic
+        // "click reopen again" hint — that is exactly what this call is doing.
+        throw error instanceof Error ? error : new Error(String(error))
+      }
+      await this.reload(sessionId)
+      await this.catchupTranscript(sessionId, 'high')
+      this.ensureLiveTranscriptSync()
+    })
+  }
+
+  /** Owning host of a catalogued session (session → project → host). */
+  private requireSessionHostId(sessionId: ReturnType<typeof RemoteSessionId>): ReturnType<typeof RemoteHostId> {
+    const session = this.snapshot.state.sessions.find(candidate => candidate.sessionId === sessionId)
+    if (session === undefined) throw new Error('unknown session')
+    const project = this.snapshot.state.projects.find(candidate => candidate.projectId === session.projectId)
+    if (project === undefined) throw new Error('unknown session project')
+    return project.hostId
+  }
+
+  /** Read-only Grok serve diagnostics for the session's host (never secret values). */
+  async inspectGrokServe(sessionId: ReturnType<typeof RemoteSessionId>): Promise<Record<string, JsonValue>> {
+    const result = await this.call('grok.serve.inspect', { hostId: this.requireSessionHostId(sessionId) })
+    return jsonObject(result, 'grok.serve.inspect result') as unknown as Record<string, JsonValue>
+  }
+
+  /**
+   * Confirm-to-fix for a failed session reopen: run the hostd repair (`adopt`
+   * is non-destructive, `restart` stops the Grok serve and starts a fresh one)
+   * and then re-attempt the reopen automatically. Failures reject with the
+   * repair reason so the UI can keep explaining.
+   */
+  async repairGrokServe(
+    sessionId: ReturnType<typeof RemoteSessionId>,
+    action: 'adopt' | 'restart',
+  ): Promise<void> {
+    await this.run(async () => {
+      await this.call(action === 'adopt' ? 'grok.serve.adopt' : 'grok.serve.restart', {
+        hostId: this.requireSessionHostId(sessionId),
+      })
+    })
+    await this.reconnectSession(sessionId)
+  }
+
+  /**
+   * Force-restart a session whose Agent stopped responding (user confirmed in
+   * the UI): the gateway asks hostd to stop the hold worker/backend process
+   * and reopen the same session id with its native session reloaded.
+   */
+  async forceRestartSession(sessionId: ReturnType<typeof RemoteSessionId>): Promise<void> {
+    await this.run(async () => {
+      try {
+        await this.call('session.restart', { sessionId })
+      } catch (error) {
+        throw error instanceof Error ? error : new Error(String(error))
       }
       await this.reload(sessionId)
       await this.catchupTranscript(sessionId, 'high')
@@ -1186,9 +1423,14 @@ export class RemoteAgentStore {
   }
 
   /**
-   * Materialize the visible draft with the selected Agent, then submit its first prompt.
-   * Once session.start succeeds the draft is removed, so the Agent cannot be changed even
-   * when prompt delivery subsequently reports an error.
+   * Submit the visible draft's first message together with `session.start`.
+   * The gateway acknowledges immediately (connecting row) and drives hold
+   * startup in the background, delivering the first message automatically once
+   * the remote session is bound. The browser performs a single RPC: the UI
+   * moves to `sending` as soon as the message is accepted, and each remote
+   * stage (`session.progress`) is shown until backend events take over.
+   * Once the Agent starts, the Agent cannot be changed even when prompt
+   * delivery subsequently reports an error.
    */
   async promptSessionDraft(backend: RemoteAgentBackend, text: string): Promise<void> {
     const draft = this.snapshot.draftSession
@@ -1213,18 +1455,26 @@ export class RemoteAgentStore {
         })
         const session = parseSession(result)
         const nextState = withSessionView(this.snapshot.state, session)
-        const connecting: RemotePromptProgress = {
-          projectId: draft.projectId, sessionId: session.sessionId, phase: 'connecting', startedAt, baselineSeq: -1,
+        // The gateway accepts the message in the same RPC, so the UI can stop
+        // showing a bare "connecting" the moment the session row exists: the
+        // hold is being created and the first prompt is queued for auto-delivery.
+        const sending: RemotePromptProgress = {
+          projectId: draft.projectId,
+          sessionId: session.sessionId,
+          phase: 'sending',
+          startedAt,
+          baselineSeq: -1,
+          message: '消息已提交，正在建立远程会话',
         }
         const { draftSession: _draftSession, panel: _panel, ...snapshot } = withoutError(this.snapshot)
         this.publish({
           ...snapshot,
           state: nextState,
           currentSessionId: session.sessionId,
-          promptProgress: connecting,
+          promptProgress: sending,
           pending: true,
         })
-        this.tracePromptPhase('connecting', startedAt, { sessionId: session.sessionId, stage: 'rpcReturned' })
+        this.tracePromptPhase('sending', startedAt, { sessionId: session.sessionId, stage: 'rpcReturned' })
         this.applyTranscriptEntries(session.sessionId, [{
           transcriptId: RemoteTranscriptId(`user:${session.sessionId}:${clientId}:${requestId}`),
           sessionId: session.sessionId,
@@ -1238,23 +1488,29 @@ export class RemoteAgentStore {
         this.liveBackoffIndex = 0
         await this.catchupTranscript(session.sessionId, 'high')
         this.ensureLiveTranscriptSync()
-        // session.start waits for the hold. Only wait on a later view.changed
-        // if this response is still the connecting placeholder.
+        // Wait for the remote session to open. The gateway auto-delivers the
+        // first message once the hold is bound, so no second session.prompt RPC
+        // is issued here; failure surfaces as a lost/failed row or a delivery
+        // failure status entry that reconcilePromptProgress turns into `failed`.
         await this.awaitSessionOpen(session.sessionId)
-        this.tracePromptPhase('connecting', startedAt, { sessionId: session.sessionId, stage: 'holdOpen' })
-        const progress: RemotePromptProgress = { ...connecting, phase: 'sending' }
-        this.publish({ ...withoutError(this.snapshot), promptProgress: progress, pending: true })
-        this.tracePromptPhase('sending', startedAt, { sessionId: session.sessionId })
+        this.tracePromptPhase('sending', startedAt, { sessionId: session.sessionId, stage: 'holdOpen' })
         try {
-          await this.deliverPrompt(session.sessionId, clientId, requestId, text)
-        } finally {
           await this.reload(session.sessionId)
+        } finally {
           void this.catchupTranscript(session.sessionId, 'high')
         }
         const current = this.snapshot.state.sessions.find(candidate => candidate.sessionId === session.sessionId)
         if (current?.turnState === 'running') {
-          this.publish({ ...withoutError(this.snapshot), promptProgress: { ...progress, phase: 'waiting' } })
+          this.publish({ ...withoutError(this.snapshot), promptProgress: { ...sending, phase: 'waiting' } })
           this.tracePromptPhase('waiting', startedAt, { sessionId: session.sessionId })
+        } else if (current?.turnState === 'failed' || current?.channelState === 'lost') {
+          const failedMessage = this.snapshot.error
+            ?? (current.channelState === 'lost' ? '远程会话已丢失，可以点「在当前会话重开」再试。' : '消息未能送达远程 Agent。')
+          this.publish({
+            ...withoutError(this.snapshot),
+            promptProgress: { ...sending, phase: 'failed', message: failedMessage },
+          })
+          this.tracePromptPhase('failed', startedAt, { sessionId: session.sessionId, message: failedMessage })
         } else {
           const { promptProgress: _promptProgress, ...snapshot } = withoutError(this.snapshot)
           this.publish(snapshot)
@@ -1378,6 +1634,27 @@ export class RemoteAgentStore {
         }
       }, true)
     } catch (error) {
+      if (isRedeliverableError(error)) {
+        // Either the socket dropped before the gateway answered (web restart),
+        // or the gateway reached us but the remote hostd was momentarily
+        // unreachable (hostd restart/redeploy). In both cases the prompt was not
+        // admitted, so keep the optimistic bubble and redeliver the same request
+        // automatically once the far side is back — instead of failing silently
+        // and losing the message.
+        this.queuePromptRedelivery({
+          sessionId, projectId: progress.projectId, clientId, requestId, text,
+          baselineSeq, startedAt: progress.startedAt, attempts: 0,
+        })
+        const message = isTransportDropError(error)
+          ? '通道已断开，正在等待重连后自动重发。'
+          : '远端 hostd 暂时不可用，正在自动重试发送。'
+        this.publish({
+          ...withoutError(this.snapshot),
+          promptProgress: { ...progress, phase: 'sending', message },
+        })
+        this.tracePromptPhase('sending', progress.startedAt, { sessionId, stage: 'queuedForRedelivery' })
+        return
+      }
       this.publish({
         ...this.snapshot,
         promptProgress: { ...progress, phase: 'failed', message: errorText(error) },
@@ -1385,6 +1662,112 @@ export class RemoteAgentStore {
       this.tracePromptPhase('failed', progress.startedAt, { sessionId, message: errorText(error) })
       throw error
     }
+  }
+
+  /** Park an undelivered prompt for automatic redelivery once the channel is live. */
+  private queuePromptRedelivery(entry: PendingRedelivery): void {
+    if (this.disposed) return
+    if (this.redeliverQueue.some(existing => existing.requestId === entry.requestId)) return
+    this.redeliverQueue.push(entry)
+    void this.pumpPromptRedeliveries()
+  }
+
+  /** Re-pump the redelivery queue after a backoff, for the hostd-unreachable
+   *  case where the live socket won't otherwise wake us. Coalesced: a single
+   *  pending timer covers the whole queue. */
+  private scheduleRedeliveryRetry(): void {
+    if (this.disposed || this.redeliveryTimer !== undefined) return
+    this.redeliveryTimer = window.setTimeout(() => {
+      this.redeliveryTimer = undefined
+      void this.pumpPromptRedeliveries()
+    }, REDELIVERY_BACKOFF_MS)
+  }
+
+  /** Redeliver queued prompts in order once the socket is live again.
+   *  Drops entries whose session the user left, and gives up (surfacing a
+   *  failed progress) after bounded attempts or wall-clock age. */
+  private async pumpPromptRedeliveries(): Promise<void> {
+    if (this.disposed || this.redeliveryBusy || this.connectionPhase !== 'ready') return
+    const current = this.snapshot.currentSessionId
+    if (this.redeliverQueue.some(entry => entry.sessionId !== current)) {
+      this.redeliverQueue = this.redeliverQueue.filter(entry => entry.sessionId === current)
+      if (this.redeliverQueue.length === 0) return
+    }
+    const entry = this.redeliverQueue[0]
+    if (entry === undefined) return
+    if (Date.now() - entry.startedAt > REDELIVERY_MAX_AGE_MS || entry.attempts >= REDELIVERY_MAX_ATTEMPTS) {
+      this.redeliverQueue.shift()
+      this.publish({
+        ...withoutError(this.snapshot),
+        promptProgress: {
+          projectId: entry.projectId, sessionId: entry.sessionId, phase: 'failed',
+          startedAt: entry.startedAt, baselineSeq: entry.baselineSeq,
+          message: '多次重连仍未送达，请点击「重发」再试。',
+        },
+      })
+      this.tracePromptPhase('failed', entry.startedAt, { sessionId: entry.sessionId, stage: 'redeliveryGaveUp' })
+      void this.pumpPromptRedeliveries()
+      return
+    }
+    this.redeliveryBusy = true
+    let redelivered = false
+    try {
+      await this.call('session.prompt', {
+        sessionId: entry.sessionId, clientId: entry.clientId, requestId: entry.requestId, text: entry.text,
+      })
+      redelivered = true
+    } catch (error) {
+      if (isTransportDropError(error)) {
+        // The socket is down; the reconnect (setPhase 'ready') re-pumps us.
+        entry.attempts += 1
+        this.tracePromptPhase('sending', entry.startedAt, {
+          sessionId: entry.sessionId, stage: 'redeliveryDeferred', attempts: entry.attempts,
+        })
+      } else if (isHoldUnreachableError(error)) {
+        // hostd is momentarily unreachable (restart/redeploy) but the socket is
+        // live, so nothing else will re-pump us — retry on a backoff timer,
+        // bounded by the age window checked at the top of the loop (not the
+        // reconnect attempt cap, which a fast timer would exhaust in seconds).
+        this.tracePromptPhase('sending', entry.startedAt, {
+          sessionId: entry.sessionId, stage: 'redeliveryBackoff',
+        })
+        this.scheduleRedeliveryRetry()
+      } else {
+        this.redeliverQueue.shift()
+        this.publish({
+          ...withoutError(this.snapshot),
+          promptProgress: {
+            projectId: entry.projectId, sessionId: entry.sessionId, phase: 'failed',
+            startedAt: entry.startedAt, baselineSeq: entry.baselineSeq,
+            message: `自动重发失败：${errorText(error)}`,
+          },
+        })
+        this.tracePromptPhase('failed', entry.startedAt, { sessionId: entry.sessionId, stage: 'redeliveryFailed' })
+        void this.pumpPromptRedeliveries()
+      }
+    } finally {
+      this.redeliveryBusy = false
+    }
+    if (!redelivered) return
+    this.redeliverQueue.shift()
+    await this.reload(entry.sessionId)
+    void this.catchupTranscript(entry.sessionId, 'high')
+    this.ensureLiveTranscriptSync()
+    const progress = this.snapshot.promptProgress
+    if (progress !== undefined && progress.sessionId === entry.sessionId) {
+      const current = this.snapshot.state.sessions.find(candidate => candidate.sessionId === entry.sessionId)
+      if (current?.turnState === 'running') {
+        this.publish({
+          ...withoutError(this.snapshot),
+          promptProgress: { ...progress, phase: 'waiting' },
+        })
+        this.tracePromptPhase('waiting', entry.startedAt, { sessionId: entry.sessionId, stage: 'redelivered' })
+      } else {
+        const { promptProgress: _cleared, ...rest } = this.snapshot
+        this.publish(rest)
+      }
+    }
+    void this.pumpPromptRedeliveries()
   }
 
   /** Park the next user message locally while a previous turn is still in flight.
@@ -1999,6 +2382,13 @@ export class RemoteAgentStore {
     if (session === undefined) return progress
     if (session.turnState === 'failed' || session.channelState === 'lost' || session.channelState === 'closed') {
       return { ...progress, phase: 'failed', message: this.snapshot.error ?? '远程会话未能完成本轮请求。' }
+    }
+    // While the socket is down a catalog reload must not clear a prompt that is
+    // still waiting to be (re)delivered — otherwise the header would flip to a
+    // misleading idle state and a queued redelivery would lose its context.
+    if (this.connectionPhase === 'reconnecting'
+      && (progress.phase === 'sending' || progress.phase === 'connecting')) {
+      return progress
     }
     if (session.channelState === 'connecting') return progress
     if (session.turnState === 'idle' || session.turnState === 'stopped') return undefined

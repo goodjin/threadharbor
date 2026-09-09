@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RemoteHostId, RemoteProjectId, RemoteSessionId, RemoteTranscriptId, type RemoteTranscriptEntry } from '@threadharbor/protocol'
-import { RemoteAgentStore, backendInventoryState, canUpgradeHostd, describeAgentInstallFailure, describeHostConnectFailure, describeSessionReconnectFailure, hostConnectionLabel, hostDeployment, isSessionHoldFailure, parseAgentConfigDocument, parseHiddenItems, parseInstallPlan, parseOperation, parseRemoteAgentState } from '../src/client/store.ts'
+import { RemoteAgentStore, backendInventoryState, canUpgradeHostd, describeAgentInstallFailure, describeHostConnectFailure, describeSessionReconnectFailure, hostConnectionLabel, hostDeployment, isSessionHoldFailure, parseAgentConfigDocument, parseHiddenItems, parseInstallPlan, parseOperation, parseRemoteAgentState, parseReopenFailure } from '../src/client/store.ts'
 import { TranscriptCache, type CachedTranscriptSession, type TranscriptDb } from '../src/client/transcript-cache.ts'
 
 const EMPTY = { pollIntervalMs: 60_000, hosts: [], projects: [], sessions: [], transcript: [], operations: [] }
@@ -412,10 +412,10 @@ describe('RemoteAgentStore', () => {
       calls.push({ method: body.method, params: body.params })
       const result = body.method === 'state'
         ? { ...EMPTY, hosts: [local, remote] }
-        : body.method === 'operation.start'
+        : body.method === 'host.ssh.redeploy'
           ? {
             operationId: 'op-up', kind: 'host-ssh-deploy', status: 'queued', phase: 'queued',
-            title: '重新部署 Mac-mini', detail: '部署任务已排队。', target: 'host:remote', cancellable: false,
+            title: '部署 Mac-mini', detail: '部署任务已排队。', target: 'host:remote', cancellable: false,
             hostId: 'remote', startedAt: 'a', updatedAt: 'a',
           }
           : {}
@@ -429,9 +429,9 @@ describe('RemoteAgentStore', () => {
       expect(calls.filter(call => call.method === 'host.upgrade')).toEqual([
         { method: 'host.upgrade', params: { hostId: 'local', confirm: true } },
       ])
-      expect(calls.find(call => call.method === 'operation.start')?.params).toMatchObject({
-        kind: 'host-ssh-deploy', hostId: 'remote', title: 'Mac-mini',
-      })
+      // SSH hosts redeploy through the dedicated trust-on-first-use path, not a
+      // fingerprint-bearing operation.start.
+      expect(calls.find(call => call.method === 'host.ssh.redeploy')?.params).toEqual({ hostId: 'remote' })
     } finally {
       store.dispose()
     }
@@ -531,9 +531,13 @@ describe('RemoteAgentStore', () => {
 
   it('keeps a new session as a local placeholder and locks the Agent on first send', async () => {
     const calls: Array<{ method: string; params: Record<string, unknown> }> = []
-    const session = {
+    const connectingRow = {
       sessionId: 's-new', projectId: 'p', title: 'first question', backend: 'grok',
-      channelState: 'open', turnState: 'running', createdAt: 'a', updatedAt: 'b',
+      channelState: 'connecting', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+    }
+    const session = {
+      ...connectingRow,
+      channelState: 'open', turnState: 'running',
       binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
     }
     let created = false
@@ -543,15 +547,9 @@ describe('RemoteAgentStore', () => {
       const state = { ...EMPTY, sessions: created ? [session] : [] }
       if (body.method === 'session.start') {
         created = true
-        // Gateway now returns the connecting row immediately and announces the
-        // bound view via the WS push. Simulate that here so awaitSessionOpen
-        // can observe the binding instead of waiting the full timeout.
-        queueMicrotask(() => {
-          store.consume({ type: 'session.view.changed', session })
-        })
-        return Response.json({ id: body.id, ok: true, result: session })
+        return Response.json({ id: body.id, ok: true, result: connectingRow })
       }
-      return Response.json({ id: body.id, ok: true, result: body.method === 'session.prompt' ? {} : state })
+      return Response.json({ id: body.id, ok: true, result: state })
     }))
     const store = new RemoteAgentStore()
     try {
@@ -560,18 +558,29 @@ describe('RemoteAgentStore', () => {
       expect(store.getSnapshot()).toMatchObject({ draftSession: { projectId: 'p', title: '新会话' } })
       expect(calls.map(call => call.method)).toEqual(['state'])
 
-      await store.promptSessionDraft('grok', 'first question')
+      const pending = store.promptSessionDraft('grok', 'first question')
+      // Wait for the accepted connecting row, then simulate the gateway's WS
+      // push announcing the bound/running view (which arrives after the RPC).
+      await vi.waitFor(() => {
+        expect(store.getSnapshot().currentSessionId).toBe('s-new')
+      })
+      expect(store.getSnapshot().state.sessions[0]?.channelState).toBe('connecting')
+      store.consume({ type: 'session.view.changed', session })
+      await pending
 
       expect(store.getSnapshot().draftSession).toBeUndefined()
       expect(store.getSnapshot().currentSessionId).toBe('s-new')
       expect(store.getSnapshot().state.sessions.map(entry => entry.sessionId)).toEqual(['s-new'])
+      // One-shot create + auto-deliver: the gateway receives session.start and
+      // delivers the first message itself, so the browser issues no second
+      // session.prompt RPC.
       expect(calls.map(call => call.method).filter(method => method !== 'transcript.read'))
-        .toEqual(['state', 'session.start', 'session.prompt', 'state'])
-      expect(calls[1]?.params).toMatchObject({
+        .toEqual(['state', 'session.start', 'state'])
+      expect(calls.find(call => call.method === 'session.start')?.params).toMatchObject({
         projectId: 'p', backend: 'grok', title: 'first question', text: 'first question',
       })
-      expect(calls[1]?.params).toHaveProperty('clientId')
-      expect(calls[1]?.params).toHaveProperty('requestId')
+      expect(calls.find(call => call.method === 'session.start')?.params).toHaveProperty('clientId')
+      expect(calls.find(call => call.method === 'session.start')?.params).toHaveProperty('requestId')
     } finally {
       store.dispose()
     }
@@ -643,7 +652,7 @@ describe('RemoteAgentStore', () => {
     }
   })
 
-  it('keeps the created session visible while waiting for the remote binding', async () => {
+  it('keeps the created session visible while the first message waits for the remote binding', async () => {
     const connecting = {
       sessionId: 's-new', projectId: 'p', title: 'first question', backend: 'grok',
       channelState: 'connecting', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
@@ -665,7 +674,7 @@ describe('RemoteAgentStore', () => {
       return Response.json({
         id: body.id,
         ok: true,
-        result: body.method === 'session.prompt' ? {} : { ...EMPTY, sessions: created ? [opened] : [] },
+        result: { ...EMPTY, sessions: created ? [opened] : [] },
       })
     }))
     const store = new RemoteAgentStore()
@@ -677,7 +686,12 @@ describe('RemoteAgentStore', () => {
         expect(store.getSnapshot().currentSessionId).toBe('s-new')
       })
       expect(store.getSnapshot().draftSession).toBeUndefined()
-      expect(store.getSnapshot().promptProgress?.phase).toBe('connecting')
+      // The message was submitted in the same RPC: once the connecting row is
+      // known the prompt is already queued for gateway auto-delivery, so the
+      // UI moves to `sending` (with a stage message) instead of staying in a
+      // bare `connecting` state until the hold is bound.
+      expect(store.getSnapshot().promptProgress?.phase).toBe('sending')
+      expect(store.getSnapshot().promptProgress?.message).toBeTruthy()
       expect(store.getSnapshot().state.sessions).toEqual([expect.objectContaining({
         sessionId: 's-new', channelState: 'connecting',
       })])
@@ -700,6 +714,7 @@ describe('RemoteAgentStore', () => {
         currentSessionId: 's-new',
         state: { sessions: [{ sessionId: 's-new', channelState: 'open' }] },
       })
+      expect(store.getSnapshot().promptProgress?.phase).toBe('waiting')
     } finally {
       store.dispose()
     }
@@ -872,11 +887,15 @@ describe('RemoteAgentStore', () => {
     }
   })
 
-  it('does not reopen Agent selection after session creation when first prompt fails', async () => {
-    const session = {
+  it('does not reopen Agent selection after session creation when first prompt delivery fails', async () => {
+    const connecting = {
       sessionId: 's-created', projectId: 'p', title: 'question', backend: 'codex',
-      channelState: 'open', turnState: 'failed', createdAt: 'a', updatedAt: 'b',
-      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+      channelState: 'connecting', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+    }
+    const failed = {
+      ...connecting,
+      channelState: 'lost', turnState: 'failed', updatedAt: 'c',
+      binding: { holdId: 'hold', generation: 'g', state: 'lost', lastSeq: 0 },
     }
     let store: RemoteAgentStore | undefined
     let created = false
@@ -884,25 +903,26 @@ describe('RemoteAgentStore', () => {
       const body = JSON.parse(requestBody(init)) as { id: string; method: string }
       if (body.method === 'session.start') {
         created = true
-        // Mirror the gateway's optimistic create + WS push so the store can
-        // observe the bound session before session.prompt is attempted.
-        queueMicrotask(() => {
-          store?.consume({ type: 'session.view.changed', session })
-        })
-        return Response.json({ id: body.id, ok: true, result: session })
+        return Response.json({ id: body.id, ok: true, result: connecting })
       }
-      if (body.method === 'session.prompt') {
-        return Response.json({ id: body.id, ok: false, error: { message: 'prompt failed' } })
-      }
-      return Response.json({ id: body.id, ok: true, result: { ...EMPTY, sessions: created ? [session] : [] } })
+      return Response.json({ id: body.id, ok: true, result: { ...EMPTY, sessions: created ? [failed] : [] } })
     }))
     store = new RemoteAgentStore()
     try {
       await store.start()
       store.startSessionDraft(RemoteProjectId('p'))
-      await expect(store.promptSessionDraft('codex', 'question')).rejects.toThrow('prompt failed')
-      expect(store.getSnapshot()).toMatchObject({ currentSessionId: 's-created', error: 'Error: prompt failed' })
+      // The create RPC succeeds (one-shot submit); the failure surfaces when
+      // the gateway pushes the lost/failed row that follows auto-delivery.
+      const pending = store.promptSessionDraft('codex', 'question').catch((error: unknown) => String(error))
+      await vi.waitFor(() => {
+        expect(store.getSnapshot().currentSessionId).toBe('s-created')
+      })
+      store.consume({ type: 'session.view.changed', session: failed })
+      await expect(pending).resolves.toMatch(/建立失败|失败/)
+      // The tombstone stays selected; the Agent picker is NOT reopened.
+      expect(store.getSnapshot().currentSessionId).toBe('s-created')
       expect(store.getSnapshot().draftSession).toBeUndefined()
+      expect(store.getSnapshot().state.sessions[0]?.turnState).toBe('failed')
       await expect(store.promptSessionDraft('grok', 'retry')).rejects.toThrow('no new-session draft')
     } finally {
       store.dispose()
@@ -1377,6 +1397,25 @@ describe('RemoteAgentStore', () => {
       ...base,
       inventory: { protocolVersion: 1, hostdVersion: '0.1.0+aaaaaaaaaaaa', hostId: 'native', healthy: true, backends: [] },
     }, '0.1.0+bbbbbbbbbbbb')).toBe('已连接，待升级')
+    // SSH-deployed hostd stamps carry `unknown` (no package.json beside the
+    // uploaded artifacts) for the same bytes as the local `0.1.0+…`. Only the
+    // digest after `+` decides whether an upgrade is pending.
+    expect(hostDeployment({
+      ...base,
+      inventory: { protocolVersion: 1, hostdVersion: 'unknown+aaaaaaaaaaaa', hostId: 'native', healthy: true, backends: [] },
+    }, '0.1.0+aaaaaaaaaaaa')).toBe('deployed')
+    expect(hostDeployment({
+      ...base,
+      inventory: { protocolVersion: 1, hostdVersion: '0.1.0+aaaaaaaaaaaa', hostId: 'native', healthy: true, backends: [] },
+    }, 'unknown+aaaaaaaaaaaa')).toBe('deployed')
+    expect(hostDeployment({
+      ...base,
+      inventory: { protocolVersion: 1, hostdVersion: 'unknown+aaaaaaaaaaaa', hostId: 'native', healthy: true, backends: [] },
+    }, '0.1.0+bbbbbbbbbbbb')).toBe('outdated')
+    expect(hostConnectionLabel({
+      ...base,
+      inventory: { protocolVersion: 1, hostdVersion: 'unknown+aaaaaaaaaaaa', hostId: 'native', healthy: true, backends: [] },
+    }, '0.1.0+aaaaaaaaaaaa')).toBe('已连接')
     const outdatedLocal = {
       ...base,
       endpoint: 'http://127.0.0.1:62846',
@@ -1460,6 +1499,119 @@ describe('RemoteAgentStore', () => {
     }
   })
 
+  it('redelivers a prompt dropped by the transport once the channel is live again', async () => {
+    const session = {
+      sessionId: 's-drop', projectId: 'p', title: 'work', backend: 'codex',
+      channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 3 },
+    }
+    let promptAttempts = 0
+    const requestIds: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string; params?: { requestId?: string } }
+      if (body.method === 'session.prompt') {
+        promptAttempts += 1
+        requestIds.push(body.params?.requestId ?? '')
+        if (promptAttempts === 1) {
+          return Response.json({
+            id: body.id, ok: false,
+            error: { message: '实时通道已断开，正在重连' },
+          })
+        }
+        return Response.json({ id: body.id, ok: true, result: { accepted: true } })
+      }
+      return Response.json({
+        id: body.id, ok: true,
+        result: body.method === 'transcript.read'
+          ? { sessionId: 's-drop', entries: [], afterSeq: -1, fromSeq: 0, toSeq: -1, latestSeq: -1, hasMore: false }
+          : { ...EMPTY, sessions: [session] },
+      })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      expect(store.getSnapshot().currentSessionId).toBe('s-drop')
+      // Socket is down when the user sends: the prompt is parked, not failed.
+      store.setPhase('reconnecting')
+      await store.prompt(RemoteSessionId('s-drop'), 'hello again')
+      expect(promptAttempts).toBe(1)
+      expect(store.getSnapshot().promptProgress).toMatchObject({
+        sessionId: 's-drop',
+        phase: 'sending',
+        message: expect.stringContaining('自动重发'),
+      })
+      // Channel returns: the same request is redelivered with the same requestId.
+      store.setPhase('ready')
+      await vi.waitFor(() => { expect(promptAttempts).toBe(2) })
+      expect(requestIds[0]).toBe(requestIds[1])
+      const userTexts = store.getSnapshot().state.transcript
+        .filter(entry => entry.role === 'user')
+        .map(entry => entry.text)
+      expect(userTexts).toEqual(['hello again'])
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('auto-redelivers a prompt when hostd is briefly unreachable (restart/redeploy) then recovers', async () => {
+    const session = {
+      sessionId: 's-hostd', projectId: 'p', title: 'work', backend: 'codex',
+      channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 3 },
+    }
+    let promptAttempts = 0
+    const requestIds: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string; params?: { requestId?: string } }
+      if (body.method === 'session.prompt') {
+        promptAttempts += 1
+        requestIds.push(body.params?.requestId ?? '')
+        // First two attempts land mid hostd-restart: the SSH tunnel refuses the
+        // TCP connection. The WS to the gateway stays live the whole time, so the
+        // redelivery is driven by the backoff timer, not a reconnect.
+        if (promptAttempts <= 2) {
+          return Response.json({
+            id: body.id, ok: false,
+            error: { message: 'connect ECONNREFUSED 127.0.0.1:54211' },
+          })
+        }
+        return Response.json({ id: body.id, ok: true, result: { accepted: true } })
+      }
+      return Response.json({
+        id: body.id, ok: true,
+        result: body.method === 'transcript.read'
+          ? { sessionId: 's-hostd', entries: [], afterSeq: -1, fromSeq: 0, toSeq: -1, latestSeq: -1, hasMore: false }
+          : { ...EMPTY, sessions: [session] },
+      })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      expect(store.getSnapshot().currentSessionId).toBe('s-hostd')
+      // hostd is down when the user sends: the prompt is parked with an actionable
+      // message, NOT failed and lost.
+      await store.prompt(RemoteSessionId('s-hostd'), 'still there?')
+      expect(store.getSnapshot().promptProgress).toMatchObject({
+        sessionId: 's-hostd',
+        phase: 'sending',
+        message: expect.stringContaining('自动重试'),
+      })
+      // The send is never lost: deliverPrompt's own prompt→attach→prompt burst
+      // (attempts 1-2, both refused) is followed by a queued redelivery that lands
+      // once hostd answers (attempt 3), all reusing the SAME requestId so the
+      // server dedups. A longer outage would space later retries on the backoff
+      // timer, bounded by the 5-minute age window.
+      await vi.waitFor(() => { expect(promptAttempts).toBeGreaterThanOrEqual(3) }, { timeout: 9000, interval: 50 })
+      expect(new Set(requestIds).size).toBe(1)
+      const userTexts = store.getSnapshot().state.transcript
+        .filter(entry => entry.role === 'user')
+        .map(entry => entry.text)
+      expect(userTexts).toEqual(['still there?'])
+    } finally {
+      store.dispose()
+    }
+  }, 10000)
+
   it('surfaces a hold-death prompt as failed after attach also fails', async () => {
     const session = {
       sessionId: 's-dead', projectId: 'p', title: 'work', backend: 'codex',
@@ -1522,6 +1674,99 @@ describe('RemoteAgentStore', () => {
         currentSessionId: 's-reconnect',
         state: { sessions: [{ sessionId: 's-reconnect', channelState: 'open' }] },
       })
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('explains reopen failures: fix-marked reasons, dead sockets, and raw messages', () => {
+    expect(parseReopenFailure(new Error('[th-fix:grok-serve] 端口 2419 的 Grok 服务密钥不一致。')))
+      .toEqual({ fix: 'grok-serve', reason: '端口 2419 的 Grok 服务密钥不一致。' })
+    expect(parseReopenFailure('Error: [th-fix:agent-missing] 找不到 grok 命令。'))
+      .toEqual({ fix: 'agent-missing', reason: '找不到 grok 命令。' })
+    expect(parseReopenFailure('[th-fix:grok-serve] '))
+      .toEqual({ fix: 'grok-serve', reason: 'Grok 服务无法连接，会话没能重新打开。' })
+    expect(parseReopenFailure(new Error('connect ENOENT /tmp/th-501/h-dead.sock')))
+      .toEqual({ reason: expect.stringContaining('远程会话进程已停止') })
+    expect(parseReopenFailure(new Error('hold 9 did not start: spawn codex ENOENT')))
+      .toEqual({ reason: 'hold 9 did not start: spawn codex ENOENT' })
+  })
+
+  it('repairs a grok serve conflict (adopt) and reopens the session in place', async () => {
+    const host = {
+      hostId: 'h', title: 'box', endpoint: 'http://127.0.0.1:3091', createdAt: 'a', updatedAt: 'b',
+      inventory: {
+        protocolVersion: 1, hostdVersion: '0.1.0', hostId: 'h', healthy: true,
+        backends: [{ backend: 'grok', installed: true, authenticated: true, running: false, sessionCapable: true }],
+      },
+    }
+    const project = { projectId: 'p', hostId: 'h', title: 'repo', cwd: '/repo', createdAt: 'a', updatedAt: 'b' }
+    const session = {
+      sessionId: 's-grok', projectId: 'p', title: 'work', backend: 'grok',
+      channelState: 'lost', turnState: 'failed', createdAt: 'a', updatedAt: 'b',
+      binding: { holdId: 'hold', generation: 'g', state: 'lost', lastSeq: 0 },
+    }
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = []
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string; params: Record<string, unknown> }
+      calls.push({ method: body.method, params: body.params })
+      if (body.method === 'grok.serve.adopt') {
+        return Response.json({ id: body.id, ok: true, result: { adopted: true } })
+      }
+      if (body.method === 'session.attach') {
+        return Response.json({
+          id: body.id, ok: true,
+          result: { ...session, channelState: 'open', turnState: 'idle', updatedAt: 'c' },
+        })
+      }
+      return Response.json({
+        id: body.id, ok: true,
+        result: {
+          ...EMPTY,
+          hosts: [host],
+          projects: [project],
+          sessions: [{ ...session, channelState: 'open', turnState: 'idle' }],
+        },
+      })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      await store.repairGrokServe(RemoteSessionId('s-grok'), 'adopt')
+      const repairCall = calls.find(call => call.method === 'grok.serve.adopt')
+      expect(repairCall?.params).toEqual({ hostId: 'h' })
+      expect(calls.filter(call => call.method !== 'transcript.read').map(call => call.method))
+        .toEqual(['state', 'grok.serve.adopt', 'session.attach', 'state'])
+      expect(store.getSnapshot().state.sessions[0]).toMatchObject({ channelState: 'open' })
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('force-restarts a wedged session through the gateway', async () => {
+    const session = {
+      sessionId: 's-stuck', projectId: 'p', title: 'work', backend: 'claude',
+      channelState: 'open', turnState: 'running', createdAt: 'a', updatedAt: 'b',
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 7 },
+    }
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      calls.push(body.method)
+      if (body.method === 'session.restart') {
+        return Response.json({ id: body.id, ok: true, result: { ...session, turnState: 'idle', updatedAt: 'c' } })
+      }
+      return Response.json({
+        id: body.id, ok: true,
+        result: { ...EMPTY, sessions: [{ ...session, turnState: 'idle', updatedAt: 'c' }] },
+      })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      await store.forceRestartSession(RemoteSessionId('s-stuck'))
+      expect(calls.filter(method => method !== 'transcript.read')).toEqual(['state', 'session.restart', 'state'])
+      expect(store.getSnapshot().state.sessions[0]).toMatchObject({ channelState: 'open', turnState: 'idle' })
     } finally {
       store.dispose()
     }
@@ -1600,6 +1845,66 @@ describe('RemoteAgentStore', () => {
       ])
       expect(store.getSnapshot().hiddenItems?.hosts[0]?.hiddenAt).toBe('2026-08-31T00:00:00.000Z')
     } finally {
+      store.dispose()
+    }
+  })
+
+  it('resolves project hide from the hide RPC alone, without waiting for the follow-up catalog reload', async () => {
+    const initialState = {
+      ...EMPTY,
+      // Pre-populate inventory so `start()` does not call `refreshInventory`.
+      hosts: [{
+        hostId: 'h', title: 'box', endpoint: 'http://127.0.0.1:3091', createdAt: 'a', updatedAt: 'b',
+        inventory: {
+          protocolVersion: 1, hostdVersion: '0.1.0', hostId: 'native-h', healthy: true,
+          backends: [{ backend: 'codex', installed: true, authenticated: true, running: true, sessionCapable: true }],
+        },
+      }],
+      projects: [{ projectId: 'p', hostId: 'h', title: 'repo', cwd: '/repo', createdAt: 'a', updatedAt: 'b' }],
+      sessions: [{
+        sessionId: 's', projectId: 'p', title: 'work', backend: 'codex',
+        channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+      }],
+    }
+    let hideConfirmed = false
+    let reloadStarted = false
+    let releaseReload: (() => void) | undefined
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string; params: Record<string, unknown> }
+      const respond = (result: unknown): Response => Response.json({ id: body.id, ok: true, result })
+      if (body.method === 'project.hide') {
+        hideConfirmed = true
+        return respond({ ...initialState.projects[0], hiddenAt: '2026-09-08T00:00:00.000Z' })
+      }
+      // Freeze every catalog reload after the hide RPC. The old mutate-based
+      // implementation awaited that reload, so this would never settle; the
+      // decoupled hide must resolve from the hide confirmation alone.
+      if (body.method === 'state' && hideConfirmed) {
+        reloadStarted = true
+        return await new Promise<Response>(resolve => {
+          releaseReload = () => resolve(respond(initialState))
+        })
+      }
+      return respond(initialState)
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      await expect(Promise.race([
+        store.hideProject(RemoteProjectId('p')),
+        new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error('hideProject did not settle once the hide RPC confirmed')), 200)
+        }),
+      ])).resolves.toBeUndefined()
+      expect(reloadStarted).toBe(true)
+      // The project row left the projection even though no reload has landed.
+      expect(store.getSnapshot().state.projects.map(project => project.projectId)).toEqual([])
+      // The previously selected session survives as an in-flight row, so the
+      // open conversation is not yanked away mid-flight (reload's rule).
+      expect(store.getSnapshot().currentSessionId).toBe(RemoteSessionId('s'))
+      expect(store.getSnapshot().state.sessions.map(session => session.sessionId)).toEqual([RemoteSessionId('s')])
+    } finally {
+      releaseReload?.()
       store.dispose()
     }
   })
