@@ -88,6 +88,7 @@ function respondToRequest(request: RemoteControlRequest, port: string, events: J
       }
     case 'session.start':
     case 'session.attach':
+    case 'session.restart':
       return { holdId: `hold-${port}-${sessionId}`, nativeSessionId: `native-${port}-${sessionId}`, generation: 'g1', latestSeq: 0 }
     case 'session.adopt':
       return {
@@ -128,6 +129,8 @@ async function harness(events: JsonValue[] = []) {
 
   let failing = false
   const methodErrors = new Map<string, string>()
+  /** Method@port pairs whose next hostd request is consumed but never answered. */
+  const silenced = new Set<string>()
   let nextAttach: Record<string, JsonValue> | undefined
   /** Per-socket map of subscribed sessions for the WS push fan-out. */
   const subscriptionsBySocket = new WeakMap<MockSocket, Map<string, { generation: string; lastSeq: number }>>()
@@ -149,6 +152,7 @@ async function harness(events: JsonValue[] = []) {
           params: (frame['params'] as Record<string, JsonValue>) ?? {},
         }
         calls.push({ port, request })
+        if (silenced.delete(`${request.method}@${port}`)) return undefined
         const errorMessage = methodErrors.get(request.method)
         if (errorMessage !== undefined) {
           methodErrors.delete(request.method)
@@ -225,6 +229,7 @@ async function harness(events: JsonValue[] = []) {
     ctx, gateway: ctx.remoteAgentGateway, calls,
     failNext: () => { failing = true },
     failMethod: (method: string, message: string) => { methodErrors.set(method, message) },
+    silenceMethod: (method: string, port: string) => { silenced.add(`${method}@${port}`) },
     setNextAttach: (value: Record<string, JsonValue>) => { nextAttach = value },
     pushJournalPage,
     subscribeEvents,
@@ -301,7 +306,7 @@ describe('RemoteAgentGateway', () => {
     }
   })
 
-  it('stores the first user message when the session row is created and returns after the hold is bound', async () => {
+  it('stores the first user message, returns the connecting row, then binds the hold in the background', async () => {
     const { ctx, gateway } = await harness()
     try {
       const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4301' })) as unknown as { hostId: string }
@@ -310,13 +315,43 @@ describe('RemoteAgentGateway', () => {
         projectId: project.projectId, title: 'hello there', backend: 'codex',
         text: 'hello there', clientId: 'browser', requestId: 'first',
       })) as unknown as { sessionId: string; channelState: string; latestTranscriptSeq?: number }
-      expect(session.channelState).toBe('open')
+      // The message is accepted in the same RPC: the gateway returns the
+      // connecting row immediately and drives hold startup + first-message
+      // delivery in the background (session.start no longer blocks on it).
+      expect(session.channelState).toBe('connecting')
       expect(session.latestTranscriptSeq).toBe(0)
       const page = await readTranscript(gateway, session.sessionId)
       expect(page.entries).toEqual([expect.objectContaining({
         sessionId: session.sessionId, role: 'user', kind: 'message', text: 'hello there', requestId: 'first',
       })])
+      await waitForSessionBinding(gateway, session.sessionId)
       expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.binding?.state).toBe('active')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('auto-delivers the first message after the hold binds and emits session.progress stages', async () => {
+    const { ctx, gateway, calls } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4302' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const started = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'first', backend: 'codex',
+        text: 'first message', clientId: 'browser', requestId: 'first-msg',
+      })) as unknown as { sessionId: string; channelState: string }
+      expect(started.channelState).toBe('connecting')
+      // The browser performs a single RPC: the gateway must deliver the message
+      // itself once the hold is up (no browser session.prompt required).
+      await vi.waitFor(() => {
+        expect(calls.some(call => call.request.method === 'session.prompt')).toBe(true)
+      })
+      await waitForSessionBinding(gateway, started.sessionId)
+      const delivered = calls.filter(call => call.request.method === 'session.prompt')
+      expect(delivered).toHaveLength(1)
+      expect(delivered[0]?.request.params['admission']).toMatchObject({ clientId: 'browser', requestId: 'first-msg' })
+      expect(gateway.state().sessions.find(entry => entry.sessionId === RemoteSessionId(started.sessionId))?.turnState)
+        .toBe('running')
     } finally {
       await ctx.fiber.dispose()
     }
@@ -461,6 +496,41 @@ describe('RemoteAgentGateway', () => {
     }
   })
 
+  it('short-circuits a re-deploy when the remote hostd label differs but the artifact digest matches', async () => {
+    // SSH-deployed hostd reports `unknown+<digest>` (no package.json beside the
+    // uploaded artifacts) for the same bytes the gateway stamps `0.1.0+<digest>`.
+    // Upgrade detection compares the digest after `+`, not the full string.
+    const { ctx, gateway } = await harness()
+    const previous = process.env['TEST_HOSTD_VERSION']
+    try {
+      const expected = hostdArtifactVersionFromDirectory(join(process.cwd(), 'packages/hostd/lib'))
+      const digest = expected.includes('+') ? expected.slice(expected.indexOf('+') + 1) : expected
+      process.env['TEST_HOSTD_VERSION'] = `unknown+${digest}`
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4102',
+      })) as unknown as { hostId: string }
+      await vi.waitFor(() => {
+        const inventory = gateway.state().hosts.find(candidate => candidate.hostId === host.hostId)?.inventory
+        if (inventory?.healthy !== true) throw new Error('inventory not healthy yet')
+      }, { timeout: 2000, interval: 10 })
+      expect(gateway.state().hosts.find(candidate => candidate.hostId === host.hostId)?.inventory?.hostdVersion)
+        .toBe(`unknown+${digest}`)
+      const started = await gateway.dispatch(request('operation.start', {
+        kind: 'host-ssh-deploy',
+        title: 'host',
+        hostId: host.hostId,
+        ssh: { target: '127.0.0.1', user: 'agent', identityFile: '/dev/null', hostKeyFingerprint: 'SHA256:fake' },
+        confirm: true,
+      })) as unknown as { status: string; detail: string }
+      expect(started.status).toBe('succeeded')
+      expect(started.detail).toMatch(/已是最新版本/)
+    } finally {
+      if (previous === undefined) delete process.env['TEST_HOSTD_VERSION']
+      else process.env['TEST_HOSTD_VERSION'] = previous
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('still queues a re-deploy when the remote hostd version is behind the gateway artifact', async () => {
     const { ctx, gateway } = await harness()
     const previous = process.env['TEST_HOSTD_VERSION']
@@ -487,6 +557,33 @@ describe('RemoteAgentGateway', () => {
     } finally {
       if (previous === undefined) delete process.env['TEST_HOSTD_VERSION']
       else process.env['TEST_HOSTD_VERSION'] = previous
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('catalogues an SSH host immediately and keeps it after a failed background deploy', async () => {
+    const { ctx, gateway } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.ssh.add', {
+        title: 'edge', ssh: { target: '127.0.0.1', user: 'agent', identityFile: '/dev/null' },
+      })) as unknown as { hostId: string; deployState?: string; endpoint?: string }
+      // Persisted before any SSH work: pending, no endpoint, already in state.
+      expect(host.deployState).toBe('pending')
+      expect(host.endpoint).toBeUndefined()
+      expect(gateway.state().hosts.some(candidate => candidate.hostId === host.hostId)).toBe(true)
+      // A background deploy operation was queued for it.
+      expect(gateway.state().operations.some(operation =>
+        operation.kind === 'host-ssh-deploy' && operation.hostId === host.hostId)).toBe(true)
+      // The deploy fails in this harness (no real SSH host), but the host must
+      // survive as 'failed' with an actionable reason — it must never vanish.
+      await vi.waitFor(() => {
+        const latest = gateway.state().hosts.find(candidate => candidate.hostId === host.hostId)
+        if (latest?.deployState !== 'failed') throw new Error(`deploy state ${latest?.deployState ?? 'missing'}`)
+      }, { timeout: 5000, interval: 20 })
+      const failed = gateway.state().hosts.find(candidate => candidate.hostId === host.hostId)
+      expect(failed?.deployError).toBeTruthy()
+      expect(failed?.endpoint).toBeUndefined()
+    } finally {
       await ctx.fiber.dispose()
     }
   })
@@ -1078,6 +1175,54 @@ describe('RemoteAgentGateway', () => {
     }
   })
 
+  it('clears a stale failed turn when a later reopen attach succeeds', async () => {
+    const { ctx, gateway, failMethod } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4419' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      // Force the outage markers: prompt delivery fails and the inline attach
+      // fallback cannot revive the (mock) hold either.
+      failMethod('session.prompt', 'Error: connect ENOENT /tmp/th-501/h-dead.sock')
+      failMethod('session.attach', 'Error: connect ENOENT /tmp/th-501/h-dead.sock')
+      await expect(gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'stale-1', text: 'hello',
+      }))).rejects.toThrow()
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)).toMatchObject({
+        channelState: 'lost', turnState: 'failed',
+      })
+      // The next explicit reopen attach succeeds (mock error is one-shot):
+      // the stale failed turn must not resurrect the reopen banner.
+      const attached = await gateway.dispatch(request('session.attach', { sessionId: session.sessionId })) as unknown as {
+        channelState: string
+        turnState: string
+      }
+      expect(attached).toMatchObject({ channelState: 'open', turnState: 'idle' })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('force-restarts a wedged session on session.restart and resets the running turn', async () => {
+    const { ctx, gateway } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4420' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      const restarted = await gateway.dispatch(request('session.restart', { sessionId: session.sessionId })) as unknown as {
+        channelState: string
+        turnState: string
+      }
+      expect(restarted).toMatchObject({ channelState: 'open', turnState: 'idle' })
+      const page = await readTranscript(gateway, session.sessionId)
+      expect(page.entries.some(entry => entry.text.includes('没有响应') && entry.text.includes('结束其进程'))).toBe(true)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('does not reopen a reconnecting channel when a later journal page is projected', async () => {
     const events: JsonValue[] = [
       { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { text: 'stale' } } } },
@@ -1114,6 +1259,23 @@ describe('RemoteAgentGateway', () => {
       failMethod('session.attach', 'Error: connect ECONNREFUSED /tmp/threadharbor-hostd-501/h-dead.sock')
       await expect(gateway.dispatch(request('session.attach', { sessionId: session.sessionId })))
         .rejects.toThrow('在当前会话重开')
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.channelState).toBe('lost')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('passes an actionable grok serve fix hint verbatim when attach fails on a hostd conflict', async () => {
+    const { ctx, gateway, failMethod } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4418' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      const conflict = '[th-fix:grok-serve] 127.0.0.1:2419 上已有一个由旧 hostd 启动的 Grok 服务，密钥不一致。可点「接管现有服务」或「重启服务」。'
+      failMethod('session.attach', `Error: ${conflict}`)
+      await expect(gateway.dispatch(request('session.attach', { sessionId: session.sessionId })))
+        .rejects.toThrow('[th-fix:grok-serve]')
       expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.channelState).toBe('lost')
     } finally {
       await ctx.fiber.dispose()
@@ -1325,6 +1487,35 @@ describe('RemoteAgentGateway', () => {
     }
   })
 
+  it('keeps a hidden project\'s sessions archived even when the project is unhidden right away', async () => {
+    const { ctx, gateway } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'dev-box', endpoint: 'http://127.0.0.1:4186' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'repo', cwd: '/repo',
+      })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'codex',
+      })) as unknown as { sessionId: string }
+
+      await gateway.dispatch(request('project.hide', { projectId: project.projectId }))
+      await gateway.dispatch(request('project.unhide', { projectId: project.projectId }))
+
+      // The hide response returns as soon as the row is marked hidden, but the
+      // session-archive sweep is queued on the shared mutation tail *before*
+      // the unhide, so unhiding must not resurrect the sessions.
+      expect(gateway.state().projects.map(entry => entry.projectId)).toEqual([project.projectId])
+      expect(gateway.state().sessions).toEqual([])
+      const hidden = await gateway.dispatch(request('hidden.list', {})) as unknown as {
+        sessions: Array<{ sessionId: string; archivedAt?: string }>
+      }
+      expect(hidden.sessions.map(entry => entry.sessionId)).toEqual([session.sessionId])
+      expect(hidden.sessions[0]?.archivedAt).toBeDefined()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('drops last-known inventory when hostd becomes unreachable', async () => {
     const { ctx, gateway, failNext } = await harness()
     try {
@@ -1343,6 +1534,81 @@ describe('RemoteAgentGateway', () => {
       expect(refreshed.inventoryError).toContain('无法连接到 hostd')
       expect(gateway.state().hosts[0]?.inventory).toBeUndefined()
       expect(gateway.state().hosts[0]?.inventoryError).toContain('无法连接到 hostd')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('moves the pooled hostd connection to the new endpoint after a host endpoint change', async () => {
+    const { ctx, gateway, calls } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'loop', endpoint: 'http://127.0.0.1:4401',
+      })) as unknown as { hostId: string }
+      await vi.waitFor(() => {
+        const inventory = gateway.state().hosts.find(candidate => candidate.hostId === host.hostId)?.inventory
+        if (inventory?.healthy !== true) throw new Error('inventory not healthy')
+      }, { timeout: 2000, interval: 10 })
+      expect(calls.some(call => call.port === '4401' && call.request.method === 'inventory')).toBe(true)
+
+      await gateway.dispatch(request('host.update', {
+        hostId: host.hostId, title: 'loop', endpoint: 'http://127.0.0.1:4402',
+      }))
+      // updateHost refreshes through the same pooled connection, which must
+      // have moved to the new endpoint instead of reconnecting to the dead one.
+      expect(calls.some(call => call.port === '4402' && call.request.method === 'inventory')).toBe(true)
+      await gateway.dispatch(request('inventory', { hostId: host.hostId }))
+      const inventoryCalls = calls.filter(call => call.request.method === 'inventory')
+      const ports = inventoryCalls.map(call => call.port)
+      const firstOnNewPort = ports.indexOf('4402')
+      const lastOnOldPort = ports.lastIndexOf('4401')
+      expect(firstOnNewPort).toBeGreaterThan(-1)
+      // Once the endpoint moved, no inventory may ever travel to the old port again.
+      expect(lastOnOldPort).toBeLessThan(firstOnNewPort)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('runs background operation work without waiting behind a slow browser RPC', async () => {
+    const { ctx, gateway, silenceMethod } = await harness()
+    try {
+      const blocked = await gateway.dispatch(request('host.add', {
+        title: 'blocked', endpoint: 'http://127.0.0.1:4403',
+      })) as unknown as { hostId: string }
+      const runner = await gateway.dispatch(request('host.add', {
+        title: 'runner', endpoint: 'http://127.0.0.1:4404',
+      })) as unknown as { hostId: string }
+      await vi.waitFor(() => {
+        const hosts = gateway.state().hosts
+        if (hosts.find(candidate => candidate.hostId === blocked.hostId)?.inventory?.healthy !== true
+          || hosts.find(candidate => candidate.hostId === runner.hostId)?.inventory?.healthy !== true) {
+          throw new Error('inventory not healthy')
+        }
+      }, { timeout: 2000, interval: 10 })
+
+      // Occupy the RPC mutation tail with an inventory RPC whose hostd never answers.
+      silenceMethod('inventory', '4403')
+      const slowRefresh = gateway.dispatch(request('inventory', { hostId: blocked.hostId }))
+      const started = await gateway.dispatch(request('operation.start', {
+        kind: 'agent-install', hostId: runner.hostId, backend: 'dsh', confirm: true,
+      })) as unknown as { operationId: string }
+      // The operation has its own work tail: it starts while slowRefresh is
+      // still pending on the RPC tail (hostdRequestTimeoutMs is 1000ms here).
+      await vi.waitFor(() => {
+        const operation = gateway.state().operations.find(candidate => candidate.operationId === started.operationId)
+        if (operation?.status !== 'running' && operation?.status !== 'succeeded') {
+          throw new Error(`operation status ${operation?.status ?? 'missing'}`)
+        }
+      }, { timeout: 500, interval: 10 })
+      // ... and still completes to success instead of being stranded behind the RPC.
+      await vi.waitFor(() => {
+        const operation = gateway.state().operations.find(candidate => candidate.operationId === started.operationId)
+        if (operation?.status !== 'succeeded') throw new Error(`operation status ${operation?.status ?? 'missing'}`)
+      }, { timeout: 3000, interval: 10 })
+      // Let the parked RPC resolve (it times out and records inventoryError).
+      const refreshed = await slowRefresh as unknown as { inventoryError?: string }
+      expect(refreshed.inventoryError).toContain('hostd')
     } finally {
       await ctx.fiber.dispose()
     }

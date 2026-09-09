@@ -208,16 +208,30 @@ export interface RemoteHostInventory {
   readonly backends: readonly RemoteBackendInventory[]
 }
 
+/** Lifecycle of an SSH host's hostd deployment, independent of live reachability.
+ *  - `pending`: catalogued but its first background deploy has not finished.
+ *  - `deploying`: a deploy operation is currently uploading/starting hostd.
+ *  - `deployed`: a deploy succeeded at least once; use inventory for liveness.
+ *  - `failed`: the last deploy attempt failed; `deployError` carries the reason.
+ *  Loopback endpoint hosts (no `ssh`) never carry a deploy state. */
+export type RemoteHostDeployState = 'pending' | 'deploying' | 'deployed' | 'failed'
+
 /** A managed host stored on the Web machine. Credentials never appear here. */
 export interface RemoteHostView {
   readonly hostId: RemoteHostId
   readonly title: string
-  readonly endpoint: string
+  /** Loopback hostd URL. Absent for an SSH host whose first deploy has not yet
+   *  succeeded — the tunnel is resolved from `ssh`, so this stays cosmetic. */
+  readonly endpoint?: string
   readonly ssh?: RemoteSshConfig
   readonly createdAt: string
   readonly updatedAt: string
   readonly inventory?: RemoteHostInventory
   readonly inventoryError?: string
+  /** SSH deploy lifecycle; adding a host no longer blocks on deployment. */
+  readonly deployState?: RemoteHostDeployState
+  /** Human-readable reason for the last failed deploy, cleared on success. */
+  readonly deployError?: string
   /** Hidden hosts stay durable but are omitted from the normal browser projection. */
   readonly hiddenAt?: string
 }
@@ -272,6 +286,32 @@ export interface RemoteSessionView {
   readonly droppedThrough?: number
 }
 
+/** Optional per-run token usage captured from backend-native frames.
+ *
+ *  Values mirror whatever the upstream actually emitted (field names are
+ *  normalized, never fabricated): DeepSeek Harness events carry
+ *  `usage.{inputTokens, outputTokens, cacheReadTokens, …}` per request;
+ *  Codex/Claude ACP put a per-prompt-turn breakdown on the `session/prompt`
+ *  response (`result.usage`); Grok exposes it on the prompt response
+ *  (`result._meta.usage`, with cache writes reported as `cacheCreationTokens`).
+ *  A metric the backend did not report stays `undefined` — the UI omits the
+ *  corresponding group instead of showing a guessed number.
+ */
+export interface RemoteTranscriptUsage {
+  /** Prompt-side uncached input tokens. */
+  readonly inputTokens?: number
+  /** Completion/output tokens. */
+  readonly outputTokens?: number
+  /** Prompt-side tokens served from the model cache (read side). */
+  readonly cachedReadTokens?: number
+  /** Prompt-side tokens written into the cache (creation/write side). */
+  readonly cachedWriteTokens?: number
+  /** Reasoning/thought tokens (when reported separately). */
+  readonly reasoningTokens?: number
+  /** Provider total when the backend reports one. */
+  readonly totalTokens?: number
+}
+
 /** Projected transcript entry stored separately from Harness SessionEventMap. */
 export interface RemoteTranscriptEntry {
   readonly transcriptId: RemoteTranscriptId
@@ -283,6 +323,8 @@ export interface RemoteTranscriptEntry {
   readonly createdAt: string
   readonly nativeFrame?: JsonValue
   readonly requestId?: string
+  /** Token usage attached to the round's terminal status row (best-effort). */
+  readonly usage?: RemoteTranscriptUsage
 }
 
 /** Default number of projected transcript entries returned by one `transcript.read`. */
@@ -400,6 +442,8 @@ export type RemoteGatewayMethod =
   | 'host.delete'
   | 'host.ssh.inspect'
   | 'host.ssh.deploy'
+  | 'host.ssh.add'
+  | 'host.ssh.redeploy'
   | 'host.upgrade'
   | 'operation.start'
   | 'operation.list'
@@ -420,6 +464,7 @@ export type RemoteGatewayMethod =
   | 'project.delete'
   | 'session.start'
   | 'session.attach'
+  | 'session.restart'
   | 'session.rename'
   | 'session.archive'
   | 'session.unarchive'
@@ -434,6 +479,9 @@ export type RemoteGatewayMethod =
   | 'session.catchup'
   | 'browser.hello'
   | 'fs.list'
+  | 'grok.serve.inspect'
+  | 'grok.serve.adopt'
+  | 'grok.serve.restart'
 
 /** Control methods accepted directly by hostd. */
 export type RemoteHostdMethod =
@@ -451,11 +499,15 @@ export type RemoteHostdMethod =
   | 'session.start'
   | 'session.adopt'
   | 'session.attach'
+  | 'session.restart'
   | 'session.prompt'
   | 'session.cancel'
   | 'session.permission'
   | 'events.read'
   | 'fs.list'
+  | 'grok.serve.inspect'
+  | 'grok.serve.adopt'
+  | 'grok.serve.restart'
 
 /** JSON request envelope for either control endpoint. */
 export interface RemoteControlRequest {
@@ -469,6 +521,54 @@ export type RemoteControlResponse =
   | { readonly id: string; readonly ok: true; readonly result: JsonValue }
   | { readonly id: string; readonly ok: false; readonly error: { readonly code: string; readonly message: string } }
 
+/** Prefix marking a control-plane error as actionable: the Web UI can offer
+ *  the user a confirm-to-fix button instead of only showing a raw message.
+ *  Error text keeps the machine-readable envelope `[th-fix:<kind>] <detail>` so
+ *  the reason survives every hop (hostd → gateway → browser) unchanged. */
+export const REMOTE_ERROR_FIX_PREFIX = '[th-fix:'
+
+/** Fixes the Web UI knows how to offer for a failed control operation. */
+export type RemoteErrorFixKind = 'grok-serve' | 'agent-missing'
+
+/** Fixes hostd currently emits. Kept separate so the client can recognize
+ *  kinds an older hostd already sends without importing hostd code. */
+export const REMOTE_ERROR_FIX_KINDS: readonly RemoteErrorFixKind[] = ['grok-serve', 'agent-missing']
+
+/** Wrap a hostd error message so every upstream hop keeps the fix hint. */
+export function remoteErrorFixMessage(kind: RemoteErrorFixKind, detail: string): string {
+  return `${REMOTE_ERROR_FIX_PREFIX}${kind}] ${detail}`
+}
+
+/** Whether a control-plane error message carries a Web-actionable fix hint. */
+export function hasRemoteErrorFix(message: string): boolean {
+  return message.startsWith(REMOTE_ERROR_FIX_PREFIX)
+}
+
+/** Split an actionable error message into its kind and human-readable detail. */
+export function parseRemoteErrorFix(message: string): { readonly kind: RemoteErrorFixKind; readonly detail: string } | undefined {
+  const match = /^\[th-fix:([a-z-]+)\]\s*([\s\S]*)$/u.exec(message.trim())
+  if (match === null) return undefined
+  const kind = match[1] as RemoteErrorFixKind
+  if (!(REMOTE_ERROR_FIX_KINDS as readonly string[]).includes(kind)) return undefined
+  return { kind, detail: match[2]?.trim() ?? '' }
+}
+
+
+/** Session-start progress stages shared by hostd and the gateway.
+ *  `spawn-hold`, `initialize-agent` and `bind-session` originate on hostd while
+ *  a `session.start` request is in flight; the gateway synthesizes
+ *  `connecting-hostd` and `prompt-delivered` around that hostd window so a
+ *  browser sees one continuous sequence. */
+export const REMOTE_SESSION_START_STAGES = [
+  'connecting-hostd', 'spawn-hold', 'initialize-agent', 'bind-session', 'prompt-delivered',
+] as const
+export type RemoteSessionStartStage = typeof REMOTE_SESSION_START_STAGES[number]
+
+/** Stage ids that hostd itself can emit for a running `session.start`. */
+export const REMOTE_HOSTD_SESSION_START_STAGES = REMOTE_SESSION_START_STAGES.filter(
+  (stage) => stage !== 'connecting-hostd' && stage !== 'prompt-delivered',
+)
+export type RemoteHostdSessionStartStage = typeof REMOTE_HOSTD_SESSION_START_STAGES[number]
 
 /** Server-initiated push event delivered over the WebSocket channel. */
 export type RemoteGatewayWsEvent =
@@ -481,6 +581,7 @@ export type RemoteGatewayWsEvent =
   | { readonly type: 'host.changed'; readonly host: RemoteHostView }
   | { readonly type: 'project.changed'; readonly project: RemoteProjectView }
   | { readonly type: 'operation.progress'; readonly operationId: string; readonly phase: string; readonly progress?: number }
+  | { readonly type: 'session.progress'; readonly sessionId: RemoteSessionId; readonly stage: RemoteSessionStartStage; readonly message: string }
 
 /** Frame exchanged over the WebSocket control channel. */
 export type RemoteGatewayWsFrame =
@@ -561,6 +662,7 @@ export function parseRemoteControlRequest(value: unknown): RemoteControlRequest 
 export type RemoteHostdWsEvent =
   | { readonly type: 'journal.page'; readonly sessionId: RemoteSessionId; readonly page: RemoteJournalPage; readonly subscribers: number }
   | { readonly type: 'journal.gap'; readonly sessionId: RemoteSessionId; readonly droppedThrough: number; readonly generation: string }
+  | { readonly type: 'session.start.progress'; readonly requestId: string; readonly sessionId: RemoteSessionId; readonly stage: RemoteHostdSessionStartStage; readonly message: string }
 
 /** Frame exchanged over the hostd control WebSocket channel.
  *  Shares the request/response envelope with HTTP `/v1/control` so RPCs reuse the existing dispatcher;
@@ -690,7 +792,37 @@ export function parseHostdWsEvent(value: unknown): RemoteHostdWsEvent {
         generation: stringField(record, 'generation'),
       }
     }
+    case 'session.start.progress': {
+      const requestId = stringField(record, 'requestId')
+      const sessionId = RemoteSessionId(stringField(record, 'sessionId'))
+      const stage = stringField(record, 'stage') as RemoteHostdSessionStartStage
+      if (!(REMOTE_HOSTD_SESSION_START_STAGES as readonly string[]).includes(stage)) {
+        throw new TypeError(`unknown session start stage ${stage}`)
+      }
+      return { type, requestId, sessionId, stage, message: stringField(record, 'message') }
+    }
     default:
       throw new TypeError(`unknown hostd ws event type ${type}`)
   }
+}
+
+/** Compare two hostd version stamps by artifact digest.
+ *
+ * Hostd stamps look like `<version-label>+<12-hex artifact digest>` (or just
+ * `<version-label>` when no artifact files exist). The label before `+` is
+ * environment-specific: SSH deployments upload only `bin.js`/`hold-worker.js`
+ * and no `package.json`, so the remote reports `unknown+…` while the local
+ * artifact directory (which sits next to a `package.json`) reports `0.1.0+…`
+ * for the very same bytes. Upgrade decisions must compare the digest after
+ * `+`; comparing the full string would keep every SSH host permanently
+ * "upgrade pending" right after a successful deploy.
+ */
+export function hostdArtifactSame(left: string | undefined, right: string | undefined): boolean {
+  if (left === right) return true
+  if (left === undefined || right === undefined) return false
+  const digest = (value: string): string => {
+    const plus = value.indexOf('+')
+    return plus === -1 ? value : value.slice(plus + 1)
+  }
+  return digest(left) === digest(right)
 }

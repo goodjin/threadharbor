@@ -40,6 +40,8 @@ interface PendingSubscription {
 export class HostdConnectionPool {
   private readonly connections = new Map<RemoteHostId, HostdConnection>()
   private readonly pending = new Map<RemoteHostId, Map<RemoteSessionId, PendingSubscription>>()
+  /** In-flight connection creation per host so concurrent first requests share one socket. */
+  private readonly creating = new Map<RemoteHostId, Promise<HostdConnection>>()
 
   constructor(
     private readonly sshManager: SshManager,
@@ -52,11 +54,11 @@ export class HostdConnectionPool {
     method: string,
     params: Record<string, JsonValue>,
     timeoutMs?: number,
+    onProgress?: (stage: string, message: string) => void,
   ): Promise<JsonValue> {
     const conn = await this.ensureConnection(host)
-    return await conn.request(method as Parameters<HostdConnection['request']>[0], params, timeoutMs)
+    return await conn.request(method as Parameters<HostdConnection['request']>[0], params, timeoutMs, onProgress)
   }
-
   /** Subscribe to journal events for one session. Returns an unsubscribe fn. */
   subscribe(
     host: RemoteHostView,
@@ -100,6 +102,7 @@ export class HostdConnectionPool {
       void conn.close()
     }
     this.pending.delete(hostId)
+    this.creating.delete(hostId)
   }
 
   /** Close every WS; called on gateway shutdown. */
@@ -107,28 +110,51 @@ export class HostdConnectionPool {
     const all = [...this.connections.values()]
     this.connections.clear()
     this.pending.clear()
+    this.creating.clear()
     await Promise.all(all.map((conn) => conn.close()))
   }
 
   private async ensureConnection(host: RemoteHostView): Promise<HostdConnection> {
-    const existing = this.connections.get(host.hostId)
-    if (existing !== undefined) return existing
+    // Resolve the endpoint on every request: SSH tunnels can be replaced (each
+    // deployment opens a new random local port) and the persistent connection
+    // must follow the live tunnel instead of reconnecting into a dead port.
     const endpoint = await this.resolveEndpoint(host)
-    const conn = new HostdConnection({
-      endpoint,
-      requestTimeoutMs: this.options.requestTimeoutMs,
-      heartbeatMs: this.options.heartbeatMs ?? 15_000,
-      reconnectStepsMs: this.options.reconnectStepsMs ?? HOSTD_BACKOFF_STEPS_MS,
-      handshakeTimeoutMs: this.options.handshakeTimeoutMs ?? 5_000,
-      ...(this.options.socketFactory ? { socketFactory: this.options.socketFactory } : {}),
+    const existing = this.connections.get(host.hostId)
+    if (existing !== undefined) {
+      existing.switchEndpoint(endpoint)
+      return existing
+    }
+    const creating = this.creating.get(host.hostId) ?? this.createConnection(host, endpoint)
+    this.creating.set(host.hostId, creating)
+    try {
+      const conn = await creating
+      // The tunnel may have moved again while the connection was being built;
+      // always finish on the endpoint resolved for this request.
+      conn.switchEndpoint(endpoint)
+      return conn
+    } finally {
+      this.creating.delete(host.hostId)
+    }
+  }
+
+  private createConnection(host: RemoteHostView, endpoint: string): Promise<HostdConnection> {
+    return Promise.resolve().then(() => {
+      const conn = new HostdConnection({
+        endpoint,
+        requestTimeoutMs: this.options.requestTimeoutMs,
+        heartbeatMs: this.options.heartbeatMs ?? 15_000,
+        reconnectStepsMs: this.options.reconnectStepsMs ?? HOSTD_BACKOFF_STEPS_MS,
+        handshakeTimeoutMs: this.options.handshakeTimeoutMs ?? 5_000,
+        ...(this.options.socketFactory ? { socketFactory: this.options.socketFactory } : {}),
+      })
+      conn.onConnection((event) => {
+        if (event === 'open') this.flushPending(host.hostId, conn)
+        if (event === 'reconnect') void this.refreshEndpoint(host, conn)
+      })
+      this.connections.set(host.hostId, conn)
+      conn.open()
+      return conn
     })
-    conn.onConnection((event) => {
-      if (event === 'open') this.flushPending(host.hostId, conn)
-      if (event === 'reconnect') void this.refreshEndpoint(host)
-    })
-    this.connections.set(host.hostId, conn)
-    conn.open()
-    return conn
   }
 
   private flushPending(hostId: RemoteHostId, conn: HostdConnection): void {
@@ -142,14 +168,21 @@ export class HostdConnectionPool {
   }
 
   private async resolveEndpoint(host: RemoteHostView): Promise<string> {
-    if (host.ssh === undefined) return host.endpoint
+    if (host.ssh === undefined) {
+      if (host.endpoint === undefined) throw new Error('host has no endpoint or SSH tunnel to resolve')
+      return host.endpoint
+    }
     return await this.sshManager.ensureTunnel(host.ssh)
   }
 
-  private async refreshEndpoint(host: RemoteHostView): Promise<void> {
+  private async refreshEndpoint(host: RemoteHostView, conn: HostdConnection): Promise<void> {
     if (host.ssh === undefined) return
     try {
-      await this.sshManager.ensureTunnel(host.ssh)
+      // The reconnect ladder alone would keep hitting the dead endpoint.
+      // Resolve the tunnel again and move the connection to whatever local
+      // port is live now so the next reconnect succeeds.
+      const endpoint = await this.sshManager.ensureTunnel(host.ssh)
+      conn.switchEndpoint(endpoint)
     } catch {
       // Tunnel probe failed; the existing connection will surface its own error.
     }

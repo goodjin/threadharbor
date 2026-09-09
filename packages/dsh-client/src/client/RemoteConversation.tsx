@@ -18,8 +18,9 @@ import type {
 import { RemoteHostId, RemoteProjectId, RemoteSessionId, isRemoteBackendSessionReady } from '@threadharbor/protocol'
 import {
   BACKEND_ORDER, backendInventoryState, describeAgentInstallFailure, describeHostConnectFailure,
-  canUpgradeHostd, hostConnectionLabel, hostDeployment, hostIpLabel,
+  canUpgradeHostd, hostConnectionLabel, hostDeployment, hostIpLabel, parseReopenFailure,
   type RemoteAgentPanel, type RemoteAgentStore, type RemotePromptProgress,
+  type ReopenFailureIssue,
 } from './store.ts'
 import {
   autoApproveOptionId, browsableDirectories, buildTranscriptNodes, choiceCancelOutcome, choiceSubmitOutcome,
@@ -37,6 +38,7 @@ import {
   subscribeDisplayPreferences,
 } from './display-preferences.ts'
 import { TranscriptGapBanner } from './transcript-gap-banner.tsx'
+import { ConversationStatsLine } from './conversation-stats-line.tsx'
 
 /** Props injected by the conversation slot registration. */
 export interface RemoteConversationInjected {
@@ -45,6 +47,13 @@ export interface RemoteConversationInjected {
 
 /** Full conversation component props. */
 export type RemoteConversationProps = PropsRuntime<'conversation'> & ConvOwnerProps & RemoteConversationInjected
+
+/** Advisory threshold: a running turn with no backend frames for this long is
+ *  flagged as possibly unresponsive and offered a force-restart action. The
+ *  agent may still legitimately be busy (e.g. a long build), so the action is
+ *  user-confirmed rather than automatic. */
+const STALLED_AGENT_BANNER_MS = 5 * 60_000
+const FORCE_RESTART_ARM_MS = 10_000
 
 function PlanCard({ items }: { items: readonly { content: string; status: string; priority?: string }[] }) {
   return (
@@ -419,6 +428,88 @@ function OperationProgress({ operation }: { operation: RemoteOperationView }) {
   )
 }
 
+/** Failed-reopen banner: real reason plus user-confirmed repair buttons. */
+function ReopenFailureBanner({ issue, busy, restartArmed, enabled, onRetry, onAdopt, onRestartClick, onOpenHostSettings }: {
+  issue: ReopenFailureIssue
+  busy: 'adopt' | 'restart' | undefined
+  restartArmed: boolean
+  enabled: boolean
+  onRetry: () => void
+  onAdopt: () => void
+  onRestartClick: () => void
+  onOpenHostSettings: () => void
+}) {
+  return (
+    <div className={css.conversationActivity} data-state="error" role="status" aria-live="polite">
+      <StateDot state="error" />
+      <div>
+        <strong>在当前会话重开失败</strong>
+        <p>{issue.reason}</p>
+        <div className={css.activityActions}>
+          {issue.fix === 'grok-serve' && (
+            <>
+              <Button size="sm" variant="outline" disabled={!enabled || busy !== undefined} onClick={onAdopt}>
+                {busy === 'adopt' ? '接管中…' : '接管现有 Grok 服务并重试'}
+              </Button>
+              <Button size="sm" variant="outline" disabled={!enabled || busy !== undefined} onClick={onRestartClick}>
+                {busy === 'restart'
+                  ? '重启中…'
+                  : restartArmed
+                    ? '再次点击确认：重启会中断该主机正在运行的 Grok 会话'
+                    : '重启 Grok 服务'}
+              </Button>
+            </>
+          )}
+          {issue.fix === 'agent-missing' && (
+            <Button size="sm" variant="outline" disabled={!enabled} onClick={onOpenHostSettings}>
+              去主机设置安装/登录
+            </Button>
+          )}
+          <Button size="sm" variant="outline" disabled={!enabled || busy !== undefined} onClick={onRetry}>
+            重试重开
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** Long-idle running turn: Agent stopped producing frames. Offer a
+ *  user-confirmed "end process and reopen" plus the normal stop action. */
+function UnresponsiveAgentBanner({ idleMinutes, armed, busy, enabled, onStop, onArmRestart }: {
+  idleMinutes: number
+  armed: boolean
+  busy: boolean
+  enabled: boolean
+  onStop: () => void
+  onArmRestart: () => void
+}) {
+  return (
+    <div className={css.conversationActivity} data-state="warning" role="status" aria-live="polite">
+      <StateDot state="warning" />
+      <div>
+        <strong>Agent 长时间没有响应</strong>
+        <p>
+          已约 {idleMinutes} 分钟没有任何新内容。可能仍在后台工作，也可以先「停止」；
+          若确认进程卡住，可以结束它的进程并在当前会话重新打开，对话记录会保留。
+        </p>
+        <div className={css.activityActions}>
+          <Button size="sm" variant="outline" disabled={!enabled || busy} onClick={onStop}>
+            停止本轮
+          </Button>
+          <Button size="sm" variant="outline" disabled={!enabled || busy} onClick={onArmRestart}>
+            {busy
+              ? '结束并重开中…'
+              : armed
+                ? '再次点击确认：将结束 Agent 进程并在当前会话重开'
+                : '结束进程并重开'}
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function useActivityClock(active: boolean): number {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -546,6 +637,28 @@ function HostPanel({ host, store, operations, onClose, artifactVersion }: {
       ? store.deploySshHost(hostTitle.trim(), approved)
       : store.updateSshHost(host.hostId, hostTitle.trim(), approved)
     void task
+      .then((operation) => { setOperationId(operation.operationId) })
+      .catch((error: unknown) => { setLocalError(String(error)) })
+      .finally(() => { setBusy(undefined) })
+  }
+  const addSsh = (): void => {
+    setBusy('deploy')
+    setLocalError('')
+    setSuccess('')
+    // Confirm = add. Connectivity and deploy run in the background afterwards
+    // (trust-on-first-use), so a failed deploy never blocks the add — the host
+    // lands in the sidebar and can be retried from its settings.
+    void store.addSshHost(hostTitle.trim(), sshInput(sshTarget.trim(), sshPort, sshUser, identityFile, proxyJump))
+      .then(() => { onClose() })
+      .catch((error: unknown) => { setLocalError(String(error)) })
+      .finally(() => { setBusy(undefined) })
+  }
+  const retryDeploy = (): void => {
+    if (host === undefined) return
+    setBusy('deploy')
+    setLocalError('')
+    setSuccess('')
+    void store.redeploySshHost(host.hostId)
       .then((operation) => { setOperationId(operation.operationId) })
       .catch((error: unknown) => { setLocalError(String(error)) })
       .finally(() => { setBusy(undefined) })
@@ -702,33 +815,55 @@ function HostPanel({ host, store, operations, onClose, artifactVersion }: {
                       onClick={saveTitle}
                     >{busy === 'save-title' ? '保存中…' : '保存名称'}</Button>
                   )}
-                  {!connectionMatchesHost && (
+                  {host === undefined ? (
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={busy !== undefined || sshTarget.trim() === '' || hostTitle.trim() === ''}
+                      onClick={addSsh}
+                    >{busy === 'deploy' ? '添加中…' : '确认'}</Button>
+                  ) : (!connectionMatchesHost && (
                     <Button size="sm" variant="outline" disabled={busy !== undefined || sshTarget.trim() === ''} onClick={inspect}>{busy === 'inspect' ? '检查中…' : '1. 检查主机密钥'}</Button>
-                  )}
+                  ))}
                 </div>
                 {host !== undefined && connectionMatchesHost && sshInspection === undefined && (
-                  <div className={`${css.setupCard} ${css.fullWidth}`}>
-                    <strong>hostd 状态：{statusLabel}</strong>
-                    <p>
-                      {live && deploymentState === 'deployed'
-                        ? `远端 hostd 正在运行${versionLabel === undefined ? '' : `（${versionLabel}）`}，与当前版本一致。`
-                        : live && deploymentState === 'outdated'
-                          ? hostdActionDetail
-                          : host.inventoryError !== undefined
-                            ? '当前连不上 hostd。请先点连接再探测；失败后会显示原因。'
-                            : hostdActionDetail}
-                    </p>
-                    {host.inventoryError !== undefined && (
-                      <Button size="sm" variant="outline" disabled={busy !== undefined || deploying} onClick={reconnect}>
-                        {busy === 'connect' ? '连接中…' : '连接'}
+                  host.deployState === 'failed' && !deploying ? (
+                    <div className={`${css.setupCard} ${css.fullWidth}`}>
+                      <strong>部署失败</strong>
+                      <p>{host.deployError ?? '上次部署未成功。请检查主机连接和远端服务日志后重试。'}</p>
+                      <Button size="sm" variant="primary" disabled={busy !== undefined} onClick={retryDeploy}>
+                        {busy === 'deploy' ? '部署中…' : '重试部署'}
                       </Button>
-                    )}
-                    {showHostdAction && (
-                      <Button size="sm" variant="outline" disabled={busy !== undefined || deploying || hostTitle.trim() === ''} onClick={upgradeHostd}>
-                        {busy === 'deploy' || deploying ? '部署中…' : hostdActionLabel}
-                      </Button>
-                    )}
-                  </div>
+                    </div>
+                  ) : host.deployState === 'pending' || host.deployState === 'deploying' || deploying ? (
+                    <div className={`${css.setupCard} ${css.fullWidth}`}>
+                      <strong>正在后台部署 hostd…</strong>
+                      <p>已加入主机列表，正在验证连接并上传启动远端 hostd。部署完成后即可使用。</p>
+                    </div>
+                  ) : (
+                    <div className={`${css.setupCard} ${css.fullWidth}`}>
+                      <strong>hostd 状态：{statusLabel}</strong>
+                      <p>
+                        {live && deploymentState === 'deployed'
+                          ? `远端 hostd 正在运行${versionLabel === undefined ? '' : `（${versionLabel}）`}，与当前版本一致。`
+                          : live && deploymentState === 'outdated'
+                            ? hostdActionDetail
+                            : host.inventoryError !== undefined
+                              ? '当前连不上 hostd。请先点连接再探测；失败后会显示原因。'
+                              : hostdActionDetail}
+                      </p>
+                      {host.inventoryError !== undefined && (
+                        <Button size="sm" variant="outline" disabled={busy !== undefined || deploying} onClick={reconnect}>
+                          {busy === 'connect' ? '连接中…' : '连接'}
+                        </Button>
+                      )}
+                      {showHostdAction && (
+                        <Button size="sm" variant="outline" disabled={busy !== undefined || deploying || hostTitle.trim() === ''} onClick={upgradeHostd}>
+                          {busy === 'deploy' || deploying ? '部署中…' : hostdActionLabel}
+                        </Button>
+                      )}
+                    </div>
+                  )
                 )}
                 {sshInspection !== undefined && (
                   <div className={`${css.setupCard} ${css.fullWidth}`}>
@@ -1089,6 +1224,12 @@ function SessionControls({ backend, preferences, disabled, onChange }: {
   )
 }
 
+/** Host settings “Agent” section. One row per backend (dsh, grok, codex,
+ *  claude), each rendered by its own `AgentSetupRow` so expand/collapse and
+ *  all transient payloads (deploy plan, install progress, config editor,
+ *  login flow, DSH key form, errors) stay independent: opening or closing one
+ *  Agent — or deploying it — never collapses another row or resets what it
+ *  shows. */
 function AgentSetupPanel({ host, store, operations = [], onClose, embedded = false }: {
   host: RemoteHostView
   store: RemoteAgentStore
@@ -1096,12 +1237,39 @@ function AgentSetupPanel({ host, store, operations = [], onClose, embedded = fal
   onClose?: () => void
   embedded?: boolean
 }) {
-  const [openBackend, setOpenBackend] = useState<RemoteAgentBackend>()
+  useEffect(() => {
+    void store.refreshInventory(host.hostId).catch(() => undefined)
+  }, [host.hostId, store])
+  const content = (
+    <div className={css.agentSetupWide}>
+      {BACKEND_ORDER.map(backend => (
+        <AgentSetupRow key={backend} backend={backend} host={host} store={store} operations={operations} />
+      ))}
+    </div>
+  )
+  if (embedded) return content
+  return <PanelShell title={`管理 ${host.title} 的 Agent`} subtitle={host.endpoint ?? host.ssh?.target ?? ''} onClose={onClose ?? (() => undefined)}>{content}</PanelShell>
+}
+
+/** One expandable Agent row inside `AgentSetupPanel`. Every piece of transient
+ *  UI state for that backend lives in this component — expansion, deployment
+ *  plan, install operation id and progress, config editor, login flow, DSH key
+ *  form, busy flags and errors — so a sibling Agent row can never observe or
+ *  overwrite it. Collapsing keeps the state, so reopening the same row resumes
+ *  where the user left off while other rows stay untouched. */
+function AgentSetupRow({ backend, host, store, operations }: {
+  backend: RemoteAgentBackend
+  host: RemoteHostView
+  store: RemoteAgentStore
+  operations: readonly RemoteOperationView[]
+}) {
+  const [open, setOpen] = useState(false)
   const [auth, setAuth] = useState<RemoteAuthChallenge>()
   const [config, setConfig] = useState<RemoteAgentConfigDocument>()
   const [configContent, setConfigContent] = useState('')
   const [configOpen, setConfigOpen] = useState(true)
   const [configSaved, setConfigSaved] = useState(false)
+  const [dshInitialized, setDshInitialized] = useState(false)
   const [dshApiKey, setDshApiKey] = useState('')
   const [dshSaved, setDshSaved] = useState(false)
   const [dshEditing, setDshEditing] = useState(false)
@@ -1110,6 +1278,7 @@ function AgentSetupPanel({ host, store, operations = [], onClose, embedded = fal
   const [response, setResponse] = useState('')
   const [localError, setLocalError] = useState('')
   const [busyAction, setBusyAction] = useState<string>()
+  const busy = busyAction !== undefined
   const tracked = async <T,>(action: string, work: () => Promise<T>): Promise<T> => {
     setBusyAction(action)
     try {
@@ -1118,18 +1287,39 @@ function AgentSetupPanel({ host, store, operations = [], onClose, embedded = fal
       setBusyAction(current => current === action ? undefined : current)
     }
   }
-  useEffect(() => {
-    void store.refreshInventory(host.hostId).catch(() => undefined)
-  }, [host.hostId, store])
+  const entry = host.inventory?.backends.find(candidate => candidate.backend === backend)
+  const deployOperation = operations.find(operation => operation.operationId === operationId && operation.backend === backend)
+    ?? operations.find(operation => operation.kind === 'agent-install'
+      && operation.hostId === host.hostId
+      && operation.backend === backend
+      && (operation.status === 'queued' || operation.status === 'running'))
+  const deploying = deployOperation?.status === 'queued' || deployOperation?.status === 'running'
+  const statusText = entry?.detail
+    ?? (!entry?.installed
+      ? '未安装'
+      : backend === 'claude'
+        ? '已安装，可通过配置提供凭据'
+        : backend === 'dsh'
+          ? entry.authenticated ? '已安装，API Key 已配置' : '已安装，未配置 API Key'
+          : entry.authenticated ? '已安装并已认证' : '已安装，未登录')
+
+  // Once the install operation started by this row succeeds, drop the plan
+  // card and pull a fresh inventory so the row header reflects the change.
+  // The ref keeps the refresh one-shot: the finished operation stays in the
+  // gateway operation list, and without the guard every later snapshot change
+  // would restart the inventory refresh.
+  const settledOperationRef = useRef<string>()
   useEffect(() => {
     if (operationId === undefined) return
     const finished = operations.find(operation => operation.operationId === operationId)
-    if (finished?.status !== 'succeeded' && finished?.status !== 'failed') return
-    if (finished.status === 'succeeded') {
-      setPlan(undefined)
-      void store.refreshInventory(host.hostId).catch(() => undefined)
-    }
+    if (finished === undefined || finished.status !== 'succeeded') return
+    if (settledOperationRef.current === operationId) return
+    settledOperationRef.current = operationId
+    setPlan(undefined)
+    void store.refreshInventory(host.hostId).catch(() => undefined)
   }, [operations, operationId, host.hostId, store])
+
+  // Poll the device/browser login flow started from this row until it settles.
   useEffect(() => {
     if (auth === undefined || !['starting', 'waiting-user'].includes(auth.status)) return
     const timer = window.setTimeout(() => {
@@ -1141,281 +1331,231 @@ function AgentSetupPanel({ host, store, operations = [], onClose, embedded = fal
     return () => { window.clearTimeout(timer) }
   }, [auth, host.hostId, store])
 
-  const clearOther = (backend: RemoteAgentBackend): void => {
+  const toggle = (): void => {
     setLocalError('')
-    if (auth !== undefined && auth.backend !== backend) setAuth(undefined)
-    if (plan !== undefined && plan.component !== backend) setPlan(undefined)
-    if (config !== undefined && config.backend !== backend) {
-      setConfig(undefined)
-      setConfigOpen(true)
-      setConfigSaved(false)
-    }
-  }
-  const selectBackend = (backend: RemoteAgentBackend): void => {
-    if (openBackend === backend) {
-      setOpenBackend(undefined)
-      setAuth(undefined)
-      setConfig(undefined)
-      setConfigOpen(true)
-      setConfigSaved(false)
-      setPlan(undefined)
-      setDshApiKey('')
-      setDshSaved(false)
-      setDshEditing(false)
-      setLocalError('')
+    if (open) {
+      // Collapsing only affects this row; the transient state is kept so
+      // reopening resumes here without disturbing the sibling rows.
+      setOpen(false)
       return
     }
-    setOpenBackend(backend)
-    clearOther(backend)
-    const entry = host.inventory?.backends.find(candidate => candidate.backend === backend)
+    setOpen(true)
     if (entry?.installed !== true) return
     if (backend === 'dsh') {
-      configureDsh(entry?.authenticated === true)
+      if (!dshInitialized) {
+        setDshInitialized(true)
+        setDshApiKey('')
+        setDshSaved(entry?.authenticated === true)
+        setDshEditing(entry?.authenticated !== true)
+      }
       return
     }
-    configure(backend)
+    if (config === undefined) configure()
   }
-  const login = (backend: RemoteAgentBackend): void => {
-    setOpenBackend(backend)
+  const login = (): void => {
+    setOpen(true)
     setConfig(undefined)
     setLocalError('')
-    void tracked(`${backend}:login`, () => store.startAuth(host.hostId, backend)).then(setAuth)
+    void tracked('login', () => store.startAuth(host.hostId, backend)).then(setAuth)
       .catch((error: unknown) => { setLocalError(String(error)) })
   }
-  const configure = (backend: RemoteAgentConfigBackend): void => {
-    setOpenBackend(backend)
+  const configure = (): void => {
+    setOpen(true)
     setAuth(undefined)
     setConfigSaved(false)
     setConfigOpen(true)
     setLocalError('')
-    void tracked(`${backend}:config-load`, () => store.readAgentConfig(host.hostId, backend)).then((document) => {
+    // Only grok/codex/claude reach configure; dsh is handled separately above.
+    void tracked('config-load', () => store.readAgentConfig(host.hostId, backend as RemoteAgentConfigBackend)).then((document) => {
       setConfig(document)
       setConfigContent(document.content)
     }).catch((error: unknown) => { setLocalError(String(error)) })
   }
-  const configureDsh = (configured: boolean): void => {
-    setOpenBackend('dsh')
-    setAuth(undefined)
-    setConfig(undefined)
-    setDshApiKey('')
-    setDshSaved(configured)
-    setDshEditing(!configured)
-    setLocalError('')
-  }
-  const loadPlan = (backend: RemoteAgentBackend): void => {
-    setOpenBackend(backend)
+  const loadPlan = (): void => {
+    setOpen(true)
     setAuth(undefined)
     setConfig(undefined)
     setLocalError('')
-    void tracked(`${backend}:plan`, () => store.installPlan(host.hostId, backend)).then(setPlan)
+    void tracked('plan', () => store.installPlan(host.hostId, backend)).then(setPlan)
       .catch((error: unknown) => { setLocalError(describeAgentInstallFailure(error)) })
   }
-  const deployAgent = (backend: RemoteAgentBackend): void => {
+  const deployAgent = (component: RemoteAgentBackend): void => {
     setLocalError('')
-    void tracked(`${backend}:install-start`, () => store.installAgent(host.hostId, backend)).then((operation) => {
+    void tracked('install-start', () => store.installAgent(host.hostId, component)).then((operation) => {
       setOperationId(operation.operationId)
     }).catch((error: unknown) => { setLocalError(describeAgentInstallFailure(error)) })
   }
-
-  const content = (
-    <div className={css.agentSetupWide}>
-        {BACKEND_ORDER.map((backend) => {
-          const entry = host.inventory?.backends.find(candidate => candidate.backend === backend)
-          const open = openBackend === backend
-          const backendAuth = auth !== undefined && auth.backend === backend ? auth : undefined
-          const backendConfig = config !== undefined && config.backend === backend ? config : undefined
-          const backendBusy = busyAction?.startsWith(`${backend}:`) === true
-          const backendPlan = plan !== undefined && plan.component === backend ? plan : undefined
-          const deployOperation = operations.find(operation => operation.operationId === operationId && operation.backend === backend)
-            ?? operations.find(operation => operation.kind === 'agent-install'
-              && operation.hostId === host.hostId
-              && operation.backend === backend
-              && (operation.status === 'queued' || operation.status === 'running'))
-          const deploying = deployOperation?.status === 'queued' || deployOperation?.status === 'running'
-          const statusText = entry?.detail
-            ?? (!entry?.installed
-              ? '未安装'
-              : backend === 'claude'
-                ? '已安装，可通过配置提供凭据'
-                : backend === 'dsh'
-                  ? entry.authenticated ? '已安装，API Key 已配置' : '已安装，未配置 API Key'
-                  : entry.authenticated ? '已安装并已认证' : '已安装，未登录')
-          return (
-            <div key={backend} className={css.agentRowWide} data-open={open || undefined}>
-              <div className={css.agentRowHeader}>
-                <button type="button" className={css.agentRowToggle} onClick={() => { selectBackend(backend) }}>
-                  <span className={css.agentRowChevron} aria-hidden="true">
-                    {open ? <IconChevronDownOutline14 /> : <IconChevronRightOutline14 />}
-                  </span>
-                  <span>
-                    <strong><StateDot state={backendInventoryState(host, backend)} />{backend}</strong>
-                    <p>{statusText}</p>
-                  </span>
-                </button>
-                <div className={css.panelActions}>
-                  {entry !== undefined && entry.installed !== true && (
-                    <Button size="sm" variant="outline" disabled={backendBusy || deploying} onClick={() => { loadPlan(backend) }}>
-                      {busyAction === `${backend}:plan` ? '读取中…' : deploying ? '部署中…' : '部署'}
-                    </Button>
+  return (
+    <div className={css.agentRowWide} data-open={open || undefined}>
+      <div className={css.agentRowHeader}>
+        <button type="button" className={css.agentRowToggle} onClick={toggle}>
+          <span className={css.agentRowChevron} aria-hidden="true">
+            {open ? <IconChevronDownOutline14 /> : <IconChevronRightOutline14 />}
+          </span>
+          <span>
+            <strong><StateDot state={backendInventoryState(host, backend)} />{backend}</strong>
+            <p>{statusText}</p>
+          </span>
+        </button>
+        <div className={css.panelActions}>
+          {entry !== undefined && entry.installed !== true && (
+            <Button size="sm" variant="outline" disabled={busy || deploying} onClick={loadPlan}>
+              {busyAction === 'plan' ? '读取中…' : deploying ? '部署中…' : '部署'}
+            </Button>
+          )}
+          {entry?.installed && !entry.authenticated && (backend === 'grok' || backend === 'codex') && (
+            <Button size="sm" variant="outline" disabled={busy} onClick={login}>{busyAction === 'login' ? '启动登录…' : '登录'}</Button>
+          )}
+        </div>
+      </div>
+      {open && (
+        <div className={css.agentRowBody}>
+          {!entry?.installed && plan === undefined && localError === '' && (
+            <p className={css.muted}>
+              {busyAction === 'plan' ? '正在读取部署计划…' : '点击部署后会在这台主机上执行官方安装命令。'}
+            </p>
+          )}
+          {entry?.installed && backend !== 'dsh' && auth === undefined && config === undefined && localError === '' && (
+            <p className={css.muted}>{busyAction === 'config-load' ? '正在读取配置…' : '正在打开配置文件。'}</p>
+          )}
+          {plan !== undefined && (
+            <div className={css.setupCard}>
+              <strong>部署 {plan.component}</strong>
+              <span>{plan.version}</span>
+              {plan.steps.map(step => <code key={step.command} title={step.title}>{step.command}</code>)}
+              {plan.unavailableReason !== undefined
+                ? <p className={css.error}>{plan.unavailableReason}</p>
+                : plan.alreadyInstalled
+                  ? <p>目标已经安装。</p>
+                  : (
+                    <Button size="sm" variant="primary" disabled={busy || deploying} onClick={() => {
+                      if (plan.component === 'hostd') return
+                      deployAgent(plan.component)
+                    }}>{busyAction === 'install-start' || deploying ? '部署中…' : '确认部署'}</Button>
                   )}
-                  {entry?.installed && !entry.authenticated && (backend === 'grok' || backend === 'codex') && (
-                    <Button size="sm" variant="outline" disabled={backendBusy} onClick={() => { login(backend) }}>{busyAction === `${backend}:login` ? '启动登录…' : '登录'}</Button>
-                  )}
+            </div>
+          )}
+          {deployOperation !== undefined && <OperationProgress operation={deployOperation} />}
+          {entry?.installed && backend === 'dsh' && localError === '' && (
+            dshSaved && !dshEditing
+              ? (
+                <div className={`${css.setupCard} ${css.setupCardSuccess}`}>
+                  <strong>DSH API Key 已配置</strong>
+                  <p>密钥已保存在远程主机，不会回传到浏览器。之后新建的 DSH 会话会使用该密钥。</p>
+                  <Button size="sm" variant="outline" onClick={() => { setDshEditing(true); setDshApiKey('') }}>修改</Button>
                 </div>
-              </div>
-              {open && (
-                <div className={css.agentRowBody}>
-                  {!entry?.installed && backendPlan === undefined && localError === '' && (
-                    <p className={css.muted}>
-                      {busyAction === `${backend}:plan` ? '正在读取部署计划…' : '点击部署后会在这台主机上执行官方安装命令。'}
-                    </p>
-                  )}
-                  {entry?.installed && backend !== 'dsh' && backendAuth === undefined && backendConfig === undefined && localError === '' && (
-                    <p className={css.muted}>{busyAction === `${backend}:config-load` ? '正在读取配置…' : '正在打开配置文件。'}</p>
-                  )}
-                  {backendPlan !== undefined && (
-                    <div className={css.setupCard}>
-                      <strong>部署 {backendPlan.component}</strong>
-                      <span>{backendPlan.version}</span>
-                      {backendPlan.steps.map(step => <code key={step.command} title={step.title}>{step.command}</code>)}
-                      {backendPlan.unavailableReason !== undefined
-                        ? <p className={css.error}>{backendPlan.unavailableReason}</p>
-                        : backendPlan.alreadyInstalled
-                          ? <p>目标已经安装。</p>
-                          : (
-                            <Button size="sm" variant="primary" disabled={backendBusy || deploying} onClick={() => {
-                              if (backendPlan.component === 'hostd') return
-                              deployAgent(backendPlan.component)
-                            }}>{busyAction === `${backend}:install-start` || deploying ? '部署中…' : '确认部署'}</Button>
-                          )}
-                    </div>
-                  )}
-                  {deployOperation !== undefined && <OperationProgress operation={deployOperation} />}
-                  {entry?.installed && backend === 'dsh' && localError === '' && (
-                    dshSaved && !dshEditing
-                      ? (
-                        <div className={`${css.setupCard} ${css.setupCardSuccess}`}>
-                          <strong>DSH API Key 已配置</strong>
-                          <p>密钥已保存在远程主机，不会回传到浏览器。之后新建的 DSH 会话会使用该密钥。</p>
-                          <Button size="sm" variant="outline" onClick={() => { setDshEditing(true); setDshApiKey('') }}>修改</Button>
-                        </div>
-                      )
-                      : (
-                        <div className={css.setupCard}>
-                          <strong>DSH API Key</strong>
-                          <p>密钥保存在远程主机的 hostd 私有凭据文件中，不会再回传到浏览器；对之后新建的 DSH 会话生效。</p>
-                          <div className={css.inlineCreate}>
-                            <input
-                              type="password"
-                              aria-label="DSH API Key"
-                              autoComplete="off"
-                              value={dshApiKey}
-                              placeholder={entry?.authenticated ? '输入新密钥以替换现有配置' : '输入 DeepSeek API Key'}
-                              onChange={(event) => { setDshApiKey(event.target.value) }}
-                            />
-                            <Button size="sm" variant="primary" disabled={backendBusy || dshApiKey.trim() === ''} onClick={() => {
-                              void tracked('dsh:credential-save', () => store.setDshApiKey(host.hostId, dshApiKey)).then(() => {
-                                setDshApiKey('')
-                                setDshSaved(true)
-                                setDshEditing(false)
-                                void store.refreshInventory(host.hostId).catch(() => undefined)
-                              }).catch((error: unknown) => { setLocalError(String(error)) })
-                            }}>{busyAction === 'dsh:credential-save' ? '保存中…' : '保存 API Key'}</Button>
-                            {entry?.authenticated === true && (
-                              <Button size="sm" variant="ghost" disabled={backendBusy} onClick={() => { setDshEditing(false); setDshApiKey('') }}>取消</Button>
-                            )}
-                          </div>
-                        </div>
-                      )
-                  )}
-                  {backendAuth !== undefined && (
-                    <div className={css.setupCard}>
-                      <strong>{backendAuth.backend} 登录</strong>
-                      <p>{backendAuth.message}</p>
-                      {(backendAuth.verificationUriComplete ?? backendAuth.verificationUri) !== undefined && (
-                        <a href={backendAuth.verificationUriComplete ?? backendAuth.verificationUri} target="_blank" rel="noreferrer">打开登录授权页面</a>
-                      )}
-                      {backendAuth.userCode !== undefined && <code>{backendAuth.userCode}</code>}
-                      {backendAuth.status === 'waiting-user' && backendAuth.userCode === undefined && (
-                        <div className={css.inlineCreate}>
-                          <input aria-label="登录返回码" value={response} placeholder="需要时粘贴返回码" onChange={(event) => { setResponse(event.target.value) }} />
-                          <button type="button" className={css.nativeButton} disabled={response === '' || backendBusy} onClick={() => {
-                            void tracked(`${backend}:auth-response`, () => store.respondAuth(host.hostId, backendAuth.flowId, response)).then(() => { setResponse('') })
-                              .catch((error: unknown) => { setLocalError(String(error)) })
-                          }}>{busyAction === `${backend}:auth-response` ? '提交中…' : '提交'}</button>
-                        </div>
-                      )}
-                      {['starting', 'waiting-user'].includes(backendAuth.status) && (
-                        <button type="button" className={css.nativeButton} disabled={backendBusy} onClick={() => {
-                          void tracked(`${backend}:auth-cancel`, () => store.cancelAuth(host.hostId, backendAuth.flowId)).then(() => { setAuth(undefined) })
-                            .catch((error: unknown) => { setLocalError(String(error)) })
-                        }}>{busyAction === `${backend}:auth-cancel` ? '取消中…' : '取消登录'}</button>
-                      )}
-                    </div>
-                  )}
-                  {backendConfig !== undefined && (
-                    <div className={`${css.setupCard} ${css.configCard}`} data-open={configOpen || undefined}>
-                      <button
-                        type="button"
-                        className={css.configCardHeader}
-                        aria-expanded={configOpen}
-                        onClick={() => { setConfigOpen(value => !value) }}
-                      >
-                        <span className={css.agentRowChevron} aria-hidden="true">
-                          {configOpen ? <IconChevronDownOutline14 /> : <IconChevronRightOutline14 />}
-                        </span>
-                        <span className={css.configCardTitle}>
-                          <strong>{backendConfig.backend} 配置</strong>
-                          <small>{backendConfig.path} · {backendConfig.format.toUpperCase()} · 最大 {backendConfig.maxBytes} 字节</small>
-                        </span>
-                      </button>
-                      {configOpen && (
-                        <>
-                          <p>这里编辑的是远程主机上的完整用户配置。不要写入明文密钥；优先引用远程环境变量。</p>
-                          <textarea
-                            className={css.configEditor}
-                            aria-label={`${backendConfig.backend} 配置内容`}
-                            spellCheck={false}
-                            value={configContent}
-                            onChange={(event) => {
-                              setConfigContent(event.target.value)
-                              setConfigSaved(false)
-                            }}
-                          />
-                          {new TextEncoder().encode(configContent).length > backendConfig.maxBytes && (
-                            <p className={css.error}>配置超过 {backendConfig.maxBytes} 字节限制。</p>
-                          )}
-                          {configSaved && <p className={css.success}>已保存并通过 {backendConfig.format.toUpperCase()} 语法校验。</p>}
-                          <div className={css.configActions}>
-                            <Button
-                              size="sm"
-                              variant="primary"
-                              disabled={configContent === backendConfig.content || new TextEncoder().encode(configContent).length > backendConfig.maxBytes || backendBusy}
-                              onClick={() => {
-                                void tracked(`${backend}:config-save`, () => store.writeAgentConfig(
-                                  host.hostId, backendConfig.backend, configContent, backendConfig.revision,
-                                )).then((saved) => {
-                                  setConfig(saved)
-                                  setConfigContent(saved.content)
-                                  setConfigSaved(true)
-                                }).catch((error: unknown) => { setLocalError(String(error)) })
-                              }}
-                            >{busyAction === `${backend}:config-save` ? '保存中…' : '保存配置'}</Button>
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  )}
-                  {localError !== '' && openBackend === backend && <p className={css.error}>{localError}</p>}
+              )
+              : (
+                <div className={css.setupCard}>
+                  <strong>DSH API Key</strong>
+                  <p>密钥保存在远程主机的 hostd 私有凭据文件中，不会再回传到浏览器；对之后新建的 DSH 会话生效。</p>
+                  <div className={css.inlineCreate}>
+                    <input
+                      type="password"
+                      aria-label="DSH API Key"
+                      autoComplete="off"
+                      value={dshApiKey}
+                      placeholder={entry?.authenticated ? '输入新密钥以替换现有配置' : '输入 DeepSeek API Key'}
+                      onChange={(event) => { setDshApiKey(event.target.value) }}
+                    />
+                    <Button size="sm" variant="primary" disabled={busy || dshApiKey.trim() === ''} onClick={() => {
+                      void tracked('credential-save', () => store.setDshApiKey(host.hostId, dshApiKey)).then(() => {
+                        setDshApiKey('')
+                        setDshSaved(true)
+                        setDshEditing(false)
+                        void store.refreshInventory(host.hostId).catch(() => undefined)
+                      }).catch((error: unknown) => { setLocalError(String(error)) })
+                    }}>{busyAction === 'credential-save' ? '保存中…' : '保存 API Key'}</Button>
+                    {entry?.authenticated === true && (
+                      <Button size="sm" variant="ghost" disabled={busy} onClick={() => { setDshEditing(false); setDshApiKey('') }}>取消</Button>
+                    )}
+                  </div>
+                </div>
+              )
+          )}
+          {auth !== undefined && (
+            <div className={css.setupCard}>
+              <strong>{auth.backend} 登录</strong>
+              <p>{auth.message}</p>
+              {(auth.verificationUriComplete ?? auth.verificationUri) !== undefined && (
+                <a href={auth.verificationUriComplete ?? auth.verificationUri} target="_blank" rel="noreferrer">打开登录授权页面</a>
+              )}
+              {auth.userCode !== undefined && <code>{auth.userCode}</code>}
+              {auth.status === 'waiting-user' && auth.userCode === undefined && (
+                <div className={css.inlineCreate}>
+                  <input aria-label="登录返回码" value={response} placeholder="需要时粘贴返回码" onChange={(event) => { setResponse(event.target.value) }} />
+                  <button type="button" className={css.nativeButton} disabled={response === '' || busy} onClick={() => {
+                    void tracked('auth-response', () => store.respondAuth(host.hostId, auth.flowId, response)).then(() => { setResponse('') })
+                      .catch((error: unknown) => { setLocalError(String(error)) })
+                  }}>{busyAction === 'auth-response' ? '提交中…' : '提交'}</button>
                 </div>
               )}
+              {['starting', 'waiting-user'].includes(auth.status) && (
+                <button type="button" className={css.nativeButton} disabled={busy} onClick={() => {
+                  void tracked('auth-cancel', () => store.cancelAuth(host.hostId, auth.flowId)).then(() => { setAuth(undefined) })
+                    .catch((error: unknown) => { setLocalError(String(error)) })
+                }}>{busyAction === 'auth-cancel' ? '取消中…' : '取消登录'}</button>
+              )}
             </div>
-          )
-        })}
+          )}
+          {config !== undefined && (
+            <div className={`${css.setupCard} ${css.configCard}`} data-open={configOpen || undefined}>
+              <button
+                type="button"
+                className={css.configCardHeader}
+                aria-expanded={configOpen}
+                onClick={() => { setConfigOpen(value => !value) }}
+              >
+                <span className={css.agentRowChevron} aria-hidden="true">
+                  {configOpen ? <IconChevronDownOutline14 /> : <IconChevronRightOutline14 />}
+                </span>
+                <span className={css.configCardTitle}>
+                  <strong>{config.backend} 配置</strong>
+                  <small>{config.path} · {config.format.toUpperCase()} · 最大 {config.maxBytes} 字节</small>
+                </span>
+              </button>
+              {configOpen && (
+                <>
+                  <p>这里编辑的是远程主机上的完整用户配置。不要写入明文密钥；优先引用远程环境变量。</p>
+                  <textarea
+                    className={css.configEditor}
+                    aria-label={`${config.backend} 配置内容`}
+                    spellCheck={false}
+                    value={configContent}
+                    onChange={(event) => {
+                      setConfigContent(event.target.value)
+                      setConfigSaved(false)
+                    }}
+                  />
+                  {new TextEncoder().encode(configContent).length > config.maxBytes && (
+                    <p className={css.error}>配置超过 {config.maxBytes} 字节限制。</p>
+                  )}
+                  {configSaved && <p className={css.success}>已保存并通过 {config.format.toUpperCase()} 语法校验。</p>}
+                  <div className={css.configActions}>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={configContent === config.content || new TextEncoder().encode(configContent).length > config.maxBytes || busy}
+                      onClick={() => {
+                        void tracked('config-save', () => store.writeAgentConfig(
+                          host.hostId, config.backend, configContent, config.revision,
+                        )).then((saved) => {
+                          setConfig(saved)
+                          setConfigContent(saved.content)
+                          setConfigSaved(true)
+                        }).catch((error: unknown) => { setLocalError(String(error)) })
+                      }}
+                    >{busyAction === 'config-save' ? '保存中…' : '保存配置'}</Button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+          {localError !== '' && open && <p className={css.error}>{localError}</p>}
+        </div>
+      )}
     </div>
   )
-  if (embedded) return content
-  return <PanelShell title={`管理 ${host.title} 的 Agent`} subtitle={host.endpoint} onClose={onClose ?? (() => undefined)}>{content}</PanelShell>
 }
 
 function OperationPanel({ panel, store, snapshot }: {
@@ -1881,7 +2021,12 @@ function DraftConversation({ project, host, projectSessions, store, error, promp
     }
     : progress === undefined
       ? { kind: 'idle', label: '尚未发送', detail: '选择 Agent 后发送第一条消息。', state: 'done', visible: false }
-      : { kind: 'connecting', label: '正在连接 Agent', detail: '正在创建远程会话并建立通信通道。', state: 'ongoing', visible: true }
+      : {
+        kind: 'connecting',
+        label: progress.phase === 'sending' ? '正在连接 Agent' : '正在创建远程会话',
+        detail: progress.message ?? '正在创建远程会话并建立通信通道。',
+        state: 'ongoing', visible: true,
+      }
   const send = (): void => {
     const text = draft.trim()
     if (text === '' || backend === '' || draftBusy) return
@@ -1968,6 +2113,16 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
   const [draft, setDraft] = useState('')
   const [sessionAction, setSessionAction] = useState<string>()
   const [sessionPreferences, setSessionPreferences] = useState<Record<string, SessionPreferences>>(readPersistedSessionPreferences)
+  // Last failed reopen: reason to show and (when hostd offered one) the repair
+  // the user can confirm. Keyed by session so switching sessions hides it.
+  const [reopenFailure, setReopenFailure] = useState<{ sessionId: string; issue: ReopenFailureIssue } | undefined>()
+  const [reopenBusy, setReopenBusy] = useState<'adopt' | 'restart' | undefined>()
+  const [restartArmed, setRestartArmed] = useState(false)
+  const restartArmedTimerRef = useRef<number | undefined>(undefined)
+  // Unresponsive-agent detection: banner + user-confirmed force restart.
+  const [forceRestartArmed, setForceRestartArmed] = useState(false)
+  const [forceRestartBusy, setForceRestartBusy] = useState(false)
+  const forceRestartArmTimerRef = useRef<number | undefined>(undefined)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const transcriptColumnRef = useRef<HTMLDivElement | null>(null)
   const followBottomRef = useRef(true)
@@ -1991,6 +2146,31 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
     || session?.turnState === 'waiting-permission'
     || snapshot.phase === 'reconnecting',
   )
+  // Unresponsive detection: a live turn with no transcript activity for a long
+  // time. Uses entry timestamps as the last backend heartbeat; falls back to
+  // the prompt start so a never-answered first request is also covered.
+  const lastEntryAtMs = useMemo(() => {
+    let latest = -1
+    for (const entry of sessionEntries) {
+      const parsed = Date.parse(entry.createdAt)
+      if (Number.isFinite(parsed) && parsed > latest) latest = parsed
+    }
+    return latest
+  }, [sessionEntries])
+  const activeProgress = snapshot.promptProgress !== undefined
+    && snapshot.promptProgress.sessionId === session?.sessionId
+    ? snapshot.promptProgress
+    : undefined
+  const promptActive = activeProgress !== undefined
+    && (activeProgress.phase === 'waiting' || activeProgress.phase === 'sending')
+  const promptStartMs = activeProgress?.startedAt
+  const lastActivityAtMs = lastEntryAtMs >= 0 ? lastEntryAtMs : promptStartMs
+  const agentIdleMs = lastActivityAtMs === undefined ? 0 : Math.max(0, activityClock - lastActivityAtMs)
+  const agentStalled = session !== undefined
+    && session.channelState === 'open'
+    && (session.turnState === 'running' || promptActive)
+    && snapshot.promptProgress?.phase !== 'failed'
+    && agentIdleMs >= STALLED_AGENT_BANNER_MS
   const presentation = session === undefined
     ? undefined
     : conversationPresentation({
@@ -2085,7 +2265,25 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
       window.clearTimeout(persistTimerRef.current)
       persistTimerRef.current = undefined
     }
+    if (restartArmedTimerRef.current !== undefined) {
+      window.clearTimeout(restartArmedTimerRef.current)
+      restartArmedTimerRef.current = undefined
+    }
+    if (forceRestartArmTimerRef.current !== undefined) {
+      window.clearTimeout(forceRestartArmTimerRef.current)
+      forceRestartArmTimerRef.current = undefined
+    }
   }, [])
+  useEffect(() => {
+    // A successful reopen (channel back to open) retires any failure banner.
+    if (session?.channelState === 'open') {
+      setReopenFailure(undefined)
+      setRestartArmed(false)
+      setReopenBusy(undefined)
+      setForceRestartArmed(false)
+      setForceRestartBusy(false)
+    }
+  }, [session?.channelState, session?.sessionId])
   const preferences = session === undefined
     ? undefined
     : resolveSessionPreferences(
@@ -2262,11 +2460,71 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
   const reconnect = (): void => {
     if (sessionAction !== undefined) return
     const action = `reconnect:${session.sessionId}`
+    setReopenFailure(undefined)
+    setRestartArmed(false)
     setSessionAction(action)
     void store.reconnectSession(session.sessionId)
-      .catch(() => undefined)
+      .then(() => { setReopenFailure(undefined) })
+      .catch((error: unknown) => {
+        setReopenFailure({ sessionId: session.sessionId, issue: parseReopenFailure(error) })
+      })
       .finally(() => { setSessionAction(current => current === action ? undefined : current) })
   }
+  /** User-confirmed repair: run the hostd fix then reopen automatically. */
+  const runReopenFix = (kind: 'adopt' | 'restart'): void => {
+    if (sessionAction !== undefined || reopenBusy !== undefined) return
+    const action = `reconnect:${session.sessionId}`
+    setReopenFailure(undefined)
+    setRestartArmed(false)
+    setReopenBusy(kind)
+    // The repair RPC itself is quick; reuse the reconnect pending guard while
+    // the whole fix-then-reopen sequence runs so nothing double-fires.
+    setSessionAction(action)
+    void store.repairGrokServe(session.sessionId, kind)
+      .then(() => { setReopenFailure(undefined) })
+      .catch((error: unknown) => {
+        setReopenFailure({ sessionId: session.sessionId, issue: parseReopenFailure(error) })
+      })
+      .finally(() => {
+        setReopenBusy(undefined)
+        setSessionAction(current => current === action ? undefined : current)
+      })
+  }
+  const armRestart = (): void => {
+    if (restartArmed) {
+      runReopenFix('restart')
+      return
+    }
+    setRestartArmed(true)
+    if (restartArmedTimerRef.current !== undefined) window.clearTimeout(restartArmedTimerRef.current)
+    restartArmedTimerRef.current = window.setTimeout(() => { setRestartArmed(false) }, 10_000)
+  }
+  /** Unresponsive-agent action: arm (10 s), then confirm -> force restart. */
+  const armForceRestart = (): void => {
+    if (session === undefined || sessionAction !== undefined || forceRestartBusy) return
+    if (forceRestartArmed) {
+      if (forceRestartArmTimerRef.current !== undefined) window.clearTimeout(forceRestartArmTimerRef.current)
+      setForceRestartArmed(false)
+      setForceRestartBusy(true)
+      const action = `force-restart:${session.sessionId}`
+      setSessionAction(action)
+      void store.forceRestartSession(session.sessionId)
+        .catch((error: unknown) => {
+          setReopenFailure({ sessionId: session.sessionId, issue: parseReopenFailure(error) })
+        })
+        .finally(() => {
+          setForceRestartBusy(false)
+          setSessionAction(current => current === action ? undefined : current)
+        })
+      return
+    }
+    setForceRestartArmed(true)
+    if (forceRestartArmTimerRef.current !== undefined) window.clearTimeout(forceRestartArmTimerRef.current)
+    forceRestartArmTimerRef.current = window.setTimeout(() => { setForceRestartArmed(false) }, FORCE_RESTART_ARM_MS)
+  }
+  const currentReopenFailure = reopenFailure !== undefined && reopenFailure.sessionId === session.sessionId
+    ? reopenFailure.issue
+    : undefined
   const reconnectAction = actions?.canReconnect === true
     ? {
       label: session.channelState === 'reconnecting' ? '重新连接' : '在当前会话重开',
@@ -2379,6 +2637,30 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
                 {...(reconnectOnTurn !== true || reconnectAction === undefined ? {} : { action: reconnectAction })}
               />
             )}
+            {currentReopenFailure !== undefined && (
+              <ReopenFailureBanner
+                issue={currentReopenFailure}
+                busy={reopenBusy}
+                restartArmed={restartArmed}
+                enabled={sessionAction === undefined}
+                onRetry={reconnect}
+                onAdopt={() => runReopenFix('adopt')}
+                onRestartClick={armRestart}
+                onOpenHostSettings={() => {
+                  if (sessionHost !== undefined) store.showPanel({ kind: 'host-settings', hostId: sessionHost.hostId })
+                }}
+              />
+            )}
+            {agentStalled && (
+              <UnresponsiveAgentBanner
+                idleMinutes={Math.max(1, Math.floor(agentIdleMs / 60_000))}
+                armed={forceRestartArmed}
+                busy={forceRestartBusy}
+                enabled={sessionAction === undefined}
+                onStop={() => { setForceRestartArmed(false); stop() }}
+                onArmRestart={armForceRestart}
+              />
+            )}
             {transcript.length === 0 && !visibleStage.visible && channelStage?.visible !== true && (
               <p className={css.emptyTranscript}>远程会话已连接。发送一条消息开始。</p>
             )}
@@ -2420,6 +2702,7 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
             <Button size="sm" variant="primary" icon={<IconSendOutline16 />} aria-label="发送" disabled={actions?.canSend !== true || draft.trim() === ''} onClick={send} />
           </div>
         </div>
+        <ConversationStatsLine entries={sessionEntries} />
       </div>
     </main>
   )

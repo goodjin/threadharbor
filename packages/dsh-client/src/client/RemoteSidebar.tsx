@@ -1,6 +1,6 @@
 /** DSH-style remote host → project → session → child-session browser. */
 
-import { useId, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { applyLimitToSessions, subscribeDisplayPreferences } from './display-preferences.ts'
 import {
   Button, IconChevronDownOutline14, IconChevronRightOutline14, IconEllipsisOutline16,
@@ -18,11 +18,11 @@ import type { RemoteAgentStore } from './store.ts'
 import { describeHostConnectFailure, hostConnectionLabel, hostDeploymentBadge, hostIpLabel } from './store.ts'
 import css from './RemoteSurface.module.css'
 
-/** Hard ceiling on how long one archive click can leave the menu button on
- *  "归档中…". The store's `call()` path already times out at 75 s per RPC, so
- *  this only fires when something else in the chain (e.g. an IndexedDB request
- *  that never settles) strands the promise. */
-const ARCHIVE_TIMEOUT_MS = 90_000
+/** Hard ceiling on how long one row action (archive, hide) can leave a button on
+ *  its busy label ("归档中…" / "隐藏中…"). The store's `call()` path already
+ *  times out at 75 s per RPC, so this only fires when something else in the
+ *  chain (e.g. an IndexedDB request that never settles) strands the promise. */
+const ACTION_TIMEOUT_MS = 90_000
 
 /** Props injected by the sidebar slot registration. */
 export interface RemoteSidebarInjected {
@@ -68,14 +68,58 @@ function operationState(operation: RemoteOperationView): 'done' | 'ongoing' | 'e
   return 'ongoing'
 }
 
+/** How long a finished tray notice stays visible once its operation settles,
+ *  before the tray auto-hides it. Failures get a longer window so the error
+ *  text is still readable. */
+const FINISHED_OK_NOTICE_MS = 6_000
+const FINISHED_ERR_NOTICE_MS = 12_000
+
+/** Wall-clock time an operation reached a terminal state; falls back to its
+ *  last update when `finishedAt` is absent (e.g. operations started by an
+ *  older gateway). */
+function operationSettledAt(operation: RemoteOperationView): number {
+  const at = Date.parse(operation.finishedAt ?? operation.updatedAt)
+  return Number.isNaN(at) ? 0 : at
+}
+
 function OperationTray({ operations, hosts, store }: {
   operations: readonly RemoteOperationView[]
   hosts: readonly RemoteHostView[]
   store: RemoteAgentStore
 }) {
+  // `now` only ticks when a finished notice's window needs to close; active
+  // operations keep the tray open on their own by updating the store.
+  const [now, setNow] = useState<number>(() => Date.now())
   const active = operations.filter(operation => operation.status === 'queued' || operation.status === 'running')
-  const latestFinished = operations.find(operation => operation.status === 'failed' || operation.status === 'succeeded')
-  const visible = [...active, ...(latestFinished === undefined ? [] : [latestFinished])].slice(0, 3)
+  // The gateway retains finished operations (last 20), so without a recency
+  // gate the tray would keep a settled notice pinned open forever. Only the
+  // most recently settled operation may still show, and only briefly.
+  let newestFinished: RemoteOperationView | undefined
+  let newestSettledAt = 0
+  for (const operation of operations) {
+    if (operation.status !== 'succeeded' && operation.status !== 'failed') continue
+    const settledAt = operationSettledAt(operation)
+    if (settledAt > newestSettledAt) {
+      newestSettledAt = settledAt
+      newestFinished = operation
+    }
+  }
+  const noticeMs = newestFinished?.status === 'failed' ? FINISHED_ERR_NOTICE_MS : FINISHED_OK_NOTICE_MS
+  const finishedVisible = newestFinished !== undefined && newestSettledAt > 0
+    && newestSettledAt <= now && now - newestSettledAt < noticeMs
+
+  // Wake up once when the current finished notice ages out of its window so the
+  // tray drops it even though the gateway still retains the operation.
+  useEffect(() => {
+    if (!finishedVisible || newestFinished === undefined) return
+    const timer = window.setTimeout(
+      () => { setNow(Date.now()) },
+      Math.max(0, newestSettledAt + noticeMs - Date.now()),
+    )
+    return () => window.clearTimeout(timer)
+  }, [newestFinished, newestSettledAt, noticeMs, finishedVisible, now])
+
+  const visible = [...active, ...(finishedVisible && newestFinished !== undefined ? [newestFinished] : [])].slice(0, 3)
   if (visible.length === 0) return null
   return (
     <section className={css.operationTray} aria-label="后台操作" aria-live="polite">
@@ -232,7 +276,7 @@ function SessionRow({
               void Promise.race([
                 work,
                 new Promise<never>((_, reject) => {
-                  window.setTimeout(() => { reject(new Error('归档请求超时')) }, ARCHIVE_TIMEOUT_MS)
+                  window.setTimeout(() => { reject(new Error('归档请求超时')) }, ACTION_TIMEOUT_MS)
                 }),
               ])
                 .then(() => { setMenuOpen(false) })
@@ -422,7 +466,7 @@ function HostSection({
   sessionOverflowExpanded: (projectId: string) => boolean
   onToggleSessionOverflow: (projectId: string) => void
 }) {
-  const hostMatchesQuery = query === '' || includesQuery(host.title, query) || includesQuery(host.endpoint, query)
+  const hostMatchesQuery = query === '' || includesQuery(host.title, query) || includesQuery(host.endpoint ?? '', query)
   const visibleProjects = hostMatchesQuery ? projects : projects.filter(project => {
     if (includesQuery(project.title, query) || includesQuery(project.cwd, query)) return true
     return sessions.some(session => session.projectId === project.projectId && sessionMatches(session, sessions, query))
@@ -717,16 +761,34 @@ function HideConfirmDialog({ target, store, onClose }: {
   const title = isHost ? `隐藏主机 ${host?.title}` : `隐藏项目 ${project?.title}`
   const body = isHost
     ? `隐藏后，主机 ${host?.title} 及其所有项目与会话会从侧栏消失；可在"隐藏的主机与项目"中恢复或永久删除。`
-    : `隐藏后，项目 ${project?.title} 的会话会归档，主机 ${host?.title ?? ''} 仍可见；可在"隐藏的主机与项目"中恢复或永久删除。`
+    : `隐藏后，项目 ${project?.title} 的会话会归档并从侧栏消失，所属主机仍可见；可在"隐藏的主机与项目"中恢复或永久删除。`
   const confirm = (): void => {
     setPending(true)
     setError('')
     const task = isHost
       ? store.hideHost(host!.hostId)
       : store.hideProject(project!.projectId)
-    void task
-      .then(() => { setPending(false); onClose() })
-      .catch((reason: unknown) => { setError(String(reason)); setPending(false) })
+    // Watchdog: the dialog must never stay on "隐藏中…" because the store
+    // promise stranded (same failure class as the archive menu — see
+    // ACTION_TIMEOUT_MS). A late success after the cap is ignored so a retried
+    // confirm owns the dialog state; the store still converges on its own.
+    let settled = false
+    task.then(() => { settled = true }, () => { settled = true })
+    void Promise.race([
+      task,
+      new Promise<never>((_, reject) => {
+        window.setTimeout(() => { reject(new Error('隐藏请求超时，请检查网关连接后重试。')) }, ACTION_TIMEOUT_MS)
+      }),
+    ])
+      .then(() => {
+        if (!settled) return
+        setPending(false)
+        onClose()
+      })
+      .catch((reason: unknown) => {
+        setError(String(reason))
+        setPending(false)
+      })
   }
   return (
     <Modal
@@ -793,7 +855,7 @@ export function RemoteSidebar({ collapsed, store, toggleSidebar }: RemoteSidebar
   }
 
   const visibleHostCount = useMemo(() => state.hosts.filter(host => {
-    if (normalizedQuery === '' || includesQuery(host.title, normalizedQuery) || includesQuery(host.endpoint, normalizedQuery)) return true
+    if (normalizedQuery === '' || includesQuery(host.title, normalizedQuery) || includesQuery(host.endpoint ?? '', normalizedQuery)) return true
     return state.projects.some(project => project.hostId === host.hostId && (
       includesQuery(project.title, normalizedQuery)
       || includesQuery(project.cwd, normalizedQuery)
