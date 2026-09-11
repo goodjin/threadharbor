@@ -224,12 +224,22 @@ export class WsBroadcaster {
       supportsTranscriptBatch,
     }
     this.subscribers.set(ws, subscriber)
+    process.stderr.write(`threadharbor-gateway: ws open browserId=${browserId} size=${this.subscribers.size}\n`)
     ws.on('message', (data) => { void this.handleClientMessage(ws, data) })
-    ws.on('close', () => { this.dropConnection(ws) })
+    ws.on('close', (code: number, reason: Buffer) => {
+      process.stderr.write(
+        `threadharbor-gateway: ws close browserId=${subscriber.browserId} code=${code}`
+        + ` reason=${reason.toString('utf8').slice(0, 80)} size=${this.subscribers.size - 1}\n`,
+      )
+      this.dropConnection(ws)
+    })
     // A peer may disappear between readyState === OPEN and send(). Without an
     // error listener ws forwards the underlying TCP EPIPE as an uncaught
     // EventEmitter error and terminates the entire Web process.
-    ws.on('error', () => { this.dropConnection(ws) })
+    ws.on('error', (error: Error) => {
+      process.stderr.write(`threadharbor-gateway: ws error browserId=${subscriber.browserId} err=${String(error).slice(0, 120)}\n`)
+      this.dropConnection(ws)
+    })
   }
 
   private dropConnection(ws: WebSocket): void {

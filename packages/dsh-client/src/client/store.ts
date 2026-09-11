@@ -343,6 +343,9 @@ const EMPTY_STATE: RemoteAgentState = {
 const CONTROL_REQUEST_TIMEOUT_MS = 75_000
 /** Maximum time to wait for session.start to publish an open binding. */
 const SESSION_OPEN_TIMEOUT_MS = 75_000
+/** Poll cadence while waiting for a new session to open, so a missed `session.view`
+ *  push (WS drop / frozen background tab) cannot strand the create. */
+const SESSION_OPEN_POLL_MS = 2_000
 /** Wall-clock cap for one auto-archive sweep. Anything still pending is left
  *  for the next reload — the goal is to never strand the settings panel on
  *  "清理中…" longer than this, not to guarantee every stale row is retired
@@ -827,7 +830,13 @@ export class RemoteAgentStore {
     startedAt: number,
     extra: Record<string, unknown> = {},
   ): void {
-    if (process.env['NODE_ENV'] === 'test') return
+    // `process` is a Node global that does not exist in the browser, and the
+    // client build does not replace `process.env.NODE_ENV` — referencing it bare
+    // throws `ReferenceError: process is not defined`, which aborted every
+    // prompt/session.start right after publishing the "connecting" state and
+    // left the composer permanently disabled. Guard the access so it only skips
+    // tracing under the Node test runner and is a no-op in the browser.
+    if (typeof process !== 'undefined' && process.env?.['NODE_ENV'] === 'test') return
     const elapsedMs = Number((Date.now() - startedAt).toFixed(1))
     const fields: Record<string, unknown> = { phase, elapsedMs, ...extra }
     const parts = Object.entries(fields)
@@ -1540,24 +1549,33 @@ export class RemoteAgentStore {
       return Promise.reject(new Error('远程会话建立失败，请重试'))
     }
     return new Promise<void>((resolve, reject) => {
-      const timer = window.setTimeout(() => {
+      let settled = false
+      const finish = (fn: () => void): void => {
+        if (settled) return
+        settled = true
+        window.clearTimeout(timer)
+        window.clearInterval(poll)
         unsubscribe()
-        reject(new Error('远程会话建立超时'))
-      }, SESSION_OPEN_TIMEOUT_MS)
-      const unsubscribe = this.subscribe(() => {
+        fn()
+      }
+      // Resolve/reject purely from the observed session row, whether it was
+      // updated by a live push OR by the poll below.
+      const check = (): void => {
         const session = this.snapshot.state.sessions.find(candidate => candidate.sessionId === sessionId)
-        if (session?.channelState === 'open') {
-          window.clearTimeout(timer)
-          unsubscribe()
-          resolve()
-          return
+        if (session?.channelState === 'open') finish(resolve)
+        else if (session?.channelState === 'lost' || session?.turnState === 'failed') {
+          finish(() => reject(new Error('远程会话建立失败，请重试')))
         }
-        if (session?.channelState === 'lost' || session?.turnState === 'failed') {
-          window.clearTimeout(timer)
-          unsubscribe()
-          reject(new Error('远程会话建立失败，请重试'))
-        }
-      })
+      }
+      const timer = window.setTimeout(() => { finish(() => reject(new Error('远程会话建立超时'))) }, SESSION_OPEN_TIMEOUT_MS)
+      const unsubscribe = this.subscribe(check)
+      // Poll fallback: the `session.view` open/running push can be missed when
+      // the WS drops or Chrome freezes a backgrounded tab. Reload the catalog
+      // (HTTP fallback when the socket is down) so the create is never stranded
+      // on "正在建立远程会话" waiting for a push that already fired.
+      const poll = window.setInterval(() => {
+        void this.reload(sessionId).then(() => check()).catch(() => undefined)
+      }, SESSION_OPEN_POLL_MS)
     })
   }
 
@@ -2144,6 +2162,14 @@ export class RemoteAgentStore {
       const got = await this.catchupTranscript(sessionId, 'high')
       if (got) this.liveBackoffIndex = 0
       else this.liveBackoffIndex = Math.min(this.liveBackoffIndex + 1, LIVE_BACKOFF_MS.length - 1)
+      // Reconcile the session row after sustained transcript silence: a finished
+      // turn whose `session.view` idle push was missed (WS drop / frozen tab)
+      // otherwise leaves turnState stuck at 'running', stranding the "正在生成回复"
+      // banner and this loop. Gated on max backoff so it never perturbs an active
+      // turn's fast path — only a genuinely quiet, seemingly-stuck turn reloads.
+      if (!got && this.liveBackoffIndex >= LIVE_BACKOFF_MS.length - 1) {
+        await this.reload(sessionId).catch(() => undefined)
+      }
       if (this.disposed || !this.sessionNeedsLiveTranscript(sessionId)) return
       await this.waitForLiveTranscript(delay)
     }
