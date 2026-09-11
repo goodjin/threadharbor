@@ -130,6 +130,10 @@ export interface RemoteInstallPlan {
   readonly requiresConfirmation: true
   readonly steps: readonly RemoteInstallStep[]
   readonly unavailableReason?: string
+  /** Globally installed versions of the pinned npm packages, by package name (npm backends only). */
+  readonly installedVersions?: Readonly<Record<string, string>>
+  /** True when at least one installed package differs from the pinned version. */
+  readonly outdated?: boolean
 }
 
 /** One fixed-path, syntax-validated Agent user configuration document. */

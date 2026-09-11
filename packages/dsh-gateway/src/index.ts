@@ -945,16 +945,19 @@ export class RemoteAgentGateway extends Service {
       const hostId = RemoteHostId(stringField(params, 'hostId'))
       const host = this.requireHost(hostId)
       const backend = remoteAgentBackend(params['backend'])
+      const upgrade = params['upgrade'] === true
       return this.launchOperation({
         kind,
-        title: `部署 ${backend}`,
-        detail: `已在 ${host.title} 上排队部署 ${backend}。`,
+        title: `${upgrade ? '升级' : '部署'} ${backend}`,
+        detail: `已在 ${host.title} 上排队${upgrade ? '升级' : '部署'} ${backend}。`,
         target: `host:${hostId}:agent:${backend}`,
         hostId,
         backend,
       }, async (report) => {
         report({ phase: 'installing', detail: `正在 ${host.title} 上执行 ${backend} 的官方安装命令。` })
-        await this.callHostd(host, 'agent.install', { backend, confirm: true }, this.config.sshInstallTimeoutMs)
+        await this.callHostd(host, 'agent.install', {
+          backend, confirm: true, ...(params['upgrade'] === true ? { upgrade: true } : {}),
+        }, this.config.sshInstallTimeoutMs)
         report({ phase: 'verifying', detail: `正在验证 ${backend} 安装结果。` })
         report({ phase: 'refreshing', detail: '正在刷新 Agent 库存状态。' })
         const refreshed = await this.refreshHostInventory(this.requireHost(hostId))
@@ -1051,6 +1054,11 @@ export class RemoteAgentGateway extends Service {
           finishedAt: new Date().toISOString(),
         })
       } catch (error) {
+        // The browser sees the translated detail; keep the raw reason in the
+        // server log so a failed deploy/install can actually be diagnosed.
+        process.stderr.write(
+          `threadharbor-gateway: operation failed kind=${input.kind} target=${input.target} error=${errorMessage(error)}\n`,
+        )
         this.updateOperation(operationId, {
           status: 'failed', phase: 'failed', detail: operationFailureDetail(input.kind, error), finishedAt: new Date().toISOString(),
         })

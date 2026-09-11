@@ -106,7 +106,15 @@ function run(command: string, args: readonly string[], timeoutMs: number, stdin?
     }
     child.once('error', (error) => { fail(error) })
     timer = setTimeout(() => {
+      // ssh in the middle of a stalled handshake has been seen to survive
+      // SIGTERM for minutes; every orphan then holds one of sshd's limited
+      // unauthenticated-connection slots (MaxStartups) and slows the next
+      // handshake further. Escalate to SIGKILL after a short grace period.
       child.kill('SIGTERM')
+      const hardKill = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+      }, 2_000)
+      hardKill.unref()
       fail(new Error(`${command} timed out after ${timeoutMs}ms`))
     }, timeoutMs)
     child.once('exit', (code) => {
@@ -222,7 +230,7 @@ export class SshManager {
         '"$node_path" -e \'const major=Number(process.versions.node.split(".")[0]); process.exit(major >= 22 ? 0 : 1)\'',
         'printf \'%s\\n\' "$node_path"',
       ].join('; '),
-    ], this.options.connectTimeoutMs)
+    ], this.handshakeBudgetMs())
     if (probe.code === 255) {
       throw new Error(`unable to connect to the remote host with the configured SSH credentials: ${probe.stderr.trim() || 'ssh exited with status 255'}`)
     }
@@ -237,7 +245,7 @@ export class SshManager {
     const prepare = await run('ssh', [
       ...this.sshArgs(config), this.destination(config),
       `set -eu; channel=${shellQuote(channel)}; release="$HOME/.local/share/threadharbor/$channel/current"; state="$HOME/.local/state/threadharbor/$channel"; mkdir -p "$release" "$state" "$HOME/.config/systemd/user"`,
-    ], this.options.connectTimeoutMs)
+    ], this.handshakeBudgetMs())
     if (prepare.code !== 0) throw new Error('unable to prepare the remote ThreadHarbor user directories')
     const hostdFiles = ['bin.js', 'hold-worker.js'] as const
     for (const [index, file] of hostdFiles.entries()) {
@@ -361,7 +369,9 @@ export class SshManager {
 
   private async scan(config: RemoteSshConfig): Promise<readonly ScanResult[]> {
     const port = String(config.port ?? 22)
-    const scan = await run('ssh-keyscan', ['-T', String(Math.ceil(this.options.connectTimeoutMs / 1000)), '-p', port, config.target], this.options.connectTimeoutMs)
+    // `-T` is ssh-keyscan's per-connection timeout; the scan itself needs a
+    // handshake per key type, so give the whole command the handshake budget.
+    const scan = await run('ssh-keyscan', ['-T', String(Math.ceil(this.handshakeBudgetMs() / 1000)), '-p', port, config.target], this.handshakeBudgetMs())
     const lines = scan.stdout.split('\n').filter(candidate => candidate !== '' && !candidate.startsWith('#'))
     if (scan.code !== 0 || lines.length === 0) throw new Error('unable to scan the SSH host key')
     const results: ScanResult[] = []
@@ -388,6 +398,41 @@ export class SshManager {
     writeFileSync(this.options.knownHostsPath, `${[...existing, entry].join('\n')}\n`, { mode: 0o600 })
   }
 
+  /** Budget for one SSH step that must complete a full handshake plus a
+   *  short remote command. `connectTimeoutMs` bounds only the TCP connect
+   *  (ssh's own `ConnectTimeout`); on a high-latency link (Tailscale via a
+   *  relay was measured at ~1.5 s per round trip) the key exchange and
+   *  authentication alone take ~8 round trips, so the wall-clock budget must
+   *  be several times the connect timeout or every deploy step times out. */
+  private handshakeBudgetMs(): number {
+    return this.options.connectTimeoutMs * 4
+  }
+
+  /** Multiplex every ssh invocation to the same host over one master
+   *  connection (`ControlMaster=auto`). A deploy runs eight or more ssh
+   *  commands; with multiplexing only the first pays the full handshake and
+   *  the rest cost a single round trip — the difference between a deploy
+   *  that finishes in seconds and one that times out on a slow link. The
+   *  live tunnel shares the master too, so a redeploy piggybacks on it.
+   *  Skipped when the socket path would exceed the unix-socket limit. */
+  private muxArgs(config: RemoteSshConfig): string[] {
+    const dir = dirname(this.options.knownHostsPath)
+    // Our own short hash instead of ssh's 40-char `%C`: ssh creates the socket
+    // under a 17-char temporary suffix first, and the whole thing must fit the
+    // ~104-byte unix socket limit (macOS) even under a long DSH_HOME.
+    const hash = createHash('sha256')
+      .update(`${config.user ?? ''}\0${config.target}\0${config.port ?? 22}\0${config.identityFile ?? ''}\0${config.proxyJump ?? ''}`)
+      .digest('hex').slice(0, 16)
+    const controlPath = join(dir, `cm-${hash}`)
+    if (controlPath.length + 18 > 100) return []
+    try {
+      mkdirSync(dir, { recursive: true, mode: 0o700 })
+    } catch {
+      return []
+    }
+    return ['-o', 'ControlMaster=auto', '-o', `ControlPath=${controlPath}`, '-o', 'ControlPersist=120']
+  }
+
   private sshArgs(config: RemoteSshConfig): string[] {
     return [
       '-o', 'BatchMode=yes',
@@ -395,6 +440,10 @@ export class SshManager {
       '-o', `UserKnownHostsFile=${this.options.knownHostsPath}`,
       '-o', `HostKeyAlias=${alias(config)}`,
       '-o', `ConnectTimeout=${Math.ceil(this.options.connectTimeoutMs / 1000)}`,
+      // Keepalives live on whichever connection becomes the mux master, so
+      // every multiplexed session (including the tunnel) inherits them.
+      '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=3',
+      ...this.muxArgs(config),
       ...(config.port === undefined ? [] : ['-p', String(config.port)]),
       ...(config.identityFile === undefined ? [] : ['-i', config.identityFile, '-o', 'IdentitiesOnly=yes']),
       ...(config.proxyJump === undefined ? [] : ['-J', config.proxyJump]),
@@ -411,7 +460,6 @@ export class SshManager {
     if (current !== undefined && current.child.exitCode === null) current.child.kill('SIGTERM')
     const args = [
       ...this.sshArgs(config), '-N', '-o', 'ExitOnForwardFailure=yes',
-      '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=3',
       '-L', `127.0.0.1:${localPort}:127.0.0.1:${this.options.hostdRemotePort}`,
       this.destination(config),
     ]

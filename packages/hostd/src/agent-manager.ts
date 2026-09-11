@@ -416,6 +416,14 @@ export class AgentManager {
         ? 'Install Claude Code and its ACP adapter from npm'
         : 'Install the official Grok Build CLI from npm'
     const conflicts = alreadyInstalled ? [] : await this.npmBinConflicts(backend)
+    const installedVersions = alreadyInstalled ? await this.npmInstalledVersions(packages) : {}
+    const outdated = alreadyInstalled && packages.some((spec) => {
+      const at = spec.lastIndexOf('@')
+      const name = spec.slice(0, at)
+      const pinned = spec.slice(at + 1)
+      const current = installedVersions[name]
+      return current !== undefined && current !== pinned
+    })
     const npmStep = planStep(title, ['npm', 'install', '-g', ...packages].map(quoteDisplay).join(' '))
     const moveSteps = conflicts.map(conflict => planStep(
       `Move the existing '${conflict.binName}' entry (${conflict.description}) out of the npm global bin so the official package can link its own command`,
@@ -427,6 +435,34 @@ export class AgentManager {
       alreadyInstalled,
       requiresConfirmation: true,
       steps: [...moveSteps, npmStep],
+      ...(Object.keys(installedVersions).length === 0 ? {} : { installedVersions }),
+      ...(outdated ? { outdated: true } : {}),
+    }
+  }
+
+  /** Versions of the pinned npm packages currently installed globally, by
+   *  package name. Empty when npm is missing or the query fails — the plan
+   *  then just omits the comparison. */
+  private async npmInstalledVersions(packages: readonly string[]): Promise<Record<string, string>> {
+    const npm = this.npmInstaller()
+    const names = packages.map(spec => spec.slice(0, spec.lastIndexOf('@')))
+    try {
+      const result = await run(npm.command, [...npm.args, 'ls', '-g', '--depth=0', '--json', ...names], 15_000, this.extraBinDirs)
+      const start = result.output.indexOf('{')
+      if (start < 0) return {}
+      const parsed: unknown = JSON.parse(result.output.slice(start))
+      const deps = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? (parsed as { dependencies?: unknown }).dependencies : undefined
+      if (deps === null || typeof deps !== 'object' || Array.isArray(deps)) return {}
+      const versions: Record<string, string> = {}
+      for (const name of names) {
+        const entry = (deps as Record<string, unknown>)[name]
+        const version = entry !== null && typeof entry === 'object' ? (entry as { version?: unknown }).version : undefined
+        if (typeof version === 'string' && version !== '') versions[name] = version
+      }
+      return versions
+    } catch {
+      return {}
     }
   }
 
@@ -438,10 +474,13 @@ export class AgentManager {
    * @param backend - requested agent.
    * @returns the completed plan.
    */
-  async install(backend: RemoteAgentBackend): Promise<RemoteInstallPlan> {
+  async install(backend: RemoteAgentBackend, options: { readonly upgrade?: boolean } = {}): Promise<RemoteInstallPlan> {
     const plan = await this.installPlan(backend)
     if (plan.unavailableReason !== undefined) throw new Error(plan.unavailableReason)
-    if (plan.alreadyInstalled) return plan
+    // An installed Agent is left alone unless the caller asks to upgrade it to
+    // the pinned versions; `npm install -g pkg@ver` / `pip --upgrade` then
+    // replace whatever is on the host.
+    if (plan.alreadyInstalled && options.upgrade !== true) return plan
     if (backend === 'dsh') {
       await this.installDshRuntime()
     } else {

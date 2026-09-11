@@ -400,7 +400,10 @@ export class RemoteAgentHostd {
         return await this.agentManager.installPlan(remoteAgentBackend(request.params['backend'])) as unknown as JsonValue
       case 'agent.install':
         requireInstallConfirmation(request.params['confirm'])
-        return await this.agentManager.install(remoteAgentBackend(request.params['backend'])) as unknown as JsonValue
+        return await this.agentManager.install(
+          remoteAgentBackend(request.params['backend']),
+          { upgrade: request.params['upgrade'] === true },
+        ) as unknown as JsonValue
       case 'agent.config.get':
         return this.agentManager.readConfig(remoteAgentConfigBackend(request.params['backend'])) as unknown as JsonValue
       case 'agent.config.set': {
