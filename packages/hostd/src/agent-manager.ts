@@ -38,7 +38,7 @@ export interface AgentManagerOptions {
 
 const CODEX_PACKAGES = ['@openai/codex@0.150.1', '@agentclientprotocol/codex-acp@1.6.2'] as const
 const GROK_PACKAGES = ['@xai-official/grok@1.0.5'] as const
-const CLAUDE_PACKAGES = ['@anthropic-ai/claude-code@2.1.251', '@agentclientprotocol/claude-agent-acp@0.69.0'] as const
+const CLAUDE_PACKAGES = ['@anthropic-ai/claude-code@2.1.268', '@agentclientprotocol/claude-agent-acp@0.76.0'] as const
 const DSH_PIP_SPEC = 'deepseek-harness-runtime-bin==0.1.1rc1'
 /** Homebrew/PEP 668 blocks bare `pip install --user`; `--break-system-packages` still writes the user scripts dir. */
 const DSH_PIP_ARGS = ['-m', 'pip', 'install', '--user', '--upgrade', '--break-system-packages', DSH_PIP_SPEC] as const
