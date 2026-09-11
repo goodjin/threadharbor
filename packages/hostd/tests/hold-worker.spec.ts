@@ -487,6 +487,102 @@ describe('HoldWorker', () => {
     }
   })
 
+  async function pacedWorker(mode: 'stream' | 'permission' | 'late'): Promise<{ socketPath: string; worker: HoldWorker }> {
+    const root = await mkdtemp(join(tmpdir(), `dsh-hold-paced-${mode}-`))
+    roots.push(root)
+    const socketPath = join(root, 'control.sock')
+    const config: HoldWorkerConfig = {
+      version: 1,
+      holdId: 'hold',
+      generation: 'generation',
+      backend: 'codex',
+      cwd: root,
+      socketPath,
+      journalPath: join(root, 'journal.jsonl'),
+      statePath: join(root, 'state.json'),
+      maxJournalEvents: 50,
+      maxJournalBytes: 100_000,
+      promptTimeoutMs: 100,
+      transport: {
+        kind: 'stdio', command: process.execPath,
+        args: [new URL('./fixtures/fake-acp-paced.mjs', import.meta.url).pathname, join(root, 'requests.txt'), mode],
+      },
+    }
+    const worker = new HoldWorker(config)
+    await worker.start()
+    return { socketPath, worker }
+  }
+
+  async function journalFrames(socketPath: string): Promise<Record<string, unknown>[]> {
+    const page = await send(socketPath, { operation: 'read', afterSeq: 0, generation: 'generation' })
+    if (!page.ok) throw new Error(page.error)
+    const events = (page.result as { events: readonly { frame: unknown }[] }).events
+    return events.map(event => event.frame).filter((frame): frame is Record<string, unknown> =>
+      frame !== null && typeof frame === 'object' && !Array.isArray(frame))
+  }
+  const isTimeoutError = (frame: Record<string, unknown>): boolean =>
+    frame['error'] !== undefined && JSON.stringify(frame['error']).includes('timed out')
+  const completions = (frames: Record<string, unknown>[]): Record<string, unknown>[] =>
+    frames.filter(frame => frame['method'] === '_x.ai/session/prompt_complete')
+
+  it('measures prompt silence, not turn length: a streaming turn far longer than the guard never times out', async () => {
+    const { socketPath, worker } = await pacedWorker('stream')
+    try {
+      expect(await send(socketPath, admission('p1'))).toMatchObject({ ok: true, result: { duplicate: false } })
+      // 8 chunks × 40ms ≈ 320ms of activity against a 100ms guard.
+      await vi.waitFor(async () => {
+        expect(completions(await journalFrames(socketPath))).toHaveLength(1)
+      }, { timeout: 2000, interval: 10 })
+      const frames = await journalFrames(socketPath)
+      expect(frames.some(isTimeoutError)).toBe(false)
+      expect(completions(frames)[0]?.['params']).toMatchObject({ stopReason: 'end_turn' })
+    } finally {
+      await worker.close()
+    }
+  })
+
+  it('pauses the idle guard while a permission request waits on the user', async () => {
+    const { socketPath, worker } = await pacedWorker('permission')
+    try {
+      expect(await send(socketPath, admission('p1'))).toMatchObject({ ok: true, result: { duplicate: false } })
+      await vi.waitFor(async () => {
+        expect((await journalFrames(socketPath)).some(frame => frame['method'] === 'session/request_permission')).toBe(true)
+      }, { timeout: 2000, interval: 10 })
+      // The user takes 3× the guard to answer; the agent is not stalled.
+      await new Promise(resolve => setTimeout(resolve, 300))
+      expect((await journalFrames(socketPath)).some(isTimeoutError)).toBe(false)
+      expect(await send(socketPath, {
+        operation: 'send-frame',
+        frame: { jsonrpc: '2.0', id: 'perm-1', result: { outcome: { outcome: 'selected', optionId: 'allow' } } },
+      })).toMatchObject({ ok: true })
+      await vi.waitFor(async () => {
+        expect(completions(await journalFrames(socketPath))).toHaveLength(1)
+      }, { timeout: 2000, interval: 10 })
+      expect((await journalFrames(socketPath)).some(isTimeoutError)).toBe(false)
+    } finally {
+      await worker.close()
+    }
+  })
+
+  it('journals the real completion when a response arrives after the guard already gave up', async () => {
+    const { socketPath, worker } = await pacedWorker('late')
+    try {
+      expect(await send(socketPath, admission('p1'))).toMatchObject({ ok: true, result: { duplicate: false } })
+      await vi.waitFor(async () => {
+        expect((await journalFrames(socketPath)).some(isTimeoutError)).toBe(true)
+      }, { timeout: 2000, interval: 10 })
+      // 300ms later the agent answers for real: a second, successful completion.
+      await vi.waitFor(async () => {
+        expect(completions(await journalFrames(socketPath))).toHaveLength(2)
+      }, { timeout: 2000, interval: 10 })
+      const [timedOut, real] = completions(await journalFrames(socketPath))
+      expect(timedOut?.['params']).toMatchObject({ stopReason: 'error' })
+      expect(real?.['params']).toMatchObject({ stopReason: 'end_turn' })
+    } finally {
+      await worker.close()
+    }
+  })
+
   it('synthesizes a DSH turn/end timeout frame when the DSH Agent stalls', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-hold-dsh-timeout-'))
     roots.push(root)

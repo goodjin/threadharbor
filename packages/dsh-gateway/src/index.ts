@@ -140,7 +140,12 @@ const RUNNING_CATCHUP_MAX_MS = 5_000
  *  arbitrarily long to answer. This is a backstop above the hold-worker's own
  *  prompt timeout, which normally synthesizes a completion the gateway observes
  *  first. */
-const RUNNING_TURN_IDLE_TIMEOUT_MS = 180_000
+/** Zero journal activity for this long while `running` concludes the turn.
+ *  This is a backstop for a hold that vanished without a completion; the
+ *  hold-worker's own idle guard (`--prompt-timeout-ms`, 30 min of agent
+ *  silence excluding permission waits) is the primary stall detector, so this
+ *  ceiling sits above it. 180 s used to fail healthy long tool calls. */
+const RUNNING_TURN_IDLE_TIMEOUT_MS = 45 * 60_000
 /** How long `session.configure` waits for the backend to acknowledge a
  *  `session/set_config_option` / `set_mode` / `set_model` before giving up. */
 const CONFIG_SWITCH_TIMEOUT_MS = 15_000
@@ -2476,7 +2481,13 @@ export class RemoteAgentGateway extends Service {
             if (current === undefined) return
             const cb = current.binding
             if (cb === undefined || cb.state !== 'active') continue
-            try { await this.applyJournalPage(current, cb, page) } catch { /* swallow */ }
+            try {
+              await this.applyJournalPage(current, cb, page)
+            } catch (error) {
+              process.stderr.write(
+                `threadharbor-gateway: pushed journal page not applied session=${sessionId} ${errorMessage(error)}\n`,
+              )
+            }
           }
         } finally {
           flushing = false
@@ -2520,6 +2531,7 @@ export class RemoteAgentGateway extends Service {
         let nextCatchupAt = performance.now() + catchupDelay
         let lastProgressSeq = liveBinding.lastSeq
         let lastProgressAt = performance.now()
+        let wasActive = false
         while (this.sessionNeedsSync(sessionId) && !lost) {
           await new Promise<void>((resolveWait) => {
             const timer = setTimeout(resolveWait, this.config.pollIntervalMs)
@@ -2530,8 +2542,22 @@ export class RemoteAgentGateway extends Service {
           const active = waiting?.turnState === 'running' || waiting?.turnState === 'waiting-permission'
           // Idle/settled turns need no catchup at all — the push subscription
           // alone keeps a followed idle session current.
-          if (!active) continue
+          if (!active) {
+            wasActive = false
+            continue
+          }
           const now = performance.now()
+          // A turn that just started (idle → running) starts its own silence
+          // clock. The loop outlives turns while a browser follows, so a clock
+          // carried over from the previous turn's tail concluded the new one
+          // "长时间无响应" within a second of the prompt being sent.
+          if (!wasActive) {
+            wasActive = true
+            lastProgressSeq = waiting?.binding?.lastSeq ?? lastProgressSeq
+            lastProgressAt = now
+            catchupDelay = RUNNING_CATCHUP_BASE_MS
+            nextCatchupAt = now + catchupDelay
+          }
           // A newly-projected frame (via push flush or a prior catchup) advanced
           // lastSeq: reset the backoff and the stuck-turn clock so a live
           // streaming turn never trips either.

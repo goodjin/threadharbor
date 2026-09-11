@@ -645,6 +645,42 @@ describe('RemoteAgentGateway', () => {
     }
   })
 
+  it('starts a fresh silence clock per turn while a browser keeps the follow loop alive', async () => {
+    // Session 8ccb9aa7 live: the follow loop had outlived an earlier turn (a
+    // browser was following), so its stale "last progress" timestamp concluded
+    // the *next* prompt as 长时间无响应 one second after it was sent.
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', method: '_x.ai/session/prompt_complete', params: { stopReason: 'end_turn' } },
+    ]
+    const { ctx, gateway } = await harness(events, { runningTurnIdleTimeoutMs: 200 })
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4361' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      const browser = makeBrowserSocket()
+      gateway.registerBrowserForTesting(browser as unknown as WebSocket, 'alice')
+      await gateway.dispatch(request('session.follow', { browserId: 'alice', sessionId: session.sessionId }))
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState).toBe('idle')
+      // Let the followed-but-idle loop sit well past the ceiling.
+      await new Promise(resolve => setTimeout(resolve, 500))
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'r-late', text: 'again',
+      }))
+      await new Promise(resolve => setTimeout(resolve, 80))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState).toBe('running')
+      // With no journal activity at all the ceiling still applies — from the
+      // prompt, not from the previous turn.
+      await vi.waitFor(() => {
+        const s = gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)
+        if (s?.turnState !== 'failed') throw new Error(`turn state ${s?.turnState ?? 'missing'}`)
+      }, { timeout: 2000, interval: 25 })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('catalogues an SSH host immediately and keeps it after a failed background deploy', async () => {
     const { ctx, gateway } = await harness()
     try {

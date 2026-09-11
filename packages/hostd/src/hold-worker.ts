@@ -169,6 +169,14 @@ export class HoldWorker {
   private closeTask: Promise<void> | undefined
   private readonly admissions = new Set<string>()
   private readonly requests = new Map<string, { method: string; sessionId?: string }>()
+  /** Prompts the idle guard already gave up on. Their real response can still
+   *  arrive later (a turn that merely took long); it is then journaled as a
+   *  normal completion so the gateway can leave `failed`. */
+  private readonly timedOutPrompts = new Set<string>()
+  /** Backend → client requests (permission prompts, elicitations) still
+   *  awaiting our answer. While any is outstanding the agent is waiting on
+   *  the user, not stalled, so the prompt idle guard is paused. */
+  private readonly pendingBackendRequests = new Set<string>()
   private readonly promptQueue: JsonValue[] = []
   private promptActive = false
   private readonly waiters = new Set<{
@@ -382,9 +390,21 @@ export class HoldWorker {
     const record = frame !== null && typeof frame === 'object' && !Array.isArray(frame) ? frame : undefined
     const id = record?.['id']
     const rpcId = typeof id === 'string' || typeof id === 'number' ? String(id) : undefined
+    const isResponse = record !== undefined && record['method'] === undefined
+      && (Object.hasOwn(record, 'result') || Object.hasOwn(record, 'error'))
+    // A request from the backend (permission / elicitation) parks the turn on
+    // the user; it must not count as agent silence.
+    if (record !== undefined && rpcId !== undefined && typeof record['method'] === 'string') {
+      this.pendingBackendRequests.add(rpcId)
+    }
+    // Any frame from the backend proves the agent is alive: restart the idle clock.
+    this.touchPromptActivity()
     const request = rpcId === undefined ? undefined : this.requests.get(rpcId)
-    if (request !== undefined && record !== undefined && record['method'] === undefined
-      && (Object.hasOwn(record, 'result') || Object.hasOwn(record, 'error'))) {
+    // The response to a prompt the idle guard already concluded: still a real
+    // turn completion, so journal it and let the gateway recover from `failed`.
+    const lateResponse = request === undefined && rpcId !== undefined && isResponse && this.timedOutPrompts.has(rpcId)
+    if (lateResponse && rpcId !== undefined) this.timedOutPrompts.delete(rpcId)
+    if (request !== undefined && isResponse) {
       if (rpcId !== undefined) {
         this.requests.delete(rpcId)
         if (request.method === 'session/prompt') this.clearPromptTimeout()
@@ -400,9 +420,7 @@ export class HoldWorker {
       }
     }
     const journaled = this.journalFrames(this.coalescer.push(frame))
-    const isPromptResponse = request?.method === 'session/prompt'
-      && record !== undefined && record['method'] === undefined
-      && (Object.hasOwn(record, 'result') || Object.hasOwn(record, 'error'))
+    const isPromptResponse = (request?.method === 'session/prompt' && isResponse) || lateResponse
     // A prompt response ends the turn whether it carries `result` OR `error`.
     // Synthesize the backend-native completion frame for both so the gateway
     // flips turnState out of `running`. Previously an error response (e.g. a
@@ -410,13 +428,17 @@ export class HoldWorker {
     // promptActive without journaling a completion, stranding the browser on
     // “正在创建远程会话 / running” until the 75s client timeout. This mirrors the
     // prompt-timeout path, which already synthesizes a completion from an error.
-    const synthesizedCompletion = isPromptResponse
-      ? this.synthesizePromptCompletion(request, record)
+    const synthesizedCompletion = isPromptResponse && record !== undefined
+      ? this.synthesizePromptCompletion(request ?? { method: 'session/prompt' }, record)
       : undefined
     if (synthesizedCompletion !== undefined) {
       this.journalFrames([synthesizedCompletion])
-      this.promptActive = false
-      this.drainPromptQueue()
+      // A late response belongs to a prompt the queue already moved past; the
+      // currently admitted prompt (if any) keeps its slot.
+      if (!lateResponse) {
+        this.promptActive = false
+        this.drainPromptQueue()
+      }
     } else if (!isPromptResponse && this.completesPrompt(record)) {
       this.promptActive = false
       this.drainPromptQueue()
@@ -609,6 +631,11 @@ export class HoldWorker {
         ...(typeof paramsRecord?.['sessionId'] === 'string' ? { sessionId: paramsRecord['sessionId'] } : {}),
       })
       if (method === 'session/prompt') this.armPromptTimeout(String(id))
+    } else if (record !== undefined && (typeof id === 'string' || typeof id === 'number') && method === undefined) {
+      // Our answer to a backend request (permission grant etc.): the agent is
+      // working again, so the idle guard resumes from now.
+      this.pendingBackendRequests.delete(String(id))
+      this.touchPromptActivity()
     }
     this.logFrame('out', frame)
     const line = jsonLine(frame)
@@ -621,13 +648,34 @@ export class HoldWorker {
   }
 
   /** Start the wall-clock guard for a single in-flight session/prompt. */
+  /** Start the *idle* guard for a single in-flight session/prompt. The clock
+   *  measures silence from the backend, not the turn's total length: every
+   *  inbound frame restarts it (`touchPromptActivity`) and it is paused while
+   *  a permission / elicitation request awaits the user. A 10-minute total
+   *  cap used to mark a healthy hour-long Claude turn as failed and then
+   *  discard its real completion. */
   private armPromptTimeout(rpcId: string): void {
     this.clearPromptTimeout()
+    this.pendingBackendRequests.clear()
     this.currentPromptRpcId = rpcId
+    this.schedulePromptTimer()
+  }
+
+  private schedulePromptTimer(): void {
+    if (this.currentPromptTimer !== undefined) {
+      clearTimeout(this.currentPromptTimer)
+      this.currentPromptTimer = undefined
+    }
+    const rpcId = this.currentPromptRpcId
+    if (rpcId === undefined || this.pendingBackendRequests.size > 0) return
     this.currentPromptTimer = setTimeout(() => {
       this.currentPromptTimer = undefined
       this.timeoutPrompt(rpcId)
     }, this.config.promptTimeoutMs)
+  }
+
+  private touchPromptActivity(): void {
+    if (this.currentPromptRpcId !== undefined) this.schedulePromptTimer()
   }
 
   /** Cancel the wall-clock guard if one is armed. Safe to call when no prompt is in flight. */
@@ -650,7 +698,8 @@ export class HoldWorker {
     const request = this.requests.get(rpcId)
     this.currentPromptRpcId = undefined
     this.requests.delete(rpcId)
-    const reason = `prompt timed out after ${this.config.promptTimeoutMs}ms`
+    this.timedOutPrompts.add(rpcId)
+    const reason = `prompt timed out after ${this.config.promptTimeoutMs}ms of agent silence`
     const errorResponse: JsonValue = {
       jsonrpc: '2.0', id: rpcId, error: { code: -32000, message: reason },
     }
