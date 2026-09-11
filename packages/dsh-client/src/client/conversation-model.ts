@@ -422,7 +422,18 @@ export function shouldAutoApprovePermissions(
     || permissionMode === 'full-access'
 }
 
-/** Pick the option that matches the current skip/auto setting, then the first option. */
+/** Whether a permission option denies the request. Claude ACP lists `Deny`
+ *  first (`reject_once`), so "first option" is never a safe default. */
+function isRejectOption(option: ChoiceOption): boolean {
+  if (option.kind !== undefined) return option.kind.startsWith('reject')
+  return /^(reject|deny|cancel|no)\b/i.test(option.id) || /^(deny|reject|no\b)/i.test(option.label)
+}
+
+/** Pick the option an auto-approval should answer with: the mode the user
+ *  chose (bypass / auto) when the prompt offers it, else a one-off allow
+ *  (`allow_once`, no durable policy change), else a durable allow, else any
+ *  non-denying option. Never a deny — returns `undefined` when denying is the
+ *  only choice so the card stays for the user. */
 export function autoApproveOptionId(
   prompt: ChoicePrompt | undefined,
   preferences: { readonly approvalChoice?: string; readonly permissionMode?: string } = {},
@@ -438,7 +449,23 @@ export function autoApproveOptionId(
     const match = options.find(option => option.id === id)
     if (match !== undefined) return match.id
   }
-  return options[0]?.id
+  const allowed = options.filter(option => !isRejectOption(option))
+  return allowed.find(option => option.kind === 'allow_once')?.id
+    ?? allowed.find(option => option.kind === 'allow_always')?.id
+    ?? allowed[0]?.id
+}
+
+/** Session modes the backend itself runs without permission prompts. When
+ *  the agent is in one of these, any prompt that still arrives (e.g. a plan
+ *  exit) can be answered on the user's behalf. */
+const AUTO_APPROVE_MODE_IDS: ReadonlySet<string> = new Set(['bypassPermissions', 'agent-full-access', 'full-access'])
+
+/** Whether the backend-advertised permission mode already means "skip confirmations". */
+export function configuredModeAutoApproves(
+  configOptions: readonly { readonly id: string; readonly category?: string; readonly currentValue: string }[] | undefined,
+): boolean {
+  const mode = configOptions?.find(option => option.category === 'mode' || option.id === 'mode')
+  return mode !== undefined && AUTO_APPROVE_MODE_IDS.has(mode.currentValue)
 }
 
 /** Latest permission row, used both for the waiting banner and the pinned card. */
@@ -481,6 +508,8 @@ export interface ChoiceOption {
   readonly id: string
   readonly label: string
   readonly description?: string
+  /** ACP permission option kind (`allow_once`, `allow_always`, `reject_once`, `reject_always`). */
+  readonly kind?: string
 }
 
 export interface ChoiceQuestion {
@@ -584,7 +613,12 @@ function parsePermissionPrompt(params: Record<string, unknown> | undefined, fall
     if (id === undefined) return []
     const label = recordText(option?.['name']) ?? recordText(option?.['kind']) ?? id
     const description = recordText(recordObject(recordObject(option?.['_meta'])?.['permission'])?.['description'])
-    return [{ id, label, ...(description === undefined ? {} : { description }) } satisfies ChoiceOption]
+    const kind = recordText(option?.['kind'])
+    return [{
+      id, label,
+      ...(description === undefined ? {} : { description }),
+      ...(kind === undefined ? {} : { kind }),
+    } satisfies ChoiceOption]
   })
   return {
     kind: 'permission',

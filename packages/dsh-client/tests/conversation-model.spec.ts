@@ -7,7 +7,7 @@ import {
   conversationPresentation, conversationStage, conversationStatsGroups, deriveConversationStats,
   formatCacheHitPercent, formatCompactDuration, formatTokenCount,
   isAutoApprovablePermission, isNearScrollBottom, mergeTranscriptEntries, parseChoicePrompt, parsePlanItems,
-  autoApproveOptionId, pendingPermissionEntry, permissionRequestId, preferredProjectBackend,
+  autoApproveOptionId, configuredModeAutoApproves, pendingPermissionEntry, permissionRequestId, preferredProjectBackend,
   shouldAutoApprovePermissions, shouldPinPendingPermission, toolDisclosurePresentation,
 } from '../src/client/conversation-model.ts'
 
@@ -140,6 +140,47 @@ describe('remote conversation view model', () => {
     expect(shouldAutoApprovePermissions('ask', 'bypass')).toBe(true)
     expect(shouldAutoApprovePermissions('ask', 'full-access')).toBe(true)
     expect(shouldAutoApprovePermissions('ask', 'edit')).toBe(false)
+  })
+
+  it('never auto-answers a Claude tool prompt with Deny, even though Deny is listed first', () => {
+    const prompt = parseChoicePrompt({
+      ...entry('109', 'permission', 'permission', '等待权限确认'),
+      requestId: '0',
+      nativeFrame: {
+        jsonrpc: '2.0', id: 0, method: 'session/request_permission',
+        params: {
+          toolCall: { title: 'git fetch origin dev' },
+          options: [
+            { kind: 'reject_once', name: 'Deny', optionId: 'reject' },
+            { kind: 'allow_once', name: 'Allow Once', optionId: 'allow' },
+            { kind: 'allow_always', name: 'Always Allow', optionId: 'allow_always' },
+          ],
+        },
+      },
+    })
+    expect(prompt?.questions[0]?.options.map(option => option.kind)).toEqual(['reject_once', 'allow_once', 'allow_always'])
+    // "跳过确认" offers no bypassPermissions option here → one-off allow, no durable rule.
+    expect(autoApproveOptionId(prompt, { permissionMode: 'bypass' })).toBe('allow')
+    expect(autoApproveOptionId(prompt, { approvalChoice: 'auto' })).toBe('allow')
+    expect(autoApproveOptionId(prompt)).toBe('allow')
+    const denyOnly = parseChoicePrompt({
+      ...entry('110', 'permission', 'permission', '等待权限确认'),
+      nativeFrame: { jsonrpc: '2.0', id: 1, method: 'session/request_permission', params: {
+        options: [{ kind: 'reject_once', name: 'Deny', optionId: 'reject' }],
+      } },
+    })
+    expect(autoApproveOptionId(denyOnly, { permissionMode: 'bypass' })).toBeUndefined()
+    // Older adapters omit `kind`; fall back to the id / label.
+    const unkinded = parseChoicePrompt({
+      ...entry('111', 'permission', 'permission', '等待权限确认'),
+      nativeFrame: { jsonrpc: '2.0', id: 2, method: 'session/request_permission', params: {
+        options: [{ name: 'Deny', optionId: 'deny' }, { name: 'Yes', optionId: 'yes' }],
+      } },
+    })
+    expect(autoApproveOptionId(unkinded, { permissionMode: 'bypass' })).toBe('yes')
+    expect(configuredModeAutoApproves([{ id: 'mode', category: 'mode', currentValue: 'bypassPermissions' }])).toBe(true)
+    expect(configuredModeAutoApproves([{ id: 'mode', category: 'mode', currentValue: 'default' }])).toBe(false)
+    expect(configuredModeAutoApproves(undefined)).toBe(false)
   })
 
   it('picks bypassPermissions when skip-confirm is on, and pins a scrolled-away card', () => {
