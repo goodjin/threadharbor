@@ -1330,6 +1330,12 @@
 }
 
 .permissionCard,
+.choiceAnswered {
+  align-self: center;
+  font-size: 12px;
+  color: var(--dsw-alias-text-tertiary, #888);
+}
+
 .choiceCard,
 .planCard {
   padding: 14px;

@@ -74,11 +74,15 @@ function PlanCard({ items }: { items: readonly { content: string; status: string
   )
 }
 
-function ChoiceCard({ prompt, pending, onSubmit }: {
+function ChoiceCard({ prompt, pending, answered = false, onSubmit }: {
   prompt: ChoicePrompt
   pending: boolean
+  /** The request was already answered (or superseded): keep the card as a
+   *  record but never let it be clicked again. */
+  answered?: boolean
   onSubmit: (outcome: JsonValue) => void
 }) {
+  const locked = pending || answered
   const immediate = prompt.questions.length <= 1 && prompt.questions[0]?.multiSelect !== true
   const [answers, setAnswers] = useState<Record<string, string | readonly string[]>>({})
   const toggle = (questionId: string, optionId: string, multiSelect: boolean): void => {
@@ -110,7 +114,7 @@ function ChoiceCard({ prompt, pending, onSubmit }: {
                   key={option.id}
                   size="sm"
                   variant={active ? 'primary' : 'outline'}
-                  disabled={pending}
+                  disabled={locked}
                   title={option.description}
                   onClick={() => {
                     if (immediate) onSubmit(choiceSubmitOutcome(prompt, { [question.id]: option.id }))
@@ -124,13 +128,14 @@ function ChoiceCard({ prompt, pending, onSubmit }: {
       ))}
       <div className={css.permissionActions}>
         {!immediate && (
-          <Button size="sm" variant="primary" disabled={pending || !ready} onClick={() => {
+          <Button size="sm" variant="primary" disabled={locked || !ready} onClick={() => {
             onSubmit(choiceSubmitOutcome(prompt, answers))
           }}>{pending ? '提交中…' : '提交选择'}</Button>
         )}
-        <Button size="sm" variant="ghost" disabled={pending} onClick={() => {
+        <Button size="sm" variant="ghost" disabled={locked} onClick={() => {
           onSubmit(choiceCancelOutcome(prompt))
         }}>{pending ? '提交中…' : prompt.kind === 'question' ? '跳过' : '拒绝'}</Button>
+        {answered && !pending && <span className={css.choiceAnswered}>已处理</span>}
       </div>
     </article>
   )
@@ -315,13 +320,15 @@ function SessionIdChip({ sessionId }: { sessionId: string }) {
   )
 }
 
-function TranscriptRow({ node, active, onPermission, onResend, resendDisabled = false, permissionPending = false }: {
+function TranscriptRow({ node, active, onPermission, onResend, resendDisabled = false, permissionPending = false, permissionAnswered = false }: {
   node: RemoteTranscriptNode
   active: boolean
   onPermission: (requestId: string, outcome: JsonValue) => void
   onResend?: (text: string) => void
   resendDisabled?: boolean
   permissionPending?: boolean
+  /** Not the request the Agent is currently waiting on: render read-only. */
+  permissionAnswered?: boolean
 }) {
   if (node.kind === 'tool') return <ToolNode node={node} active={active} />
   const entry = node.entry
@@ -342,6 +349,7 @@ function TranscriptRow({ node, active, onPermission, onResend, resendDisabled = 
       <ChoiceCard
         prompt={prompt}
         pending={permissionPending}
+        answered={permissionAnswered}
         onSubmit={(outcome) => { onPermission(requestId, outcome) }}
       />
     )
@@ -2596,6 +2604,17 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
       .catch(() => undefined)
       .finally(() => { setSessionAction(current => current === action ? undefined : current) })
   }
+  /** A choice card stays clickable only while it is the request the Agent is
+   *  waiting on and this browser has not answered it yet. Everything else
+   *  (earlier requests, one already submitted, a turn that moved on) is a
+   *  read-only record — clicking it again would only produce a stray answer. */
+  const isPermissionAnswered = (entry: RemoteTranscriptEntry): boolean => {
+    const requestId = permissionRequestId(entry)
+    if (requestId === undefined) return true
+    if (answeredPermissionsRef.current.has(`permission:${session.sessionId}:${requestId}`)) return true
+    if (session.turnState !== 'waiting-permission') return true
+    return pendingPermission?.transcriptId !== entry.transcriptId
+  }
   const submitPermission = (requestId: string, outcome: JsonValue): void => {
     if (sessionAction !== undefined) return
     const action = `permission:${session.sessionId}:${requestId}`
@@ -2751,6 +2770,8 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
                 active={index === transcript.length - 1 && session.turnState === 'running'}
                 permissionPending={node.kind === 'entry' && permissionRequestId(node.entry) !== undefined
                   && sessionAction === `permission:${session.sessionId}:${permissionRequestId(node.entry)}`}
+                permissionAnswered={node.kind === 'entry' && node.entry.role === 'permission'
+                  && isPermissionAnswered(node.entry)}
                 resendDisabled={actions?.canResend !== true || sessionAction !== undefined}
                 onPermission={submitPermission}
                 onResend={resend}
@@ -2782,6 +2803,7 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
                 active={false}
                 permissionPending={permissionRequestId(pendingPermission) !== undefined
                   && sessionAction === `permission:${session.sessionId}:${permissionRequestId(pendingPermission)}`}
+                permissionAnswered={isPermissionAnswered(pendingPermission)}
                 resendDisabled
                 onPermission={submitPermission}
               />
