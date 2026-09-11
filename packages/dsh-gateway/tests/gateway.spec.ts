@@ -788,12 +788,35 @@ describe('RemoteAgentGateway', () => {
       const third = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'third', backend: 'codex' })) as unknown as { sessionId: string }
 
       const state = gateway.state()
-      // Most-recently created (largest `updatedAt`) must be first so the sidebar
-      // shows the just-created session at the top instead of at the bottom.
+      // Most-recently created must be first so the sidebar shows the
+      // just-created session at the top instead of at the bottom.
       expect(state.sessions.map(session => session.sessionId)).toEqual([
         RemoteSessionId(third.sessionId),
         RemoteSessionId(second.sessionId),
         RemoteSessionId(first.sessionId),
+      ])
+      // Sending to the oldest session moves it up: the user's own send is the
+      // only thing that reorders the list.
+      await waitForSessionBinding(gateway, first.sessionId)
+      await new Promise(resolve => setTimeout(resolve, 5))
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: first.sessionId, clientId: 'browser', requestId: 'r-first', text: 'again',
+      }))
+      expect(gateway.state().sessions.map(session => session.sessionId)).toEqual([
+        RemoteSessionId(first.sessionId),
+        RemoteSessionId(third.sessionId),
+        RemoteSessionId(second.sessionId),
+      ])
+      // Agent-side activity on another session (journal catch-up, view
+      // writes) bumps its `updatedAt` but must not shuffle the list.
+      await waitForSessionBinding(gateway, second.sessionId)
+      await new Promise(resolve => setTimeout(resolve, 5))
+      await gateway.dispatch(request('events.read', { sessionId: second.sessionId }))
+      await gateway.dispatch(request('session.rename', { sessionId: second.sessionId, title: 'renamed' }))
+      expect(gateway.state().sessions.map(session => session.sessionId)).toEqual([
+        RemoteSessionId(first.sessionId),
+        RemoteSessionId(third.sessionId),
+        RemoteSessionId(second.sessionId),
       ])
     } finally {
       await ctx.fiber.dispose()

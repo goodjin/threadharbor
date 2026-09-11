@@ -659,6 +659,7 @@ function parseSession(value: JsonValue): RemoteSessionView {
   const parentSessionId = optionalText(record, 'parentSessionId')
   const nativeSessionId = binding === undefined ? undefined : optionalText(binding, 'nativeSessionId')
   const archivedAt = optionalText(record, 'archivedAt')
+  const lastPromptAt = optionalText(record, 'lastPromptAt')
   const configOptions = parseConfigOptions(record['configOptions'])
   return {
     sessionId: RemoteSessionId(stringField(record, 'sessionId')),
@@ -672,6 +673,7 @@ function parseSession(value: JsonValue): RemoteSessionView {
     updatedAt: stringField(record, 'updatedAt'),
     ...(record['latestTranscriptSeq'] === undefined ? {} : { latestTranscriptSeq: seqField(record, 'latestTranscriptSeq') }),
     ...(archivedAt === undefined ? {} : { archivedAt }),
+    ...(lastPromptAt === undefined ? {} : { lastPromptAt }),
     ...(configOptions === undefined ? {} : { configOptions }),
     ...(binding === undefined ? {} : {
       binding: {

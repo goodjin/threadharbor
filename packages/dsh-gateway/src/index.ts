@@ -240,17 +240,18 @@ function optionalNonNegativeInteger(record: Record<string, JsonValue>, key: stri
  *  the original `sessionIds` order so two sessions stamped in the same
  *  millisecond stay stable. `Array.prototype.sort` is stable, so the chained
  *  compares act as a deterministic tiebreaker chain. */
+/** Sidebar order: most recently *prompted* first. `updatedAt` is bumped by
+ *  every state write (streaming, reconnects, setting switches, journal
+ *  catch-ups), so sorting on it made the list reshuffle while Agents worked.
+ *  Only the user's own sends (`lastPromptAt`, falling back to creation for
+ *  sessions that predate the field) move a session. */
 function sortSessionsByRecencyDesc(
   left: RemoteSessionView,
   right: RemoteSessionView,
 ): number {
-  const leftUpdated = left.updatedAt
-  const rightUpdated = right.updatedAt
-  if (leftUpdated !== undefined && rightUpdated !== undefined && leftUpdated !== rightUpdated) {
-    return leftUpdated < rightUpdated ? 1 : -1
-  }
-  if (leftUpdated === undefined && rightUpdated !== undefined) return 1
-  if (rightUpdated === undefined && leftUpdated !== undefined) return -1
+  const leftPrompted = left.lastPromptAt ?? left.createdAt
+  const rightPrompted = right.lastPromptAt ?? right.createdAt
+  if (leftPrompted !== rightPrompted) return leftPrompted < rightPrompted ? 1 : -1
   const leftCreated = left.createdAt
   const rightCreated = right.createdAt
   if (leftCreated !== rightCreated) return leftCreated < rightCreated ? 1 : -1
@@ -1795,8 +1796,9 @@ export class RemoteAgentGateway extends Service {
     const frame = current.backend === 'dsh'
       ? { jsonrpc: '2.0', id: requestId, method: 'session/prompt', params: { sessionId: nativeSessionId, contentBlocks: [{ type: 'text', text }] } }
       : { jsonrpc: '2.0', id: requestId, method: 'session/prompt', params: { sessionId: nativeSessionId, prompt: [{ type: 'text', text }] } }
+    const now = new Date().toISOString()
     const running: RemoteSessionView = {
-      ...current, turnState: 'running', channelState: 'open', updatedAt: new Date().toISOString(),
+      ...current, turnState: 'running', channelState: 'open', updatedAt: now, lastPromptAt: now,
     }
     await this.requireTables().sessions.put(session.sessionId, running)
     this.broadcastSessionView(running)

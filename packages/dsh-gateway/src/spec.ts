@@ -87,6 +87,7 @@ const sessionRecord = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
   archivedAt: z.string().optional(),
+  lastPromptAt: z.string().optional(),
   binding: binding.optional(),
   /** Highest seq that has been rotated out of the projected transcript.
    *  Absent when the session has never been trimmed. */

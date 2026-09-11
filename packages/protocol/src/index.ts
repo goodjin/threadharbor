@@ -283,6 +283,10 @@ export interface RemoteSessionView {
   readonly latestTranscriptSeq?: number
   /** Archived sessions stay durable but are omitted from the normal browser projection. */
   readonly archivedAt?: string
+  /** When the user last sent a message to this session. Drives sidebar order:
+   *  only the user's own sends move a session, never Agent output, reconnects
+   *  or setting switches (those bump `updatedAt`). */
+  readonly lastPromptAt?: string
   readonly binding?: RemoteSessionBinding
   /** Highest seq the gateway once held but has since rotated out of the
    *  projected transcript. Present only when entries have been trimmed; the
