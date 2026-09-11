@@ -13,7 +13,7 @@ import type { ConvOwnerProps } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {
   JsonValue, RemoteAgentBackend, RemoteAgentConfigBackend, RemoteAgentConfigDocument, RemoteAuthChallenge,
   RemoteDirectoryListing, RemoteHostView, RemoteInstallPlan, RemoteOperationView, RemoteProjectView, RemoteSshConfig,
-  RemoteSessionView, RemoteSshInspection, RemoteTranscriptEntry,
+  RemoteSessionConfigOption, RemoteSessionView, RemoteSshInspection, RemoteTranscriptEntry,
 } from '@threadharbor/protocol'
 import { RemoteHostId, RemoteProjectId, RemoteSessionId, isRemoteBackendSessionReady } from '@threadharbor/protocol'
 import {
@@ -24,7 +24,7 @@ import {
 } from './store.ts'
 import {
   autoApproveOptionId, browsableDirectories, buildTranscriptNodes, choiceCancelOutcome, choiceSubmitOutcome,
-  conversationPresentation,
+  configuredModeAutoApproves, conversationPresentation,
   isAutoApprovablePermission, isNearScrollBottom, parseChoicePrompt, parsePlanItems, pendingPermissionEntry,
   permissionRequestId, preferredProjectBackend, shouldAutoApprovePermissions, shouldPinPendingPermission,
   toolDisclosurePresentation,
@@ -1065,13 +1065,19 @@ const SESSION_OPTION_SPECS: Record<RemoteAgentBackend, readonly SessionOptionSpe
     {
       key: 'model', label: '模型', title: '模型',
       options: [
+        // Fallback only: once the agent announces its own model list
+        // (`session.configOptions`) the composer shows that instead.
         { value: 'default', label: '默认' },
-        { value: 'sonnet', label: 'sonnet' },
         { value: 'opus', label: 'opus' },
-        { value: 'claude-sonnet-4-6', label: 'claude-sonnet-4-6' },
+        { value: 'sonnet', label: 'sonnet' },
+        { value: 'haiku', label: 'haiku' },
+        { value: 'claude-fable-5-1', label: 'claude-fable-5-1' },
+        { value: 'claude-opus-5', label: 'claude-opus-5' },
+        { value: 'claude-sonnet-5', label: 'claude-sonnet-5' },
+        { value: 'claude-opus-4-8', label: 'claude-opus-4-8' },
         { value: 'claude-opus-4-6', label: 'claude-opus-4-6' },
-        { value: 'claude-sonnet-4-5-20250929', label: 'claude-sonnet-4-5' },
-        { value: 'claude-haiku-4-5-20251001', label: 'claude-haiku-4-5' },
+        { value: 'claude-sonnet-4-6', label: 'claude-sonnet-4-6' },
+        { value: 'claude-haiku-4-5', label: 'claude-haiku-4-5' },
       ],
     },
     {
@@ -1185,6 +1191,101 @@ function sessionPreferencesKey(hostId: string, backend: RemoteAgentBackend): str
   return `${hostId}-${backend}`
 }
 
+/** Backend-advertised settings the user picked, remembered per host+backend
+ *  so the next session on that agent starts the same way. Keyed like
+ *  `sessionPreferencesKey`; values are `{ [configId]: value }`. */
+const SESSION_CONFIG_STORAGE_KEY = 'dsh.remote-agent.session-config'
+
+function readPersistedSessionConfig(): Record<string, Record<string, string>> {
+  if (typeof window === 'undefined') return {}
+  try {
+    const raw = window.localStorage.getItem(SESSION_CONFIG_STORAGE_KEY)
+    if (raw === null) return {}
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
+    return parsed as Record<string, Record<string, string>>
+  } catch {
+    return {}
+  }
+}
+
+function rememberSessionConfig(hostKey: string, configId: string, value: string): void {
+  if (typeof window === 'undefined') return
+  try {
+    const current = readPersistedSessionConfig()
+    const next = { ...current, [hostKey]: { ...current[hostKey], [configId]: value } }
+    window.localStorage.setItem(SESSION_CONFIG_STORAGE_KEY, JSON.stringify(next))
+  } catch {
+    // ignore quota / disabled storage
+  }
+}
+
+const CONFIG_CATEGORY_LABELS: Record<string, string> = {
+  mode: '权限', model: '模型', thought_level: '思考', model_config: '加速',
+}
+
+/** Chinese labels for the mode ids Claude / Codex ACP advertise; other values
+ *  show the agent's own name. */
+const CONFIG_MODE_LABELS: Record<string, string> = {
+  'default': '询问',
+  'acceptEdits': '自动接受编辑',
+  'bypassPermissions': '跳过确认',
+  'dontAsk': '不询问',
+  'auto': '自动判定',
+  'plan': '计划',
+  'read-only': '只读',
+  'agent': '工作区',
+  'agent-full-access': '完全访问',
+}
+
+function configOptionLabel(option: RemoteSessionConfigOption): string {
+  if (option.category !== undefined && option.category !== 'model_config') {
+    return CONFIG_CATEGORY_LABELS[option.category] ?? option.name
+  }
+  return option.name === 'Fast mode' ? '加速' : option.name
+}
+
+function configChoiceLabel(option: RemoteSessionConfigOption, value: string, name: string): string {
+  if (option.category === 'mode' || option.id === 'mode') return CONFIG_MODE_LABELS[value] ?? name
+  return name
+}
+
+/** Translate the static composer preferences (kept for agents that never
+ *  announce settings) into the backend's own option values, so a "跳过确认"
+ *  chosen before the agent spoke still takes effect once it does. */
+function legacyConfigTargets(backend: RemoteAgentBackend, preferences: SessionPreferences): Record<string, string> {
+  const targets: Record<string, string> = {}
+  if (backend === 'claude') {
+    const mode = preferences.collaborationMode === 'plan' ? 'plan'
+      : ({ ask: 'default', edit: 'acceptEdits', bypass: 'bypassPermissions' } as Record<string, string>)[preferences.permissionMode]
+    if (mode !== undefined) targets['mode'] = mode
+    if (preferences.model !== 'default') targets['model'] = preferences.model
+  } else if (backend === 'codex') {
+    const mode = ({ 'read-only': 'read-only', 'workspace-write': 'agent', 'full-access': 'agent-full-access' } as Record<string, string>)[preferences.permissionMode]
+    if (mode !== undefined) targets['mode'] = mode
+    if (preferences.model !== 'default' && preferences.thinking !== 'auto') targets['model'] = `${preferences.model}[${preferences.thinking}]`
+  }
+  return targets
+}
+
+/** Settings to push to a freshly announced agent: what the user last picked
+ *  on this host+backend, else the static preferences translated. Only values
+ *  the agent actually offers, and only where they differ from its current one. */
+function pendingConfigSwitches(
+  hostKey: string | undefined,
+  backend: RemoteAgentBackend,
+  preferences: SessionPreferences,
+  options: readonly RemoteSessionConfigOption[],
+): { readonly configId: string; readonly value: string }[] {
+  const remembered = hostKey === undefined ? {} : readPersistedSessionConfig()[hostKey] ?? {}
+  const desired = { ...legacyConfigTargets(backend, preferences), ...remembered }
+  return options.flatMap((option) => {
+    const value = desired[option.id]
+    if (value === undefined || value === option.currentValue) return []
+    return option.options.some(choice => choice.value === value) ? [{ configId: option.id, value }] : []
+  })
+}
+
 function resolveSessionPreferences(
   backend: RemoteAgentBackend,
   memory: Record<string, SessionPreferences>,
@@ -1197,12 +1298,38 @@ function resolveSessionPreferences(
   return normalizeSessionPreferences(backend, fromSession ?? fromHost ?? defaultSessionPreferences(backend))
 }
 
-function SessionControls({ backend, preferences, disabled, onChange }: {
+function SessionControls({ backend, preferences, disabled, onChange, configOptions, onConfigure }: {
   backend: RemoteAgentBackend
   preferences: SessionPreferences
   disabled?: boolean
   onChange: (preferences: SessionPreferences) => void
+  /** Settings the running agent announced; when present they replace the static specs. */
+  configOptions?: readonly RemoteSessionConfigOption[] | undefined
+  onConfigure?: (configId: string, value: string) => void
 }) {
+  if (configOptions !== undefined && configOptions.length > 0 && onConfigure !== undefined) {
+    return (
+      <div className={css.sessionControls} aria-label={`${backend} 会话选项`}>
+        <span className={css.sessionControlsIcon} title="会话选项（由远程 Agent 提供）"><IconEnhanceOutline16 /></span>
+        {configOptions.map(option => (
+          <label key={option.id} className={css.sessionControl} title={option.description ?? option.name}>
+            <span>{configOptionLabel(option)}</span>
+            <select
+              value={option.currentValue}
+              disabled={disabled}
+              onChange={(event) => { onConfigure(option.id, event.target.value) }}
+            >
+              {option.options.map(choice => (
+                <option key={choice.value} value={choice.value} title={choice.description}>
+                  {configChoiceLabel(option, choice.value, choice.name)}
+                </option>
+              ))}
+            </select>
+          </label>
+        ))}
+      </div>
+    )
+  }
   const specs = SESSION_OPTION_SPECS[backend]
   if (specs.length === 0) return null
   return (
@@ -2292,9 +2419,34 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
       session.sessionId,
       sessionHost?.hostId,
     )
+  // Push the remembered / static settings to an agent that just announced
+  // its options (new session or a restarted hold), once per generation.
+  const appliedConfigRef = useRef(new Set<string>())
+  const configGeneration = session?.binding?.generation
+  const sessionConfigOptions = session?.configOptions
+  useEffect(() => {
+    if (session === undefined || preferences === undefined || sessionConfigOptions === undefined) return
+    if (session.parentSessionId !== undefined || session.channelState !== 'open') return
+    const key = `${session.sessionId}:${configGeneration ?? 'none'}`
+    if (appliedConfigRef.current.has(key)) return
+    appliedConfigRef.current.add(key)
+    const hostKey = sessionHost === undefined ? undefined : sessionPreferencesKey(sessionHost.hostId, session.backend)
+    const switches = pendingConfigSwitches(hostKey, session.backend, preferences, sessionConfigOptions)
+    if (switches.length === 0) return
+    void (async () => {
+      for (const item of switches) {
+        try {
+          await store.configureSession(session.sessionId, item.configId, item.value)
+        } catch {
+          // The gateway surfaced the reason in snapshot.error; keep the agent's own value.
+        }
+      }
+    })()
+  }, [session, preferences, sessionConfigOptions, configGeneration, sessionHost, store])
   useEffect(() => {
     if (session === undefined || session.turnState !== 'waiting-permission') return
-    if (!shouldAutoApprovePermissions(preferences?.approvalChoice, preferences?.permissionMode)) return
+    if (!shouldAutoApprovePermissions(preferences?.approvalChoice, preferences?.permissionMode)
+      && !configuredModeAutoApproves(session.configOptions)) return
     const entry = pendingPermissionEntry(sessionEntries)
     const requestId = entry === undefined ? undefined : permissionRequestId(entry)
     if (entry === undefined || requestId === undefined || !isAutoApprovablePermission(entry)) return
@@ -2434,6 +2586,15 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
     if (payload === '' || sessionAction !== undefined || actions?.canResend !== true) return
     followBottomRef.current = true
     void store.prompt(session.sessionId, payload).catch(() => undefined)
+  }
+  const configure = (configId: string, value: string): void => {
+    if (sessionAction !== undefined) return
+    const action = `config:${session.sessionId}:${configId}`
+    setSessionAction(action)
+    if (sessionHost !== undefined) rememberSessionConfig(sessionPreferencesKey(sessionHost.hostId, session.backend), configId, value)
+    void store.configureSession(session.sessionId, configId, value)
+      .catch(() => undefined)
+      .finally(() => { setSessionAction(current => current === action ? undefined : current) })
   }
   const submitPermission = (requestId: string, outcome: JsonValue): void => {
     if (sessionAction !== undefined) return
@@ -2677,8 +2838,10 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
             <SessionControls
               backend={session.backend}
               preferences={preferences}
-              disabled={actions?.canChangePreferences !== true}
+              disabled={actions?.canChangePreferences !== true || sessionAction !== undefined}
               onChange={setPreferences}
+              configOptions={session.configOptions}
+              onConfigure={configure}
             />
           )}
           <textarea

@@ -284,6 +284,34 @@ export interface RemoteSessionView {
    *  projected transcript. Present only when entries have been trimmed; the
    *  count of lost entries equals this value (transcript starts at seq 0). */
   readonly droppedThrough?: number
+  /** Backend-advertised session settings (permission mode, model, effort, …)
+   *  captured from the native `session/new` response and kept current from
+   *  later `config_option_update` / `current_mode_update` frames. Absent until
+   *  the backend has announced them; the composer falls back to static choices. */
+  readonly configOptions?: readonly RemoteSessionConfigOption[]
+}
+
+/** One selectable value of a backend session setting. */
+export interface RemoteSessionConfigChoice {
+  readonly value: string
+  readonly name: string
+  readonly description?: string
+}
+
+/** A backend session setting exactly as the agent advertises it (ACP
+ *  `configOptions`), or synthesized from the older ACP `modes` / `models`
+ *  fields (ids `mode` / `model`). `category` follows ACP: `mode`, `model`,
+ *  `thought_level`, `model_config`, … */
+export interface RemoteSessionConfigOption {
+  readonly id: string
+  readonly name: string
+  readonly description?: string
+  readonly category?: string
+  readonly currentValue: string
+  readonly options: readonly RemoteSessionConfigChoice[]
+  /** How the gateway must switch this option: `config` → `session/set_config_option`;
+   *  `mode` → `session/set_mode`; `model` → `session/set_model`. */
+  readonly setter: 'config' | 'mode' | 'model'
 }
 
 /** Optional per-run token usage captured from backend-native frames.
@@ -472,6 +500,7 @@ export type RemoteGatewayMethod =
   | 'session.prompt'
   | 'session.cancel'
   | 'session.permission'
+  | 'session.configure'
   | 'transcript.read'
   | 'events.read'
   | 'session.follow'
@@ -503,6 +532,7 @@ export type RemoteHostdMethod =
   | 'session.prompt'
   | 'session.cancel'
   | 'session.permission'
+  | 'session.native'
   | 'events.read'
   | 'fs.list'
   | 'grok.serve.inspect'

@@ -442,6 +442,7 @@ export class RemoteAgentHostd {
         return await this.sendAdmission(request.params)
       case 'session.cancel':
       case 'session.permission':
+      case 'session.native':
         return await this.sendNativeFrame(request.params)
       case 'events.read':
         return await this.readEvents(request.params) as unknown as JsonValue

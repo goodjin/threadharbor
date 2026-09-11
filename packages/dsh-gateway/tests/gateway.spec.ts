@@ -99,6 +99,14 @@ function respondToRequest(request: RemoteControlRequest, port: string, events: J
       }
     case 'session.prompt':
       return { accepted: true, duplicate: false }
+    case 'session.native': {
+      // The fake hold acknowledges any gateway-issued request by journaling a
+      // bare `{}` result under the same JSON-RPC id, like `session/set_mode`.
+      const frame = request.params['frame']
+      const id = frame !== null && typeof frame === 'object' && !Array.isArray(frame) ? frame['id'] : undefined
+      if (typeof id === 'string') events.push({ jsonrpc: '2.0', id, result: {} })
+      return { accepted: true }
+    }
     case 'events.read':
       return {
         generation: 'g1', latestSeq: events.length, droppedThrough: 0, gap: false,
@@ -389,6 +397,53 @@ describe('RemoteAgentGateway', () => {
       const forwarded = calls.find(call => call.request.method === 'session.permission')?.request
       expect(forwarded?.params['frame']).toMatchObject({ jsonrpc: '2.0', id: 0, result: { outcome: { outcome: 'selected', optionId: 'bypassPermissions' } } })
       expect(calls.filter(call => call.request.method === 'events.read').length).toBeGreaterThan(0)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('captures backend-advertised settings from session/new and switches them through session.configure', async () => {
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', id: 'hostd-session-1', result: {
+        sessionId: 'native-4301-x',
+        configOptions: [
+          { id: 'mode', name: 'Mode', category: 'mode', currentValue: 'default', options: [
+            { value: 'default', name: 'Manual' }, { value: 'bypassPermissions', name: 'Bypass Permissions' },
+          ] },
+          { id: 'model', name: 'Model', category: 'model', currentValue: 'default', options: [
+            { value: 'default', name: 'Default' }, { value: 'sonnet', name: 'Sonnet' },
+          ] },
+        ],
+      } },
+    ]
+    const { ctx, gateway, calls } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4301' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      const announced = gateway.state().sessions.find(entry => entry.sessionId === RemoteSessionId(session.sessionId))
+      expect(announced?.configOptions?.map(option => `${option.id}=${option.currentValue}`)).toEqual(['mode=default', 'model=default'])
+
+      await expect(gateway.dispatch(request('session.configure', {
+        sessionId: session.sessionId, configId: 'mode', value: 'nope',
+      }))).rejects.toThrow(/不支持取值 nope/)
+      await expect(gateway.dispatch(request('session.configure', {
+        sessionId: session.sessionId, configId: 'effort', value: 'high',
+      }))).rejects.toThrow(/尚未公布/)
+
+      const switched = await gateway.dispatch(request('session.configure', {
+        sessionId: session.sessionId, configId: 'mode', value: 'bypassPermissions',
+      })) as unknown as { configOptions?: { id: string; currentValue: string }[] }
+      const forwarded = calls.find(call => call.request.method === 'session.native')?.request
+      expect(forwarded?.params['frame']).toMatchObject({
+        jsonrpc: '2.0', method: 'session/set_config_option',
+        params: { sessionId: `native-4301-${session.sessionId}`, configId: 'mode', value: 'bypassPermissions' },
+      })
+      expect(switched.configOptions?.find(option => option.id === 'mode')?.currentValue).toBe('bypassPermissions')
+      const stored = gateway.state().sessions.find(entry => entry.sessionId === RemoteSessionId(session.sessionId))
+      expect(stored?.configOptions?.find(option => option.id === 'mode')?.currentValue).toBe('bypassPermissions')
     } finally {
       await ctx.fiber.dispose()
     }

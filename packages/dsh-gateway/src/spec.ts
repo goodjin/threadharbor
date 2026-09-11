@@ -91,6 +91,19 @@ const sessionRecord = z.object({
   /** Highest seq that has been rotated out of the projected transcript.
    *  Absent when the session has never been trimmed. */
   droppedThrough: z.number().int().nonnegative().optional(),
+  configOptions: z.array(z.object({
+    id: z.string(),
+    name: z.string(),
+    description: z.string().optional(),
+    category: z.string().optional(),
+    currentValue: z.string(),
+    options: z.array(z.object({
+      value: z.string(),
+      name: z.string(),
+      description: z.string().optional(),
+    })),
+    setter: z.enum(['config', 'mode', 'model']),
+  })).optional(),
 }) as unknown as z.ZodType<RemoteSessionView>
 const transcriptUsage = z.object({
   inputTokens: z.number().nonnegative().optional(),

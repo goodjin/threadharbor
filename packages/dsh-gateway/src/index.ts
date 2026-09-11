@@ -54,6 +54,7 @@ import {
 } from '@threadharbor/protocol'
 import { projectNativeFrame } from './projection.ts'
 import { frameUsageReading, isRoundTerminalFrame, mergeUsage } from './run-usage.ts'
+import { applyConfigFrame, configSwitchRequest, withSwitchedValue } from './session-config.ts'
 import { remoteAgentDomainSpec, type RemoteAgentCatalogState } from './spec.ts'
 import { SshManager, type SshDeploymentProgress } from './ssh-manager.ts'
 import { restartLoopbackHostd } from './local-hostd.ts'
@@ -140,6 +141,13 @@ const RUNNING_CATCHUP_MAX_MS = 5_000
  *  prompt timeout, which normally synthesizes a completion the gateway observes
  *  first. */
 const RUNNING_TURN_IDLE_TIMEOUT_MS = 180_000
+/** How long `session.configure` waits for the backend to acknowledge a
+ *  `session/set_config_option` / `set_mode` / `set_model` before giving up. */
+const CONFIG_SWITCH_TIMEOUT_MS = 15_000
+const CONFIG_SWITCH_POLL_MS = 250
+/** JSON-RPC id prefix for gateway-issued native requests whose responses
+ *  are picked back out of the journal (see `awaitNativeResponse`). */
+const GATEWAY_RPC_PREFIX = 'gateway-rpc-'
 
 /** Trace toggle: default ON in non-test runs so latency investigations always
  *  have data; explicit `THREADHARBOR_TRACE=0` silences. */
@@ -637,6 +645,8 @@ export class RemoteAgentGateway extends Service {
         return await this.enqueue(() => this.cancel(request.params))
       case 'session.permission':
         return await this.enqueue(() => this.permission(request.params))
+      case 'session.configure':
+        return await this.enqueue(() => this.configure(request.params))
       case 'transcript.read':
         return this.readTranscript(request.params) as unknown as JsonValue
       case 'events.read':
@@ -1857,6 +1867,92 @@ export class RemoteAgentGateway extends Service {
     return result
   }
 
+  /** Switch one backend-advertised session setting (permission mode, model,
+   *  effort …). The composer's choice is sent to the agent over its own ACP
+   *  method and the acknowledged value is reflected on the session view; a
+   *  setting the backend never advertised cannot be switched from here. */
+  private async configure(params: Record<string, JsonValue>): Promise<JsonValue> {
+    const session = this.requireSession(RemoteSessionId(stringField(params, 'sessionId')))
+    const binding = this.requireBinding(session)
+    const configId = stringField(params, 'configId')
+    const value = stringField(params, 'value')
+    const option = session.configOptions?.find(candidate => candidate.id === configId)
+    if (option === undefined) throw new Error(`远程 Agent 尚未公布可切换的设置 ${configId}`)
+    if (!option.options.some(candidate => candidate.value === value)) {
+      throw new Error(`设置「${option.name}」不支持取值 ${value}`)
+    }
+    const rpcId = `${GATEWAY_RPC_PREFIX}${randomUUID()}`
+    const frame = configSwitchRequest(option, binding.nativeSessionId ?? session.sessionId, value, rpcId)
+    await this.sendNativeFrame(session, frame)
+    const response = await this.awaitNativeResponse(session.sessionId, rpcId)
+    if (response === undefined) throw new Error(`远程 Agent 未在 ${CONFIG_SWITCH_TIMEOUT_MS / 1000}s 内确认切换「${option.name}」`)
+    const failure = jsonRecord(response['error'])
+    if (failure !== undefined) {
+      const detail = typeof failure['message'] === 'string' ? failure['message'] : JSON.stringify(failure)
+      throw new Error(`远程 Agent 拒绝切换「${option.name}」：${detail}`)
+    }
+    // `session/set_config_option` echoes the full list and the journal fold
+    // above already applied it; `set_mode` / `set_model` return `{}`, so
+    // reflect the acknowledged value ourselves.
+    const current = this.requireSession(session.sessionId)
+    const next = withSwitchedValue(current.configOptions ?? session.configOptions ?? [], configId, value)
+    if (next !== current.configOptions) {
+      const updated: RemoteSessionView = { ...current, configOptions: next, updatedAt: new Date().toISOString() }
+      await this.requireTables().sessions.put(session.sessionId, updated)
+      this.broadcastSessionView(updated)
+    }
+    return this.withTranscriptHead(this.requireSession(session.sessionId)) as unknown as JsonValue
+  }
+
+  /** Forward one raw backend-native frame through hostd. `session.native` is
+   *  the dedicated hostd method; a hostd deployed before it existed exposes the
+   *  identical forwarder under `session.permission`, so fall back to that
+   *  rather than forcing a redeploy before settings can be switched. */
+  private async sendNativeFrame(session: RemoteSessionView, frame: JsonValue): Promise<void> {
+    try {
+      await this.callSessionHostd(session, 'session.native', { sessionId: session.sessionId, frame })
+    } catch (error) {
+      if (!/does not implement method session\.native/.test(errorMessage(error))) throw error
+      await this.callSessionHostd(session, 'session.permission', { sessionId: session.sessionId, frame })
+    }
+  }
+
+  /** Native responses to gateway-issued requests, keyed by JSON-RPC id. The
+   *  hold journals every backend frame, so the reply to a request we sent is
+   *  picked up by the ordinary journal fold instead of a second channel. */
+  private readonly gatewayRpcResponses = new Map<string, Record<string, JsonValue>>()
+
+  private captureGatewayRpcResponse(frame: JsonValue): void {
+    const row = jsonRecord(frame)
+    const id = row?.['id']
+    if (row === undefined || typeof id !== 'string' || !id.startsWith(GATEWAY_RPC_PREFIX)) return
+    if (row['method'] !== undefined || (row['result'] === undefined && row['error'] === undefined)) return
+    if (this.gatewayRpcResponses.size >= 64) {
+      const oldest = this.gatewayRpcResponses.keys().next().value
+      if (oldest !== undefined) this.gatewayRpcResponses.delete(oldest)
+    }
+    this.gatewayRpcResponses.set(id, row)
+  }
+
+  /** Poll the session journal until the backend answers `rpcId` or the switch
+   *  timeout elapses. */
+  private async awaitNativeResponse(
+    sessionId: ReturnType<typeof RemoteSessionId>,
+    rpcId: string,
+  ): Promise<Record<string, JsonValue> | undefined> {
+    const deadline = Date.now() + CONFIG_SWITCH_TIMEOUT_MS
+    for (;;) {
+      await this.catchupSessionJournal(sessionId)
+      const response = this.gatewayRpcResponses.get(rpcId)
+      if (response !== undefined) {
+        this.gatewayRpcResponses.delete(rpcId)
+        return response
+      }
+      if (Date.now() >= deadline) return undefined
+      await new Promise<void>(resolve => setTimeout(resolve, CONFIG_SWITCH_POLL_MS))
+    }
+  }
+
   /** Format the native JSON-RPC result for a permission grant or an elicitation form. */
   private permissionNativeResult(
     sessionId: ReturnType<typeof RemoteSessionId>,
@@ -1983,9 +2079,12 @@ export class RemoteAgentGateway extends Service {
       .slice(0, MAX_JOURNAL_EVENTS_PER_SYNC)
     const suppressNativeTranscript = session.turnState === 'stopped'
     const sessionKey = session.sessionId
+    let configOptions = session.configOptions
     for (const event of events) {
       const child = nativeChildUpdate(event.frame)
       if (child !== undefined) await this.upsertNativeChild(session, child)
+      configOptions = applyConfigFrame(configOptions, event.frame)
+      this.captureGatewayRpcResponse(event.frame)
       if (suppressNativeTranscript) continue
       const targetSessionId = nativeFrameSessionId(event.frame)
       const nativeSessionId = binding.nativeSessionId ?? session.sessionId
@@ -2052,9 +2151,11 @@ export class RemoteAgentGateway extends Service {
       turnState,
       binding: { ...binding, lastSeq: processedThrough },
       updatedAt: new Date().toISOString(),
+      ...(configOptions === undefined ? {} : { configOptions }),
     }
     await this.requireTables().sessions.put(session.sessionId, updated)
-    if (turnState !== session.turnState || processedThrough !== binding.lastSeq) {
+    if (turnState !== session.turnState || processedThrough !== binding.lastSeq
+      || configOptions !== session.configOptions) {
       this.broadcastSessionView(updated)
     }
     return processedThrough

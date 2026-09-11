@@ -41,6 +41,7 @@ import {
   type RemoteInstallPlan,
   type RemoteOperationView,
   type RemoteProjectView,
+  type RemoteSessionConfigOption,
   type RemoteSessionView,
   type RemoteTranscriptEntry,
   type RemoteTranscriptPage,
@@ -607,6 +608,44 @@ function oneOf<T extends string>(value: JsonValue | undefined, values: readonly 
   return value as T
 }
 
+/** Backend-advertised session settings; tolerant of a gateway that predates them. */
+function parseConfigOptions(value: JsonValue | undefined): RemoteSessionConfigOption[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const options = value.flatMap((entry): RemoteSessionConfigOption[] => {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return []
+    const id = entry['id']
+    const currentValue = entry['currentValue']
+    const setter = entry['setter']
+    const choices = Array.isArray(entry['options']) ? entry['options'] : []
+    if (typeof id !== 'string' || typeof currentValue !== 'string') return []
+    if (setter !== 'config' && setter !== 'mode' && setter !== 'model') return []
+    const parsedChoices = choices.flatMap((choice) => {
+      if (choice === null || typeof choice !== 'object' || Array.isArray(choice)) return []
+      const choiceValue = choice['value']
+      if (typeof choiceValue !== 'string') return []
+      const description = choice['description']
+      return [{
+        value: choiceValue,
+        name: typeof choice['name'] === 'string' ? choice['name'] : choiceValue,
+        ...(typeof description === 'string' ? { description } : {}),
+      }]
+    })
+    if (parsedChoices.length === 0) return []
+    const description = entry['description']
+    const category = entry['category']
+    return [{
+      id,
+      name: typeof entry['name'] === 'string' ? entry['name'] : id,
+      ...(typeof description === 'string' ? { description } : {}),
+      ...(typeof category === 'string' ? { category } : {}),
+      currentValue,
+      options: parsedChoices,
+      setter,
+    }]
+  })
+  return options.length === 0 ? undefined : options
+}
+
 function parseSession(value: JsonValue): RemoteSessionView {
   const record = jsonObject(value, 'session')
   const bindingValue = record['binding']
@@ -614,6 +653,7 @@ function parseSession(value: JsonValue): RemoteSessionView {
   const parentSessionId = optionalText(record, 'parentSessionId')
   const nativeSessionId = binding === undefined ? undefined : optionalText(binding, 'nativeSessionId')
   const archivedAt = optionalText(record, 'archivedAt')
+  const configOptions = parseConfigOptions(record['configOptions'])
   return {
     sessionId: RemoteSessionId(stringField(record, 'sessionId')),
     projectId: RemoteProjectId(stringField(record, 'projectId')),
@@ -626,6 +666,7 @@ function parseSession(value: JsonValue): RemoteSessionView {
     updatedAt: stringField(record, 'updatedAt'),
     ...(record['latestTranscriptSeq'] === undefined ? {} : { latestTranscriptSeq: seqField(record, 'latestTranscriptSeq') }),
     ...(archivedAt === undefined ? {} : { archivedAt }),
+    ...(configOptions === undefined ? {} : { configOptions }),
     ...(binding === undefined ? {} : {
       binding: {
         holdId: RemoteHoldId(stringField(binding, 'holdId')),
@@ -2080,6 +2121,21 @@ export class RemoteAgentStore {
       undefined,
       draft,
     )
+  }
+
+  /** Switch one backend-advertised session setting (permission mode, model,
+   *  effort …) on the running agent. Resolves once the backend acknowledged
+   *  it; the returned view already carries the new `currentValue`.
+   * @param sessionId - session whose agent should switch.
+   * @param configId - id from `session.configOptions`.
+   * @param value - one of that option's advertised values.
+   */
+  configureSession(sessionId: ReturnType<typeof RemoteSessionId>, configId: string, value: string): Promise<void> {
+    return this.run(async () => {
+      const result = await this.call('session.configure', { sessionId, configId, value })
+      const session = parseSession(result)
+      this.publish({ ...withoutError(this.snapshot), state: withSessionView(this.snapshot.state, session) })
+    })
   }
 
   /** Answer one backend-native permission request.
