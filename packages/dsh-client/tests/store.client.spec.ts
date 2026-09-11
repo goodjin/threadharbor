@@ -720,6 +720,48 @@ describe('RemoteAgentStore', () => {
     }
   })
 
+  it('lets the user switch to another session while a prompt is still waiting for the Agent', async () => {
+    const waiting = {
+      sessionId: 's-busy', projectId: 'p', title: 'busy', backend: 'grok',
+      channelState: 'open', turnState: 'running', createdAt: 'a', updatedAt: 'c',
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+    }
+    const other = {
+      sessionId: 's-other', projectId: 'p', title: 'other', backend: 'grok',
+      channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+      binding: { holdId: 'hold-2', generation: 'g', state: 'active', lastSeq: 0 },
+    }
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+      if (body.method === 'session.prompt') return Response.json({ id: body.id, ok: true, result: { accepted: true } })
+      if (body.method === 'transcript.read') {
+        return Response.json({ id: body.id, ok: true, result: { entries: [], hasMore: false, fromSeq: 0, toSeq: -1, latestSeq: -1 } })
+      }
+      return Response.json({ id: body.id, ok: true, result: { ...EMPTY, sessions: [waiting, other] } })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      await store.selectSession(RemoteSessionId('s-busy'))
+      await store.prompt(RemoteSessionId('s-busy'), 'take your time')
+      await vi.waitFor(() => { expect(store.getSnapshot().promptProgress?.phase).toBe('waiting') })
+      expect(store.getSnapshot().currentSessionId).toBe('s-busy')
+
+      await store.selectSession(RemoteSessionId('s-other'))
+      expect(store.getSnapshot().currentSessionId).toBe('s-other')
+      // Catalog reloads keep arriving while the Agent works (view pushes,
+      // host changes, the live loop). None of them may yank the user back.
+      store.consume({ type: 'host.changed', host: { hostId: 'h' } })
+      store.consume({ type: 'session.view.changed' })
+      await new Promise(resolve => setTimeout(resolve, 20))
+      await vi.waitFor(() => { expect(store.getSnapshot().phase).toBe('ready') })
+      expect(store.getSnapshot().currentSessionId).toBe('s-other')
+      expect(store.getSnapshot().promptProgress?.sessionId).toBe('s-busy')
+    } finally {
+      store.dispose()
+    }
+  })
+
   it('opens the created session when a catalog reload arrives while the draft is still showing', async () => {
     const created = {
       sessionId: 's-new', projectId: 'p', title: 'first question', backend: 'grok',

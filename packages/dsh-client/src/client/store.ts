@@ -390,7 +390,13 @@ function inFlightCreatedSessionId(
   currentSessionId: ReturnType<typeof RemoteSessionId> | undefined,
 ): ReturnType<typeof RemoteSessionId> | undefined {
   if (progress === undefined || progress.phase === 'failed') return undefined
+  // A prompt in flight only pins the selection while the user is still on
+  // that session (or has no selection yet, i.e. it was just created from a
+  // draft). Every catalog reload during "等待 Agent 响应" runs through here;
+  // re-adopting the prompting session unconditionally yanked the user back
+  // from whichever other session they had just clicked.
   if (progress.sessionId !== undefined
+    && (currentSessionId === undefined || currentSessionId === progress.sessionId)
     && state.sessions.some(session => session.sessionId === progress.sessionId)) {
     return progress.sessionId
   }
