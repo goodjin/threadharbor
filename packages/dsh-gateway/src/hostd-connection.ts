@@ -121,6 +121,12 @@ export class HostdConnection {
       // Tear the socket down without rejecting pending requests: `pending` is
       // flushed on the next open and `subscriptions` are re-sent as well.
       ws.removeAllListeners()
+      // `close()` on a still-CONNECTING socket makes `ws` emit an 'error'
+      // ("WebSocket was closed before the connection was established") on the
+      // next tick; with every listener just removed that error is unhandled
+      // and takes the whole DSH Web process down. Seen live when a hostd
+      // redeploy switched the endpoint mid-handshake.
+      ws.on('error', () => undefined)
       if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
         ws.close(1000, 'endpoint changed')
       }
@@ -155,6 +161,7 @@ export class HostdConnection {
     this.ws = undefined
     if (ws !== undefined) {
       ws.removeAllListeners()
+      ws.on('error', () => undefined) // see switchEndpoint
       if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
         ws.close(1000, 'hostd connection closed')
       }

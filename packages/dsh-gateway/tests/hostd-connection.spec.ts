@@ -398,6 +398,47 @@ describe('HostdConnection', () => {
     await conn.close()
   })
 
+  it('switchEndpoint / close on a still-connecting socket never leaves the ws error unhandled', async () => {
+    // Real `ws` emits 'error' ("WebSocket was closed before the connection was
+    // established") on the next tick when close() hits a CONNECTING socket;
+    // with the listeners already removed that used to crash DSH Web during a
+    // hostd redeploy. The mock mirrors that behaviour.
+    const scripts = makeSocketFactory()
+    const factory = (url: string): MockSocket => {
+      const socket = scripts.factory(url)
+      const originalClose = socket.close.bind(socket)
+      socket.close = (code?: number, reason?: string): void => {
+        if (socket.readyState === CONNECTING) {
+          process.nextTick(() => socket.emit('error', new Error('WebSocket was closed before the connection was established')))
+        }
+        originalClose(code, reason)
+      }
+      return socket
+    }
+    const conn = new HostdConnection({
+      endpoint: 'http://127.0.0.1:1',
+      requestTimeoutMs: 1000,
+      heartbeatMs: 60_000,
+      reconnectStepsMs: [10, 10, 10],
+      handshakeTimeoutMs: 100,
+      socketFactory: factory as unknown as (url: string) => import('ws').WebSocket,
+    })
+    const unhandled: unknown[] = []
+    const onUncaught = (error: unknown): void => { unhandled.push(error) }
+    process.on('uncaughtException', onUncaught)
+    try {
+      conn.open()
+      conn.switchEndpoint('http://127.0.0.1:2')
+      await new Promise<void>(resolve => setImmediate(resolve))
+      await conn.close()
+      await new Promise<void>(resolve => setImmediate(resolve))
+    } finally {
+      process.off('uncaughtException', onUncaught)
+    }
+    expect(unhandled).toEqual([])
+    expect(scripts.urls).toEqual(['ws://127.0.0.1:1/v1/ws', 'ws://127.0.0.1:2/v1/ws'])
+  })
+
   it('switchEndpoint keeps subscriptions and re-sends them on the new socket', async () => {
     const scripts = makeSocketFactory()
     const conn = new HostdConnection({
