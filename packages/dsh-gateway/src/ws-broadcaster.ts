@@ -249,6 +249,17 @@ export class WsBroadcaster {
     const browserStillConnected = [...this.subscribers.values()]
       .some(candidate => candidate.browserId === subscriber.browserId)
     if (!browserStillConnected) this.followedByBrowser.delete(subscriber.browserId)
+    // A socket we have stopped pushing to is worthless to the browser, but if
+    // we only forget it (the old behaviour on a failed send) the client keeps
+    // a "live" connection that still answers pings and RPCs yet never receives
+    // another push — silent starvation that degrades every turn into the
+    // choppy transcript-polling fallback. Terminate it so the client's close
+    // handler fires and it reconnects with a fresh, registered, re-followed
+    // socket. Harmless when the socket already closed (the close/error paths
+    // land here too).
+    if (ws.readyState === WS_OPEN) {
+      try { ws.terminate() } catch { /* already gone */ }
+    }
   }
 
   private send(
@@ -264,7 +275,12 @@ export class WsBroadcaster {
     }
     try {
       ws.send(payload, (error) => {
-        if (error !== undefined) {
+        // `ws` invokes the send callback with `null` on success and an Error
+        // on failure. A bare `!== undefined` check treated that success `null`
+        // as a failure, so every socket's FIRST push was logged as send-failed
+        // and the subscriber was dropped — silently starving the browser of
+        // all later pushes and degrading every turn into the polling fallback.
+        if (error !== undefined && error !== null) {
           if (sessionId !== undefined) this.noteTranscriptPushDrop(sessionId, 'send-failed', fromSeq ?? -1, toSeq ?? -1)
           this.dropConnection(ws)
         }

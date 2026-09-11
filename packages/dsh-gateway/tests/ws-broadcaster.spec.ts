@@ -281,6 +281,48 @@ describe('WsBroadcaster', () => {
     }).not.toThrow()
   })
 
+  it('terminates a socket whose push send fails so the client reconnects instead of starving', () => {
+    // A transport-level send failure (tab frozen, backpressure) used to only
+    // forget the subscriber while leaving the socket OPEN. The browser then kept
+    // a "live" connection — pongs and RPC replies still flowed — but never
+    // received another push, silently degrading every turn into the choppy
+    // transcript-polling fallback. Dropping must also close the socket so the
+    // client's close handler fires and it reconnects with a fresh, re-followed one.
+    let terminated = false
+    const failing = makeSocket()
+    ;(failing as unknown as { send: (payload: string, cb?: (error?: Error) => void) => void }).send =
+      (_payload, cb) => { cb?.(new Error('write EPIPE')) }
+    ;(failing as unknown as { terminate: () => void }).terminate = () => { terminated = true }
+    register(failing, 'alice')
+    broadcaster.follow('alice', RemoteSessionId('session-a'))
+    broadcaster.broadcastFollowed(RemoteSessionId('session-a'), {
+      type: 'transcript.append', sessionId: RemoteSessionId('session-a'),
+      entry: { seq: 1 } as unknown as never, seq: 1,
+    } as unknown as RemoteGatewayWsEvent)
+    expect(broadcaster.size()).toBe(0)
+    expect(terminated).toBe(true)
+  })
+
+  it('keeps a subscriber whose push send succeeds — ws reports success as null, not an error', () => {
+    // Regression for the starvation root cause: `ws` calls the send callback
+    // with `null` on success. Treating that as a failure dropped every socket
+    // on its first push, so browsers received one frame then nothing more.
+    let terminated = false
+    const healthy = makeSocket()
+    ;(healthy as unknown as { send: (payload: string, cb?: (error?: Error | null) => void) => void }).send =
+      (payload, cb) => { healthy.sent.push(payload); cb?.(null) }
+    ;(healthy as unknown as { terminate: () => void }).terminate = () => { terminated = true }
+    register(healthy, 'alice')
+    broadcaster.follow('alice', RemoteSessionId('session-a'))
+    broadcaster.broadcastFollowed(RemoteSessionId('session-a'), {
+      type: 'transcript.append', sessionId: RemoteSessionId('session-a'),
+      entry: { seq: 1 } as unknown as never, seq: 1,
+    } as unknown as RemoteGatewayWsEvent)
+    expect(parseSent(healthy).length).toBe(1)
+    expect(broadcaster.size()).toBe(1)
+    expect(terminated).toBe(false)
+  })
+
   it('completes an HTTP upgrade for /remote-agent/ws and registers the browser', async () => {
     vi.useRealTimers()
     const server = createServer()
