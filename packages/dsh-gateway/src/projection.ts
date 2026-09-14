@@ -55,6 +55,23 @@ function requestId(frame: Record<string, JsonValue>): string | undefined {
   return typeof id === 'string' || typeof id === 'number' ? String(id) : undefined
 }
 
+/** The property of an `elicitation/create` form that takes a free-text answer
+ *  (Claude's AskUserQuestion "Other" field, or any plain string without a
+ *  fixed choice list). `undefined` when the request only accepts a pick — a
+ *  tool permission, or a form made of enums/booleans only. */
+export function elicitationFreeTextField(frame: JsonValue | undefined): string | undefined {
+  const record = object(frame)
+  if (record === undefined || frameMethod(record) !== 'elicitation/create') return undefined
+  const properties = object(object(object(record['params'])?.['requestedSchema'])?.['properties'])
+  if (properties === undefined) return undefined
+  const entries = Object.entries(properties).map(([key, raw]) => [key, object(raw)] as const)
+  const marked = entries.find(([, property]) => object(object(property?.['_meta'])?.['_askUserQuestionCustomAnswer']) !== undefined)
+  if (marked !== undefined) return marked[0]
+  const plain = entries.find(([, property]) => property?.['type'] === 'string'
+    && property['enum'] === undefined && property['oneOf'] === undefined && property['anyOf'] === undefined)
+  return plain?.[0]
+}
+
 function projectAcp(frame: Record<string, JsonValue>): ProjectedFragment[] {
   const method = frameMethod(frame)
   const params = object(frame['params'])

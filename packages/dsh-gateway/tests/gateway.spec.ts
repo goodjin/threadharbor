@@ -450,6 +450,70 @@ describe('RemoteAgentGateway', () => {
     }
   })
 
+  it('delivers a chat message as the free-text answer of an open AskUserQuestion instead of queueing it', async () => {
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', id: 4, method: 'elicitation/create', params: {
+        mode: 'form', message: '分支从哪个基线建？',
+        requestedSchema: { type: 'object', properties: {
+          question_0: { type: 'string', title: '基线', oneOf: [{ const: '本地 dev', title: '本地 dev' }, { const: 'origin/dev', title: 'origin/dev' }] },
+          question_0_custom: { type: 'string', title: 'Other', _meta: { _askUserQuestionCustomAnswer: { questionId: 'question_0', isCustomAnswer: true } } },
+        } },
+      } },
+    ]
+    const { ctx, gateway, calls } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4303' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === RemoteSessionId(session.sessionId))?.pendingRequestIds).toEqual(['4'])
+      const promptsBefore = calls.filter(call => call.request.method === 'session.prompt').length
+
+      const result = await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'r-answer', text: '从远程 dev 基线建',
+      })) as unknown as { accepted: boolean; answeredRequestId?: string }
+      expect(result).toMatchObject({ accepted: true, answeredRequestId: '4' })
+      const answered = calls.filter(call => call.request.method === 'session.permission').at(-1)?.request
+      expect(answered?.params['frame']).toEqual({
+        jsonrpc: '2.0', id: 4, result: { action: 'accept', content: { question_0_custom: '从远程 dev 基线建' } },
+      })
+      // No session/prompt was queued behind the blocked turn.
+      expect(calls.filter(call => call.request.method === 'session.prompt')).toHaveLength(promptsBefore)
+      const view = gateway.state().sessions.find(entry => entry.sessionId === RemoteSessionId(session.sessionId))
+      expect(view?.pendingRequestIds).toBeUndefined()
+      expect(view?.turnState).toBe('running')
+      const page = await gateway.dispatch(request('transcript.read', { sessionId: session.sessionId })) as unknown as { entries: Array<{ role: string; text: string }> }
+      expect(page.entries.filter(row => row.role === 'user').map(row => row.text)).toContain('从远程 dev 基线建')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('refuses a chat message while a tool permission card is open, pointing the user at the card', async () => {
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', id: 9, method: 'session/request_permission', params: {
+        title: 'Run npm test?', options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+      } },
+    ]
+    const { ctx, gateway, calls } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4304' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      const promptsBefore = calls.filter(call => call.request.method === 'session.prompt').length
+      await expect(gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'r-blocked', text: '继续',
+      }))).rejects.toThrow('请先在卡片中回答')
+      expect(calls.filter(call => call.request.method === 'session.prompt')).toHaveLength(promptsBefore)
+      expect(gateway.state().sessions.find(entry => entry.sessionId === RemoteSessionId(session.sessionId))?.turnState).toBe('waiting-permission')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('captures backend-advertised settings from session/new and switches them through session.configure', async () => {
     const events: JsonValue[] = [
       { jsonrpc: '2.0', id: 'hostd-session-1', result: {

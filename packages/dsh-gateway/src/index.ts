@@ -52,7 +52,7 @@ import {
   type RemoteTranscriptPage,
   type RemoteTranscriptUsage,
 } from '@threadharbor/protocol'
-import { projectNativeFrame, retainsNativeFrame } from './projection.ts'
+import { elicitationFreeTextField, projectNativeFrame, retainsNativeFrame } from './projection.ts'
 import { frameUsageReading, isRoundTerminalFrame, mergeUsage } from './run-usage.ts'
 import { applyConfigFrame, configSwitchRequest, withSwitchedValue } from './session-config.ts'
 import { remoteAgentDomainSpec, remoteAgentLegacyDomainSpec, type RemoteAgentCatalogState } from './spec.ts'
@@ -1867,6 +1867,8 @@ export class RemoteAgentGateway extends Service {
     const requestId = stringField(params, 'requestId')
     const text = stringField(params, 'text')
     const userTranscriptId = RemoteTranscriptId(`user:${session.sessionId}:${clientId}:${requestId}`)
+    const routed = await this.answerOpenRequestWithText(session, userTranscriptId, requestId, text)
+    if (routed !== undefined) return routed
     await this.withSessionJournalApply(session.sessionId, async () => {
       if (this.requireTranscriptStore().get(userTranscriptId) === undefined) {
         await this.appendTranscript(session.sessionId, {
@@ -1889,6 +1891,52 @@ export class RemoteAgentGateway extends Service {
       await this.markPromptUndelivered(session, clientId, requestId, error)
       throw error
     }
+  }
+
+  /** While the agent is blocked on a request it raised, a chat message cannot
+   *  reach it: Claude queues `session/prompt` behind the open AskUserQuestion,
+   *  so the text would sit unread until the prompt timed out. When the open
+   *  request is a form that takes a free-text answer, the message *is* the
+   *  answer — deliver it as such and let the turn continue. A request that
+   *  only accepts a pick (tool permission) is refused with a pointer to the
+   *  card, instead of silently parking the message. */
+  private async answerOpenRequestWithText(
+    session: RemoteSessionView,
+    userTranscriptId: ReturnType<typeof RemoteTranscriptId>,
+    requestId: string,
+    text: string,
+  ): Promise<JsonValue | undefined> {
+    const openId = session.pendingRequestIds?.at(-1)
+    if (openId === undefined) return undefined
+    const entry = this.sessionTranscriptEntries(session.sessionId).findLast(item => item.requestId === openId)
+    const field = elicitationFreeTextField(entry?.nativeFrame)
+    if (field === undefined) {
+      throw new Error('远程 Agent 正在等待你处理上方的授权或选择卡片，请先在卡片中回答，再继续对话。')
+    }
+    await this.withSessionJournalApply(session.sessionId, async () => {
+      if (this.requireTranscriptStore().get(userTranscriptId) === undefined) {
+        await this.appendTranscript(session.sessionId, {
+          transcriptId: userTranscriptId, role: 'user', kind: 'message', text, requestId,
+        })
+      }
+    })
+    const id = Number.isSafeInteger(Number(openId)) ? Number(openId) : openId
+    await this.callSessionHostd(session, 'session.permission', {
+      sessionId: session.sessionId,
+      frame: { jsonrpc: '2.0', id, result: { action: 'accept', content: { [field]: text } } },
+    })
+    await this.settleBackendRequest(session.sessionId, openId)
+    await this.withSessionJournalApply(session.sessionId, async () => {
+      const current = this.requireTables().sessions.get(session.sessionId)
+      if (current === undefined) return
+      const now = new Date().toISOString()
+      const next: RemoteSessionView = { ...current, lastPromptAt: now, updatedAt: now }
+      await this.requireTables().sessions.put(session.sessionId, next)
+      this.broadcastSessionView(next)
+    })
+    this.ensureFollowedSync(session.sessionId)
+    await this.catchupSessionJournal(session.sessionId)
+    return { accepted: true, duplicate: false, answeredRequestId: openId }
   }
 
   /** Mark the session running and forward one admission to hostd. */
