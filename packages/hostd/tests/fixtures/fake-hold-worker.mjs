@@ -37,7 +37,11 @@ function handle(request) {
   if (request.operation === 'send-frame') {
     const frame = request.frame
     if (frame.method === 'initialize') append({ jsonrpc: '2.0', id: frame.id, result: { ready: true } })
-    else if (frame.method === 'session/new' || frame.method === 'session/fork' || frame.method === 'session/load') {
+    else if (frame.method === 'session/load') {
+      // Like a real ACP agent (grok, codex): a load reply carries modes/models
+      // but no sessionId -- the caller named the session it wanted loaded.
+      append({ jsonrpc: '2.0', id: frame.id, result: { models: { currentModelId: 'fake' } } })
+    } else if (frame.method === 'session/new' || frame.method === 'session/fork') {
       append({
         jsonrpc: '2.0', id: frame.id,
         result: { sessionId: typeof frame.params?.sessionId === 'string' ? frame.params.sessionId : `${config.backend}-native` },

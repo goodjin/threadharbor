@@ -127,18 +127,42 @@ const transcriptRecord: z.ZodType<RemoteTranscriptEntry> = z.object({
   usage: transcriptUsage.optional(),
 }) as z.ZodType<RemoteTranscriptEntry>
 
-/** Durable domain: remote catalog and transcript projection, separate from dsh-workspace/session. */
+const catalogGlobal = {
+  schema: remoteAgentCatalogState,
+  initial: { hostIds: [], projectIds: [], sessionIds: [], nextTranscriptSeq: {}, droppedThrough: {} },
+}
+const catalogTables = {
+  hosts: domainTable<ReturnType<typeof RemoteHostId>, RemoteHostView>(hostRecord),
+  projects: domainTable<ReturnType<typeof RemoteProjectId>, RemoteProjectView>(projectRecord),
+  sessions: domainTable<ReturnType<typeof RemoteSessionId>, RemoteSessionView>(sessionRecord),
+}
+
+/**
+ * Durable domain: the remote catalog (hosts, projects, sessions) plus the
+ * transcript seq counters, separate from dsh-workspace/session. The projected
+ * transcript rows themselves live in the gateway's own per-session files
+ * (`transcript-store.ts`): the storage domain rewrites its whole JSON unit on
+ * every record write, which a transcript of tens of thousands of rows cannot
+ * afford.
+ */
 export const remoteAgentDomainSpec = defineDomain({
   name: 'remote_agent',
   version: 1,
-  global: {
-    schema: remoteAgentCatalogState,
-    initial: { hostIds: [], projectIds: [], sessionIds: [], nextTranscriptSeq: {}, droppedThrough: {} },
-  },
+  global: catalogGlobal,
+  tables: catalogTables,
+})
+
+/**
+ * The same unit as it was written before transcript rows moved out of the
+ * domain. Opened once, read-only, to import those rows into the transcript
+ * store; the next catalog write then publishes the unit without the table.
+ */
+export const remoteAgentLegacyDomainSpec = defineDomain({
+  name: 'remote_agent',
+  version: 1,
+  global: catalogGlobal,
   tables: {
-    hosts: domainTable<ReturnType<typeof RemoteHostId>, RemoteHostView>(hostRecord),
-    projects: domainTable<ReturnType<typeof RemoteProjectId>, RemoteProjectView>(projectRecord),
-    sessions: domainTable<ReturnType<typeof RemoteSessionId>, RemoteSessionView>(sessionRecord),
+    ...catalogTables,
     transcript: domainTable<ReturnType<typeof RemoteTranscriptId>, RemoteTranscriptEntry>(transcriptRecord),
   },
 })

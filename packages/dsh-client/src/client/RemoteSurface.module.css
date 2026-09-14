@@ -1,5 +1,17 @@
 /* ThreadHarbor keeps the DSH theme/token contract while projecting one extra host level. */
 
+/* Every piece of text on the page must be selectable and copyable. The DSH
+ * shell (trajectory panel, workspace rows, tags, gutters) ships
+ * `user-select: none` on several of its own classes; this global override
+ * wins over them. `user-select: all` blocks below keep their click-to-select
+ * behaviour via their own `!important`. */
+:global(*),
+:global(*)::before,
+:global(*)::after {
+  -webkit-user-select: text !important;
+  user-select: text !important;
+}
+
 .sidebar {
   --threadharbor-row-height: 32px;
   --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
@@ -235,6 +247,7 @@
 
 .treeRowMain {
   min-width: 0;
+  box-sizing: border-box;
   flex: 1;
   height: var(--threadharbor-row-height);
   display: flex;
@@ -348,6 +361,7 @@
 
 .sessionRow {
   width: 100%;
+  box-sizing: border-box;
   min-width: 0;
   min-height: 30px;
   display: flex;
@@ -2156,7 +2170,8 @@
   border-radius: 6px;
   background: var(--dsw-alias-bg-layer-2);
   font-size: 11px;
-  user-select: all;
+  -webkit-user-select: all !important;
+  user-select: all !important;
 }
 
 .configEditor {

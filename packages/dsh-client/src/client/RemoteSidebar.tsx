@@ -16,6 +16,7 @@ import type {
 } from '@threadharbor/protocol'
 import type { RemoteAgentStore } from './store.ts'
 import { describeHostConnectFailure, hostConnectionLabel, hostDeploymentBadge, hostIpLabel } from './store.ts'
+import type { HTMLAttributes, ReactNode } from 'react'
 import css from './RemoteSurface.module.css'
 
 /** Hard ceiling on how long one row action (archive, hide) can leave a button on
@@ -32,6 +33,42 @@ export interface RemoteSidebarInjected {
 
 /** Full sidebar component props. */
 export type RemoteSidebarProps = PropsRuntime<'sidebar'> & SidebarOwnerProps & RemoteSidebarInjected
+
+
+/** Whether the user just finished dragging a text selection inside `element`. */
+function selectionInside(element: HTMLElement): boolean {
+  const selection = window.getSelection()
+  if (selection === null || selection.isCollapsed || selection.toString() === '') return false
+  return element.contains(selection.anchorNode) || element.contains(selection.focusNode)
+}
+
+/**
+ * A tree/session row that behaves like a button but keeps its text
+ * selectable: Chromium refuses to start a drag selection inside a native
+ * `<button>`, so host titles, endpoints and session names could not be
+ * copied. A drag that ended up selecting text must not also fire the click.
+ */
+function SelectableRow({ onClick, children, ...rest }: {
+  onClick: () => void
+  children: ReactNode
+} & Omit<HTMLAttributes<HTMLDivElement>, 'onClick' | 'children' | 'role' | 'tabIndex'>) {
+  return (
+    <div
+      {...rest}
+      role="button"
+      tabIndex={0}
+      onClick={(event) => {
+        if (selectionInside(event.currentTarget)) return
+        onClick()
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return
+        event.preventDefault()
+        onClick()
+      }}
+    >{children}</div>
+  )
+}
 
 function sessionState(session: RemoteSessionView): 'done' | 'warning' | 'ongoing' | 'error' {
   if (session.channelState === 'lost') return 'error'
@@ -221,8 +258,7 @@ function SessionRow({
   useDismissOnOutsidePointer(menuRef, menuOpen, () => { setMenuOpen(false) })
   return (
     <div ref={menuRef} className={css.sessionItem}>
-      <button
-        type="button"
+      <SelectableRow
         className={css.sessionRow}
         data-current={session.sessionId === currentSessionId || undefined}
         aria-current={session.sessionId === currentSessionId ? 'page' : undefined}
@@ -241,7 +277,7 @@ function SessionRow({
             : session.channelState === 'connecting' ? 'connecting'
               : session.turnState === 'stopped' ? 'stopped' : undefined}
         >{sessionBadge(session, session.sessionId === attachingSessionId)}</span>
-      </button>
+      </SelectableRow>
       <button
         type="button"
         className={css.sessionMenuButton}
@@ -335,8 +371,7 @@ function ProjectSection({
   return (
     <section className={css.projectSection} data-active={active || undefined}>
       <div className={css.treeRow} data-level="project">
-        <button
-          type="button"
+        <SelectableRow
           className={css.treeRowMain}
           aria-expanded={expanded}
           aria-current={active ? 'page' : undefined}
@@ -346,7 +381,7 @@ function ProjectSection({
           <span className={css.chevron}><TreeToggle open={expanded} /></span>
           <span className={css.folderIcon} aria-hidden="true">{expanded ? <IconFolderOpen16 /> : <IconFolderClose16 />}</span>
           <span className={css.treeLabel}>{project.title}</span>
-        </button>
+        </SelectableRow>
         <div className={css.treeRowActions}>
           <button
             type="button"
@@ -395,11 +430,11 @@ function ProjectSection({
       {expanded && (
         <div className={css.projectChildren}>
           {draftCurrent && (
-            <button type="button" className={css.sessionRow} data-current aria-current="page" onClick={() => { store.startSessionDraft(project.projectId) }}>
+            <SelectableRow className={css.sessionRow} data-current aria-current="page" onClick={() => { store.startSessionDraft(project.projectId) }}>
               <span className={css.sessionLeading}><span className={css.draftDot} aria-hidden="true" /></span>
               <span className={css.sessionTitle}>新会话</span>
               <span className={css.backendBadge}>待选择</span>
-            </button>
+            </SelectableRow>
           )}
           <SessionRows
             sessions={renderedSessions}
@@ -491,8 +526,7 @@ function HostSection({
   return (
     <section className={css.hostSection} data-active={active || undefined}>
       <div className={css.treeRow} data-level="host">
-        <button
-          type="button"
+        <SelectableRow
           className={css.treeRowMain}
           aria-expanded={expanded}
           aria-current={active ? 'page' : undefined}
@@ -530,7 +564,7 @@ function HostSection({
               {hostIpLabel(host)} · {hostConnectionLabel(host, artifactVersion)}
             </small>
           </span>
-        </button>
+        </SelectableRow>
         <div className={css.treeRowActions}>
           <button
             type="button"

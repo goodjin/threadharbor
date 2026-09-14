@@ -28,6 +28,28 @@ function frameMethod(frame: Record<string, JsonValue>): string {
   return typeof frame['method'] === 'string' ? frame['method'] : ''
 }
 
+/**
+ * Whether a projected row must carry its native frame. The browser reads the
+ * frame only to render choice cards (permission / elicitation ids, options)
+ * and plan items; tool-call and tool-result rows never use it, and keeping
+ * every tool frame made the transcript store an order of magnitude larger.
+ */
+export function retainsNativeFrame(
+  row: { readonly role: string; readonly kind: string },
+  frame: JsonValue,
+): boolean {
+  if (row.role === 'permission') return true
+  const record = object(frame)
+  if (record === undefined) return false
+  const method = frameMethod(record)
+  if (method === 'session/request_permission' || method === 'session/requestPermission' || method === 'elicitation/create') {
+    return true
+  }
+  const update = object(object(record['params'])?.['update'])
+  const kind = typeof update?.['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
+  return kind === 'plan' || kind === 'plan_update'
+}
+
 function requestId(frame: Record<string, JsonValue>): string | undefined {
   const id = frame['id']
   return typeof id === 'string' || typeof id === 'number' ? String(id) : undefined

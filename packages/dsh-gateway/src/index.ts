@@ -5,7 +5,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { existsSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { performance } from 'node:perf_hooks'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { HOSTD_ARTIFACT_FILES, hostdArtifactVersionFromDirectory } from '@threadharbor/hostd/version'
 import { Context, Service } from '@deepseek-ai/cordis'
@@ -52,10 +52,11 @@ import {
   type RemoteTranscriptPage,
   type RemoteTranscriptUsage,
 } from '@threadharbor/protocol'
-import { projectNativeFrame } from './projection.ts'
+import { projectNativeFrame, retainsNativeFrame } from './projection.ts'
 import { frameUsageReading, isRoundTerminalFrame, mergeUsage } from './run-usage.ts'
 import { applyConfigFrame, configSwitchRequest, withSwitchedValue } from './session-config.ts'
-import { remoteAgentDomainSpec, type RemoteAgentCatalogState } from './spec.ts'
+import { remoteAgentDomainSpec, remoteAgentLegacyDomainSpec, type RemoteAgentCatalogState } from './spec.ts'
+import { TranscriptStore } from './transcript-store.ts'
 import { SshManager, type SshDeploymentProgress } from './ssh-manager.ts'
 import { restartLoopbackHostd } from './local-hostd.ts'
 import { WsBroadcaster } from './ws-broadcaster.ts'
@@ -85,6 +86,8 @@ export interface Config {
   runningTurnIdleTimeoutMs?: number
   /** Durable projected entries retained per session. */
   maxTranscriptEntriesPerSession: number
+  /** Directory of per-session transcript files; defaults to `transcripts/` next to the known_hosts file. */
+  transcriptDir?: string
   /** Web-service-owned OpenSSH known_hosts file. */
   sshKnownHostsPath: string
   /** SSH connection and key-scan timeout. */
@@ -101,7 +104,6 @@ interface Tables {
   readonly hosts: KvTable<ReturnType<typeof RemoteHostId>, RemoteHostView>
   readonly projects: KvTable<ReturnType<typeof RemoteProjectId>, RemoteProjectView>
   readonly sessions: KvTable<ReturnType<typeof RemoteSessionId>, RemoteSessionView>
-  readonly transcript: KvTable<ReturnType<typeof RemoteTranscriptId>, RemoteTranscriptEntry>
 }
 
 /** First message submitted together with `session.start`; the gateway delivers
@@ -360,11 +362,28 @@ function holdUnreachable(error: unknown): boolean {
     .test(errorMessage(error))
 }
 
+/**
+ * hostd answered but has no record for this session id: its data directory
+ * was cleared or replaced (a dev hostd under /tmp after a reboot, a redeploy
+ * that moved --data-dir). The hold can never be re-attached; it has to be
+ * recreated under the same session id.
+ */
+function isMissingHostdSession(error: unknown): boolean {
+  return /unknown hostd session/i.test(errorMessage(error))
+}
+
+const MISSING_HOSTD_SESSION_HINT = '远程主机上已没有该会话的记录（hostd 数据目录可能已被清空或更换）。'
+  + '可以点「在当前会话重开」，系统会重新创建 Agent 进程，对话记录会保留，但先前的模型上下文不会恢复。'
+
+const RECREATED_HOLD_STATUS = '远程主机上已没有该会话的记录，已在当前会话上重新创建 Agent 进程。'
+  + '先前的模型上下文未恢复，对话记录已保留，可以继续发送新请求。'
+
 function holdSessionFailure(error: unknown): string {
   const message = errorMessage(error)
   // Actionable hostd errors (e.g. a Grok serve secret conflict with adopt /
   // restart buttons) must reach the browser verbatim.
   if (hasRemoteErrorFix(message)) return message
+  if (isMissingHostdSession(error)) return MISSING_HOSTD_SESSION_HINT
   // Only a genuinely dead hold socket deserves the generic reopen hint; any
   // other hostd reply already is the reason the reopen failed and should be
   // shown instead of being collapsed into "click reopen again".
@@ -411,6 +430,7 @@ export class RemoteAgentGateway extends Service {
     pollIntervalMs: z.natural().min(1).required(),
     runningTurnIdleTimeoutMs: z.natural().min(1),
     maxTranscriptEntriesPerSession: z.natural().min(1).required(),
+    transcriptDir: z.string(),
     sshKnownHostsPath: z.string().required(),
     sshConnectTimeoutMs: z.natural().min(1).required(),
     sshInstallTimeoutMs: z.natural().min(1).required(),
@@ -420,6 +440,7 @@ export class RemoteAgentGateway extends Service {
 
   private tables?: Tables
   private global?: DomainGlobal<RemoteAgentCatalogState>
+  private transcriptStore?: TranscriptStore
   /** Serial chain for quick browser RPC mutations (add/rename/hide/prompt…). */
   private operationTail: Promise<void> = Promise.resolve()
   /** Serial chain for background operation work (SSH deploys, agent installs).
@@ -478,13 +499,17 @@ export class RemoteAgentGateway extends Service {
 
   /** Open the independent catalog domain and register its exact control route. */
   protected async [Service.init](): Promise<void> {
+    const store = new TranscriptStore({ directory: this.transcriptDirectory() })
+    await store.open()
+    this.transcriptStore = store
+    this.ctx.effect(() => () => { void store.flush() }, 'remoteAgent.transcriptFlush')
+    if (await store.needsLegacyImport()) await this.importLegacyTranscript(store)
     const domain = await this.ctx.storageDomain.open(remoteAgentDomainSpec)
     this.ctx.effect(() => () => domain.close(), 'remoteAgent.domainClose')
     this.tables = {
       hosts: domain.table('hosts'),
       projects: domain.table('projects'),
       sessions: domain.table('sessions'),
-      transcript: domain.table('transcript'),
     }
     this.global = domain.global
     this.validateCatalog()
@@ -634,7 +659,7 @@ export class RemoteAgentGateway extends Service {
       case 'session.start':
         return await this.startSessionAndWait(request.params) as unknown as JsonValue
       case 'session.attach':
-        return await this.enqueue(() => this.attachSession(request.params)) as unknown as JsonValue
+        return await this.enqueue(() => this.attachSession(request.params, { recreateMissing: true })) as unknown as JsonValue
       case 'session.restart':
         return await this.enqueue(() => this.restartSession(request.params)) as unknown as JsonValue
       case 'session.rename':
@@ -1474,24 +1499,21 @@ export class RemoteAgentGateway extends Service {
     }
   }
 
-  private async attachSession(params: Record<string, JsonValue>): Promise<RemoteSessionView> {
+  /**
+   * Re-attach a session's hold on hostd. With `recreateMissing` (explicit
+   * reopen / prompt delivery — never the background follow attach), a hostd
+   * that no longer knows the session id gets a fresh hold created under the
+   * same id, so the gateway transcript stays attached to a new Agent process.
+   */
+  private async attachSession(
+    params: Record<string, JsonValue>,
+    options: { readonly recreateMissing?: boolean } = {},
+  ): Promise<RemoteSessionView> {
     const session = this.requireSession(RemoteSessionId(stringField(params, 'sessionId')))
     const project = this.requireProject(session.projectId)
     const host = this.requireHost(project.hostId)
-    let attached: RemoteSessionAttachResult
-    try {
-      attached = await this.callHostd(host, 'session.attach', { sessionId: session.sessionId }) as unknown as RemoteSessionAttachResult
-    } catch (error) {
-      await this.requireTables().sessions.put(session.sessionId, {
-        ...session,
-        channelState: 'lost',
-        turnState: session.turnState === 'running' ? 'failed' : session.turnState,
-        ...(session.binding === undefined ? {} : { binding: { ...session.binding, state: 'lost' } }),
-        updatedAt: new Date().toISOString(),
-      })
-      throw new Error(holdSessionFailure(error))
-    }
-    if (session.binding !== undefined && session.binding.generation !== attached.generation) {
+    const { attached, recreated } = await this.attachOrRecreateHold(host, project, session, 'session.attach', options)
+    if (!recreated && session.binding !== undefined && session.binding.generation !== attached.generation) {
       const lost: RemoteSessionView = {
         ...session,
         channelState: 'lost',
@@ -1502,7 +1524,7 @@ export class RemoteAgentGateway extends Service {
       await this.requireTables().sessions.put(session.sessionId, lost)
       throw new Error('remote hold generation changed; any in-flight prompt outcome is unknown and was not resent')
     }
-    const reopened = attached.reopened === true
+    const reopened = recreated || attached.reopened === true
     // A live in-flight turn interrupted by a reopen is reported as failed (the
     // native context was replaced) so the user is not left waiting on a turn
     // that can never complete. A terminal failed/stopped turn, however, is a
@@ -1525,11 +1547,64 @@ export class RemoteAgentGateway extends Service {
         transcriptId: RemoteTranscriptId(`reopen:${session.sessionId}:${attached.generation}:${attached.latestSeq}`),
         role: 'system',
         kind: 'status',
-        text: '远程 Agent 已在当前会话上重新打开。先前的模型上下文可能未恢复，可以继续发送新请求。',
+        text: recreated
+          ? RECREATED_HOLD_STATUS
+          : '远程 Agent 已在当前会话上重新打开。先前的模型上下文可能未恢复，可以继续发送新请求。',
       })
       await this.markChildrenLost(session.sessionId)
     }
     return ready
+  }
+
+  /**
+   * Call `session.attach` / `session.restart` on hostd; when hostd has no
+   * record for the session and recreation is allowed, fall back to
+   * `session.start` under the same session id. Any failure marks the row lost
+   * and rethrows the browser-facing reason.
+   */
+  private async attachOrRecreateHold(
+    host: RemoteHostView,
+    project: RemoteProjectView,
+    session: RemoteSessionView,
+    method: 'session.attach' | 'session.restart',
+    options: { readonly recreateMissing?: boolean },
+  ): Promise<{ attached: RemoteSessionAttachResult; recreated: boolean }> {
+    const params = method === 'session.restart'
+      ? { sessionId: session.sessionId, confirm: true }
+      : { sessionId: session.sessionId }
+    try {
+      const attached = await this.callHostd(host, method, params) as unknown as RemoteSessionAttachResult
+      return { attached, recreated: false }
+    } catch (error) {
+      if (options.recreateMissing !== true || !isMissingHostdSession(error)) {
+        await this.markSessionLost(session)
+        throw new Error(holdSessionFailure(error))
+      }
+      process.stderr.write(
+        `threadharbor-gateway: hostd has no record of session=${session.sessionId}; recreating hold host=${host.hostId}\n`,
+      )
+      try {
+        const attached = await this.callHostd(host, 'session.start', {
+          sessionId: session.sessionId,
+          backend: session.backend,
+          cwd: project.cwd,
+        }) as unknown as RemoteSessionAttachResult
+        return { attached, recreated: true }
+      } catch (recreateError) {
+        await this.markSessionLost(session)
+        throw new Error(holdSessionFailure(recreateError))
+      }
+    }
+  }
+
+  private async markSessionLost(session: RemoteSessionView): Promise<void> {
+    await this.requireTables().sessions.put(session.sessionId, {
+      ...session,
+      channelState: 'lost',
+      turnState: session.turnState === 'running' ? 'failed' : session.turnState,
+      ...(session.binding === undefined ? {} : { binding: { ...session.binding, state: 'lost' } }),
+      updatedAt: new Date().toISOString(),
+    })
   }
 
   /**
@@ -1543,23 +1618,10 @@ export class RemoteAgentGateway extends Service {
     const session = this.requireSession(RemoteSessionId(stringField(params, 'sessionId')))
     const project = this.requireProject(session.projectId)
     const host = this.requireHost(project.hostId)
-    let attached: RemoteSessionAttachResult
-    try {
-      attached = await this.callHostd(host, 'session.restart', {
-        sessionId: session.sessionId,
-        confirm: true,
-      }) as unknown as RemoteSessionAttachResult
-    } catch (error) {
-      await this.requireTables().sessions.put(session.sessionId, {
-        ...session,
-        channelState: 'lost',
-        turnState: session.turnState === 'running' ? 'failed' : session.turnState,
-        ...(session.binding === undefined ? {} : { binding: { ...session.binding, state: 'lost' } }),
-        updatedAt: new Date().toISOString(),
-      })
-      throw new Error(holdSessionFailure(error))
-    }
-    if (session.binding !== undefined && session.binding.generation !== attached.generation) {
+    const { attached, recreated } = await this.attachOrRecreateHold(
+      host, project, session, 'session.restart', { recreateMissing: true },
+    )
+    if (!recreated && session.binding !== undefined && session.binding.generation !== attached.generation) {
       const lost: RemoteSessionView = {
         ...session,
         channelState: 'lost',
@@ -1570,7 +1632,7 @@ export class RemoteAgentGateway extends Service {
       await this.requireTables().sessions.put(session.sessionId, lost)
       throw new Error('remote hold generation changed; any in-flight prompt outcome is unknown and was not resent')
     }
-    const reopened = attached.reopened === true
+    const reopened = recreated || attached.reopened === true
     const ready = this.withAttachment({ ...session, turnState: 'idle' }, attached, reopened)
     await this.requireTables().sessions.put(session.sessionId, ready)
     this.broadcastSessionView(ready)
@@ -1578,9 +1640,11 @@ export class RemoteAgentGateway extends Service {
       transcriptId: RemoteTranscriptId(`force-restart:${session.sessionId}:${attached.generation}:${attached.latestSeq}`),
       role: 'system',
       kind: 'status',
-      text: 'Agent 长时间没有响应，已结束其进程并在当前会话重新打开。'
-        + (reopened ? '先前的模型上下文可能未恢复。' : '')
-        + '对话记录已保留，可以继续发送新请求。',
+      text: recreated
+        ? RECREATED_HOLD_STATUS
+        : 'Agent 长时间没有响应，已结束其进程并在当前会话重新打开。'
+          + (reopened ? '先前的模型上下文可能未恢复。' : '')
+          + '对话记录已保留，可以继续发送新请求。',
     })
     if (reopened) await this.markChildrenLost(session.sessionId)
     return ready
@@ -1708,13 +1772,42 @@ export class RemoteAgentGateway extends Service {
     const tables = this.requireTables()
     for (const id of ids) {
       const session = tables.sessions.get(id)
-      if (session !== undefined) {
-        for (const [transcriptId, entry] of tables.transcript.entries()) {
-          if (entry.sessionId === session.sessionId) await tables.transcript.delete(transcriptId)
-        }
-      }
+      if (session !== undefined) await this.requireTranscriptStore().deleteSession(session.sessionId)
       await tables.sessions.delete(id)
     }
+  }
+
+  private transcriptDirectory(): string {
+    if (this.config.transcriptDir !== undefined && this.config.transcriptDir !== '') {
+      return localPath(this.config.transcriptDir)
+    }
+    return join(dirname(localPath(this.config.sshKnownHostsPath)), 'transcripts')
+  }
+
+  /**
+   * One-time move of transcript rows out of the storage domain: open the unit
+   * with the legacy table, copy its rows into the transcript store (tool rows
+   * lose the raw frame they never needed), close it. The catalog domain is
+   * then opened without the table, and its next write publishes the unit
+   * without those rows.
+   */
+  private async importLegacyTranscript(store: TranscriptStore): Promise<void> {
+    const startedAt = performance.now()
+    const legacy = await this.ctx.storageDomain.open(remoteAgentLegacyDomainSpec)
+    let imported = 0
+    try {
+      const rows = [...legacy.table('transcript').entries()].map(([, entry]) => {
+        if (entry.nativeFrame === undefined || retainsNativeFrame(entry, entry.nativeFrame)) return entry
+        const { nativeFrame: _dropped, ...slim } = entry
+        return slim
+      })
+      imported = await store.importLegacy(rows)
+    } finally {
+      await legacy.close()
+    }
+    process.stderr.write(
+      `threadharbor-gateway: transcript rows imported from storage domain count=${imported} elapsedMs=${Math.round(performance.now() - startedAt)}\n`,
+    )
   }
 
   private withAttachment(
@@ -1761,7 +1854,7 @@ export class RemoteAgentGateway extends Service {
     const text = stringField(params, 'text')
     const userTranscriptId = RemoteTranscriptId(`user:${session.sessionId}:${clientId}:${requestId}`)
     await this.withSessionJournalApply(session.sessionId, async () => {
-      if (this.requireTables().transcript.get(userTranscriptId) === undefined) {
+      if (this.requireTranscriptStore().get(userTranscriptId) === undefined) {
         await this.appendTranscript(session.sessionId, {
           transcriptId: userTranscriptId, role: 'user', kind: 'message', text, requestId,
         })
@@ -1770,9 +1863,9 @@ export class RemoteAgentGateway extends Service {
     try {
       return await this.deliverPrompt(session, clientId, requestId, text)
     } catch (error) {
-      if (holdUnreachable(error)) {
+      if (holdUnreachable(error) || isMissingHostdSession(error)) {
         try {
-          const revived = await this.attachSession({ sessionId: session.sessionId })
+          const revived = await this.attachSession({ sessionId: session.sessionId }, { recreateMissing: true })
           return await this.deliverPrompt(revived, clientId, requestId, text)
         } catch (retryError) {
           await this.markPromptUndelivered(session, clientId, requestId, retryError)
@@ -1819,7 +1912,7 @@ export class RemoteAgentGateway extends Service {
     error: unknown,
   ): Promise<void> {
     const current = this.requireTables().sessions.get(session.sessionId) ?? session
-    const holdDead = holdUnreachable(error)
+    const holdDead = holdUnreachable(error) || isMissingHostdSession(error)
     const failed: RemoteSessionView = {
       ...current,
       turnState: 'failed',
@@ -1830,7 +1923,7 @@ export class RemoteAgentGateway extends Service {
     await this.requireTables().sessions.put(session.sessionId, failed)
     this.broadcastSessionView(failed)
     const failureId = RemoteTranscriptId(`delivery:${session.sessionId}:${clientId}:${requestId}`)
-    if (this.requireTables().transcript.get(failureId) === undefined) {
+    if (this.requireTranscriptStore().get(failureId) === undefined) {
       await this.appendTranscript(session.sessionId, {
         transcriptId: failureId,
         role: 'system',
@@ -2137,7 +2230,7 @@ export class RemoteAgentGateway extends Service {
             role: fragment.role,
             kind: fragment.kind,
             text: fragment.text,
-            ...(fragment.role === 'assistant' ? {} : { nativeFrame: event.frame }),
+            ...(retainsNativeFrame(fragment, event.frame) ? { nativeFrame: event.frame } : {}),
             ...(fragment.requestId === undefined ? {} : { requestId: fragment.requestId }),
             ...(fragmentIndex === terminalFragmentIndex && stampUsage !== undefined ? { usage: stampUsage } : {}),
           })
@@ -2243,7 +2336,7 @@ export class RemoteAgentGateway extends Service {
       await this.requireTables().sessions.put(session.sessionId, next)
       this.broadcastSessionView(next)
       const transcriptId = RemoteTranscriptId(`turn:${session.sessionId}:${turnState}:${current.binding?.generation ?? 'none'}:${current.binding?.lastSeq ?? 0}`)
-      if (this.requireTables().transcript.get(transcriptId) === undefined) {
+      if (this.requireTranscriptStore().get(transcriptId) === undefined) {
         await this.appendTranscript(session.sessionId, {
           transcriptId, role: 'system', kind: 'status', text,
         })
@@ -2267,11 +2360,8 @@ export class RemoteAgentGateway extends Service {
     this.wsBroadcaster.broadcast({ type: 'session.view.changed', session: this.withTranscriptHead(session) })
   }
 
-  private sessionTranscriptEntries(sessionId: ReturnType<typeof RemoteSessionId>): RemoteTranscriptEntry[] {
-    return [...this.requireTables().transcript.entries()]
-      .map(([, entry]) => entry)
-      .filter(entry => entry.sessionId === sessionId)
-      .sort((left, right) => left.seq - right.seq)
+  private sessionTranscriptEntries(sessionId: ReturnType<typeof RemoteSessionId>): readonly RemoteTranscriptEntry[] {
+    return this.requireTranscriptStore().session(sessionId)
   }
 
   private readTranscript(params: Record<string, JsonValue>): RemoteTranscriptPage {
@@ -2328,8 +2418,8 @@ export class RemoteAgentGateway extends Service {
     inputs: readonly TranscriptInput[],
   ): Promise<readonly RemoteTranscriptEntry[]> {
     if (inputs.length === 0) return []
-    const tables = this.requireTables()
-    const novel = inputs.filter(input => tables.transcript.get(input.transcriptId) === undefined)
+    const store = this.requireTranscriptStore()
+    const novel = inputs.filter(input => store.get(input.transcriptId) === undefined)
     if (novel.length === 0) return []
     const global = this.requireGlobal()
     const state = global.get()
@@ -2338,17 +2428,14 @@ export class RemoteAgentGateway extends Service {
     const entries = novel.map((input, index): RemoteTranscriptEntry => ({
       ...input, sessionId, seq: firstSeq + index, createdAt,
     }))
-    for (const entry of entries) await tables.transcript.put(entry.transcriptId, entry)
-    const excess = [...this.requireTables().transcript.entries()]
-      .filter(([, candidate]) => candidate.sessionId === sessionId)
-      .sort((left, right) => left[1].seq - right[1].seq)
-      .slice(0, -this.config.maxTranscriptEntriesPerSession)
-    for (const [id] of excess) await this.requireTables().transcript.delete(id)
+    // One file append per page (plus the seq counter below) instead of one
+    // whole-unit rewrite per row.
+    const excess = await store.append(sessionId, entries, this.config.maxTranscriptEntriesPerSession)
     // Record the highest seq the gateway once held but has now rotated out,
     // so the browser can show an honest banner when the session is re-opened.
     // Mirrors hostd's `droppedThrough` convention; the count of lost entries
     // equals `droppedThrough + 1` because the projected seq starts at 0.
-    const lastDropped = excess.at(-1)?.[1].seq
+    const lastDropped = excess.at(-1)?.seq
     await global.set({
       ...state,
       nextTranscriptSeq: { ...state.nextTranscriptSeq, [sessionId]: firstSeq + entries.length },
@@ -2698,6 +2785,11 @@ export class RemoteAgentGateway extends Service {
     const value = table.get(id)
     if (value === undefined) throw new Error(`unknown ${kind} ${id}`)
     return value
+  }
+
+  private requireTranscriptStore(): TranscriptStore {
+    if (this.transcriptStore === undefined) throw new Error('remote-agent transcript store is not initialized')
+    return this.transcriptStore
   }
 
   private requireTables(): Tables {

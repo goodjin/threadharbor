@@ -3,7 +3,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { createServer } from 'node:net'
+import { connect, createServer } from 'node:net'
 import { dirname, isAbsolute, join } from 'node:path'
 import { readHostdPackageVersion } from '@threadharbor/hostd/version'
 import {
@@ -44,6 +44,7 @@ interface RunResult {
 interface OwnedTunnel {
   readonly child: ChildProcess
   readonly localPort: number
+  readonly config: RemoteSshConfig
 }
 
 function text(value: unknown, name: string): string {
@@ -149,6 +150,27 @@ function alias(config: RemoteSshConfig): string {
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`
+}
+
+/**
+ * Whether something accepts TCP connections on a loopback port. Retries a few
+ * times because a forward can be registered a moment before it is bound.
+ * @param port - loopback port to probe.
+ * @param attempts - probe count, 250ms apart.
+ */
+export async function portListening(port: number, attempts = 1): Promise<boolean> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const open = await new Promise<boolean>((resolveProbe) => {
+      const socket = connect({ host: '127.0.0.1', port })
+      socket.setTimeout(1000)
+      socket.once('connect', () => { socket.destroy(); resolveProbe(true) })
+      socket.once('timeout', () => { socket.destroy(); resolveProbe(false) })
+      socket.once('error', () => resolveProbe(false))
+    })
+    if (open) return true
+    if (attempt + 1 < attempts) await new Promise(resolveWait => setTimeout(resolveWait, 250))
+  }
+  return false
 }
 
 async function freePort(): Promise<number> {
@@ -344,7 +366,14 @@ export class SshManager {
     const prior = this.tunnelOps.get(key) ?? Promise.resolve()
     const run = prior.then(async () => {
       const existing = this.tunnels.get(key)
-      if (existing !== undefined && existing.child.exitCode === null) return `http://127.0.0.1:${existing.localPort}`
+      // With ControlMaster/ControlPersist the child we spawned hands the
+      // connection to a background master and exits; the forward it registered
+      // lives on in that master. The local port, not the child, says whether
+      // the tunnel is still up.
+      if (existing !== undefined
+        && (existing.child.exitCode === null || await portListening(existing.localPort))) {
+        return `http://127.0.0.1:${existing.localPort}`
+      }
       const localPort = await freePort()
       await this.startTunnel(config, localPort)
       return `http://127.0.0.1:${localPort}`
@@ -357,14 +386,23 @@ export class SshManager {
   /** Stop the tunnel owned for one no-longer-catalogued SSH connection. */
   releaseTunnel(config: RemoteSshConfig): void {
     const key = alias(config)
-    this.tunnels.get(key)?.child.kill('SIGTERM')
+    const tunnel = this.tunnels.get(key)
+    if (tunnel !== undefined) this.stopTunnel(tunnel)
     this.tunnels.delete(key)
   }
 
   /** Stop gateway-owned tunnels without touching remote hostd or agent workers. */
   close(): void {
-    for (const tunnel of this.tunnels.values()) tunnel.child.kill('SIGTERM')
+    for (const tunnel of this.tunnels.values()) this.stopTunnel(tunnel)
     this.tunnels.clear()
+  }
+
+  /** Kill the spawned ssh and, when it was multiplexed, ask the background master to exit too. */
+  private stopTunnel(tunnel: OwnedTunnel): void {
+    if (tunnel.child.exitCode === null) tunnel.child.kill('SIGTERM')
+    const mux = this.muxArgs(tunnel.config)
+    if (mux.length === 0) return
+    void run('ssh', [...mux, '-O', 'exit', this.destination(tunnel.config)], 5_000).catch(() => undefined)
   }
 
   private async scan(config: RemoteSshConfig): Promise<readonly ScanResult[]> {
@@ -464,13 +502,21 @@ export class SshManager {
       this.destination(config),
     ]
     const tunnel = spawn('ssh', args, { stdio: ['ignore', 'ignore', 'pipe'] })
-    this.tunnels.set(key, { child: tunnel, localPort })
-    await new Promise<void>((resolveTunnel, rejectTunnel) => {
-      let error = ''
-      tunnel.stderr?.on('data', (chunk: Buffer) => { error = `${error}${chunk.toString('utf8')}`.slice(-4096) })
-      const timer = setTimeout(() => resolveTunnel(), 350)
-      tunnel.once('error', (cause) => { clearTimeout(timer); rejectTunnel(cause) })
-      tunnel.once('exit', (code) => { clearTimeout(timer); rejectTunnel(new Error(`SSH tunnel exited with status ${code ?? 1}: ${error.trim()}`)) })
+    this.tunnels.set(key, { child: tunnel, localPort, config })
+    let error = ''
+    tunnel.stderr?.on('data', (chunk: Buffer) => { error = `${error}${chunk.toString('utf8')}`.slice(-4096) })
+    const outcome = await new Promise<{ exited?: number | null; failure?: Error }>((resolveOutcome) => {
+      const timer = setTimeout(() => resolveOutcome({}), 350)
+      tunnel.once('error', (cause) => { clearTimeout(timer); resolveOutcome({ failure: cause }) })
+      tunnel.once('exit', (code) => { clearTimeout(timer); resolveOutcome({ exited: code }) })
     })
+    if (outcome.failure !== undefined) throw outcome.failure
+    // Still connecting after the grace window: the child owns the forward.
+    if (outcome.exited === undefined) return
+    // A clean exit is not a failure under ControlPersist: the first ssh forks
+    // a background master and exits 0 once the forward is registered, and a
+    // later ssh joining that master does the same. Trust the port instead.
+    if (outcome.exited === 0 && await portListening(localPort, 8)) return
+    throw new Error(`SSH tunnel exited with status ${outcome.exited ?? 1}: ${error.trim()}`)
   }
 }

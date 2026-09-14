@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { EventEmitter } from 'node:events'
 import { hostdArtifactVersionFromDirectory } from '@threadharbor/hostd/version'
@@ -11,6 +13,7 @@ import {
   RemoteHostId, RemoteProjectId, RemoteSessionId, type JsonValue, type RemoteControlRequest,
 } from '@threadharbor/protocol'
 import RemoteAgentGateway from '../src/index.ts'
+import { remoteAgentLegacyDomainSpec } from '../src/spec.ts'
 import type { WebSocket } from 'ws'
 
 const CONFIG = {
@@ -231,10 +234,12 @@ async function harness(events: JsonValue[] = [], configOverride: Partial<typeof 
     }
   }
 
-  await ctx.plugin(RemoteAgentGateway, { ...CONFIG, ...configOverride }).await()
+  const transcriptDir = mkdtempSync(join(tmpdir(), 'th-transcript-'))
+  transcriptDirs.push(transcriptDir)
+  await ctx.plugin(RemoteAgentGateway, { ...CONFIG, transcriptDir, ...configOverride }).await()
   ctx.remoteAgentGateway.setHostdSocketFactory(socketFactory as unknown as (url: string) => import('ws').WebSocket)
   return {
-    ctx, gateway: ctx.remoteAgentGateway, calls,
+    ctx, gateway: ctx.remoteAgentGateway, calls, storageDomain, transcriptDir,
     failNext: () => { failing = true },
     failMethod: (method: string, message: string) => { methodErrors.set(method, message) },
     silenceMethod: (method: string, port: string) => { silenced.add(`${method}@${port}`) },
@@ -291,7 +296,12 @@ async function waitForSessionBinding(
   }, { timeout: 2000, interval: 10 })
 }
 
-afterEach(() => { vi.unstubAllGlobals() })
+const transcriptDirs: string[] = []
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  for (const dir of transcriptDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+})
 
 describe('RemoteAgentGateway', () => {
   it('registers the browser WebSocket route through webServer.registerUpgrade', async () => {
@@ -854,6 +864,85 @@ describe('RemoteAgentGateway', () => {
       ])
       expect(gateway.state().sessions.find(entry => entry.sessionId === RemoteSessionId(session.sessionId))?.latestTranscriptSeq)
         .toBe(transcript.at(-1)?.seq)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps the native frame only on choice and plan rows, never on tool rows', async () => {
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', id: 9, method: 'session/request_permission', params: { title: 'Allow?', options: [] } },
+      { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'tool_call', toolCallId: 'call-1', title: 'read_file', rawInput: { path: '/big' } } } },
+      { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'tool_call_update', toolCallId: 'call-1', title: 'Read /big', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'x'.repeat(2000) } }] } } },
+      { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'plan', entries: [{ content: 'step one', status: 'pending' }] } } },
+      { jsonrpc: '2.0', method: '_x.ai/session/prompt_complete', params: { stopReason: 'end_turn' } },
+    ]
+    const { ctx, gateway } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4240' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', { sessionId: session.sessionId, clientId: 'browser', requestId: 'frame-1', text: 'hello' }))
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      const transcript = (await readTranscript(gateway, session.sessionId)).entries as Array<{ role: string; kind: string; nativeFrame?: unknown }>
+      const byKind = (role: string, kind: string) => transcript.filter(entry => entry.role === role && entry.kind === kind)
+      expect(byKind('permission', 'permission').every(entry => entry.nativeFrame !== undefined)).toBe(true)
+      expect(byKind('tool', 'tool-call')).toHaveLength(1)
+      expect(byKind('tool', 'tool-result')).toHaveLength(1)
+      expect(byKind('tool', 'tool-call')[0]?.nativeFrame).toBeUndefined()
+      expect(byKind('tool', 'tool-result')[0]?.nativeFrame).toBeUndefined()
+      const plan = transcript.find(entry => entry.role === 'system' && entry.kind === 'status' && (entry as { text: string }).text.includes('step one'))
+      expect(plan?.nativeFrame).toBeDefined()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('imports transcript rows left in the storage domain once and drops tool frames on the way', async () => {
+    const ctx = new Context()
+    await ctx.plugin(Storage)
+    ctx.storage.backend.register('memory', new MemoryStorageBackend())
+    const storageDomain = new DomainFacility(ctx, { backend: 'memory', routes: {} })
+    ctx.storage.mount('domain', storageDomain)
+    ctx.reflect.provide('storageDomain', storageDomain)
+    ctx.reflect.provide('webServer', { register: () => () => undefined, registerUpgrade: () => () => undefined })
+    const transcriptDir = mkdtempSync(join(tmpdir(), 'th-transcript-'))
+    transcriptDirs.push(transcriptDir)
+    try {
+      // Seed the unit the way the pre-store gateway wrote it: catalog plus a
+      // transcript table carrying raw frames on every row.
+      const legacy = await storageDomain.open(remoteAgentLegacyDomainSpec)
+      const sessionId = RemoteSessionId('11111111-1111-4111-8111-111111111111')
+      const projectId = RemoteProjectId('22222222-2222-4222-8222-222222222222')
+      const hostId = RemoteHostId('33333333-3333-4333-8333-333333333333')
+      const now = '2026-09-12T00:00:00.000Z'
+      await legacy.table('hosts').put(hostId, { hostId, title: 'h', endpoint: 'http://127.0.0.1:1', createdAt: now, updatedAt: now })
+      await legacy.table('projects').put(projectId, { projectId, hostId, title: 'p', cwd: '/repo', createdAt: now, updatedAt: now })
+      await legacy.table('sessions').put(sessionId, {
+        sessionId, projectId, title: 's', backend: 'codex', channelState: 'closed', turnState: 'idle', createdAt: now, updatedAt: now,
+      })
+      const toolFrame = { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'tool_call', toolCallId: 'c1', title: 'read_file' } } }
+      const permissionFrame = { jsonrpc: '2.0', id: 4, method: 'session/request_permission', params: { title: 'Allow?', options: [] } }
+      await legacy.table('transcript').put('t-0' as never, {
+        transcriptId: 't-0', sessionId, seq: 0, role: 'tool', kind: 'tool-call', text: 'read_file', createdAt: now, nativeFrame: toolFrame,
+      } as never)
+      await legacy.table('transcript').put('t-1' as never, {
+        transcriptId: 't-1', sessionId, seq: 1, role: 'permission', kind: 'permission', text: 'Allow?', createdAt: now, nativeFrame: permissionFrame, requestId: '4',
+      } as never)
+      await legacy.global.set({ hostIds: [hostId], projectIds: [projectId], sessionIds: [sessionId], nextTranscriptSeq: { [sessionId]: 2 }, droppedThrough: {} })
+      await legacy.close()
+
+      await ctx.plugin(RemoteAgentGateway, { ...CONFIG, transcriptDir }).await()
+      const gateway = ctx.remoteAgentGateway
+      const page = await readTranscript(gateway, sessionId)
+      expect(page.entries.map(entry => [entry.seq, entry.role, (entry as { nativeFrame?: unknown }).nativeFrame !== undefined])).toEqual([
+        [0, 'tool', false],
+        [1, 'permission', true],
+      ])
+      // The marker keeps a second start from re-reading the legacy table.
+      expect(existsSync(join(transcriptDir, 'legacy-domain-imported'))).toBe(true)
+      expect(existsSync(join(transcriptDir, `${sessionId}.jsonl`))).toBe(true)
     } finally {
       await ctx.fiber.dispose()
     }
@@ -1444,6 +1533,77 @@ describe('RemoteAgentGateway', () => {
       expect(attached.binding?.lastSeq).toBe(9)
       const page = await readTranscript(gateway, session.sessionId)
       expect(page.entries.some(entry => entry.text.includes('已在当前会话上重新打开'))).toBe(true)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('recreates the hold under the same session id when hostd no longer knows it and the browser reopens', async () => {
+    const { ctx, gateway, failMethod, calls } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4430' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      const startsBefore = calls.filter(call => call.request.method === 'session.start').length
+      // hostd lost its data directory: the session id is unknown to it now.
+      failMethod('session.attach', `Error: unknown hostd session ${session.sessionId}`)
+      const attached = await gateway.dispatch(request('session.attach', { sessionId: session.sessionId })) as unknown as {
+        sessionId: string
+        channelState: string
+        turnState: string
+      }
+      expect(attached).toMatchObject({ sessionId: session.sessionId, channelState: 'open', turnState: 'idle' })
+      const starts = calls.filter(call => call.request.method === 'session.start')
+      expect(starts).toHaveLength(startsBefore + 1)
+      expect(starts.at(-1)?.request.params).toMatchObject({ sessionId: session.sessionId, backend: 'codex', cwd: '/repo' })
+      const page = await readTranscript(gateway, session.sessionId)
+      expect(page.entries.some(entry => entry.text.includes('重新创建 Agent 进程'))).toBe(true)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('recreates a hold hostd forgot and still delivers the prompt in place', async () => {
+    const { ctx, gateway, failMethod, calls } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4431' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      failMethod('session.prompt', `Error: unknown hostd session ${session.sessionId}`)
+      failMethod('session.attach', `Error: unknown hostd session ${session.sessionId}`)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'forgot-1', text: 'hello',
+      }))
+      expect(calls.filter(call => call.request.method === 'session.prompt')).toHaveLength(2)
+      expect(calls.filter(call => call.request.method === 'session.start')).toHaveLength(2)
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)).toMatchObject({
+        channelState: 'open', turnState: 'running',
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('explains a missing hostd record with a reopen hint when recreation itself fails', async () => {
+    const { ctx, gateway, failMethod } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4432' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      failMethod('session.attach', `Error: unknown hostd session ${session.sessionId}`)
+      failMethod('session.start', 'Error: ENOENT: no such file or directory, realpath \'/repo\'')
+      await expect(gateway.dispatch(request('session.attach', { sessionId: session.sessionId })))
+        .rejects.toThrow('realpath')
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.channelState).toBe('lost')
+      // Without recreation (background follow attach) the raw hostd error is
+      // rewritten into the actionable reopen hint.
+      failMethod('session.restart', `Error: unknown hostd session ${session.sessionId}`)
+      failMethod('session.start', `Error: unknown hostd session ${session.sessionId}`)
+      await expect(gateway.dispatch(request('session.restart', { sessionId: session.sessionId })))
+        .rejects.toThrow('远程主机上已没有该会话的记录')
     } finally {
       await ctx.fiber.dispose()
     }

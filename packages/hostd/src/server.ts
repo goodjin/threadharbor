@@ -766,7 +766,17 @@ export class RemoteAgentHostd {
     const response = this.requireRpcSuccess(await this.holdRequest(record, {
       operation: 'wait', rpcId, afterSeq: before, timeoutMs: this.options.operationTimeoutMs,
     }), rpcId)
-    const result = jsonObject(response['result'], 'session create result')
+    // ACP `session/load` answers with modes/models but no `sessionId` (the
+    // caller named it); `session/new` and `session/fork` always return one.
+    // Treating the missing field as a failure made every reopen fall back to
+    // `session/new`, silently discarding the model context that load had just
+    // restored.
+    const result = response['result'] === null || response['result'] === undefined
+      ? {}
+      : jsonObject(response['result'], 'session create result')
+    const returned = result['sessionId']
+    if (typeof returned === 'string' && returned !== '') return returned
+    if (method === 'session/load') return stringField(params, 'sessionId')
     return stringField(result, 'sessionId')
   }
 

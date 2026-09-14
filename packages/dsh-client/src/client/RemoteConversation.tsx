@@ -39,6 +39,7 @@ import {
 } from './display-preferences.ts'
 import { TranscriptGapBanner } from './transcript-gap-banner.tsx'
 import { ConversationStatsLine } from './conversation-stats-line.tsx'
+import { readComposerDrafts, withComposerDraft, writeComposerDrafts, type ComposerDrafts } from './composer-drafts.ts'
 
 /** Props injected by the conversation slot registration. */
 export interface RemoteConversationInjected {
@@ -2245,7 +2246,9 @@ function DraftConversation({ project, host, projectSessions, store, error, promp
 /** Render the selected remote session. */
 export function RemoteConversation({ store }: RemoteConversationProps) {
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
-  const [draft, setDraft] = useState('')
+  // Composer text is kept per session so switching sessions never carries a
+  // half-typed message along; see composer-drafts.ts.
+  const [drafts, setDrafts] = useState<ComposerDrafts>(() => readComposerDrafts())
   const [sessionAction, setSessionAction] = useState<string>()
   const [sessionPreferences, setSessionPreferences] = useState<Record<string, SessionPreferences>>(readPersistedSessionPreferences)
   // Last failed reopen: reason to show and (when hostd offered one) the repair
@@ -2268,6 +2271,15 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
   const answeredPermissionsRef = useRef(new Set<string>())
   const [showJumpToLatest, setShowJumpToLatest] = useState(false)
   const session = snapshot.state.sessions.find(candidate => candidate.sessionId === snapshot.currentSessionId)
+  const draft = session === undefined ? '' : drafts[session.sessionId] ?? ''
+  const setDraft = (text: string): void => {
+    if (session === undefined) return
+    setDrafts((current) => {
+      const next = withComposerDraft(current, session.sessionId, text)
+      writeComposerDrafts(next)
+      return next
+    })
+  }
   const sessionProject = snapshot.state.projects.find(candidate => candidate.projectId === session?.projectId)
   const sessionHost = snapshot.state.hosts.find(candidate => candidate.hostId === sessionProject?.hostId)
   const sessionEntries = useMemo(

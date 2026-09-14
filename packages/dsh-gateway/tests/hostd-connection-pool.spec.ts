@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   RemoteHostId,
+  RemoteSessionId,
   type RemoteHostView,
 } from '@threadharbor/protocol'
 import { HostdConnectionPool } from '../src/hostd-connection-pool.ts'
@@ -113,6 +114,38 @@ describe('HostdConnectionPool', () => {
       expect(await pending).toEqual({ healthy: true })
       expect(harness.urls).toEqual(['ws://127.0.0.1:4100/v1/ws'])
     } finally {
+      await pool.closeAll()
+    }
+  })
+
+  it('does not leak an unhandled rejection when a subscription cannot open its tunnel', async () => {
+    const harness = makeSocketHarness()
+    const ensureTunnel = async (): Promise<string> => { throw new Error('SSH tunnel exited with status 0: ') }
+    const pool = new HostdConnectionPool(
+      { ensureTunnel } as unknown as SshManager,
+      {
+        requestTimeoutMs: 1000,
+        heartbeatMs: 60_000,
+        reconnectStepsMs: [10, 10, 10],
+        handshakeTimeoutMs: 100,
+        socketFactory: harness.factory as unknown as (url: string) => import('ws').WebSocket,
+      },
+    )
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    try {
+      const host = hostWithSsh('http://127.0.0.1:9999')
+      const unsubscribe = pool.subscribe(host, RemoteSessionId('sess-1'), 'g1', 0, () => undefined)
+      await new Promise(resolve => setTimeout(resolve, 20))
+      expect(unhandled).toEqual([])
+      expect(stderr.mock.calls.some(call => String(call[0]).includes('hostd subscription deferred'))).toBe(true)
+      expect(harness.sockets).toHaveLength(0)
+      unsubscribe()
+    } finally {
+      stderr.mockRestore()
+      process.off('unhandledRejection', onUnhandled)
       await pool.closeAll()
     }
   })

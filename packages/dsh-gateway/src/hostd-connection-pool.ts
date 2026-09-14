@@ -75,11 +75,21 @@ export class HostdConnectionPool {
       existing.subscribe(sessionId, generation, lastSeq, listener)
       hostPending.get(sessionId)!.transferred = true
     } else {
+      // A tunnel that cannot be opened (host down, key rejected) rejects here.
+      // Nobody awaits this chain, so an uncaught rejection would take the
+      // whole Web process down under DSH's fail-loud handler. Keep the pending
+      // slot: the follow loop's backed-off catchup retries the host and the
+      // subscription transfers once a connection finally opens.
       void this.ensureConnection(host).then((conn) => {
         const slot = hostPending.get(sessionId)
         if (slot === undefined) return
         conn.subscribe(slot.sessionId, slot.generation, lastSeq, slot.listener)
         slot.transferred = true
+      }).catch((error: unknown) => {
+        process.stderr.write(
+          `threadharbor-gateway: hostd subscription deferred host=${host.hostId} session=${sessionId} `
+          + `${error instanceof Error ? error.message : String(error)}\n`,
+        )
       })
     }
     return () => {

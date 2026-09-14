@@ -3,7 +3,8 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { SshManager } from '../src/ssh-manager.ts'
+import { createServer } from 'node:net'
+import { SshManager, portListening } from '../src/ssh-manager.ts'
 
 const roots: string[] = []
 
@@ -129,6 +130,32 @@ describe('SshManager configuration', () => {
     expect(manifest).toBeGreaterThan(-1)
     const region = source.slice(manifest - 300, manifest + 200)
     expect(region).toContain('version: hostdVersion')
+  })
+
+  it('judges a tunnel by its local port, so a ControlPersist master that daemonised counts as alive', async () => {
+    // With ControlMaster=auto + ControlPersist the ssh we spawn hands the
+    // connection to a background master and exits 0 as soon as the forward is
+    // registered; a later ssh joining that master does the same. Treating the
+    // clean exit as failure marked every multiplexed host unreachable while
+    // its forward was serving traffic.
+    const source = readFileSync(new URL('../src/ssh-manager.ts', import.meta.url), 'utf8')
+    const start = source.indexOf('private async startTunnel(')
+    const method = source.slice(start, source.indexOf('\n  }\n', start))
+    expect(method).toContain('outcome.exited === 0 && await portListening(localPort')
+    expect(method).not.toContain("rejectTunnel(new Error(`SSH tunnel exited")
+    const ensure = source.slice(source.indexOf('async ensureTunnel('), source.indexOf('releaseTunnel('))
+    expect(ensure).toContain('await portListening(existing.localPort)')
+
+    const server = createServer()
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()))
+    const address = server.address()
+    const port = typeof address === 'object' && address !== null ? address.port : 0
+    try {
+      expect(await portListening(port)).toBe(true)
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+    expect(await portListening(port, 2)).toBe(false)
   })
 
   it('no longer releases the tunnel on a failed inventory refresh', () => {
