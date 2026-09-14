@@ -1362,6 +1362,124 @@ describe('RemoteAgentStore', () => {
     }
   })
 
+  it('auto-approves a permission request on a background session without switching to it', async () => {
+    const local = new Map<string, string>([['dsh.remote-agent.current-session-id', 's-active']])
+    vi.stubGlobal('window', {
+      setTimeout: globalThis.setTimeout.bind(globalThis),
+      clearTimeout: globalThis.clearTimeout.bind(globalThis),
+      sessionStorage: { getItem: () => null, setItem: () => undefined },
+      localStorage: {
+        getItem: (key: string) => local.get(key) ?? null,
+        setItem: (key: string, value: string) => { local.set(key, value) },
+      },
+    })
+    const permissionCard = {
+      transcriptId: 'bg-3', sessionId: 's-bg', seq: 3, role: 'permission', kind: 'permission',
+      text: '等待权限确认', createdAt: 'c', requestId: '0',
+      nativeFrame: {
+        jsonrpc: '2.0', id: 0, method: 'session/request_permission',
+        params: { toolCall: { title: 'npm test' }, options: [
+          { kind: 'reject_once', name: 'Deny', optionId: 'reject' },
+          { kind: 'allow_once', name: 'Allow Once', optionId: 'allow' },
+        ] },
+      },
+    }
+    let background = {
+      sessionId: 's-bg', projectId: 'p', title: 'background', backend: 'claude',
+      channelState: 'open', turnState: 'waiting-permission', createdAt: 'a', updatedAt: 'b', latestTranscriptSeq: 3,
+      binding: { holdId: 'hold-bg', generation: 'g', state: 'active', lastSeq: 3 },
+      configOptions: [{
+        id: 'mode', name: 'Mode', category: 'mode', currentValue: 'bypassPermissions', setter: 'mode',
+        options: [{ value: 'default', name: 'Default' }, { value: 'bypassPermissions', name: 'Bypass' }],
+      }],
+    }
+    const active = {
+      sessionId: 's-active', projectId: 'p', title: 'active', backend: 'codex',
+      channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+    }
+    const calls: { method: string; params: Record<string, unknown> }[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string; params: Record<string, unknown> }
+      calls.push({ method: body.method, params: body.params })
+      if (body.method === 'transcript.read') {
+        const entries = body.params.sessionId === 's-bg' && body.params.afterSeq === undefined ? [permissionCard] : []
+        return Response.json({
+          id: body.id, ok: true,
+          result: {
+            sessionId: body.params.sessionId, entries, afterSeq: -1,
+            fromSeq: entries[0]?.seq ?? -1, toSeq: entries.at(-1)?.seq ?? -1,
+            latestSeq: body.params.sessionId === 's-bg' ? 3 : -1, hasMore: false,
+          },
+        })
+      }
+      if (body.method === 'session.permission') {
+        background = { ...background, turnState: 'running', updatedAt: 'd' }
+        return Response.json({ id: body.id, ok: true, result: {} })
+      }
+      return Response.json({
+        id: body.id, ok: true,
+        result: { ...EMPTY, projects: [{ projectId: 'p', hostId: 'h', title: 'repo', cwd: '/repo', createdAt: 'a', updatedAt: 'b' }], sessions: [active, background] },
+      })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      expect(store.getSnapshot().currentSessionId).toBe('s-active')
+      await vi.waitFor(() => {
+        expect(calls.some(call => call.method === 'session.permission')).toBe(true)
+      })
+      const answered = calls.filter(call => call.method === 'session.permission')
+      expect(answered).toHaveLength(1)
+      expect(answered[0]?.params).toEqual({
+        sessionId: 's-bg', requestId: '0', outcome: { outcome: 'selected', optionId: 'allow' },
+      })
+      // The user never left the session they were reading.
+      expect(store.getSnapshot().currentSessionId).toBe('s-active')
+      // A later catalog refresh must not answer the same request twice.
+      store.consume({ type: 'session.view.changed', session: { ...background, turnState: 'waiting-permission', updatedAt: 'e' } })
+      await new Promise(resolve => setTimeout(resolve, 20))
+      expect(calls.filter(call => call.method === 'session.permission')).toHaveLength(1)
+    } finally {
+      store.dispose()
+    }
+  })
+
+  it('does not auto-approve a waiting session whose preferences say ask', async () => {
+    const waiting = {
+      sessionId: 's-ask', projectId: 'p', title: 'ask', backend: 'claude',
+      channelState: 'open', turnState: 'waiting-permission', createdAt: 'a', updatedAt: 'b', latestTranscriptSeq: 0,
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+    }
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string; params: Record<string, unknown> }
+      calls.push(body.method)
+      if (body.method === 'transcript.read') {
+        return Response.json({ id: body.id, ok: true, result: {
+          sessionId: 's-ask', afterSeq: -1, fromSeq: 0, toSeq: 0, latestSeq: 0, hasMore: false,
+          entries: [{
+            transcriptId: 'ask-0', sessionId: 's-ask', seq: 0, role: 'permission', kind: 'permission', text: '等待权限确认',
+            createdAt: 'c', requestId: '1',
+            nativeFrame: { jsonrpc: '2.0', id: 1, method: 'session/request_permission', params: { options: [
+              { kind: 'allow_once', name: 'Allow Once', optionId: 'allow' },
+            ] } },
+          }],
+        } })
+      }
+      return Response.json({ id: body.id, ok: true, result: { ...EMPTY, sessions: [waiting] } })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      store.setAutoApprovePreferences(() => ({ approvalChoice: 'ask', permissionMode: 'ask' }))
+      await store.start()
+      await new Promise(resolve => setTimeout(resolve, 30))
+      expect(calls).not.toContain('session.permission')
+    } finally {
+      store.dispose()
+    }
+  })
+
   it('clears a stale RPC error phase when live transcript arrives', async () => {
     const session = {
       sessionId: 's-live', projectId: 'p', title: 'work', backend: 'codex',

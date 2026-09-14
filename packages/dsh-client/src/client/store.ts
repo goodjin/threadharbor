@@ -7,6 +7,7 @@ import {
   type DisplayPreferences,
 } from './display-preferences.ts'
 import { TranscriptCache } from './transcript-cache.ts'
+import { permissionActionKey, scanAutoApprovals, type AutoApprovePreferenceResolver } from './permission-autopilot.ts'
 import {
   REMOTE_AGENT_BACKENDS,
   REMOTE_AGENT_GATEWAY_PATH,
@@ -868,6 +869,12 @@ export class RemoteAgentStore {
   private readonly cache: TranscriptCache | null
   /** Prompts interrupted by a transport drop or hostd restart, awaiting automatic redelivery. */
   private redeliverQueue: PendingRedelivery[] = []
+  /** Browser-local auto-approve preferences, injected by the conversation surface. */
+  private autoApproveResolver: AutoApprovePreferenceResolver | undefined
+  /** (session, request) pairs already answered — by the autopilot or a click — so no request gets two answers. */
+  private readonly answeredPermissions = new Set<string>()
+  private autoApproveScheduled = false
+  private readonly autoApproveCatchups = new Set<string>()
   private redeliveryBusy = false
   /** Backoff timer driving redelivery retries while hostd is unreachable. */
   private redeliveryTimer: number | undefined
@@ -2152,11 +2159,57 @@ export class RemoteAgentStore {
    * @param outcome - backend-native option value.
    */
   permission(sessionId: ReturnType<typeof RemoteSessionId>, requestId: string, outcome: JsonValue): Promise<void> {
+    this.answeredPermissions.add(permissionActionKey(sessionId, requestId))
     return this.run(async () => {
       await this.call('session.permission', { sessionId, requestId, outcome })
       await this.reload()
       await this.catchupTranscript(sessionId, 'high')
     })
+  }
+
+  /** Register how to look up a session's auto-approve preferences. Permission
+   *  grants are then answered for every auto-approving session in the catalog,
+   *  not only the one on screen: a background session must never sit in
+   *  `waiting-permission` until the user happens to switch to it. */
+  setAutoApprovePreferences(resolver: AutoApprovePreferenceResolver | undefined): void {
+    this.autoApproveResolver = resolver
+    this.scheduleAutoApprove()
+  }
+
+  private scheduleAutoApprove(): void {
+    if (this.disposed || this.autoApproveScheduled) return
+    this.autoApproveScheduled = true
+    // Deferred so a publish() from inside permission()/catchup never re-enters synchronously.
+    window.setTimeout(() => {
+      this.autoApproveScheduled = false
+      this.runAutoApprove()
+    }, 0)
+  }
+
+  private runAutoApprove(): void {
+    if (this.disposed) return
+    const { state } = this.snapshot
+    const scan = scanAutoApprovals(state.sessions, state.transcript, (session) => {
+      const hostId = state.projects.find(project => project.projectId === session.projectId)?.hostId
+      return this.autoApproveResolver?.(session, hostId)
+    })
+    for (const sessionId of scan.needsTranscript) {
+      if (this.autoApproveCatchups.has(sessionId)) continue
+      this.autoApproveCatchups.add(sessionId)
+      void this.catchupTranscript(sessionId, 'high')
+        .catch(() => undefined)
+        .finally(() => { this.autoApproveCatchups.delete(sessionId) })
+    }
+    for (const answer of scan.answers) {
+      if (this.answeredPermissions.has(answer.key)) continue
+      // A failed answer stays marked: the next transcript/catalog update either
+      // shows the request resolved or brings a new request id to answer.
+      void this.permission(
+        answer.sessionId,
+        answer.requestId,
+        answer.optionId === undefined ? { outcome: 'selected' } : { outcome: 'selected', optionId: answer.optionId },
+      ).catch(() => undefined)
+    }
   }
 
   private async startOperation(params: Record<string, JsonValue>): Promise<RemoteOperationView> {
@@ -2546,6 +2599,7 @@ export class RemoteAgentStore {
       this.followHandler?.(next.currentSessionId)
     }
     for (const listener of this.listeners) listener()
+    this.scheduleAutoApprove()
   }
 
   /** Catalog reloads and RPC errors must not clobber a reconnecting transport phase. */

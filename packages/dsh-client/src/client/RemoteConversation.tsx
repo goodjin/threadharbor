@@ -23,10 +23,10 @@ import {
   type ReopenFailureIssue,
 } from './store.ts'
 import {
-  autoApproveOptionId, browsableDirectories, buildTranscriptNodes, choiceCancelOutcome, choiceSubmitOutcome,
-  configuredModeAutoApproves, conversationPresentation,
-  isAutoApprovablePermission, isNearScrollBottom, parseChoicePrompt, parsePlanItems, pendingPermissionEntry,
-  permissionRequestId, preferredProjectBackend, shouldAutoApprovePermissions, shouldPinPendingPermission,
+  browsableDirectories, buildTranscriptNodes, choiceCancelOutcome, choiceSubmitOutcome,
+  conversationPresentation,
+  isNearScrollBottom, parseChoicePrompt, parsePlanItems, pendingPermissionEntry,
+  permissionRequestId, preferredProjectBackend, shouldPinPendingPermission,
   toolDisclosurePresentation,
   type ChoicePrompt, type ConversationStage, type RemoteTranscriptNode,
 } from './conversation-model.ts'
@@ -2463,36 +2463,16 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
       }
     })()
   }, [session, preferences, sessionConfigOptions, configGeneration, sessionHost, store])
+  // Auto-approval lives in the store so it covers every session in the
+  // catalog, not just the one on screen; this surface only supplies the
+  // browser-local preferences it owns.
   useEffect(() => {
-    if (session === undefined || session.turnState !== 'waiting-permission') return
-    if (!shouldAutoApprovePermissions(preferences?.approvalChoice, preferences?.permissionMode)
-      && !configuredModeAutoApproves(session.configOptions)) return
-    const entry = pendingPermissionEntry(sessionEntries)
-    const requestId = entry === undefined ? undefined : permissionRequestId(entry)
-    if (entry === undefined || requestId === undefined || !isAutoApprovablePermission(entry)) return
-    const action = `permission:${session.sessionId}:${requestId}`
-    if (sessionAction !== undefined || answeredPermissionsRef.current.has(action)) return
-    const optionId = autoApproveOptionId(parseChoicePrompt(entry), {
-      ...(preferences?.approvalChoice === undefined ? {} : { approvalChoice: preferences.approvalChoice }),
-      ...(preferences?.permissionMode === undefined ? {} : { permissionMode: preferences.permissionMode }),
+    store.setAutoApprovePreferences((candidate, hostId) => {
+      const resolved = resolveSessionPreferences(candidate.backend, sessionPreferences, candidate.sessionId, hostId)
+      return { approvalChoice: resolved.approvalChoice, permissionMode: resolved.permissionMode }
     })
-    answeredPermissionsRef.current.add(action)
-    setSessionAction(action)
-    void store.permission(
-      session.sessionId,
-      requestId,
-      optionId === undefined ? { outcome: 'selected' } : { outcome: 'selected', optionId },
-    )
-      .catch(() => { answeredPermissionsRef.current.delete(action) })
-      .finally(() => { setSessionAction(current => current === action ? undefined : current) })
-  }, [
-    session,
-    sessionEntries,
-    preferences?.approvalChoice,
-    preferences?.permissionMode,
-    sessionAction,
-    store,
-  ])
+    return () => { store.setAutoApprovePreferences(undefined) }
+  }, [store, sessionPreferences])
 
   if (snapshot.panel !== undefined) {
     return <OperationPanel panel={snapshot.panel} store={store} snapshot={snapshot} />
