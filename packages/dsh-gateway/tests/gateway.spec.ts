@@ -1819,6 +1819,33 @@ describe('RemoteAgentGateway', () => {
     }
   })
 
+  it('re-registering a hidden directory restores the project instead of returning it hidden', async () => {
+    const { ctx, gateway } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'mac-good', endpoint: 'http://127.0.0.1:4187' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'nexa-service', cwd: '/repo',
+      })) as unknown as { projectId: string }
+      await gateway.dispatch(request('project.hide', { projectId: project.projectId }))
+      expect(gateway.state().projects).toEqual([])
+
+      const again = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'nexa-service-2', cwd: '/repo',
+      })) as unknown as { projectId: string; title: string; hiddenAt?: string }
+
+      // Same directory on the same host must reuse the catalogue row, but it has
+      // to come back visible and carry the freshly requested title.
+      expect(again.projectId).toBe(project.projectId)
+      expect(again.hiddenAt).toBeUndefined()
+      expect(again.title).toBe('nexa-service-2')
+      expect(gateway.state().projects.map(entry => entry.projectId)).toEqual([project.projectId])
+      const hidden = await gateway.dispatch(request('hidden.list', {})) as unknown as { projects: Array<{ projectId: string }> }
+      expect(hidden.projects).toEqual([])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('drops last-known inventory when hostd becomes unreachable', async () => {
     const { ctx, gateway, failNext } = await harness()
     try {

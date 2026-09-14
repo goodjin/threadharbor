@@ -1158,9 +1158,18 @@ export class RemoteAgentGateway extends Service {
     const cwd = listing.path
     const tables = this.requireTables()
     const duplicate = [...tables.projects.entries()].find(([, project]) => project.hostId === host.hostId && project.cwd === cwd)
-    if (duplicate !== undefined) return duplicate[1]
-    const projectId = RemoteProjectId(randomUUID())
     const now = new Date().toISOString()
+    if (duplicate !== undefined) {
+      const [duplicateId, existing] = duplicate
+      if (existing.hiddenAt === undefined) return existing
+      // Re-registering a hidden directory means "bring it back": restore it under the requested
+      // title instead of silently returning a record the sidebar will never show.
+      const { hiddenAt: _hiddenAt, ...without } = existing
+      const restored: RemoteProjectView = { ...without, title: stringField(params, 'title'), updatedAt: now }
+      await tables.projects.put(duplicateId, restored)
+      return restored
+    }
+    const projectId = RemoteProjectId(randomUUID())
     const project: RemoteProjectView = {
       projectId, hostId: host.hostId, title: stringField(params, 'title'), cwd, createdAt: now, updatedAt: now,
     }
