@@ -1194,6 +1194,9 @@ function writePersistedSessionPreferences(map: Record<string, SessionPreferences
 /** Last observed scroll position for a remote session. */
 import type { TranscriptScrollMemory } from './transcript-scroll-memory.ts'
 import { readTranscriptScrollMemory, writeTranscriptScrollMemory } from './transcript-scroll-memory.ts'
+import {
+  configAppliedKey, readAppliedConfigMarkers, withAppliedConfigMarker, writeAppliedConfigMarkers,
+} from './session-config-applied.ts'
 export type { TranscriptScrollMemory } from './transcript-scroll-memory.ts'
 
 function sessionPreferencesKey(hostId: string, backend: RemoteAgentBackend): string {
@@ -2440,16 +2443,20 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
       sessionHost?.hostId,
     )
   // Push the remembered / static settings to an agent that just announced
-  // its options (new session or a restarted hold), once per generation.
-  const appliedConfigRef = useRef(new Set<string>())
+  // its options (new session or a restarted hold), once per generation. The
+  // marker is persisted so a page reload or web restart does not re-push the
+  // host-wide remembered mode onto a session that has been running with its
+  // own mode all along.
+  const appliedConfigRef = useRef(new Set<string>(readAppliedConfigMarkers()))
   const configGeneration = session?.binding?.generation
   const sessionConfigOptions = session?.configOptions
   useEffect(() => {
     if (session === undefined || preferences === undefined || sessionConfigOptions === undefined) return
     if (session.parentSessionId !== undefined || session.channelState !== 'open') return
-    const key = `${session.sessionId}:${configGeneration ?? 'none'}`
+    const key = configAppliedKey(session.sessionId, configGeneration)
     if (appliedConfigRef.current.has(key)) return
     appliedConfigRef.current.add(key)
+    writeAppliedConfigMarkers(withAppliedConfigMarker(readAppliedConfigMarkers(), key))
     const hostKey = sessionHost === undefined ? undefined : sessionPreferencesKey(sessionHost.hostId, session.backend)
     const switches = pendingConfigSwitches(hostKey, session.backend, preferences, sessionConfigOptions)
     if (switches.length === 0) return
