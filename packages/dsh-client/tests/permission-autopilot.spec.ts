@@ -52,6 +52,13 @@ describe('permission autopilot', () => {
     expect(scan.needsTranscript).toEqual([])
   })
 
+  it('answers the request the gateway says is open, not the last permission row', () => {
+    const sessions = [session({ sessionId: 'bg', latestTranscriptSeq: 6, configOptions: BYPASS, pendingRequestIds: ['7'] })]
+    const answeredEarlier = permission('bg', 6, 9)
+    const scan = scanAutoApprovals(sessions, [permission('bg', 4, 7), answeredEarlier], () => undefined)
+    expect(scan.answers.map(answer => answer.requestId)).toEqual(['7'])
+  })
+
   it('waits for the transcript to catch up instead of answering a stale card', () => {
     const sessions = [session({ sessionId: 'bg', latestTranscriptSeq: 9, configOptions: BYPASS })]
     // The only local permission card is an older request (seq 4 < latest 9).

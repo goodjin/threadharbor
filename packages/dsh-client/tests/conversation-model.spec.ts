@@ -142,6 +142,17 @@ describe('remote conversation view model', () => {
     expect(shouldAutoApprovePermissions('ask', 'edit')).toBe(false)
   })
 
+  it('finds the pending card by request id even when later rows buried it', () => {
+    const asked = { ...entry('200', 'permission', 'permission', '任务 2 的分支从哪里创建？'), requestId: '1' }
+    const later = entry('201', 'tool', 'tool-call', 'grep foo')
+    const older = { ...entry('199', 'permission', 'permission', '旧问题'), requestId: '0' }
+    expect(pendingPermissionEntry([older, asked, later], ['1'])?.transcriptId).toBe('200')
+    // Ids provided but nothing local matches yet → no card, not a stale one.
+    expect(pendingPermissionEntry([older, later], ['1'])).toBeUndefined()
+    // Older gateway without ids keeps the "last permission row" behaviour.
+    expect(pendingPermissionEntry([older, asked, later])?.transcriptId).toBe('200')
+  })
+
   it('never auto-answers a Claude tool prompt with Deny, even though Deny is listed first', () => {
     const prompt = parseChoicePrompt({
       ...entry('109', 'permission', 'permission', '等待权限确认'),

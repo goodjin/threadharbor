@@ -412,6 +412,44 @@ describe('RemoteAgentGateway', () => {
     }
   })
 
+  it('keeps a turn parked on an unanswered question while a background subagent keeps reporting', async () => {
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', id: 1, method: 'elicitation/create', params: {
+        mode: 'form', message: '任务 2 的分支从哪里创建？',
+        requestedSchema: { type: 'object', properties: { base: { type: 'string', enum: ['dev', 'task-1'] } } },
+      } },
+      // Subagent output after the question: these used to flip the turn back to running.
+      { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'tool_call', toolCallId: 't1', title: 'grep foo' } } },
+      { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'tool_call_update', toolCallId: 't1', status: 'completed' } } },
+    ]
+    const { ctx, gateway } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4302' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      const parked = gateway.state().sessions.find(entry => entry.sessionId === RemoteSessionId(session.sessionId))
+      expect(parked?.turnState).toBe('waiting-permission')
+      expect(parked?.pendingRequestIds).toEqual(['1'])
+
+      await gateway.dispatch(request('session.permission', {
+        sessionId: session.sessionId, requestId: '1', outcome: { outcome: 'selected', optionId: 'dev' },
+      }))
+      const answered = gateway.state().sessions.find(entry => entry.sessionId === RemoteSessionId(session.sessionId))
+      expect(answered?.turnState).toBe('running')
+      expect(answered?.pendingRequestIds).toBeUndefined()
+
+      events.push({ jsonrpc: '2.0', method: '_x.ai/session/prompt_complete', params: { stopReason: 'end_turn' } })
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      const finished = gateway.state().sessions.find(entry => entry.sessionId === RemoteSessionId(session.sessionId))
+      expect(finished?.turnState).toBe('idle')
+      expect(finished?.pendingRequestIds).toBeUndefined()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('captures backend-advertised settings from session/new and switches them through session.configure', async () => {
     const events: JsonValue[] = [
       { jsonrpc: '2.0', id: 'hostd-session-1', result: {

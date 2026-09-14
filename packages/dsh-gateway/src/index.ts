@@ -1824,8 +1824,13 @@ export class RemoteAgentGateway extends Service {
     attached: RemoteSessionAttachResult,
     skipCatchup = false,
   ): RemoteSessionView {
+    // A new hold generation means the old agent process — and every request it
+    // had open — is gone; only a same-generation reattach keeps them pending.
+    const { pendingRequestIds, ...withoutPending } = session
+    const sameGeneration = session.binding?.generation === attached.generation
     return {
-      ...session,
+      ...withoutPending,
+      ...(sameGeneration && pendingRequestIds !== undefined ? { pendingRequestIds } : {}),
       channelState: 'open',
       binding: {
         holdId: attached.holdId,
@@ -1979,6 +1984,7 @@ export class RemoteAgentGateway extends Service {
       sessionId: session.sessionId,
       frame: { jsonrpc: '2.0', id, result: this.permissionNativeResult(session.sessionId, requestId, outcome) },
     })
+    await this.settleBackendRequest(session.sessionId, requestId)
     this.ensureFollowedSync(session.sessionId)
     await this.catchupSessionJournal(session.sessionId)
     return result
@@ -2191,6 +2197,12 @@ export class RemoteAgentGateway extends Service {
       role: 'system', kind: 'status', text: `远程日志在序号 ${page.droppedThrough} 前已截断`,
     })
     let turnState = session.turnState
+    // Requests the agent is still waiting on. A permission / elicitation frame
+    // adds one; only our answer (see `settleBackendRequest`) or the end of the
+    // round removes it. Later `session/update` frames — typically a background
+    // subagent still reporting — must not flip the turn back to `running` and
+    // bury the unanswered card.
+    const pendingRequests = new Set(session.pendingRequestIds ?? [])
     const events = page.events
       .filter(event => event.seq > binding.lastSeq)
       .slice(0, MAX_JOURNAL_EVENTS_PER_SYNC)
@@ -2245,8 +2257,14 @@ export class RemoteAgentGateway extends Service {
           })
         }
         if (fragment.turnState !== undefined) turnState = fragment.turnState
+        if (fragment.role === 'permission' && fragment.requestId !== undefined) {
+          pendingRequests.add(fragment.requestId)
+        } else if (fragment.turnState === 'idle' || fragment.turnState === 'failed') {
+          pendingRequests.clear()
+        }
       }
     }
+    if (pendingRequests.size > 0 && turnState === 'running') turnState = 'waiting-permission'
     await this.appendTranscriptBatch(session.sessionId, transcript)
     const processedThrough = events.at(-1)?.seq ?? binding.lastSeq
     const latest = this.requireTables().sessions.get(session.sessionId) ?? session
@@ -2260,8 +2278,12 @@ export class RemoteAgentGateway extends Service {
       // Idle is not: Claude may emit prompt_complete and then AskUserQuestion.
       turnState = 'failed'
     }
+    if (turnState !== 'waiting-permission' && turnState !== 'running') pendingRequests.clear()
+    const { pendingRequestIds: _previousPending, ...latestWithoutPending } = latest
+    const pendingRequestIds = [...pendingRequests]
+    const pendingChanged = pendingRequestIds.join('\u0000') !== (latest.pendingRequestIds ?? []).join('\u0000')
     const updated: RemoteSessionView = {
-      ...latest,
+      ...latestWithoutPending,
       channelState: latest.channelState === 'connecting' || latest.channelState === 'open'
         ? 'open'
         : latest.channelState,
@@ -2269,13 +2291,35 @@ export class RemoteAgentGateway extends Service {
       binding: { ...binding, lastSeq: processedThrough },
       updatedAt: new Date().toISOString(),
       ...(configOptions === undefined ? {} : { configOptions }),
+      ...(pendingRequestIds.length === 0 ? {} : { pendingRequestIds }),
     }
     await this.requireTables().sessions.put(session.sessionId, updated)
     if (turnState !== session.turnState || processedThrough !== binding.lastSeq
-      || configOptions !== session.configOptions) {
+      || configOptions !== session.configOptions || pendingChanged) {
       this.broadcastSessionView(updated)
     }
     return processedThrough
+  }
+
+  /** Forget one backend request once our answer has left for hostd. With no
+   *  request outstanding the agent is working again, so a turn that was parked
+   *  on `waiting-permission` resumes `running` right away instead of waiting
+   *  for the next journal frame to say so. */
+  private async settleBackendRequest(sessionId: ReturnType<typeof RemoteSessionId>, requestId: string): Promise<void> {
+    await this.withSessionJournalApply(sessionId, async () => {
+      const current = this.requireTables().sessions.get(sessionId)
+      if (current === undefined || !(current.pendingRequestIds ?? []).includes(requestId)) return
+      const remaining = (current.pendingRequestIds ?? []).filter(id => id !== requestId)
+      const { pendingRequestIds: _dropped, ...without } = current
+      const next: RemoteSessionView = {
+        ...without,
+        turnState: remaining.length === 0 && current.turnState === 'waiting-permission' ? 'running' : current.turnState,
+        updatedAt: new Date().toISOString(),
+        ...(remaining.length === 0 ? {} : { pendingRequestIds: remaining }),
+      }
+      await this.requireTables().sessions.put(sessionId, next)
+      this.broadcastSessionView(next)
+    })
   }
 
   private async upsertNativeChild(parent: RemoteSessionView, update: NativeChildUpdate): Promise<void> {
@@ -2336,8 +2380,9 @@ export class RemoteAgentGateway extends Service {
     await this.withSessionJournalApply(session.sessionId, async () => {
       const current = this.requireTables().sessions.get(session.sessionId) ?? session
       if (current.turnState !== 'running' && current.turnState !== 'waiting-permission') return
+      const { pendingRequestIds: _pending, ...currentWithoutPending } = current
       const next: RemoteSessionView = {
-        ...current,
+        ...currentWithoutPending,
         turnState,
         channelState: channelState ?? current.channelState,
         updatedAt: new Date().toISOString(),

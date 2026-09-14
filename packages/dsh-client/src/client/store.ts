@@ -662,6 +662,10 @@ function parseSession(value: JsonValue): RemoteSessionView {
   const archivedAt = optionalText(record, 'archivedAt')
   const lastPromptAt = optionalText(record, 'lastPromptAt')
   const configOptions = parseConfigOptions(record['configOptions'])
+  const pendingRaw = record['pendingRequestIds']
+  const pendingRequestIds = Array.isArray(pendingRaw)
+    ? pendingRaw.filter((id): id is string => typeof id === 'string')
+    : []
   return {
     sessionId: RemoteSessionId(stringField(record, 'sessionId')),
     projectId: RemoteProjectId(stringField(record, 'projectId')),
@@ -676,6 +680,7 @@ function parseSession(value: JsonValue): RemoteSessionView {
     ...(archivedAt === undefined ? {} : { archivedAt }),
     ...(lastPromptAt === undefined ? {} : { lastPromptAt }),
     ...(configOptions === undefined ? {} : { configOptions }),
+    ...(pendingRequestIds.length === 0 ? {} : { pendingRequestIds }),
     ...(binding === undefined ? {} : {
       binding: {
         holdId: RemoteHoldId(stringField(binding, 'holdId')),

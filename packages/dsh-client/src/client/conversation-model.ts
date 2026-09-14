@@ -469,9 +469,21 @@ export function configuredModeAutoApproves(
 }
 
 /** Latest permission row, used both for the waiting banner and the pinned card. */
+/** The card the agent is waiting on. With the gateway's outstanding request
+ *  ids, match by id — later output (a background subagent's tool calls) may
+ *  have pushed the card far above the last permission row. Without ids (older
+ *  gateway) fall back to the last permission row. */
 export function pendingPermissionEntry(
   entries: readonly RemoteTranscriptEntry[],
+  pendingRequestIds?: readonly string[],
 ): RemoteTranscriptEntry | undefined {
+  if (pendingRequestIds !== undefined && pendingRequestIds.length > 0) {
+    return entries.findLast((entry) => {
+      if (entry.role !== 'permission') return false
+      const id = permissionRequestId(entry)
+      return id !== undefined && pendingRequestIds.includes(id)
+    })
+  }
   return entries.findLast(entry => entry.role === 'permission')
 }
 

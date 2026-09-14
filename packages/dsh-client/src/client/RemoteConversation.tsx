@@ -2332,7 +2332,7 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
   const stage = presentation?.turn
   const lastNode = transcript.at(-1)
   const pendingPermission = session?.turnState === 'waiting-permission'
-    ? pendingPermissionEntry(sessionEntries)
+    ? pendingPermissionEntry(sessionEntries, session.pendingRequestIds)
     : undefined
   const pinPendingPermission = shouldPinPendingPermission(
     session?.turnState ?? 'idle',

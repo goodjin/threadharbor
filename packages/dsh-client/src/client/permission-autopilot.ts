@@ -76,7 +76,7 @@ export function scanAutoApprovals(
       needsTranscript.push(session.sessionId)
       continue
     }
-    const pending = pendingPermissionEntry(entries)
+    const pending = pendingPermissionEntry(entries, session.pendingRequestIds)
     if (pending === undefined) {
       needsTranscript.push(session.sessionId)
       continue

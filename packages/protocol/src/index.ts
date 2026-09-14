@@ -297,6 +297,12 @@ export interface RemoteSessionView {
    *  later `config_option_update` / `current_mode_update` frames. Absent until
    *  the backend has announced them; the composer falls back to static choices. */
   readonly configOptions?: readonly RemoteSessionConfigOption[]
+  /** Backend → user requests (permission prompts, AskUserQuestion elicitations)
+   *  the gateway has projected but nobody has answered yet. While any is
+   *  outstanding the turn stays `waiting-permission` even when later frames
+   *  (a background subagent, say) keep arriving; the browser uses the ids to
+   *  find the exact card instead of "the last permission row". */
+  readonly pendingRequestIds?: readonly string[]
 }
 
 /** One selectable value of a backend session setting. */
