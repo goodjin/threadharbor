@@ -1185,70 +1185,24 @@
   font-size: 13px;
 }
 
-.reasoningRow,
-.toolRow {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
+/* DisclosureRow (the DSH session UI's flow-row chrome) renders the icon,
+ * title, hover chevron and expanded body; these rules only position the
+ * ThreadHarbor-specific hint and payload blocks inside it. */
+
+.reasoningMessage [data-disclosure-row],
+.toolMessage [data-disclosure-row] {
   padding: 4px 6px 4px 4px;
-  border: 0;
   border-radius: 8px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  overflow: hidden;
   transition: background-color 0.12s ease;
 }
 
-.reasoningRow:hover,
-.toolRow:hover {
+.reasoningMessage [data-disclosure-row]:hover,
+.toolMessage [data-disclosure-row]:hover {
   background: var(--dsw-alias-bg-layer-2);
 }
 
-.reasoningLeading,
-.toolLeading {
-  flex: none;
-  display: inline-flex;
-  color: var(--dsw-alias-label-secondary);
-}
-
-.reasoningTitle,
-.toolTitle {
-  flex: none;
-  font-weight: 500;
-  color: var(--dsw-alias-label-secondary);
-}
-
-.reasoningSeparator,
-.toolSeparator {
-  flex: none;
-  width: 2px;
-  height: 2px;
-  margin: 0 4px;
-  border-radius: 1px;
-  background: var(--dsw-alias-label-caption);
-}
-
-.reasoningChevron,
-.toolChevron {
-  flex: none;
-  margin-left: auto;
-  color: var(--dsw-alias-label-caption);
-  transform: rotate(-90deg);
-  transition: transform 0.18s ease;
-}
-
-.reasoningChevron[data-open],
-.toolChevron[data-open] {
-  transform: rotate(0deg);
-}
-
-.reasoningMessage[data-state='running'] .reasoningRow::after,
-.toolMessage[data-state='running'] .toolRow::after {
+.reasoningMessage[data-state='running'] [data-disclosure-row]::after,
+.toolMessage[data-state='running'] [data-disclosure-row]::after {
   content: '';
   position: absolute;
   inset-block: 0;
@@ -1270,18 +1224,14 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .reasoningMessage[data-state='running'] .reasoningRow::after,
-  .toolMessage[data-state='running'] .toolRow::after {
+  .reasoningMessage[data-state='running'] [data-disclosure-row]::after,
+  .toolMessage[data-state='running'] [data-disclosure-row]::after {
     animation: none;
-  }
-  .reasoningChevron,
-  .toolChevron {
-    transition: none;
   }
 }
 
 .reasoningBody {
-  margin: 5px 0 0 23px;
+  margin: 5px 0 0 22px;
   padding: 3px 0 3px 12px;
   border-left: 1px solid var(--dsw-alias-border-l2);
   color: var(--dsw-alias-label-tertiary);
@@ -1294,6 +1244,7 @@
   max-width: min(50vw, 460px);
   display: inline-block;
   overflow: hidden;
+  margin-left: 8px;
   color: var(--dsw-alias-label-tertiary);
   font-size: 11px;
   text-overflow: ellipsis;
@@ -1302,11 +1253,6 @@
 
 .nodeHint[data-follow-end] {
   text-overflow: clip;
-}
-
-.reasoningMessage .nodeHint,
-.toolMessage .nodeHint {
-  margin-left: 0;
 }
 
 .toolBody {

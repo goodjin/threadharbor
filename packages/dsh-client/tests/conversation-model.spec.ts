@@ -9,6 +9,7 @@ import {
   isAutoApprovablePermission, isNearScrollBottom, mergeTranscriptEntries, parseChoicePrompt, parsePlanItems,
   autoApproveOptionId, configuredModeAutoApproves, pendingPermissionEntry, permissionRequestId, preferredProjectBackend,
   shouldAutoApprovePermissions, shouldPinPendingPermission, toolDisclosurePresentation,
+  toolGlyphKind,
 } from '../src/client/conversation-model.ts'
 
 function entry(
@@ -310,6 +311,26 @@ describe('remote conversation view model', () => {
     expect(toolDisclosurePresentation(false, false)).toEqual({ initialOpen: false, status: '无结果' })
   })
 
+  it('maps tool row titles onto the DSH session icon families', () => {
+    expect(toolGlyphKind('Read package.json')).toBe('read')
+    expect(toolGlyphKind('read_file src/main.ts')).toBe('read')
+    expect(toolGlyphKind('list_directory /tmp')).toBe('read')
+    expect(toolGlyphKind('Edit src/app.ts')).toBe('edit')
+    expect(toolGlyphKind('write_file notes.txt')).toBe('edit')
+    expect(toolGlyphKind('Apply patch')).toBe('edit')
+    expect(toolGlyphKind('Bash npm test')).toBe('code')
+    expect(toolGlyphKind('run_shell_command ls')).toBe('code')
+    expect(toolGlyphKind('web_search DeepSeek')).toBe('web')
+    expect(toolGlyphKind('web_fetch https://example.com')).toBe('web')
+    expect(toolGlyphKind('grep TODO')).toBe('search')
+    expect(toolGlyphKind('google_web_search')).toBe('web')
+    expect(toolGlyphKind('TodoWrite')).toBe('plan')
+    expect(toolGlyphKind('Task 启动子代理')).toBe('agent')
+    expect(toolGlyphKind('skill 回复润色')).toBe('skill')
+    expect(toolGlyphKind('save_memory 用户偏好')).toBe('data')
+    expect(toolGlyphKind('连续工具调用 · 3 次')).toBe('code')
+  })
+
   it('restores the last available Agent for a project and otherwise selects the first', () => {
     const oldSession = session({ sessionId: RemoteSessionId('old'), backend: 'grok' })
     const latestSession = session({ sessionId: RemoteSessionId('latest'), backend: 'claude' })
@@ -403,8 +424,23 @@ describe('remote conversation view model', () => {
       ],
       now: Date.parse('2026-08-29T00:00:01.000Z'),
     })).toMatchObject({ kind: 'waiting', label: '等待 Agent 响应' })
+    expect(conversationStage({ ...base, now: 20_000, progress: { ...base.progress, phase: 'waiting' } }))
+      .toMatchObject({ kind: 'waiting', label: '等待 Agent 响应' })
+    // A slow first frame reads as model work (large-context prefill or
+    // extended thinking), not as a failure: ongoing state, no reopen offer.
     expect(conversationStage({ ...base, now: 32_000, progress: { ...base.progress, phase: 'waiting' } }))
-      .toMatchObject({ kind: 'timeout', label: '等待响应超时', state: 'warning' })
+      .toMatchObject({ kind: 'thinking', label: '模型正在读取长上下文 / 思考中', state: 'ongoing' })
+    expect(conversationStage({
+      session: remoteSession,
+      entries: [
+        entry('1', 'assistant', 'message', '上一轮回复'),
+        entry('2', 'user', 'message', '新问题'),
+      ],
+      now: Date.parse('2026-08-29T00:02:30.000Z'),
+    })).toMatchObject({
+      kind: 'thinking', label: '模型正在读取长上下文 / 思考中', state: 'ongoing',
+      detail: expect.stringContaining('已等待 150 秒'),
+    })
     expect(conversationStage({
       ...base, progress: { ...base.progress, phase: 'failed', message: 'request timed out' },
     })).toMatchObject({ kind: 'timeout', label: '请求超时', state: 'error' })

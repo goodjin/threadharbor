@@ -62,6 +62,38 @@ export function toolDisclosurePresentation(hasResult: boolean, active: boolean):
   }
 }
 
+/** Icon kinds shared with the DSH session UI's flow rows. The browser maps
+ *  each kind onto the matching `Icon*Outline` glyph from dsh-client-ui-primitives. */
+export type ToolGlyphKind =
+  | 'think' | 'web' | 'search' | 'plan' | 'agent' | 'skill' | 'data' | 'edit' | 'read' | 'code'
+
+/** Ordered keyword table; the first matching row wins, so more specific
+ *  families (web before plain search, plan before edit for "TodoWrite") sit
+ *  earlier. Titles come from the agent: ACP rows show human titles like
+ *  "Read package.json" or "Apply patch", DSH rows the raw tool name. */
+const TOOL_GLYPH_RULES: readonly (readonly [RegExp, ToolGlyphKind])[] = [
+  [/think|思考|reason|推理/i, 'think'],
+  [/web|网页|网络|browse|浏览器|fetch|http|url|globe/i, 'web'],
+  [/search|grep|glob|find|query|查找|搜索|检索/i, 'search'],
+  [/todo|plan|checklist|待办|计划|清单/i, 'plan'],
+  [/agent|task|子代理|任务/i, 'agent'],
+  [/skill|技能/i, 'skill'],
+  [/edit|write|patch|apply|replace|insert|create|补丁|编辑|写入|修改|创建/i, 'edit'],
+  [/read|file|folder|directory|list|view|读取|阅读|文件|目录/i, 'read'],
+  [/memory|data|json|sql|database|数据|记忆/i, 'data'],
+  [/bash|shell|command|terminal|exec|run|命令|终端/i, 'code'],
+]
+
+/** Pick the DSH flow-row icon kind for a tool row from its title text. Tool
+ *  rows deliberately drop their native frames in the gateway, so the title is
+ *  the only signal available in the browser. */
+export function toolGlyphKind(title: string): ToolGlyphKind {
+  for (const [pattern, glyph] of TOOL_GLYPH_RULES) {
+    if (pattern.test(title)) return glyph
+  }
+  return 'code'
+}
+
 const FIRST_RESPONSE_TIMEOUT_MS = 30_000
 
 function failureLabel(message: string | undefined): string {
@@ -154,10 +186,15 @@ function turnStage(input: {
       const startedAt = progress?.startedAt ?? (Number.isFinite(userStartedAt) ? userStartedAt : now)
       const elapsed = Math.max(0, now - startedAt)
       if (elapsed >= FIRST_RESPONSE_TIMEOUT_MS) {
+        // Slow first frame is normal for large-context sessions (cold cache
+        // prefill, extended thinking) and the model streams nothing during
+        // it; the alarming "timeout" wording plus a reopen action here made
+        // users stop healthy turns. Real stalls still escalate to the
+        // unresponsive banner after several minutes.
         return {
-          kind: 'timeout', label: '等待响应超时',
-          detail: `已等待 ${Math.floor(elapsed / 1000)} 秒，Agent 可能仍在后台运行；可以继续等待或停止本轮。`,
-          state: 'warning', visible: true,
+          kind: 'thinking', label: '模型正在读取长上下文 / 思考中',
+          detail: `已等待 ${Math.floor(elapsed / 1000)} 秒还没有可见输出。上下文较大或模型在深度思考时，第一个可见内容可能需要 1-2 分钟；可以继续等待，或停止本轮。`,
+          state: 'ongoing', visible: true,
         }
       }
       return { kind: 'waiting', label: '等待 Agent 响应', detail: '请求已送达，正在等待第一个后台事件。', state: 'ongoing', visible: true }

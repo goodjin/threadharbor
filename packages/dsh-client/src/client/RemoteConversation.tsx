@@ -3,11 +3,14 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
 import {
-  Button, IconAgentPresetOutline16, IconCheckOutline16, IconChevronDownOutline14,
-  IconChevronRightOutline14, IconCodeOutline16, IconCopyOutline16, IconEnhanceOutline16,
-  IconLinkOutline16, IconRefreshOutline16, IconSendOutline16, IconStopFill16, IconThinkOutline16,
+  Button, DisclosureRow, IconAgentPresetOutline16, IconCheckOutline16,
+  IconChevronDownOutline14, IconChevronRightOutline14, IconCodeOutline16, IconCopyOutline16,
+  IconDataOutline16, IconEditOutline16, IconEnhanceOutline16, IconFolderClose16,
+  IconGlobeOutline14, IconLinkOutline16, IconListPenOutline16, IconRefreshOutline16,
+  IconSearchOutline16, IconSendOutline16, IconSkillOutline16, IconStopFill16, IconThinkOutline16,
   IconTrashOutline16, MarkdownText, MessageText, StateDot, writeClipboard,
 } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { IconProps } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConvOwnerProps } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {
@@ -27,8 +30,8 @@ import {
   conversationPresentation,
   isNearScrollBottom, parseChoicePrompt, parsePlanItems, pendingPermissionEntry,
   permissionRequestId, preferredProjectBackend, shouldPinPendingPermission,
-  toolDisclosurePresentation,
-  type ChoicePrompt, type ConversationStage, type RemoteTranscriptNode,
+  toolDisclosurePresentation, toolGlyphKind,
+  type ChoicePrompt, type ConversationStage, type RemoteTranscriptNode, type ToolGlyphKind,
 } from './conversation-model.ts'
 import css from './RemoteSurface.module.css'
 import {
@@ -142,39 +145,67 @@ function ChoiceCard({ prompt, pending, answered = false, onSubmit }: {
   )
 }
 
-function ReasoningNode({ entry, active }: { entry: RemoteTranscriptEntry; active: boolean }) {
-  const [pinnedOpen, setPinnedOpen] = useState(false)
-  const open = active || pinnedOpen
-  const summary = active ? latestLine(entry.text) : firstLine(entry.text)
+/** DSH flow-row glyphs: one icon per tool family, using the same outline set
+ *  the DSH session UI uses for its thinking / search / edit disclosures.
+ *  Stores component references — element creation waits for render so module
+ *  evaluation never touches the JSX runtime. */
+const TOOL_GLYPH_ICONS: Record<ToolGlyphKind, (props: IconProps) => ReactNode> = {
+  think: IconThinkOutline16,
+  web: IconGlobeOutline14,
+  search: IconSearchOutline16,
+  plan: IconListPenOutline16,
+  agent: IconAgentPresetOutline16,
+  skill: IconSkillOutline16,
+  data: IconDataOutline16,
+  edit: IconEditOutline16,
+  read: IconFolderClose16,
+  code: IconCodeOutline16,
+}
+
+function ToolGlyph({ kind }: { kind: ToolGlyphKind }) {
+  const Glyph = TOOL_GLYPH_ICONS[kind]
+  return <Glyph />
+}
+
+/** Scroll the collapsed hint so its tail (the newest streamed line) stays visible. */
+function useHintTailFollow(active: boolean, summary: string) {
   const summaryRef = useRef<HTMLSpanElement>(null)
   useLayoutEffect(() => {
     const element = summaryRef.current
     if (element === null) return
     element.scrollLeft = active ? element.scrollWidth - element.clientWidth : 0
   }, [active, summary])
+  return summaryRef
+}
+
+function ReasoningNode({ entry, active }: { entry: RemoteTranscriptEntry; active: boolean }) {
+  // Collapsed by default — even while streaming; the hint line carries a live
+  // peek, and the user expands for the full chain of thought.
+  const [open, setOpen] = useState(false)
+  const summary = active ? latestLine(entry.text) : firstLine(entry.text)
+  const summaryRef = useHintTailFollow(active, summary)
   return (
     <div className={css.reasoningMessage} data-state={active ? 'running' : 'ok'}>
-      <button
-        type="button"
-        className={css.reasoningRow}
-        aria-expanded={open}
-        disabled={!active && entry.text === ''}
-        onClick={() => { if (active || entry.text !== '') setPinnedOpen(value => !value) }}
+      <DisclosureRow
+        icon={<IconThinkOutline16 />}
+        title={active ? '正在思考' : '思考过程'}
+        open={open}
+        expandable={active || entry.text !== ''}
+        onToggle={() => { setOpen(value => !value) }}
+        expandOnRowClick
+        collapsedContent={(
+          <span
+            ref={summaryRef}
+            className={css.nodeHint}
+            data-follow-end={active || undefined}
+            title={summary}
+          >
+            {summary === '' ? ' ' : summary}
+          </span>
+        )}
       >
-        <span className={css.reasoningLeading} aria-hidden><IconThinkOutline16 /></span>
-        <span className={css.reasoningTitle}>{active ? '正在思考' : '思考过程'}</span>
-        <span className={css.reasoningSeparator} aria-hidden />
-        <span
-          ref={summaryRef}
-          className={css.nodeHint}
-          data-follow-end={active || undefined}
-          title={summary}
-        >
-          {summary === '' ? ' ' : summary}
-        </span>
-        <IconChevronDownOutline14 className={css.reasoningChevron} data-open={open || undefined} aria-hidden />
-      </button>
-      {open && <div className={css.reasoningBody}><MarkdownText text={entry.text} streaming={active} /></div>}
+        <div className={css.reasoningBody}><MarkdownText text={entry.text} streaming={active} /></div>
+      </DisclosureRow>
     </div>
   )
 }
@@ -192,39 +223,32 @@ function formatEntryTime(iso: string): string {
 function ToolNode({ node, active }: { node: Extract<RemoteTranscriptNode, { kind: 'tool' }>; active: boolean }) {
   const hasResult = node.entries.some(entry => entry.kind === 'tool-result')
   const presentation = toolDisclosurePresentation(hasResult, active)
-  const [pinnedOpen, setPinnedOpen] = useState(false)
-  // running => open, finished without result => open, finished with result => collapsed unless pinned
-  const open = active || !hasResult || pinnedOpen
+  // Always collapsed by default — running or finished; the hint carries the
+  // live status and only a user click opens the payload.
+  const [open, setOpen] = useState(false)
   const liveText = node.entries.at(-1)?.text ?? ''
-  const summary = active ? latestLine(liveText) : firstLine(node.title)
-  const summaryRef = useRef<HTMLSpanElement>(null)
-  useLayoutEffect(() => {
-    const element = summaryRef.current
-    if (element === null) return
-    element.scrollLeft = active ? element.scrollWidth - element.clientWidth : 0
-  }, [active, summary])
+  const summary = active ? latestLine(liveText) : presentation.status
+  const summaryRef = useHintTailFollow(active, summary)
   return (
     <div className={css.toolMessage} data-state={active ? 'running' : hasResult ? 'ok' : 'pending'}>
-      <button
-        type="button"
-        className={css.toolRow}
-        aria-expanded={open}
-        onClick={() => { setPinnedOpen(value => !value) }}
+      <DisclosureRow
+        icon={<ToolGlyph kind={toolGlyphKind(node.title)} />}
+        title={node.title}
+        open={open}
+        expandable
+        onToggle={() => { setOpen(value => !value) }}
+        expandOnRowClick
+        collapsedContent={(
+          <span
+            ref={summaryRef}
+            className={css.nodeHint}
+            data-follow-end={active || undefined}
+            title={summary}
+          >
+            {summary === '' ? ' ' : summary}
+          </span>
+        )}
       >
-        <span className={css.toolLeading} aria-hidden><IconCodeOutline16 /></span>
-        <span className={css.toolTitle}>{node.title}</span>
-        <span className={css.toolSeparator} aria-hidden />
-        <span
-          ref={summaryRef}
-          className={css.nodeHint}
-          data-follow-end={active || undefined}
-          title={summary}
-        >
-          {summary === '' ? presentation.status : summary}
-        </span>
-        <IconChevronDownOutline14 className={css.toolChevron} data-open={open || undefined} aria-hidden />
-      </button>
-      {open && (
         <div className={css.toolBody}>
           {node.entries.map(entry => (
             <div key={entry.transcriptId} className={css.toolPart}>
@@ -233,7 +257,7 @@ function ToolNode({ node, active }: { node: Extract<RemoteTranscriptNode, { kind
             </div>
           ))}
         </div>
-      )}
+      </DisclosureRow>
     </div>
   )
 }
