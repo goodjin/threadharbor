@@ -2304,7 +2304,17 @@ export class RemoteAgentGateway extends Service {
             ...(fragmentIndex === terminalFragmentIndex && stampUsage !== undefined ? { usage: stampUsage } : {}),
           })
         }
-        if (fragment.turnState !== undefined) turnState = fragment.turnState
+        // A finished round stays finished: Claude keeps streaming
+        // session/update frames after prompt_complete — typically a
+        // background subagent still reporting — and every such fragment
+        // projects `running`, but no second end-of-round frame will ever
+        // arrive for that round. Trusting them wedged sessions in `running`
+        // forever. The content above still lands; a real next round always
+        // opens through prompt admission, which sets `running` before any
+        // journal frame can exist.
+        if (!(fragment.turnState === 'running' && turnState === 'idle') && fragment.turnState !== undefined) {
+          turnState = fragment.turnState
+        }
         if (fragment.role === 'permission' && fragment.requestId !== undefined) {
           pendingRequests.add(fragment.requestId)
         } else if (fragment.turnState === 'idle' || fragment.turnState === 'failed') {
