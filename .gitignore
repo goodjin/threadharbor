@@ -7,6 +7,7 @@
 /.claude/
 /.pnpm-store/
 /.sessions/
+/.worktrees/
 /undefined/
 /scripts/dsh-wrapper.sh
 *.log
