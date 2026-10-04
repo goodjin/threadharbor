@@ -26,7 +26,6 @@ describe('hostd artifact version', () => {
     const lib = join(root, 'lib')
     await mkdir(lib)
     await writeFile(join(lib, 'bin.js'), 'first\n')
-    await writeFile(join(lib, 'hold-worker.js'), 'worker\n')
     const first = hostdArtifactVersionFromDirectory(lib)
     expect(first).toMatch(/^0\.1\.0\+[0-9a-f]{12}$/)
     expect(readHostdPackageVersion(join(root, 'package.json'))).toBe('0.1.0')

@@ -13,7 +13,7 @@ if (client.includes('@threadharbor/protocol')) {
   throw new Error('DSH browser artifact leaked @threadharbor/protocol into the module table; it must be inlined')
 }
 
-for (const path of ['packages/hostd/lib/bin.js', 'packages/hostd/lib/hold-worker.js']) {
+for (const path of ['packages/hostd/lib/bin.js']) {
   const artifact = readFileSync(path, 'utf8')
   const external = [...artifact.matchAll(/\bfrom["']([^"']+)["']/g)].map(match => match[1])
     .find(specifier => !specifier?.startsWith('node:'))

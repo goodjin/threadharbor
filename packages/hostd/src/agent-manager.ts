@@ -3,7 +3,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import {
-  accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, renameSync, statSync, writeFileSync,
+  accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync,
 } from 'node:fs'
 import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import {
@@ -32,24 +32,23 @@ export interface AgentManagerOptions {
   readonly dshCommand: string
   /** Test seam; production resolves npm next to the hostd Node executable. */
   readonly npmCommand?: readonly [command: string, ...args: string[]]
-  /** Test seam; production uses python3, then python. */
-  readonly pythonCommand?: string
 }
 
 const CODEX_PACKAGES = ['@openai/codex@0.150.1', '@agentclientprotocol/codex-acp@1.6.2'] as const
 const GROK_PACKAGES = ['@xai-official/grok@1.0.5'] as const
 const CLAUDE_PACKAGES = ['@anthropic-ai/claude-code@2.1.268', '@agentclientprotocol/claude-agent-acp@0.76.0'] as const
-const DSH_PIP_SPEC = 'deepseek-harness-runtime-bin==0.1.1rc1'
-/** Homebrew/PEP 668 blocks bare `pip install --user`; `--break-system-packages` still writes the user scripts dir. */
-const DSH_PIP_ARGS = ['-m', 'pip', 'install', '--user', '--upgrade', '--break-system-packages', DSH_PIP_SPEC] as const
-/** Official locator: the wheel ships `dsh-jsonrpc-agent-pkg-<platform>-<arch>`, not a PATH entry. */
-const DSH_RESOLVE_SCRIPT = 'from deepseek_harness_runtime import bundled_runtime_path, bundled_default_config_path; print(bundled_runtime_path()); print(bundled_default_config_path())'
+/** Official DeepSeek Harness CLI. Its shipped `acp` profile is the automation-only
+ *  ACP surface: one agent loop whose model catalog and credentials come from the
+ *  host user's own `$DSH_HOME` (settings.yaml / .credentials.yaml), the same
+ *  documents the DSH Web Models page writes. */
+const DSH_PACKAGES = ['@deepseek-ai/dsh@0.1.5-rc.1'] as const
 
 /** npm global bin names the pinned official recipes link into the npm global prefix. */
 const NPM_BIN_NAMES: Readonly<Partial<Record<RemoteAgentBackend, readonly string[]>>> = {
   codex: ['codex', 'codex-acp'],
   claude: ['claude', 'claude-agent-acp'],
   grok: ['grok'],
+  dsh: ['dsh'],
 }
 
 /** Which pinned npm package owns each global bin link; links that already point at the same
@@ -60,6 +59,7 @@ const NPM_BIN_OWNER: Readonly<Record<string, string>> = {
   claude: '@anthropic-ai/claude-code',
   'claude-agent-acp': '@agentclientprotocol/claude-agent-acp',
   grok: '@xai-official/grok',
+  dsh: '@deepseek-ai/dsh',
 }
 
 /** Read the owning npm package out of a bin symlink target such as `../lib/node_modules/codex-cli/bin/codex`. */
@@ -114,11 +114,6 @@ interface NpmBinConflict {
   readonly path: string
   readonly backupPath: string
   readonly description: string
-}
-
-interface DshLaunch {
-  readonly command: string
-  readonly configPath?: string
 }
 
 interface AuthFlow {
@@ -186,16 +181,11 @@ function resolveNpm(): { readonly command: string; readonly args: readonly strin
   return { command: 'npm', args: [] }
 }
 
-function resolvePython(): string | undefined {
-  if (commandExists('python3')) return 'python3'
-  if (commandExists('python')) return 'python'
-  return undefined
-}
-
 function npmPackages(backend: RemoteAgentBackend): readonly string[] | undefined {
   if (backend === 'codex') return CODEX_PACKAGES
   if (backend === 'grok') return GROK_PACKAGES
   if (backend === 'claude') return CLAUDE_PACKAGES
+  if (backend === 'dsh') return DSH_PACKAGES
   return undefined
 }
 
@@ -314,7 +304,6 @@ export class AgentManager {
   private readonly flows = new Map<string, AuthFlow>()
   private readonly configs: AgentConfigManager
   private extraBinDirs: readonly string[] = []
-  private dshLaunch: DshLaunch | undefined
 
   /** @param options - administrator-resolved commands and timings. */
   constructor(private readonly options: AgentManagerOptions) {
@@ -334,7 +323,6 @@ export class AgentManager {
    */
   async inventory(running: ReadonlySet<RemoteAgentBackend>): Promise<readonly RemoteBackendInventory[]> {
     await this.refreshExtraBins()
-    await this.refreshDshLaunch()
     const codexInstalled = this.hasCommand(this.options.codexCliCommand) && this.hasCommand(this.options.codexAcpCommand)
     const grokInstalled = this.hasCommand(this.options.grokCommand)
     const claudeAcpInstalled = this.hasCommand(this.options.claudeAcpCommand)
@@ -359,8 +347,13 @@ export class AgentManager {
       },
       {
         backend: 'dsh', installed: dshInstalled,
-        authenticated: dshInstalled && this.dshApiKey() !== undefined,
+        // The ACP profile resolves every route and credential from the host user's
+        // own DSH configuration, so installation is the whole readiness check: a
+        // missing key surfaces as a per-request model error, not as a blocked backend.
+        authenticated: dshInstalled,
         running: running.has('dsh'), sessionCapable: true,
+        ...(dshInstalled && this.dshApiKey() === undefined
+          ? { detail: '模型与凭据来自主机上的 DSH 配置（$DSH_HOME）。' } : {}),
       },
     ]
   }
@@ -375,29 +368,6 @@ export class AgentManager {
    */
   async installPlan(backend: RemoteAgentBackend): Promise<RemoteInstallPlan> {
     const alreadyInstalled = this.backendInstalled(backend)
-    if (backend === 'dsh') {
-      const python = this.options.pythonCommand ?? resolvePython()
-      if (python === undefined) {
-        return {
-          component: backend,
-          version: DSH_PIP_SPEC,
-          alreadyInstalled,
-          requiresConfirmation: true,
-          steps: [],
-          unavailableReason: 'This host needs python3 to install DeepSeek Harness JSON-RPC runtime from PyPI.',
-        }
-      }
-      return {
-        component: backend,
-        version: DSH_PIP_SPEC,
-        alreadyInstalled,
-        requiresConfirmation: true,
-        steps: [planStep(
-          'Install the official DeepSeek Harness JSON-RPC runtime from PyPI',
-          [python, ...DSH_PIP_ARGS].map(quoteDisplay).join(' '),
-        )],
-      }
-    }
     const packages = npmPackages(backend)
     const npm = this.npmInstaller()
     if (packages === undefined) {
@@ -414,7 +384,9 @@ export class AgentManager {
       ? 'Install Codex CLI and its ACP adapter from npm'
       : backend === 'claude'
         ? 'Install Claude Code and its ACP adapter from npm'
-        : 'Install the official Grok Build CLI from npm'
+        : backend === 'dsh'
+          ? 'Install the official DeepSeek Harness CLI from npm (its shipped acp profile serves sessions)'
+          : 'Install the official Grok Build CLI from npm'
     const conflicts = alreadyInstalled ? [] : await this.npmBinConflicts(backend)
     const installedVersions = alreadyInstalled ? await this.npmInstalledVersions(packages) : {}
     const outdated = alreadyInstalled && packages.some((spec) => {
@@ -478,52 +450,45 @@ export class AgentManager {
     const plan = await this.installPlan(backend)
     if (plan.unavailableReason !== undefined) throw new Error(plan.unavailableReason)
     // An installed Agent is left alone unless the caller asks to upgrade it to
-    // the pinned versions; `npm install -g pkg@ver` / `pip --upgrade` then
-    // replace whatever is on the host.
+    // the pinned versions; `npm install -g pkg@ver` then replaces whatever is on
+    // the host.
     if (plan.alreadyInstalled && options.upgrade !== true) return plan
-    if (backend === 'dsh') {
-      await this.installDshRuntime()
-    } else {
-      const packages = npmPackages(backend)
-      if (packages === undefined) throw new Error('no installer is configured')
-      const conflicts = await this.npmBinConflicts(backend)
-      const moved: Array<{ readonly path: string; readonly backupPath: string }> = []
-      for (const conflict of conflicts) {
-        try {
-          renameSync(conflict.path, conflict.backupPath)
-          moved.push({ path: conflict.path, backupPath: conflict.backupPath })
-        } catch {
-          // The entry vanished between plan and execution; npm can link freely.
-        }
-      }
-      const npm = this.npmInstaller()
-      const result = await run(
-        npm.command,
-        [...npm.args, 'install', '-g', ...packages],
-        this.options.installTimeoutMs,
-        this.extraBinDirs,
-      )
-      if (result.code !== 0) {
-        // npm failed: put every moved entry back so the foreign tool keeps its
-        // shim and the user sees an honest EEXIST reason, not a half-moved bin.
-        for (const item of moved) {
-          try {
-            renameSync(item.backupPath, item.path)
-          } catch {
-            // Leave the backup in place for manual cleanup.
-          }
-        }
-        const translated = this.npmInstallEexistMessage(result.output)
-        throw new Error(translated ?? `installer exited with status ${result.code}: ${result.output.trim().slice(-2000) || 'no output'}`)
+    const packages = npmPackages(backend)
+    if (packages === undefined) throw new Error('no installer is configured')
+    const conflicts = await this.npmBinConflicts(backend)
+    const moved: Array<{ readonly path: string; readonly backupPath: string }> = []
+    for (const conflict of conflicts) {
+      try {
+        renameSync(conflict.path, conflict.backupPath)
+        moved.push({ path: conflict.path, backupPath: conflict.backupPath })
+      } catch {
+        // The entry vanished between plan and execution; npm can link freely.
       }
     }
+    const npm = this.npmInstaller()
+    const result = await run(
+      npm.command,
+      [...npm.args, 'install', '-g', ...packages],
+      this.options.installTimeoutMs,
+      this.extraBinDirs,
+    )
+    if (result.code !== 0) {
+      // npm failed: put every moved entry back so the foreign tool keeps its
+      // shim and the user sees an honest EEXIST reason, not a half-moved bin.
+      for (const item of moved) {
+        try {
+          renameSync(item.backupPath, item.path)
+        } catch {
+          // Leave the backup in place for manual cleanup.
+        }
+      }
+      const translated = this.npmInstallEexistMessage(result.output)
+      throw new Error(translated ?? `installer exited with status ${result.code}: ${result.output.trim().slice(-2000) || 'no output'}`)
+    }
     await this.refreshExtraBins(true)
-    if (backend === 'dsh') await this.refreshDshLaunch(true)
     const installed = await this.installPlan(backend)
     if (!installed.alreadyInstalled) {
-      throw new Error(backend === 'dsh'
-        ? 'pip installed deepseek-harness-runtime-bin but bundled_runtime_path() did not resolve a runtime executable'
-        : `${backend} installer finished but the command is not on PATH or in the official npm/pip location`)
+      throw new Error(`${backend} installer finished but the command is not on PATH or in the official npm location`)
     }
     return installed
   }
@@ -675,62 +640,19 @@ export class AgentManager {
   }
 
   private dshInstalled(): boolean {
-    return this.resolveDshFromPath() !== undefined || this.dshLaunch?.command !== undefined
+    return this.resolveDshFromPath() !== undefined
   }
 
   private resolveDshFromPath(): string | undefined {
     return resolveCommandPath(this.options.dshCommand, this.extraBinDirs)
   }
 
-  /** Absolute DSH runtime command and bundled config, if the official wheel is present.
-   * @returns launch paths for hold-worker stdio.
+  /** Absolute DeepSeek Harness CLI command for hold-worker stdio, when installed.
+   * @returns the resolved command, or undefined when `dsh` is not on the host.
    */
-  async resolvedDshLaunch(): Promise<DshLaunch | undefined> {
+  async resolvedDshLaunch(): Promise<string | undefined> {
     await this.refreshExtraBins()
-    await this.refreshDshLaunch()
-    if (this.dshLaunch !== undefined) return this.dshLaunch
-    const command = this.resolveDshFromPath()
-    return command === undefined ? undefined : { command }
-  }
-
-  private async refreshDshLaunch(force = false): Promise<void> {
-    if (!force && this.dshLaunch !== undefined) return
-    const fromPath = this.resolveDshFromPath()
-    if (fromPath !== undefined) {
-      this.dshLaunch = { command: fromPath }
-      return
-    }
-    const python = this.options.pythonCommand ?? resolvePython()
-    if (python === undefined) {
-      this.dshLaunch = undefined
-      return
-    }
-    try {
-      const result = await run(python, ['-c', DSH_RESOLVE_SCRIPT], 5_000, this.extraBinDirs)
-      const paths = result.output.trim().split(/\r?\n/).map(line => line.trim()).filter(line => line.includes('/') || line.includes('\\'))
-      const command = paths.length >= 2 ? paths[paths.length - 2] : paths[0]
-      const configPath = paths.length >= 2 ? paths[paths.length - 1] : undefined
-      if (result.code !== 0 || command === undefined) {
-        this.dshLaunch = undefined
-        return
-      }
-      try {
-        accessSync(command, constants.X_OK)
-        if (!statSync(command).isFile()) {
-          this.dshLaunch = undefined
-          return
-        }
-      } catch {
-        this.dshLaunch = undefined
-        return
-      }
-      this.dshLaunch = {
-        command,
-        ...(configPath !== undefined && existsSync(configPath) ? { configPath } : {}),
-      }
-    } catch {
-      this.dshLaunch = undefined
-    }
+    return this.resolveDshFromPath()
   }
 
   private npmInstaller(): { readonly command: string; readonly args: readonly string[] } {
@@ -752,36 +674,7 @@ export class AgentManager {
     } catch {
       // npm may be missing; PATH and the hostd Node directory remain.
     }
-    const python = this.options.pythonCommand ?? resolvePython()
-    if (python !== undefined) {
-      try {
-        const scripts = await run(
-          python,
-          ['-c', "import os,sysconfig; print(sysconfig.get_path('scripts', 'nt_user' if os.name=='nt' else 'posix_user'))"],
-          5_000,
-          this.extraBinDirs,
-        )
-        const value = scripts.output.trim().split(/\r?\n/).at(-1)?.trim()
-        if (scripts.code === 0 && value !== undefined && value !== '') dirs.push(value)
-      } catch {
-        // python/pip may be missing; DSH install will fail with a clear reason.
-      }
-    }
     this.extraBinDirs = [...new Set(dirs.filter(directory => directory !== ''))]
-  }
-
-  private async installDshRuntime(): Promise<void> {
-    const python = this.options.pythonCommand ?? resolvePython()
-    if (python === undefined) throw new Error('python3 is not available on this host')
-    const result = await run(
-      python,
-      [...DSH_PIP_ARGS],
-      this.options.installTimeoutMs,
-      this.extraBinDirs,
-    )
-    if (result.code !== 0) {
-      throw new Error(`DSH installer exited with status ${result.code}: ${result.output.trim().slice(-2000) || 'no output'}`)
-    }
   }
 
   /** Resolve the npm global bin directory using the same installer the recipe would run. */

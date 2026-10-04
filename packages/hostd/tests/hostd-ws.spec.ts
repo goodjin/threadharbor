@@ -7,19 +7,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
 import {
   parseHostdWsFrame,
+  RemoteSessionId,
   type JsonValue,
   type RemoteHostdWsFrame,
   type RemoteJournalEvent,
   type RemoteJournalPage,
 } from '@threadharbor/protocol'
 import { HostdWsHub, type HostdWsHubOptions } from '../src/ws-hub.ts'
-import type { HoldResponse } from '../src/hold-protocol.ts'
+import type { HostdSessionResponse } from '../src/agent-protocol.ts'
 import type { HostdSessionRecord, RemoteAgentHostd } from '../src/server.ts'
 
+/** One session's journal. Keyed by session, not by hold: a hold is a session now. */
 interface FakeHold {
   nextSeq: number
   pages: RemoteJournalPage[]
-  waiters: Array<{ resolve: (response: HoldResponse) => void; timer: NodeJS.Timeout }>
+  waiters: Array<{ resolve: (response: HostdSessionResponse) => void; timer: NodeJS.Timeout }>
+  /** A dead Agent connection, which in-process surfaces as a thrown error. */
   dead?: boolean
 }
 
@@ -63,11 +66,11 @@ function makeHostd(): FakeHostd {
       return record
     },
     holdRequest: vi.fn(async (record: HostdSessionRecord, request: Parameters<RemoteAgentHostd['holdRequest']>[1]) => {
-      const hold = holds.get(record.holdId)
-      if (hold === undefined) throw new Error(`unknown hold ${record.holdId}`)
-      if (hold.dead === true) throw new Error('connect ECONNREFUSED /tmp/th-501/h-dead.sock')
+      const hold = holds.get(record.sessionId)
+      if (hold === undefined) throw new Error(`unknown session ${record.sessionId}`)
+      if (hold.dead === true) throw new Error(`no running ${record.backend} bridge for session ${record.sessionId}`)
       if (request.operation === 'ping') {
-        return { ok: true, result: { latestSeq: hold.nextSeq - 1 } } as HoldResponse
+        return { ok: true, result: { latestSeq: hold.nextSeq - 1 } } as HostdSessionResponse
       }
       if (request.operation === 'read') {
         const afterSeq = request.afterSeq
@@ -75,27 +78,27 @@ function makeHostd(): FakeHostd {
         const latestSeq = hold.pages.at(-1)?.latestSeq ?? hold.nextSeq - 1
         return { ok: true, result: {
           generation: 'g1', latestSeq, droppedThrough: 0, gap: false, events: matching,
-        } satisfies RemoteJournalPage } as HoldResponse
+        } satisfies RemoteJournalPage } as HostdSessionResponse
       }
       if (request.operation === 'wait-page') {
-        const page = (afterSeq: number): HoldResponse => {
+        const page = (afterSeq: number): HostdSessionResponse => {
           const matching = hold.pages.flatMap((item) => item.events).filter((event) => event.seq > afterSeq)
           const latestSeq = hold.pages.at(-1)?.latestSeq ?? hold.nextSeq - 1
           return { ok: true, result: {
             generation: 'g1', latestSeq, droppedThrough: 0, gap: false, events: matching,
-          } satisfies RemoteJournalPage } as HoldResponse
+          } satisfies RemoteJournalPage } as HostdSessionResponse
         }
         if (hold.nextSeq - 1 > request.afterSeq) return page(request.afterSeq)
-        return await new Promise<HoldResponse>((resolve) => {
+        return await new Promise<HostdSessionResponse>((resolve) => {
           const timer = setTimeout(() => { resolve(page(request.afterSeq)) }, request.timeoutMs)
           hold.waiters.push({ resolve, timer })
         })
       }
       if (request.operation === 'wait-seq') {
         if (hold.nextSeq - 1 > request.afterSeq) {
-          return { ok: true, result: { latestSeq: hold.nextSeq - 1, timedOut: false } } as HoldResponse
+          return { ok: true, result: { latestSeq: hold.nextSeq - 1, timedOut: false } } as HostdSessionResponse
         }
-        return await new Promise<HoldResponse>((resolve) => {
+        return await new Promise<HostdSessionResponse>((resolve) => {
           const timer = setTimeout(() => {
             resolve({ ok: true, result: { latestSeq: hold.nextSeq - 1, timedOut: true } })
           }, request.timeoutMs)
@@ -255,7 +258,7 @@ describe('HostdWsHub', () => {
         generation: 'g1', latestSeq: 1, droppedThrough: 0, gap: false, events: [event],
       }
       const hold: FakeHold = { nextSeq: 2, pages: [page], waiters: [] }
-      h.fake.holds.set(record.holdId, hold)
+      h.fake.holds.set(sessionId, hold)
 
       const socket = await new Promise<WebSocket>((resolveOpen, rejectOpen) => {
         const ws = h.connect()
@@ -281,7 +284,7 @@ describe('HostdWsHub', () => {
       const sessionId = 's2'
       const record = makeSessionRecord(sessionId, 'g2')
       h.fake.sessions.set(sessionId, record)
-      h.fake.holds.set(record.holdId, { nextSeq: 0, pages: [], waiters: [] })
+      h.fake.holds.set(sessionId, { nextSeq: 0, pages: [], waiters: [] })
 
       const socket = await new Promise<WebSocket>((resolveOpen, rejectOpen) => {
         const ws = h.connect()
@@ -298,13 +301,13 @@ describe('HostdWsHub', () => {
     }
   })
 
-  it('emits journal.gap when the hold socket is dead so the gateway can leave running', async () => {
+  it('emits journal.gap when the Agent connection is gone so the gateway can leave running', async () => {
     const h = await makeWsHarness()
     try {
       const sessionId = 's-dead'
       const record = makeSessionRecord(sessionId)
       h.fake.sessions.set(sessionId, record)
-      h.fake.holds.set(record.holdId, { nextSeq: 0, pages: [], waiters: [], dead: true })
+      h.fake.holds.set(sessionId, { nextSeq: 0, pages: [], waiters: [], dead: true })
       const socket = await new Promise<WebSocket>((resolveOpen, rejectOpen) => {
         const ws = h.connect()
         ws.once('open', () => resolveOpen(ws))
@@ -320,13 +323,13 @@ describe('HostdWsHub', () => {
     }
   })
 
-  it('cleans up the per-hold waiter when the last subscriber unsubscribes', async () => {
+  it('cleans up the per-session waiter when the last subscriber unsubscribes', async () => {
     const h = await makeWsHarness()
     try {
       const sessionId = 's3'
       const record = makeSessionRecord(sessionId)
       h.fake.sessions.set(sessionId, record)
-      h.fake.holds.set(record.holdId, { nextSeq: 1, pages: [{
+      h.fake.holds.set(sessionId, { nextSeq: 1, pages: [{
         generation: 'g1', latestSeq: 1, droppedThrough: 0, gap: false,
         events: [{ seq: 1, generation: 'g1', timestamp: '2026-01-01T00:00:00Z',
           frame: { jsonrpc: '2.0', method: 'session/update', params: {} } }],
@@ -341,10 +344,10 @@ describe('HostdWsHub', () => {
       collector.send({ direction: 'subscribe', sessionId, generation: 'g1', lastSeq: 0 })
       await collector.waitFor(frames => frames.some(frame =>
         frame.direction === 'push' && frame.event.type === 'journal.page' && frame.event.sessionId === sessionId))
-      expect(h.hub.waitersForTesting().has(record.holdId)).toBe(true)
+      expect(h.hub.waitersForTesting().has(RemoteSessionId(sessionId))).toBe(true)
       collector.send({ direction: 'unsubscribe', sessionId })
       await new Promise(resolveWait => setTimeout(resolveWait, 50))
-      expect(h.hub.waitersForTesting().has(record.holdId)).toBe(false)
+      expect(h.hub.waitersForTesting().has(RemoteSessionId(sessionId))).toBe(false)
       socket.close()
     } finally {
       await h.close()
@@ -368,7 +371,7 @@ describe('HostdWsHub', () => {
         generation: 'g1', latestSeq: 250, droppedThrough: 0, gap: false, events,
       }
       const hold: FakeHold = { nextSeq: 251, pages: [page], waiters: [] }
-      h.fake.holds.set(record.holdId, hold)
+      h.fake.holds.set(sessionId, hold)
 
       const socket = await new Promise<WebSocket>((resolveOpen, rejectOpen) => {
         const ws = h.connect()

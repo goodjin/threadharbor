@@ -5,8 +5,11 @@ import { existsSync, readFileSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-/** Files SSH-deployed to a remote host and hashed for upgrade detection. */
-export const HOSTD_ARTIFACT_FILES = ['bin.js', 'hold-worker.js'] as const
+/** Files SSH-deployed to a remote host and hashed for upgrade detection.
+ *  One file: the Agent now runs inside hostd, so there is no second script to
+ *  deploy. Deploying one artifact also removes the class of bug where the daemon
+ *  and its worker came from different versions. */
+export const HOSTD_ARTIFACT_FILES = ['bin.js'] as const
 
 export function readHostdPackageVersion(packageJsonPath: string): string {
   try {
@@ -45,9 +48,8 @@ export function hostdArtifactVersionFromDirectory(artifactDirectory: string): st
 
 /** Version of the code this process loaded. Must not re-read files after start. */
 export function runningHostdVersion(
-  workerScript: string,
   here = fileURLToPath(new URL('.', import.meta.url)),
 ): string {
-  const files = [...new Set([join(here, 'bin.js'), workerScript])]
+  const files = HOSTD_ARTIFACT_FILES.map(file => join(here, file))
   return hostdVersionFromFiles(readHostdPackageVersion(join(here, '..', 'package.json')), files)
 }

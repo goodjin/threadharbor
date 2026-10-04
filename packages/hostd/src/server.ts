@@ -2,7 +2,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { connect, createConnection } from 'node:net'
 import { dirname, join } from 'node:path'
@@ -35,9 +35,12 @@ import {
   type RemoteAgentBackend,
   type RemoteHostdSessionStartStage,
 } from '@threadharbor/protocol'
+import { AgentBridge } from './agent-bridge.ts'
 import { AgentManager, requireInstallConfirmation } from './agent-manager.ts'
-import { migrateProjectDshSessions } from './dsh-sessions.ts'
-import type { HoldRequest, HoldResponse, HoldWorkerConfig } from './hold-protocol.ts'
+import type {
+  AgentSessionConfig, AgentTransport, HostdSessionRequest, HostdSessionResponse,
+} from './agent-protocol.ts'
+import { optionalSessionContext, CONTEXT_SEED_MAX_CHARS, type SessionContextSeed } from './hostd-util.ts'
 import { HostdWsHub } from './ws-hub.ts'
 import { runningHostdVersion } from './version.ts'
 import {
@@ -80,6 +83,12 @@ export interface HostdOptions {
    * instead of hanging until the backend process eventually dies.
    */
   readonly promptTimeoutMs: number
+  /**
+   * How long a hold may sit with no subscriber and no client activity before
+   * hostd releases it. A detached hold is meant to survive disconnects, not to
+   * outlive the session forever; `0` disables reaping (tests, embedded use).
+   */
+  readonly holdIdleTimeoutMs: number
   readonly agentConfigHome: string
   readonly maxAgentConfigBytes: number
   readonly codexCliCommand: string
@@ -90,16 +99,10 @@ export interface HostdOptions {
   readonly claudeAcpArgs: readonly string[]
   readonly dshCommand: string
   readonly dshArgs: readonly string[]
-  /** Test seam; production resolves python3, then python. */
-  readonly pythonCommand?: string
-  readonly dshProvider: string
-  readonly dshModel: string
   readonly grokCommand: string
   readonly grokServeHost: '127.0.0.1'
   readonly grokServePort: number
   readonly grokArgs: readonly string[]
-  /** Built worker entry; injectable for packaged runtimes and tests. */
-  readonly workerScript: string
   /**
    * Whether to accept legacy `POST /v1/control` requests in addition to the
    * WebSocket channel. Defaults to `false`: gateway now speaks WS-only and an
@@ -163,6 +166,18 @@ function ownerSuffix(): string {
 /** Unix domain socket paths are short; keep the directory well under the platform limit. */
 const HOLD_RUNTIME_DIR_MAX = 48
 
+/** How long a released hold waits for its worker to exit before it is signalled. */
+const RELEASE_EXIT_TIMEOUT_MS = 5_000
+
+/** Timestamp of the last client-driven request per session, in epoch ms. */
+type SessionActivity = Map<string, number>
+
+/** Hold operations that represent real client activity; everything else is
+ *  hostd's own polling and must not reset the idle clock. */
+const HOLD_ACTIVITY_OPERATIONS: ReadonlySet<HostdSessionRequest['operation']> = new Set([
+  'send', 'send-frame', 'set-native-session',
+])
+
 /** Trace toggle: default ON in non-test runs so latency investigations always
  *  have data; explicit `THREADHARBOR_TRACE=0` silences. */
 function traceEnabled(): boolean {
@@ -212,14 +227,6 @@ function ensureOwnerOnlyDirectory(path: string): void {
   if ((stats.mode & 0o077) !== 0) chmodSync(path, 0o700)
 }
 
-/** Resolved and pre-created DSH session root. Lives under hostd dataDir so
- *  JSONL never scatters into project ./.sessions directories. */
-function dshSessionRoot(dataDir: string): string {
-  const root = join(dataDir, 'dsh-sessions')
-  ensureOwnerOnlyDirectory(root)
-  return root
-}
-
 function writeJsonAtomic(path: string, value: unknown): void {
   const temporary = `${path}.${process.pid}.tmp`
   writeFileSync(temporary, `${JSON.stringify(value, undefined, 2)}\n`, { mode: 0o600 })
@@ -263,8 +270,27 @@ export class RemoteAgentHostd {
   private grokServeSecretValue: string | undefined
   /** Listener pid whose Grok reachability was already verified this process. */
   private grokServeVerifiedPid: number | undefined
-  /** Worker pids hostd spawned per hold; `session.restart` force-stops a wedged agent. */
-  private readonly workerPids = new Map<string, number>()
+  /**
+   * One shared Agent connection per backend kind.
+   *
+   * Every session of a backend rides the same connection, so the process count
+   * follows the number of Agent *types* in use, not the number of sessions.
+   */
+  private readonly bridges = new Map<RemoteAgentBackend, AgentBridge>()
+  /** Serializes bridge creation per backend; two sessions must not race it. */
+  private readonly bridgeLocks = new Map<RemoteAgentBackend, Promise<unknown>>()
+  /** Last client-driven request per session, used by the idle reaper. */
+  private readonly sessionActivity: SessionActivity = new Map()
+  /** Periodic idle-hold reaper; `undefined` when disabled. */
+  private idleReaper: ReturnType<typeof setInterval> | undefined
+  /** Context text offered by the current attach, consumed only if resume fails. */
+  private pendingContextSeed: { sessionId: string; transcript: string; truncated: boolean } | undefined
+  /**
+   * How each session's live context was obtained, remembered so a later attach
+   * of an already-bound session reports the same truth instead of defaulting to
+   * "nothing" simply because it skipped the work.
+   */
+  private readonly contextSources = new Map<string, 'resumed' | 'reconstructed' | 'none'>()
 
   /** @param options - fully resolved deployment configuration. */
   constructor(readonly options: HostdOptions) {
@@ -274,7 +300,7 @@ export class RemoteAgentHostd {
     this.hostId = readFileSync(identityPath, 'utf8').trim()
     this.sessionsPath = join(options.dataDir, 'sessions.json')
     this.codeVersion = options.hostdVersion
-      ?? runningHostdVersion(options.workerScript, fileURLToPath(new URL('.', import.meta.url)))
+      ?? runningHostdVersion(fileURLToPath(new URL('.', import.meta.url)))
     this.agentManager = new AgentManager({
       installTimeoutMs: options.installTimeoutMs,
       authTimeoutMs: options.authTimeoutMs,
@@ -286,7 +312,6 @@ export class RemoteAgentHostd {
       claudeAcpCommand: options.claudeAcpCommand,
       grokCommand: options.grokCommand,
       dshCommand: options.dshCommand,
-      ...(options.pythonCommand === undefined ? {} : { pythonCommand: options.pythonCommand }),
     })
     this.loadSessions()
     this.wsHub = new HostdWsHub(this, {
@@ -305,6 +330,7 @@ export class RemoteAgentHostd {
   /** Start the loopback HTTP control endpoint. */
   async start(): Promise<void> {
     if (this.server !== undefined) return
+    this.sweepLegacyHoldWorkers()
     const server = createServer((req, res) => {
       this.handleHttp(req, res).catch((error: unknown) => {
         if (res.headersSent) {
@@ -332,6 +358,7 @@ export class RemoteAgentHostd {
         })
       })
       this.wsHub.attach(server)
+      this.startIdleReaper()
     } catch (error) {
       this.server = undefined
       this.listenedPort = undefined
@@ -344,9 +371,19 @@ export class RemoteAgentHostd {
 
   /** Stop accepting control requests without terminating backend holds. */
   async close(): Promise<void> {
+    if (this.idleReaper !== undefined) {
+      clearInterval(this.idleReaper)
+      this.idleReaper = undefined
+    }
     const server = this.server
-    if (server === undefined) return
     this.server = undefined
+    // Stop the Agents first. They hold a write handle on their own session
+    // store, and dsh refuses to reopen a session another live process owns — so
+    // an Agent that outlives hostd locks its sessions out of every future run,
+    // not just this one. Closing only the listener would leave them running and
+    // the next hostd would be unable to recover a single one of their sessions.
+    await this.stopAllBridges()
+    if (server === undefined) return
     await this.wsHub.close()
     await new Promise<void>((resolveClose, reject) => {
       server.close((error) => {
@@ -354,6 +391,17 @@ export class RemoteAgentHostd {
         else reject(error)
       })
     })
+  }
+
+  /** Stop every backend connection, so no Agent outlives this process. */
+  private async stopAllBridges(): Promise<void> {
+    const bridges = [...this.bridges.values()]
+    this.bridges.clear()
+    this.bridgeLocks.clear()
+    await Promise.all(bridges.map(async bridge => {
+      await bridge.close().catch(() => undefined)
+      trace('bridge.stop', { backend: bridge.options.backend, reason: 'shutdown', ok: true })
+    }))
   }
 
   /** Dispatch one already-parsed control request.
@@ -441,6 +489,8 @@ export class RemoteAgentHostd {
       case 'session.restart':
         if (request.params['confirm'] !== true) throw new Error('session.restart requires confirm: true')
         return await this.restartSession(request.params) as unknown as JsonValue
+      case 'session.release':
+        return await this.releaseSession(request.params) as unknown as JsonValue
       case 'session.prompt':
         return await this.sendAdmission(request.params)
       case 'session.cancel':
@@ -558,12 +608,13 @@ export class RemoteAgentHostd {
       createdAt: now,
       updatedAt: now,
     }
-    onProgress?.('spawn-hold', record.sessionId, '正在启动远端会话进程')
-    await this.spawnHold(record)
-    trace('session.start', { stage: 'spawnHold', sessionId: record.sessionId, backend: record.backend })
+    onProgress?.('spawn-hold', record.sessionId, '正在准备 Agent 连接')
+    await this.ensureSession(record)
+    trace('session.start', { stage: 'ensureSession', sessionId: record.sessionId, backend: record.backend })
     onProgress?.('initialize-agent', record.sessionId, '正在初始化 Agent 连接')
-    await this.initializeHold(record)
-    trace('session.start', { stage: 'initializeHold', sessionId: record.sessionId })
+    // The handshake belongs to the shared connection and completed with it; the
+    // stage stays so callers still see the same three steps.
+    trace('session.start', { stage: 'initializeAgent', sessionId: record.sessionId })
     onProgress?.('bind-session', record.sessionId, '正在创建原生会话')
     const ready = await this.bindNativeSession(record, {
       ...(spec.parentNativeSessionId === undefined ? {} : { parentNativeSessionId: spec.parentNativeSessionId }),
@@ -576,7 +627,16 @@ export class RemoteAgentHostd {
     const sessionId = stringField(params, 'sessionId')
     const record = this.sessions.get(sessionId)
     if (record === undefined) throw new Error(`unknown hostd session ${sessionId}`)
-    return await this.attachRecord(record)
+    // Conversation text the caller can offer if the Agent turns out not to be
+    // able to reopen its own session. The Agent's real memory always wins; this
+    // is only the fallback, and it is applied only after resume has failed.
+    const seed = optionalSessionContext(params)
+    this.pendingContextSeed = seed === undefined ? undefined : { sessionId, ...seed }
+    try {
+      return await this.attachRecord(record)
+    } finally {
+      this.pendingContextSeed = undefined
+    }
   }
 
   private async adoptSession(params: Record<string, JsonValue>): Promise<RemoteSessionAttachResult> {
@@ -587,17 +647,20 @@ export class RemoteAgentHostd {
     if (parent === undefined) throw new Error(`unknown parent hostd session ${parentId}`)
     const existing = this.sessions.get(childId)
     if (existing !== undefined) {
-      if (existing.holdId !== parent.holdId || existing.generation !== parent.generation
-        || existing.nativeSessionId !== nativeSessionId) {
+      if (existing.backend !== parent.backend || existing.nativeSessionId !== nativeSessionId) {
         throw new Error('session.adopt cannot change an existing child binding')
       }
       return await this.attachRecord(existing)
     }
     const now = new Date().toISOString()
+    // The child gets its own slot: a slot is a session's own bookkeeping (journal,
+    // sequence space, prompt queue), which is exactly what must not be shared.
+    // What it shares with the parent is the backend connection and the native
+    // session, and the bridge fans that session's frames out to both.
     const child: HostdSessionRecord = {
       sessionId: childId,
-      holdId: parent.holdId,
-      generation: parent.generation,
+      holdId: RemoteHoldId(randomUUID()),
+      generation: randomUUID(),
       backend: parent.backend,
       cwd: parent.cwd,
       nativeSessionId,
@@ -606,21 +669,44 @@ export class RemoteAgentHostd {
     }
     this.sessions.set(childId, child)
     this.saveSessions()
-    return await this.attachRecord(child)
+    await this.ensureSession(child)
+    this.bridgeFor(child).setNativeSession(child.holdId, nativeSessionId)
+    return await this.snapshotHold(child)
   }
 
   private async attachRecord(record: HostdSessionRecord): Promise<RemoteSessionAttachResult> {
     return await this.withHoldLock(record.holdId, async () => {
-      try {
-        return await this.snapshotHold(record)
-      } catch (error) {
-        if (!holdSocketDead(error)) throw error
+      // The bridge may not be up at all: a hostd restart loses every in-process
+      // connection, and a dead backend loses its own. Both are the same repair —
+      // start the shared connection and re-open this session on it.
+      const bridge = this.bridges.get(record.backend)
+      // A session with no native binding has to be bound, even when its slot is
+      // open: that is exactly the state a failed reopen leaves behind, and
+      // skipping the bind here would report a blank Agent as a healthy reopen.
+      // The slot existing is not enough: a shared connection opens a slot for
+      // every session of the backend at once, and only the one being attached
+      // gets bound. Skipping the bind for the others left them accepting
+      // prompts that the Agent rejects on arrival, with the UI still reporting
+      // a live turn.
+      // A running turn outranks the binding check: the Agent is demonstrably
+      // serving this session, and re-binding it mid-turn can break a turn that
+      // is waiting on a permission or a tool result. Binding is for sessions
+      // that look alive but were never named to the Agent, which is exactly the
+      // state a revive leaves a sibling session in.
+      if (bridge === undefined || !bridge.alive || !bridge.has(record.holdId)
+        || (!bridge.isBound(record.holdId) && !bridge.isInFlight(record.holdId))) {
         return await this.reviveHold(record)
       }
+      return await this.snapshotHold(record)
     })
   }
 
-  private async snapshotHold(record: HostdSessionRecord, reopened = false): Promise<RemoteSessionAttachResult> {
+  private async snapshotHold(
+    record: HostdSessionRecord,
+    reopened = false,
+    contextSource?: RemoteSessionAttachResult['contextSource'],
+  ): Promise<RemoteSessionAttachResult> {
+    contextSource ??= this.contextSources.get(record.sessionId) ?? 'none'
     const latestSeq = await this.latestSeq(record)
     return {
       holdId: RemoteHoldId(record.holdId),
@@ -628,57 +714,219 @@ export class RemoteAgentHostd {
       ...(record.nativeSessionId === undefined ? {} : { nativeSessionId: record.nativeSessionId }),
       latestSeq,
       ...(reopened ? { reopened: true } : {}),
+      // Reported even when nothing went wrong, so the UI can tell a real resume
+      // from a rebuilt context instead of showing both as a healthy reopen.
+      contextSource,
     }
   }
 
   private async reviveHold(record: HostdSessionRecord): Promise<RemoteSessionAttachResult> {
-    this.unlinkStaleHoldSockets(record.holdId)
-    if (record.backend === 'grok') await this.ensureGrokServer()
-    await this.spawnHold(record)
-    await this.initializeHold(record)
+    if (this.bridges.get(record.backend)?.alive === true) {
+      // Only this session is missing its slot or its binding; the shared
+      // connection is fine.
+      this.bridgeFor(record).open(this.sessionConfig(record))
+    } else {
+      await this.reviveBackendSessions(record.backend)
+    }
     const ready = await this.bindNativeSession(record, { loadExisting: true })
-    return await this.snapshotHold(ready.record, ready.reopened)
+    return await this.snapshotHold(ready.record, ready.reopened, ready.contextSource)
+  }
+
+  private bridgeFor(record: HostdSessionRecord): AgentBridge {
+    return this.requireBridge(record)
   }
 
   /**
-   * User-confirmed force restart of one wedged session: stop its hold worker
-   * (and stdio backend child), then attach again — which revives a fresh
-   * worker under the same hold/generation and reloads the native session.
-   * Grok serves are shared and never touched; only this hold's process is.
+   * User-confirmed restart of one wedged session.
+   *
+   * This used to kill a per-session process. The connection is now shared, so a
+   * restart clears the *session* instead: the slot is torn down and re-opened,
+   * which drops the stuck prompt queue, its waiters and its pending chunks while
+   * the live agent session — and its context — stay put. That is both narrower
+   * and safer than the old behaviour, which killed the agent and then depended on
+   * a resume to rebuild what it had.
    */
   private async restartSession(params: Record<string, JsonValue>): Promise<RemoteSessionAttachResult> {
     const record = this.requireSession(params)
     await this.withHoldLock(record.holdId, async () => {
-      await this.forceStopHold(record)
-      // Hold lock released by withHoldLock; attachRecord takes it again. That
-      // is fine — nothing else can be waiting on a dead worker's lock queue.
+      const bridge = await this.ensureSession(record)
+      // Cancel any turn still in flight, so the agent is not left working on a
+      // prompt the user has just abandoned.
+      if (record.nativeSessionId !== undefined) {
+        bridge.sendFrame(record.holdId, {
+          jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: record.nativeSessionId },
+        })
+      }
+      bridge.open(this.sessionConfig(record))
+      if (record.nativeSessionId !== undefined) {
+        bridge.setNativeSession(record.holdId, record.nativeSessionId)
+      }
+      // Drop the WS hub's cached cursor: the slot's head did not move, but its
+      // in-memory state did, and a stale waiter would never see the new slot.
+      this.wsHub.forgetSession(RemoteSessionId(record.sessionId))
+      trace('session.restart', { sessionId: record.sessionId, holdId: record.holdId, backend: record.backend, ok: true })
     })
-    return await this.attachRecord(record)
+    return await this.snapshotHold(record)
   }
 
-  /** Kill the hold worker and its stdio backend child, then drop stale sockets. */
-  private async forceStopHold(record: HostdSessionRecord): Promise<void> {
-    const pids = new Set<number>()
-    const spawned = this.workerPids.get(record.holdId)
-    if (spawned !== undefined && spawned > 0) pids.add(spawned)
-    // Worker-written state.json carries both its own pid and the stdio backend
-    // child; prefer it when available so the agent is stopped before the
-    // worker (a detached child would otherwise be orphaned).
-    const statePath = join(this.options.dataDir, 'holds', record.holdId, 'state.json')
-    try {
-      const state = jsonObject(readJson(statePath), 'hold worker state')
-      for (const key of ['backendPid', 'pid'] as const) {
-        const value = state[key]
-        if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) pids.add(value)
+  private async releaseSession(params: Record<string, JsonValue>): Promise<JsonValue> {
+    const record = this.requireSession(params)
+    const result = await this.withHoldLock(record.holdId, async () => await this.releaseHold(record))
+    return result as unknown as JsonValue
+  }
+
+  /**
+   * Permanently release one session: close its slot, forget the record, and
+   * delete the hold's runtime directory.
+   *
+   * A release must not disturb the other sessions on the same Agent, so the
+   * shared connection is only stopped when this was its last session. It is
+   * idempotent, so a retry after a partial failure still converges.
+   */
+  private async releaseHold(record: HostdSessionRecord): Promise<Record<string, JsonValue>> {
+    const bridge = this.bridges.get(record.backend)
+    const backendPid = bridge?.backendPid
+    let released = false
+    if (bridge !== undefined) {
+      released = bridge.detach(record.holdId)
+      if (bridge.sessionCount === 0) {
+        // Nothing is using this Agent any more, so give the memory back rather
+        // than holding ~435 MB for an idle connection.
+        await this.stopBridge(record.backend)
       }
+    }
+    this.sessionActivity.delete(record.sessionId)
+    this.wsHub.forgetSession(RemoteSessionId(record.sessionId))
+    this.sessions.delete(record.sessionId)
+    this.saveSessions()
+    if (process.platform !== 'win32') {
+      try {
+        rmSync(join(this.options.dataDir, 'holds', record.holdId), { recursive: true, force: true })
+      } catch {
+        // A leftover directory is harmless: the next release retries.
+      }
+    }
+    trace('session.release', {
+      sessionId: record.sessionId, holdId: record.holdId, backend: record.backend,
+      ...(backendPid === undefined ? {} : { backendPid }),
+    })
+    return {
+      sessionId: record.sessionId,
+      holdId: record.holdId,
+      backend: record.backend,
+      released: true,
+      // Whether this session had a live slot; there is no per-session process
+      // to report any more, the connection is shared and may outlive this session.
+      hadSlot: released,
+    }
+  }
+
+  /** Resolve once a pid is gone, or after the budget expires; never rejects. */
+  private async waitForProcessExit(pid: number, timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      try {
+        process.kill(pid, 0)
+      } catch {
+        return
+      }
+      await wait(100)
+    }
+  }
+
+  /**
+   * Reclaim holds nobody can still be using: no subscriber is streaming from
+   * them and no client has sent anything for the idle budget. Runs from
+   * `start()` so an abandoned daemon with no gateway attached self-cleans
+   * instead of accumulating one agent process per session forever.
+   */
+  /**
+   * Shut down hold-workers left behind by an older hostd.
+   *
+   * Before the Agent moved in-process, every session had its own detached
+   * worker holding a control socket. Those workers survive the daemon that
+   * started them, so an upgrade leaves them running forever — one dsh, one
+   * codex or one claude per session, at hundreds of megabytes each. They are
+   * unreachable through any channel this version has, so the only way to reach
+   * them is the one thing they still speak: their own socket.
+   */
+  private sweepLegacyHoldWorkers(): void {
+    if (process.platform === 'win32') return
+    let entries: string[]
+    try {
+      entries = readdirSync(holdRuntimeDirectory())
     } catch {
-      // state.json may be absent while the worker is mid-startup; the
-      // spawnHold pid map above is authoritative in that case.
+      return
     }
-    for (const pid of pids) {
-      if (pid !== process.pid) await stopProcess(pid)
+    for (const entry of entries) {
+      if (!entry.startsWith('h-') || !entry.endsWith('.sock')) continue
+      const socketPath = join(holdRuntimeDirectory(), entry)
+      try {
+        if (!existsSync(socketPath)) continue
+      } catch {
+        continue
+      }
+      const socket = createConnection(socketPath)
+      // Best effort: a worker that does not answer is already gone, and its
+      // socket is unlinked below either way.
+      socket.once('connect', () => { socket.write('{"operation":"shutdown"}\n') })
+      socket.once('error', () => { socket.destroy() })
+      socket.once('end', () => { socket.destroy() })
+      socket.setTimeout(500, () => { socket.destroy() })
+      try {
+        unlinkSync(socketPath)
+      } catch {
+        // Another hostd on this machine may have just replaced it.
+      }
     }
-    this.unlinkStaleHoldSockets(record.holdId)
+    trace('sweep.legacyHoldWorkers', { swept: entries.length, ok: true })
+  }
+
+  private startIdleReaper(): void {
+    const idleMs = this.options.holdIdleTimeoutMs
+    if (idleMs <= 0 || this.idleReaper !== undefined) return
+    const intervalMs = Math.max(30_000, Math.min(Math.floor(idleMs / 4), 10 * 60_000))
+    this.idleReaper = setInterval(() => { void this.reapIdleSessions(idleMs) }, intervalMs)
+    // A daemon's whole job is to outlive its clients; the reaper must not be
+    // the reason this process stays scheduled awake.
+    this.idleReaper.unref()
+    // Sweep once at startup so a daemon that was down long enough for its
+    // recovered records to age out does not first spend a whole interval
+    // holding an agent for every session in sessions.json.
+    setTimeout(() => { void this.reapIdleSessions(idleMs) }, 1_000).unref()
+  }
+
+  /** Test seam: run one idle-reap pass without waiting for the interval. */
+  async reapIdleHoldsForTesting(): Promise<void> {
+    await this.reapIdleSessions(this.options.holdIdleTimeoutMs)
+  }
+
+  private async reapIdleSessions(idleMs: number): Promise<void> {
+    const now = Date.now()
+    for (const record of [...this.sessions.values()]) {
+      if (this.wsHub.sessionHasSubscribers(RemoteSessionId(record.sessionId))) continue
+      const last = this.sessionActivity.get(record.sessionId) ?? Date.parse(record.updatedAt)
+      const since = Number.isFinite(last) ? last : now
+      if (now - since < idleMs) continue
+      try {
+        await this.withHoldLock(record.holdId, async () => {
+          // Re-check inside the lock: an attach may have revived the hold while
+          // we were queued, and releasing a session the user just opened would
+          // be far worse than leaking one worker.
+          const latest = this.sessions.get(record.sessionId)
+          if (latest === undefined || this.wsHub.sessionHasSubscribers(RemoteSessionId(latest.sessionId))) return
+          const latestSince = this.sessionActivity.get(latest.sessionId) ?? Date.parse(latest.updatedAt)
+          if (Number.isFinite(latestSince) && now - latestSince < idleMs) return
+          trace('session.reap', {
+            sessionId: latest.sessionId, holdId: latest.holdId, backend: latest.backend,
+            idleMs: now - latestSince,
+          })
+          await this.releaseHold(latest)
+        })
+      } catch (error) {
+        process.stderr.write(`threadharbor-hostd idle reap failed: ${String(error)}\n`)
+      }
+    }
   }
 
   private async withHoldLock<T>(holdId: string, task: () => Promise<T>): Promise<T> {
@@ -699,21 +947,17 @@ export class RemoteAgentHostd {
   private async initializeHold(record: HostdSessionRecord): Promise<void> {
     const before = await this.latestSeq(record)
     const initializeId = `hostd-initialize-${randomUUID()}`
-    const initialize = record.backend === 'dsh'
-      ? {
-        jsonrpc: '2.0', id: initializeId, method: 'initialize', params: {
-          cwd: record.cwd, provider: this.options.dshProvider, model: this.options.dshModel,
+    // Every backend ThreadHarbor drives now speaks ACP: the agent loop and its
+    // model route come from the backend's own composition, not from hostd.
+    const initialize = {
+      jsonrpc: '2.0', id: initializeId, method: 'initialize', params: {
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {
+          elicitation: { form: {} },
+          plan: {},
         },
-      }
-      : {
-        jsonrpc: '2.0', id: initializeId, method: 'initialize', params: {
-          protocolVersion: PROTOCOL_VERSION,
-          clientCapabilities: {
-            elicitation: { form: {} },
-            plan: {},
-          },
-        },
-      }
+      },
+    }
     await this.holdRequest(record, { operation: 'send-frame', frame: initialize })
     this.requireRpcSuccess(await this.holdRequest(record, {
       operation: 'wait', rpcId: initializeId, afterSeq: before, timeoutMs: this.options.operationTimeoutMs,
@@ -723,20 +967,63 @@ export class RemoteAgentHostd {
   private async bindNativeSession(
     record: HostdSessionRecord,
     options: { readonly parentNativeSessionId?: string; readonly loadExisting?: boolean } = {},
-  ): Promise<{ record: HostdSessionRecord; reopened: boolean }> {
+  ): Promise<{ record: HostdSessionRecord; reopened: boolean; contextSource: RemoteSessionAttachResult['contextSource'] }> {
     let nativeSessionId = record.nativeSessionId ?? record.sessionId
     let reopened = false
-    if (record.backend === 'dsh') {
-      nativeSessionId = record.sessionId
-      reopened = options.loadExisting === true
-    } else if (options.loadExisting === true && record.nativeSessionId !== undefined) {
+    let contextSource: RemoteSessionAttachResult['contextSource'] = 'none'
+    if (options.loadExisting === true && record.nativeSessionId !== undefined) {
+      // Codex/Claude implement the standard ACP `session/load`; the Harness ACP
+      // profile deliberately does not, and offers `session/resume` for the same
+      // job.
+      const method = record.backend === 'dsh' ? 'session/resume' : 'session/load'
       try {
-        nativeSessionId = await this.nativeSessionRpc(record, 'session/load', {
+        nativeSessionId = await this.nativeSessionRpc(record, method, {
           sessionId: record.nativeSessionId, cwd: record.cwd, mcpServers: [],
         })
-      } catch {
-        nativeSessionId = await this.nativeSessionRpc(record, 'session/new', { cwd: record.cwd, mcpServers: [] })
-        reopened = true
+        contextSource = 'resumed'
+      } catch (error) {
+        const detail = String(error)
+        const held = record.nativeSessionId !== undefined
+          && detail.includes('session is already active')
+          && detail.includes(record.nativeSessionId)
+        if (held) {
+          // dsh-acp refuses to activate a session it already holds. That is
+          // proof the session is alive, not a dead end: the binding this caller
+          // wanted to re-establish is already there. Count the reopen as done
+          // instead of dropping the id and telling the user the history is gone.
+          nativeSessionId = record.nativeSessionId
+          contextSource = 'resumed'
+        } else {
+          const seed = this.takeContextSeed(record.sessionId)
+          // Whatever happens next, this session's old native binding is gone.
+          // Recording that now is what stops a later attach from mistaking a
+          // half-revived slot for a healthy session.
+          const { nativeSessionId: _dropped, ...unbound } = record
+          void _dropped
+          this.sessions.set(record.sessionId, unbound)
+          this.saveSessions()
+          if (seed === undefined) {
+            // Nothing to fall back on, so say what actually went wrong. Starting a
+            // blank session here is the one thing that must not happen: the user
+            // would read a reply that ignores everything they said.
+            throw new Error(/already owned by an active write handle/.test(detail)
+              ? `另一个 ${record.backend} 进程还占着会话 ${record.nativeSessionId}，先把它关掉再重开：${detail}`
+              : `agent ${record.backend} could not reopen session ${record.nativeSessionId}: ${detail}；`
+                + '它的历史可能已经不在了，请新建会话')
+          }
+          // The Agent lost its own memory, but the conversation did not: the
+          // caller has the transcript. Start a fresh session and hand it over, so
+          // the model can at least read what was already discussed. This is a
+          // reconstruction and is reported as one, never as a resume.
+          nativeSessionId = await this.nativeSessionRpc(record, 'session/new', { cwd: record.cwd, mcpServers: [] })
+          reopened = true
+          contextSource = 'reconstructed'
+          await this.seedContext(record, nativeSessionId, seed)
+          trace('session.contextReconstructed', {
+            sessionId: record.sessionId, backend: record.backend,
+            chars: seed.transcript.length, truncated: seed.truncated, ok: true,
+          })
+        }
       }
     } else {
       const method = options.parentNativeSessionId === undefined ? 'session/new' : 'session/fork'
@@ -744,17 +1031,76 @@ export class RemoteAgentHostd {
         ...(options.parentNativeSessionId === undefined ? {} : { sessionId: options.parentNativeSessionId }),
         cwd: record.cwd, mcpServers: [],
       })
+      // A reopen whose old binding is already gone cannot resume, so this is the
+      // second chance to put the conversation back rather than start blank.
+      const seed = options.loadExisting === true ? this.takeContextSeed(record.sessionId) : undefined
+      if (seed !== undefined) {
+        contextSource = 'reconstructed'
+        await this.seedContext(record, nativeSessionId, seed)
+        trace('session.contextReconstructed', {
+          sessionId: record.sessionId, backend: record.backend,
+          chars: seed.transcript.length, truncated: seed.truncated, ok: true,
+        })
+      }
     }
     await this.holdRequest(record, { operation: 'set-native-session', nativeSessionId })
+    // The Agent answered a session RPC for this slot, so it now knows it.
+    this.bridges.get(record.backend)?.markBound(record.holdId)
+    this.contextSources.set(record.sessionId, contextSource)
     const ready: HostdSessionRecord = { ...record, nativeSessionId, updatedAt: new Date().toISOString() }
     this.sessions.set(ready.sessionId, ready)
     this.saveSessions()
-    return { record: ready, reopened }
+    return { record: ready, reopened, contextSource }
+  }
+
+  /** Take the context seed offered for this session, if any, and only once. */
+  private takeContextSeed(sessionId: string): SessionContextSeed | undefined {
+    const pending = this.pendingContextSeed
+    if (pending === undefined || pending.sessionId !== sessionId) return undefined
+    this.pendingContextSeed = undefined
+    return { transcript: pending.transcript, truncated: pending.truncated }
+  }
+
+  /**
+   * Hand the conversation to a fresh Agent session as its first turn.
+   *
+   *  This is text, not a replay: no Agent-internal format is written, so nothing
+   *  here depends on how a given Agent stores its own messages. The trade is
+   *  honest and worth stating — the model *reads* the history rather than
+   *  remembering it, and tool calls in the transcript come back as prose, not as
+   *  re-runnable results.
+   */
+  private async seedContext(
+    record: HostdSessionRecord,
+    nativeSessionId: string,
+    seed: SessionContextSeed,
+  ): Promise<void> {
+    const bridge = this.requireBridge(record)
+    bridge.setNativeSession(record.holdId, nativeSessionId)
+    const notice = [
+      '这是一次重开：你的 Agent 会话记录无法恢复，所以下面是重开之前这段对话的文字记录。',
+      '请先读完它再继续，把里面的内容当成之前已经讨论过的事实，而不是新的问题。',
+      seed.truncated
+        ? `（记录过长，只保留了最近的部分，最早的内容已经不在了。）`
+        : '',
+      '',
+      '--- 以下是之前的对话记录 ---',
+      seed.transcript,
+    ].filter(line => line !== '').join('\n')
+    const rpcId = `hostd-context-${randomUUID()}`
+    const before = bridge.latestSeq(record.holdId)
+    bridge.sendFrame(record.holdId, {
+      jsonrpc: '2.0', id: rpcId, method: 'session/prompt',
+      params: { sessionId: nativeSessionId, prompt: [{ type: 'text', text: notice }] },
+    })
+    // Wait for the seed turn so the next real prompt queues behind it instead of
+    // racing it, and so a seed the Agent rejected is visible rather than silent.
+    await bridge.waitFor(record.holdId, rpcId, before, this.options.operationTimeoutMs)
   }
 
   private async nativeSessionRpc(
     record: HostdSessionRecord,
-    method: 'session/new' | 'session/fork' | 'session/load',
+    method: 'session/new' | 'session/fork' | 'session/load' | 'session/resume',
     params: Record<string, JsonValue>,
   ): Promise<string> {
     const rpcId = `hostd-session-${randomUUID()}`
@@ -766,22 +1112,29 @@ export class RemoteAgentHostd {
     const response = this.requireRpcSuccess(await this.holdRequest(record, {
       operation: 'wait', rpcId, afterSeq: before, timeoutMs: this.options.operationTimeoutMs,
     }), rpcId)
-    // ACP `session/load` answers with modes/models but no `sessionId` (the
-    // caller named it); `session/new` and `session/fork` always return one.
-    // Treating the missing field as a failure made every reopen fall back to
-    // `session/new`, silently discarding the model context that load had just
-    // restored.
+    // ACP `session/load` and `session/resume` answer with configuration state
+    // but no `sessionId` (the caller named the session it wanted reopened);
+    // `session/new` and `session/fork` always return one. Treating the missing
+    // field as a failure made every reopen fall back to `session/new`, silently
+    // discarding the model context that the reopen had just restored.
     const result = response['result'] === null || response['result'] === undefined
       ? {}
       : jsonObject(response['result'], 'session create result')
     const returned = result['sessionId']
     if (typeof returned === 'string' && returned !== '') return returned
-    if (method === 'session/load') return stringField(params, 'sessionId')
+    if (method === 'session/load' || method === 'session/resume') return stringField(params, 'sessionId')
     return stringField(result, 'sessionId')
   }
 
   private async sendAdmission(params: Record<string, JsonValue>): Promise<JsonValue> {
     const record = this.requireSession(params)
+    // A prompt is the one frame that must never go to an Agent that has not
+    // been told the session exists. After a hostd restart the gateway can still
+    // believe a session is open, and the prompt is then admitted into a live
+    // bridge that has never heard of it — the Agent rejects it on arrival and
+    // the user sees a failed turn with no cause. Binding first turns that into
+    // the session working.
+    await this.ensureBound(record)
     const admissionValue = jsonObject(params['admission'], 'admission')
     const frame = admissionValue['frame']
     if (!isJsonValue(frame)) throw new TypeError('admission.frame must be JSON')
@@ -793,6 +1146,30 @@ export class RemoteAgentHostd {
     const response = await this.holdRequest(record, { operation: 'send', admission })
     if (!response.ok) throw new Error(response.error)
     return response.result as JsonValue
+  }
+
+  /**
+   * Make sure the live Agent knows this session, reviving it if it does not.
+   *
+   * Binding is per-process knowledge: the session lives in the Agent's memory
+   * and in a file, and a restarted hostd starts with neither. The file is the
+   * recoverable half, so resume it rather than reporting a session that is
+   * intact on disk as unknown.
+   */
+  private async ensureBound(record: HostdSessionRecord): Promise<void> {
+    if (record.nativeSessionId === undefined) return
+    if (this.slotIsBound(record)) return
+    await this.withHoldLock(record.holdId, async () => {
+      const latest = this.sessions.get(record.sessionId) ?? record
+      if (this.slotIsBound(latest)) return
+      await this.bindNativeSession(latest, { loadExisting: true })
+    })
+  }
+
+  /** Whether the live Agent already knows this session. */
+  private slotIsBound(record: HostdSessionRecord): boolean {
+    const bridge = this.bridges.get(record.backend)
+    return bridge !== undefined && bridge.alive && bridge.has(record.holdId) && bridge.isBound(record.holdId)
   }
 
   private async sendNativeFrame(params: Record<string, JsonValue>): Promise<JsonValue> {
@@ -879,260 +1256,232 @@ export class RemoteAgentHostd {
     return record
   }
 
-  private async spawnHold(record: HostdSessionRecord): Promise<void> {
+  /** How one backend is reached. Grok is a shared serve; the rest are stdio. */
+  private async transportFor(record: HostdSessionRecord): Promise<AgentTransport> {
+    if (record.backend === 'grok') {
+      return {
+        kind: 'websocket',
+        url: `ws://${this.options.grokServeHost}:${this.options.grokServePort}/ws`,
+        secret: this.grokServeSecret(),
+      }
+    }
+    if (record.backend === 'codex') return { kind: 'stdio', command: this.options.codexCommand, args: this.options.codexArgs }
+    if (record.backend === 'claude') {
+      return { kind: 'stdio', command: this.options.claudeAcpCommand, args: this.options.claudeAcpArgs }
+    }
+    // The ACP profile owns models and credentials through the host user's own
+    // $DSH_HOME; a key stored here is only an explicit override injected into the
+    // process environment, which the DeepSeek adapter's credential ladder reads.
+    const dshCommand = await this.agentManager.resolvedDshLaunch()
+    // The ACP profile owns models and credentials through the host user's own
+    // $DSH_HOME; a key stored here is only an explicit override injected into the
+    // process environment, which the DeepSeek adapter's credential ladder reads.
+    const dshKey = this.agentManager.dshApiKey()
+    return {
+      kind: 'stdio',
+      command: dshCommand ?? this.options.dshCommand,
+      args: this.options.dshArgs,
+      ...(dshKey === undefined ? {} : { env: { DEEPSEEK_API_KEY: dshKey } }),
+    }
+  }
+
+  private sessionConfig(record: HostdSessionRecord): AgentSessionConfig {
     const directory = join(this.options.dataDir, 'holds', record.holdId)
     mkdirSync(directory, { recursive: true, mode: 0o700 })
-    const socketPath = this.createHoldSocket(record)
-    const configPath = join(directory, 'config.json')
-    const dshLaunch = record.backend === 'dsh' ? await this.agentManager.resolvedDshLaunch() : undefined
-    const sessionRoot = record.backend === 'dsh' ? dshSessionRoot(this.options.dataDir) : undefined
-    if (sessionRoot !== undefined) migrateProjectDshSessions(record.cwd, sessionRoot)
-    const config: HoldWorkerConfig = {
-      version: 1,
+    return {
       holdId: record.holdId,
       generation: record.generation,
       backend: record.backend,
       cwd: record.cwd,
-      socketPath,
       journalPath: join(directory, 'journal.jsonl'),
       statePath: join(directory, 'state.json'),
       maxJournalEvents: this.options.maxJournalEvents,
       maxJournalBytes: this.options.maxJournalBytes,
       promptTimeoutMs: this.options.promptTimeoutMs,
-      ...(sessionRoot === undefined ? {} : { sessionRoot }),
-      transport: record.backend === 'grok'
-        ? {
-          kind: 'websocket',
-          url: `ws://${this.options.grokServeHost}:${this.options.grokServePort}/ws`,
-          secret: this.grokServeSecret(),
-        }
-        : record.backend === 'codex'
-          ? { kind: 'stdio', command: this.options.codexCommand, args: this.options.codexArgs }
-          : record.backend === 'claude'
-            ? { kind: 'stdio', command: this.options.claudeAcpCommand, args: this.options.claudeAcpArgs }
-            : { kind: 'stdio', command: dshLaunch?.command ?? this.options.dshCommand, args: this.options.dshArgs },
     }
-    this.unlinkStaleHoldSockets(record.holdId)
-    writeJsonAtomic(configPath, config)
-    const dshKey = record.backend === 'dsh' ? this.agentManager.dshApiKey() : undefined
-    const env: NodeJS.ProcessEnv = { ...process.env }
-    if (dshKey !== undefined) env['DEEPSEEK_API_KEY'] = dshKey
-    if (
-      record.backend === 'dsh'
-      && (env['DSH_CORDIS_CONFIG'] === undefined || env['DSH_CORDIS_CONFIG'] === '')
-      && dshLaunch?.configPath !== undefined
-    ) {
-      env['DSH_CORDIS_CONFIG'] = dshLaunch.configPath
+  }
+
+  /**
+   * Get or start the shared bridge for a session's backend.
+   *
+   * Two sessions of the same backend must not race the launch, so creation is
+   * serialized per backend. The bridge handshakes the Agent itself, once, on
+   * start-up — there is no per-session initialize any more.
+   */
+  private async ensureBridge(record: HostdSessionRecord): Promise<AgentBridge> {
+    const existing = this.bridges.get(record.backend)
+    if (existing !== undefined) {
+      if (existing.alive) return existing
+      // The Agent died under us. Drop the corpse so the next start is clean.
+      await this.stopBridge(record.backend)
     }
-    // Every detached worker writes to an owner-only worker.log so startup
-    // failures (bad command, rejected Grok handshake, corrupt state) are
-    // diagnosable instead of vanishing into the hostd parent's stdio.
-    const workerLogPath = join(directory, 'worker.log')
-    let workerLogFd = -1
-    try {
-      workerLogFd = openSync(workerLogPath, 'w', 0o600)
-    } catch {
-      // Logging must never prevent the worker from starting.
-    }
-    const child = spawn(process.execPath, [this.options.workerScript, configPath], {
-      cwd: record.cwd,
-      detached: process.platform !== 'win32',
-      env,
-      stdio: workerLogFd >= 0 ? ['ignore', 'ignore', workerLogFd] : ['ignore', 'ignore', 'ignore'],
-      windowsHide: true,
-    })
-    if (workerLogFd >= 0) closeSync(workerLogFd)
-    child.unref()
-    if (child.pid !== undefined) this.workerPids.set(record.holdId, child.pid)
-    let spawnError: unknown
-    let workerExited = false
-    child.once('error', (error) => { spawnError = error })
-    // A worker that boots then dies (bad command, missing config, startup
-    // crash) will never answer ping; surface that immediately instead of
-    // making every caller wait out the full workerStartupTimeoutMs window.
-    child.once('exit', () => { workerExited = true })
-    const deadline = Date.now() + this.options.workerStartupTimeoutMs
-    let lastError: unknown
-    while (Date.now() < deadline) {
-      if (spawnError !== undefined) {
-        throw new Error(`hold ${record.holdId} did not start: ${String(spawnError)}`)
-      }
-      if (workerExited && !this.holdSocketExists(socketPath)) {
-        lastError = new Error(`worker exited before its socket ${socketPath} appeared`)
-        break
-      }
+    return await this.withBridgeLock(record.backend, async () => {
+      const raced = this.bridges.get(record.backend)
+      if (raced !== undefined && raced.alive) return raced
+      if (record.backend === 'grok') await this.ensureGrokServer()
+      const bridge = new AgentBridge({
+        backend: record.backend,
+        cwd: record.cwd,
+        transport: await this.transportFor(record),
+      })
       try {
-        await this.holdRequest(record, { operation: 'ping' }, socketPath)
-        return
+        await bridge.start()
       } catch (error) {
-        lastError = error
-        await wait(50)
+        await bridge.close().catch(() => undefined)
+        throw new Error(`${record.backend} bridge did not start: ${String(error)}`)
+      }
+      this.bridges.set(record.backend, bridge)
+      trace('bridge.start', { backend: record.backend, backendPid: bridge.backendPid, ok: true })
+      return bridge
+    })
+  }
+
+  private withBridgeLock<T>(backend: RemoteAgentBackend, task: () => Promise<T>): Promise<T> {
+    const previous = this.bridgeLocks.get(backend) ?? Promise.resolve()
+    const next = previous.then(task, task)
+    this.bridgeLocks.set(backend, next.catch(() => undefined))
+    return next
+  }
+
+  /** Make sure this session has a slot on its backend's shared connection. */
+  private async ensureSession(record: HostdSessionRecord): Promise<AgentBridge> {
+    const bridge = await this.ensureBridge(record)
+    if (!bridge.has(record.holdId)) {
+      const config = this.sessionConfig(record)
+      if (!existsSync(config.journalPath)) writeFileSync(config.journalPath, '', { mode: 0o600 })
+      bridge.open(config)
+    }
+    return bridge
+  }
+
+  /** Stop one backend's shared connection, dropping every session on it. */
+  private async stopBridge(backend: RemoteAgentBackend): Promise<void> {
+    const bridge = this.bridges.get(backend)
+    if (bridge === undefined) return
+    this.bridges.delete(backend)
+    await bridge.close().catch(() => undefined)
+    trace('bridge.stop', { backend, sessions: 0, ok: true })
+  }
+
+  /**
+   * Stop the shared connection for a backend and re-open every session on it.
+   *
+   * The fault domain is the backend, not the session: a DSH/Codex/Claude process
+   * that died takes its sessions' live connection with it, so recovery has to be
+   * per backend. Each session's journal is on disk, so re-opening resumes the
+   * transcript and rebinds the native session.
+   */
+  private async reviveBackendSessions(backend: RemoteAgentBackend): Promise<void> {
+    await this.stopBridge(backend)
+    const records = [...this.sessions.values()].filter(record => record.backend === backend)
+    for (const record of records) {
+      const bridge = await this.ensureBridge(record)
+      const config = this.sessionConfig(record)
+      bridge.open(config)
+      if (record.nativeSessionId !== undefined) {
+        bridge.setNativeSession(record.holdId, record.nativeSessionId)
       }
     }
-    const tail = readFileTail(workerLogPath)
-    const cause = String(lastError ?? spawnError ?? 'unknown')
-    throw new Error(tail === undefined || tail === ''
-      ? `hold ${record.holdId} did not start: ${cause}`
-      : `hold ${record.holdId} did not start: ${cause}；worker 日志尾部：${tail}`)
+    trace('bridge.revive', { backend, sessions: records.length, ok: true })
   }
 
-  private holdSocketExists(socketPath: string): boolean {
-    try {
-      statSync(socketPath)
-      return true
-    } catch {
-      return false
-    }
-  }
-
-  private holdSocket(record: HostdSessionRecord): string {
-    if (process.platform === 'win32') return `\\\\.\\pipe\\threadharbor-hostd-${record.holdId}`
-    const current = this.shortHoldSocket(record.holdId)
-    if (existsSync(current)) return current
-    for (const candidate of this.holdSocketLookups(record.holdId)) {
-      if (existsSync(candidate)) return candidate
-    }
-    return current
-  }
-
-  private createHoldSocket(record: HostdSessionRecord): string {
-    if (process.platform === 'win32') return `\\\\.\\pipe\\threadharbor-hostd-${record.holdId}`
-    const socketPath = this.shortHoldSocket(record.holdId)
-    ensureOwnerOnlyDirectory(dirname(socketPath))
-    return socketPath
-  }
-
-  private shortHoldSocket(holdId: string): string {
-    return join(holdRuntimeDirectory(), `h-${holdId}.sock`)
-  }
-
-  private holdSocketLookups(holdId: string): string[] {
-    const uid = ownerSuffix()
-    const xdg = process.env['XDG_RUNTIME_DIR']
-    const dirs = [
-      ...(typeof xdg === 'string' && xdg !== '' ? [join(xdg, 'th')] : []),
-      ...(uid !== 'nouid' ? [join('/run/user', uid, 'th')] : []),
-      join('/tmp', `th-${uid}`),
-      join('/tmp', `threadharbor-hostd-${uid}`),
-    ]
-    return [
-      ...dirs.map(dir => join(dir, `h-${holdId}.sock`)),
-      join(this.options.dataDir, 'holds', holdId, 'control.sock'),
-    ]
-  }
-
-  private unlinkStaleHoldSockets(holdId: string): void {
-    if (process.platform === 'win32') return
-    const paths = new Set([this.shortHoldSocket(holdId), ...this.holdSocketLookups(holdId)])
-    for (const path of paths) {
-      try {
-        if (existsSync(path)) unlinkSync(path)
-      } catch {
-        // spawn still recreates the current runtime socket
-      }
-    }
-  }
-
-  /** Issue one hold-worker control request; used by the WS hub.
-   *  The optional `signal` aborts the underlying socket immediately so a closed
-   *  subscription tears down its `wait-seq` without waiting for `timeoutMs`. */
+  /**
+   * Serve one session request from the in-process bridge.
+   *
+   * The request shape is unchanged from the old control protocol so the WS hub
+   * and every internal caller keep working; only the transport changed, from a
+   * unix socket per hold to a direct call into the shared connection. `signal`
+   * cancels a long-poll waiter so a closed subscription stops waiting at once.
+   */
   async holdRequest(
     record: HostdSessionRecord,
-    request: HoldRequest,
-    socketPath?: string,
+    request: HostdSessionRequest,
     signal?: AbortSignal,
-  ): Promise<HoldResponse> {
-    const path = socketPath ?? this.holdSocket(record)
-    return await this.holdRequestInner(record, request, path, signal)
+  ): Promise<HostdSessionResponse> {
+    const startedAt = performance.now()
+    // Only operations a *client* drives count as activity. The journal readers
+    // and `ping` are also issued by hostd's own liveness/subscription machinery;
+    // counting them would keep an idle session alive forever and defeat the reaper.
+    if (HOLD_ACTIVITY_OPERATIONS.has(request.operation)) {
+      this.sessionActivity.set(record.sessionId, Date.now())
+    }
+    const bridge = this.bridges.get(record.backend)
+    if (bridge === undefined || !bridge.has(record.holdId)) {
+      // The caller is responsible for reviving: a missing bridge is a backend
+      // that is not running, not a transport hiccup to retry here.
+      throw new Error(`no running ${record.backend} bridge for session ${record.sessionId}`)
+    }
+    const finish = (ok: boolean, error?: unknown): void => {
+      const fields: Record<string, unknown> = {
+        op: request.operation,
+        holdId: record.holdId,
+        elapsedMs: Number((performance.now() - startedAt).toFixed(2)),
+        ok,
+        ...(error === undefined ? {} : { error: error instanceof Error ? error.message : String(error) }),
+      }
+      if ('afterSeq' in request) fields['afterSeq'] = request.afterSeq
+      if (request.operation === 'wait') fields['rpcId'] = request.rpcId
+      trace('holdRequest', fields)
+    }
+    try {
+      const result = await this.dispatchToBridge(bridge, record, request, signal)
+      finish(true)
+      return { ok: true, result }
+    } catch (error) {
+      finish(false, error)
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
   }
 
-  private async holdRequestInner(
+  private async dispatchToBridge(
+    bridge: AgentBridge,
     record: HostdSessionRecord,
-    request: HoldRequest,
-    socketPath: string,
+    request: HostdSessionRequest,
     signal: AbortSignal | undefined,
-  ): Promise<HoldResponse> {
-    const holdStartedAt = performance.now()
-    return await new Promise<HoldResponse>((resolveResponse, reject) => {
-      const socket = createConnection(socketPath)
-      let settled = false
-      let text = ''
-      const finishTrace = (ok: boolean, error?: unknown): void => {
-        const fields: Record<string, unknown> = {
-          op: request.operation,
-          holdId: record.holdId,
-          elapsedMs: Number((performance.now() - holdStartedAt).toFixed(2)),
-          ok,
-          ...(error === undefined ? {} : { error: error instanceof Error ? error.message : String(error) }),
-        }
-        if (request.operation === 'wait') {
-          fields['rpcId'] = request.rpcId
-          fields['afterSeq'] = request.afterSeq
-          fields['timeoutMs'] = request.timeoutMs
-        } else if (request.operation === 'wait-seq') {
-          fields['afterSeq'] = request.afterSeq
-          fields['timeoutMs'] = request.timeoutMs
-        } else if (request.operation === 'wait-page') {
-          fields['afterSeq'] = request.afterSeq
-          fields['timeoutMs'] = request.timeoutMs
-          if (request.generation !== undefined) fields['generation'] = request.generation
-        } else if (request.operation === 'read') {
-          fields['afterSeq'] = request.afterSeq
-          if (request.generation !== undefined) fields['generation'] = request.generation
-        }
-        trace('holdRequest', fields)
+  ): Promise<JsonValue | RemoteJournalPage> {
+    switch (request.operation) {
+      case 'ping':
+        return { generation: record.generation, latestSeq: bridge.latestSeq(record.holdId) } as unknown as JsonValue
+      case 'read':
+        return bridge.read(record.holdId, request.afterSeq, request.generation)
+      case 'send':
+        return bridge.send(record.holdId, request.admission) as unknown as JsonValue
+      case 'send-frame':
+        bridge.sendFrame(record.holdId, request.frame)
+        return { accepted: true } as JsonValue
+      case 'set-native-session':
+        bridge.setNativeSession(record.holdId, request.nativeSessionId)
+        return { nativeSessionId: request.nativeSessionId } as JsonValue
+      case 'wait': {
+        const outcome = await bridge.waitFor(
+          record.holdId, request.rpcId, request.afterSeq, request.timeoutMs, signal,
+        )
+        if (outcome.kind === 'timeout') throw new Error(`timed out waiting for RPC ${request.rpcId}`)
+        return outcome.frame
       }
-      const finishError = (error: unknown): void => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        signal?.removeEventListener('abort', onAbort)
-        socket.destroy()
-        finishTrace(false, error)
-        reject(error instanceof Error ? error : new Error(String(error)))
+      case 'wait-seq':
+        return bridge.waitSeq(record.holdId, request.afterSeq, request.timeoutMs, signal) as unknown as JsonValue
+      case 'wait-page':
+        return bridge.waitPage(record.holdId, request.afterSeq, request.timeoutMs, request.generation, signal)
+      default: {
+        const exhaustive: never = request
+        throw new Error(`unsupported session request: ${JSON.stringify(exhaustive)}`)
       }
-      const onAbort = (): void => {
-        finishError(new Error(`hold ${record.holdId} request aborted`))
-      }
-      if (signal?.aborted === true) {
-        onAbort()
-        return
-      }
-      signal?.addEventListener('abort', onAbort, { once: true })
-      const timer = setTimeout(() => {
-        finishError(new Error(`hold ${record.holdId} request timed out`))
-      }, request.operation === 'wait' || request.operation === 'wait-seq' || request.operation === 'wait-page'
-        ? request.timeoutMs + 500
-        : this.options.operationTimeoutMs)
-      socket.setEncoding('utf8')
-      socket.once('connect', () => { socket.write(`${JSON.stringify(request)}\n`) })
-      socket.on('data', (chunk: string) => { text += chunk })
-      socket.once('error', finishError)
-      socket.once('end', () => {
-        if (settled) return
-        clearTimeout(timer)
-        signal?.removeEventListener('abort', onAbort)
-        settled = true
-        try {
-          const parsed = JSON.parse(text) as HoldResponse
-          finishTrace(parsed.ok, parsed.ok ? undefined : parsed.error)
-          resolveResponse(parsed)
-        } catch (error) {
-          finishTrace(false, error)
-          reject(error instanceof Error ? error : new Error(String(error)))
-        }
-      })
-    })
+    }
   }
 
   private async latestSeq(record: HostdSessionRecord): Promise<number> {
-    const response = await this.holdRequest(record, { operation: 'ping' })
-    if (!response.ok) throw new Error(response.error)
-    const result = jsonObject(response.result, 'hold ping')
-    return safeInteger(result['latestSeq'], 'latestSeq')
+    const bridge = this.requireBridge(record)
+    return bridge.latestSeq(record.holdId)
   }
 
-  private requireRpcSuccess(response: HoldResponse, rpcId: string): Record<string, JsonValue> {
+  private requireBridge(record: HostdSessionRecord): AgentBridge {
+    const bridge = this.bridges.get(record.backend)
+    if (bridge === undefined) throw new Error(`no running ${record.backend} bridge for session ${record.sessionId}`)
+    return bridge
+  }
+
+  private requireRpcSuccess(response: HostdSessionResponse, rpcId: string): Record<string, JsonValue> {
     if (!response.ok) throw new Error(response.error)
     const frame = jsonObject(response.result, `RPC ${rpcId} response`)
     if (frame['error'] !== undefined) throw new Error(`RPC ${rpcId} failed: ${JSON.stringify(frame['error'])}`)
@@ -1308,6 +1657,8 @@ export class RemoteAgentHostd {
     for (const value of file['sessions']) {
       const record = parseSessionRecord(value)
       this.sessions.set(record.sessionId, record)
+      const updatedAt = Date.parse(record.updatedAt)
+      this.sessionActivity.set(record.sessionId, Number.isFinite(updatedAt) ? updatedAt : Date.now())
     }
   }
 
@@ -1315,11 +1666,4 @@ export class RemoteAgentHostd {
     const file: HostdSessionsFile = { version: 1, sessions: [...this.sessions.values()] }
     writeJsonAtomic(this.sessionsPath, file)
   }
-}
-
-/** Default worker path beside the built hostd entry.
- * @returns the built detached-worker module path.
- */
-export function defaultHoldWorkerScript(): string {
-  return fileURLToPath(new URL('./hold-worker.js', import.meta.url))
 }

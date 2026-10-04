@@ -36,6 +36,7 @@ function hostdOptions(dataDir: string, overrides: Partial<HostdOptions> = {}): H
     authTimeoutMs: 200,
     installTimeoutMs: 200,
     promptTimeoutMs: 60_000,
+    holdIdleTimeoutMs: 0,
     agentConfigHome: dataDir,
     maxAgentConfigBytes: 4096,
     codexCliCommand: '/missing/codex',
@@ -44,16 +45,12 @@ function hostdOptions(dataDir: string, overrides: Partial<HostdOptions> = {}): H
     claudeCommand: '/missing/claude',
     claudeAcpCommand: '/missing/claude-agent-acp',
     claudeAcpArgs: [],
-    dshCommand: '/missing/dsh-jsonrpc-agent',
+    dshCommand: '/missing/dsh',
     dshArgs: [],
-    pythonCommand: '/missing/python',
-    dshProvider: 'deepseek-official',
-    dshModel: 'test',
     grokCommand: process.execPath,
     grokServeHost: '127.0.0.1',
     grokServePort: 65_534,
     grokArgs: [],
-    workerScript: '/missing/hold-worker.js',
     hostdHttpFallback: false,
     ...overrides,
   }
@@ -203,17 +200,17 @@ describe('RemoteAgentHostd grok serve repair guards', () => {
     expect(result.reachable).toBe(false)
   })
 
-  it('includes the worker stderr tail when a hold worker fails to start', async () => {
+  it('includes the Agent stderr tail when a backend fails to start', async () => {
     const root = await mkdtemp(join(tmpdir(), 'th-hostd-spawn-'))
     roots.push(root)
-    const failing = join(root, 'failing-worker.mjs')
-    writeFileSync(failing, 'process.stderr.write("boom-worker-start\\n")\nprocess.exit(2)\n')
+    const failing = join(root, 'failing-agent.mjs')
+    writeFileSync(failing, 'process.stderr.write("boom-agent-start\\n")\nprocess.exit(2)\n')
     const project = await mkdtemp(join(tmpdir(), 'th-hostd-spawn-cwd-'))
     roots.push(project)
-    const hostd = new RemoteAgentHostd(hostdOptions(root, { workerScript: failing }))
+    const hostd = new RemoteAgentHostd(hostdOptions(root, { codexCommand: process.execPath, codexArgs: [failing] }))
     await expect(hostd.dispatch({
       id: 's', method: 'session.start',
       params: { sessionId: 's-fail', backend: 'codex', cwd: project },
-    })).rejects.toThrow(/worker 日志尾部：boom-worker-start/)
+    })).rejects.toThrow(/Agent 日志尾部：boom-agent-start/)
   })
 })

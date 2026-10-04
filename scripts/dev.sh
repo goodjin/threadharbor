@@ -11,11 +11,11 @@
 #
 # Targets:
 #   web    DSH Web for a channel (test by default -> http://127.0.0.1:3081)
-#   hostd  local dev hostd (default port 62846; --data-dir required)
+#   hostd  local dev hostd (default port 62846; designed data dir per channel)
 #   all    both (default target)
 #
 # Options:
-#   --data-dir <path>   hostd data directory (holds + journal) [hostd]
+#   --data-dir <path>   override the hostd data directory (holds + journal) [hostd]
 #   --frame-log         start hostd with THREADHARBOR_FRAME_LOG=1 (new holds only)
 #
 # Environment overrides:
@@ -26,16 +26,24 @@
 #   THREADHARBOR_WEB_LOG        web log path         (default: $DSH_HOME/threadharbor-runtime/web.log)
 #   THREADHARBOR_WEB_PID        web pid path         (default: .../web.pid)
 #   THREADHARBOR_HOSTD_PORT     hostd listen port    (default: 62846)
-#   THREADHARBOR_HOSTD_DATA_DIR hostd --data-dir     (see --data-dir)
+#   THREADHARBOR_HOSTD_DATA_DIR hostd --data-dir     (default: the designed root below)
 #   THREADHARBOR_HOSTD_LOG      hostd log path       (default: /tmp/threadharbor-hostd-$port.log)
 #   THREADHARBOR_HOSTD_PID      hostd pid path       (default: /tmp/threadharbor-hostd-$port.pid)
 #
 # Notes:
-#   - Killing/restarting web or hostd never stops detached hold workers.
-#   - THREADHARBOR_FRAME_LOG only affects holds started after the restart
-#     (hold workers read it once at process start).
-#   - hostd --data-dir must be the directory that already holds your holds
-#     (e.g. the one whose holds/<id>/journal.jsonl you rely on).
+#   - Killing or restarting hostd DOES stop the agents: they now run inside it,
+#     one process per backend kind, instead of one detached worker per session.
+#     Sessions are not lost — the first attach after the restart brings the
+#     backend back and reopens the session.
+#   - THREADHARBOR_FRAME_LOG only affects agents started after the restart
+#     (each backend's agent reads it once at process start).
+#   - The hostd data dir is a designed location, not a generated one:
+#     ~/.local/state/threadharbor/<channel>/hostd, the same shape the gateway
+#     deploys on SSH hosts. It holds sessions.json, host-id, the Grok serve
+#     secret, holds/<id>/ journals and dsh-sessions/ history, and it must
+#     survive restarts. Do not point --data-dir at /tmp or a mktemp -d path:
+#     the OS clears those, which loses every session and re-rolls the Grok
+#     secret into a mismatch with an already running `grok agent serve`.
 
 set -euo pipefail
 
@@ -50,7 +58,7 @@ web_pid="${THREADHARBOR_WEB_PID:-$dsh_home/threadharbor-runtime/web.pid}"
 hostd_port="${THREADHARBOR_HOSTD_PORT:-62846}"
 hostd_log="${THREADHARBOR_HOSTD_LOG:-/tmp/threadharbor-hostd-$hostd_port.log}"
 hostd_pid="${THREADHARBOR_HOSTD_PID:-/tmp/threadharbor-hostd-$hostd_port.pid}"
-hostd_data="${THREADHARBOR_HOSTD_DATA_DIR:-}"
+hostd_data="${THREADHARBOR_HOSTD_DATA_DIR:-$HOME/.local/state/threadharbor/$channel/hostd}"
 frame_log=0
 
 if [[ -n "${THREADHARBOR_DSH_BIN:-}" ]]; then
@@ -140,9 +148,15 @@ web_start() {
 
 # ---- hostd ------------------------------------------------------------------
 hostd_start() {
-  [[ -n "$hostd_data" ]] || die "hostd needs --data-dir PATH (or THREADHARBOR_HOSTD_DATA_DIR)"
-  [[ -d "$hostd_data" ]] || info "warning: data dir does not exist yet: $hostd_data"
-  mkdir -p "$(dirname "$hostd_log")"
+  [[ -n "$hostd_data" ]] || die "hostd needs a data dir (--data-dir PATH or THREADHARBOR_HOSTD_DATA_DIR)"
+  case "$hostd_data" in
+    /tmp/*|/private/tmp/*|/var/folders/*)
+      info "warning: $hostd_data is a temporary path the OS may clear; sessions, journals and the Grok serve secret would be lost."
+      info "warning: the designed root is $HOME/.local/state/threadharbor/$channel/hostd — pass nothing to use it."
+      ;;
+  esac
+  [[ -d "$hostd_data" ]] || info "created data dir: $hostd_data"
+  mkdir -p "$hostd_data" "$(dirname "$hostd_log")"
   guard_orphan "$hostd_pid" "$hostd_port"
   if pid_alive "$hostd_pid"; then
     info "hostd already running: pid $(cat "$hostd_pid") port $hostd_port"
@@ -169,6 +183,11 @@ web_status() {
   if pid_alive "$web_pid"; then
     if port_busy "$web_port"; then state="listening"; else state="pid alive, port $web_port free"; fi
     info "web: pid $(cat "$web_pid") port $web_port ($state) log $web_log"
+  elif port_busy "$web_port"; then
+    # The port is serving but no pid file points at it: something started this
+    # outside dev.sh. Reporting "not running" here is what lets a stale build
+    # keep answering for hours while every check says everything is fine.
+    info "web: UNMANAGED process on port $web_port (no pid file $web_pid) — restart it manually to pick up a new build"
   else
     info "web: not running (pid file $web_pid)"
   fi
@@ -176,9 +195,11 @@ web_status() {
 hostd_status() {
   if pid_alive "$hostd_pid"; then
     if port_busy "$hostd_port"; then state="listening"; else state="pid alive, port $hostd_port free"; fi
-    info "hostd: pid $(cat "$hostd_pid") port $hostd_port ($state) log $hostd_log"
+    info "hostd: pid $(cat "$hostd_pid") port $hostd_port ($state) data $hostd_data log $hostd_log"
+  elif port_busy "$hostd_port"; then
+    info "hostd: UNMANAGED process on port $hostd_port (no pid file $hostd_pid) — restart it manually to pick up a new build"
   else
-    info "hostd: not running (pid file $hostd_pid)"
+    info "hostd: not running (pid file $hostd_pid, data $hostd_data)"
   fi
 }
 

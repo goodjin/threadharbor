@@ -5,7 +5,12 @@ import { join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { Command } from 'commander'
 import { inheritLoginProxy } from './login-proxy.ts'
-import { defaultHoldWorkerScript, RemoteAgentHostd, type HostdOptions } from './server.ts'
+import { RemoteAgentHostd, type HostdOptions } from './server.ts'
+
+/** The shipped automation-only ACP profile every ThreadHarbor DSH session boots.
+ *  It carries no ThreadHarbor-owned model configuration: the profile reads models
+ *  and credentials from the host user's own `$DSH_HOME`. */
+const DSH_ACP_ARGS = ['--profile', 'acp']
 
 interface CliOptions {
   host: string
@@ -20,6 +25,7 @@ interface CliOptions {
   authTimeoutMs: string
   installTimeoutMs: string
   promptTimeoutMs: string
+  holdIdleTimeoutMs: string
   maxAgentConfigBytes: string
   codexCliCommand?: string
   codexCommand?: string
@@ -29,12 +35,9 @@ interface CliOptions {
   claudeAcpArg: string[]
   dshCommand?: string
   dshArg: string[]
-  dshProvider: string
-  dshModel: string
   grokCommand?: string
   grokServePort: string
   grokArg: string[]
-  workerScript: string
 }
 
 function integer(value: string, name: string, minimum: number): number {
@@ -49,7 +52,7 @@ function integer(value: string, name: string, minimum: number): number {
 export async function runHostd(argv: readonly string[] = process.argv): Promise<void> {
   const command = new Command()
     .name('threadharbor-hostd')
-    .description('Persistent local supervisor for Grok, Codex ACP, and DeepSeek Harness SDK sessions')
+    .description('Persistent local supervisor for Grok, Codex ACP, Claude ACP, and DeepSeek Harness ACP sessions')
     .option('--host <host>', 'listen host (loopback only)', '127.0.0.1')
     .option('--port <port>', 'listen port, zero asks the OS', '3091')
     .option('--data-dir <path>', 'hostd private state root', join(homedir(), '.local', 'state', 'threadharbor'))
@@ -62,6 +65,7 @@ export async function runHostd(argv: readonly string[] = process.argv): Promise<
     .option('--auth-timeout-ms <ms>', 'detached login timeout', '900000')
     .option('--install-timeout-ms <ms>', 'agent installation timeout', '600000')
     .option('--prompt-timeout-ms <ms>', 'session/prompt idle guard: agent silence (no frames, no pending permission) after which the hold-worker synthesizes a timeout completion', '1800000')
+    .option('--hold-idle-timeout-ms <ms>', 'release a detached hold after this long with no subscriber and no client activity; 0 disables reaping', '43200000')
     .option('--max-agent-config-bytes <bytes>', 'maximum Agent user configuration size', '262144')
     .option('--codex-cli-command <path>', 'Codex CLI executable; defaults to codex on PATH')
     .option('--codex-command <path>', 'Codex ACP executable; defaults to codex-acp on PATH')
@@ -69,14 +73,11 @@ export async function runHostd(argv: readonly string[] = process.argv): Promise<
     .option('--claude-command <path>', 'Claude Code executable; defaults to claude on PATH')
     .option('--claude-acp-command <path>', 'Claude Code ACP executable; defaults to claude-agent-acp on PATH')
     .option('--claude-acp-arg <arg...>', 'Claude Code ACP arguments', [])
-    .option('--dsh-command <path>', 'Harness JSON-RPC executable; defaults to dsh-jsonrpc-agent on PATH')
-    .option('--dsh-arg <arg...>', 'Harness JSON-RPC arguments; otherwise use DSH_CORDIS_CONFIG', [])
-    .option('--dsh-provider <name>', 'Harness SDK provider route', 'deepseek-official')
-    .option('--dsh-model <name>', 'Harness SDK model', 'deepseek-v4-flash')
+    .option('--dsh-command <path>', 'DeepSeek Harness CLI executable; defaults to dsh on PATH')
+    .option('--dsh-arg <arg...>', 'DeepSeek Harness CLI arguments', DSH_ACP_ARGS)
     .option('--grok-command <path>', 'Grok executable; defaults to grok on PATH')
     .option('--grok-serve-port <port>', 'loopback Grok agent server port', '2419')
     .option('--grok-arg <arg...>', 'arguments prepended before `agent serve`', [])
-    .option('--worker-script <path>', 'detached hold-worker JavaScript entry', defaultHoldWorkerScript())
   command.parse([...argv])
   inheritLoginProxy()
   const cli = command.opts<CliOptions>()
@@ -94,6 +95,7 @@ export async function runHostd(argv: readonly string[] = process.argv): Promise<
     authTimeoutMs: integer(cli.authTimeoutMs, 'auth-timeout-ms', 1),
     installTimeoutMs: integer(cli.installTimeoutMs, 'install-timeout-ms', 1),
     promptTimeoutMs: integer(cli.promptTimeoutMs, 'prompt-timeout-ms', 1),
+    holdIdleTimeoutMs: integer(cli.holdIdleTimeoutMs, 'hold-idle-timeout-ms', 0),
     agentConfigHome: homedir(),
     maxAgentConfigBytes: integer(cli.maxAgentConfigBytes, 'max-agent-config-bytes', 1),
     codexCliCommand: cli.codexCliCommand ?? 'codex',
@@ -102,15 +104,12 @@ export async function runHostd(argv: readonly string[] = process.argv): Promise<
     claudeCommand: cli.claudeCommand ?? 'claude',
     claudeAcpCommand: cli.claudeAcpCommand ?? 'claude-agent-acp',
     claudeAcpArgs: cli.claudeAcpArg,
-    dshCommand: cli.dshCommand ?? 'dsh-jsonrpc-agent',
+    dshCommand: cli.dshCommand ?? 'dsh',
     dshArgs: cli.dshArg,
-    dshProvider: cli.dshProvider,
-    dshModel: cli.dshModel,
     grokCommand: cli.grokCommand ?? 'grok',
     grokServeHost: '127.0.0.1',
     grokServePort: integer(cli.grokServePort, 'grok-serve-port', 1),
     grokArgs: cli.grokArg,
-    workerScript: resolve(cli.workerScript),
     hostdHttpFallback: false,
   }
   const hostd = new RemoteAgentHostd(options)
@@ -120,7 +119,15 @@ export async function runHostd(argv: readonly string[] = process.argv): Promise<
   const close = async (): Promise<void> => {
     if (closing) return
     closing = true
+    // A signal must actually end the process. If shutdown stalls — a backend
+    // that will not die, a client that will not hang up — the Agent would keep
+    // running with nobody driving it, still holding its sessions' write handle
+    // so no later hostd could reopen them.
+    const hardExit = setTimeout(() => process.exit(1), 15_000)
+    hardExit.unref()
     await hostd.close()
+    clearTimeout(hardExit)
+    process.exit(0)
   }
   process.once('SIGINT', () => { void close() })
   process.once('SIGTERM', () => { void close() })

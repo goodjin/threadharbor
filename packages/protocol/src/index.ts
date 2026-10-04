@@ -253,7 +253,7 @@ export interface RemoteProjectView {
 }
 
 /** Browser-visible channel state, independent from turn execution. */
-export type RemoteChannelState = 'connecting' | 'open' | 'reconnecting' | 'closed' | 'lost'
+export type RemoteChannelState = 'connecting' | 'open' | 'reconnecting' | 'lost'
 /** Browser-visible turn state. */
 export type RemoteTurnState = 'idle' | 'running' | 'waiting-permission' | 'stopped' | 'failed'
 /** Remote-session binding state. */
@@ -303,6 +303,12 @@ export interface RemoteSessionView {
    *  (a background subagent, say) keep arriving; the browser uses the ids to
    *  find the exact card instead of "the last permission row". */
   readonly pendingRequestIds?: readonly string[]
+  /** Backend-native subagent key this virtual child session was projected
+   *  from (Claude: the owning Task tool-use id). Present only on child
+   *  sessions without a `binding` — the gateway routes the parent journal's
+   *  tagged frames into their transcripts, so there is no hold to attach,
+   *  prompt, or restart. */
+  readonly nativeChildKey?: string
 }
 
 /** One selectable value of a backend session setting. */
@@ -455,6 +461,25 @@ export interface RemoteSessionAttachResult {
   readonly latestSeq: number
   /** True when attach had to recreate the native Agent session under the same hold. */
   readonly reopened?: boolean
+  /**
+   * Where the Agent's context for this session actually came from.
+   *
+   *  `resumed` is the real thing: the Agent reopened its own stored session and
+   *  the model has the genuine prior context. `reconstructed` means the Agent
+   *  could not reopen it and the caller supplied the conversation as text
+   *  instead — the model can read the history, but it is a reconstruction, not
+   *  the Agent's memory, and the UI should say so rather than let the two look
+   *  alike. `none` means a fresh session with no prior context.
+   */
+  readonly contextSource?: 'resumed' | 'reconstructed' | 'none'
+}
+
+/** Conversation text to seed a session whose Agent state could not be reopened. */
+export interface RemoteSessionContextSeed {
+  /** Plain-text transcript of the prior conversation, oldest first. */
+  readonly transcript: string
+  /** True when the transcript was cut down to fit the context budget. */
+  readonly truncated?: boolean
 }
 
 /** Bounded directory entry returned by hostd. */
@@ -543,6 +568,7 @@ export type RemoteHostdMethod =
   | 'session.adopt'
   | 'session.attach'
   | 'session.restart'
+  | 'session.release'
   | 'session.prompt'
   | 'session.cancel'
   | 'session.permission'

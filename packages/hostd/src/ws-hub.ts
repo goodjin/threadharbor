@@ -8,8 +8,11 @@
  *    - server-initiated `journal.page` and `journal.gap` events,
  *    - ping/pong heartbeats.
  *
- *  A single per-hold waiter (`holdRequest('wait-page')`) feeds all subscribers of
- *  the same session, eliminating the 1s poll fallback and an extra local socket round trip.
+ *  A single per-session waiter (`holdRequest('wait-page')`) feeds all subscribers
+ *  of that session, eliminating the poll fallback. Waiters are keyed by *session*,
+ *  not by hold: with a shared Agent connection, several sessions no longer share a
+ *  process, and keying by hold made the first subscriber's record stand in for the
+ *  rest — so a second session bound to the same Agent got no frames of its own.
  */
 
 import type http from 'node:http'
@@ -25,11 +28,18 @@ import {
   type RemoteHostdWsFrame,
   type RemoteJournalPage,
 } from '@threadharbor/protocol'
-import type { HoldResponse } from './hold-protocol.ts'
+import type { HostdSessionResponse } from './agent-protocol.ts'
 import type { HostdSessionRecord, RemoteAgentHostd } from './server.ts'
 
 /** WS_OPEN is the only readyState where we may send frames. */
 const WS_OPEN = 1
+
+/** Whether an error means this session's Agent connection is not running, which
+ *  is the in-process equivalent of the old "hold socket is dead" check. */
+function bridgeGone(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /no running \w+ bridge/.test(message) || /unknown agent session/.test(message)
+}
 
 /** Tunables for the WS hub; injected to keep tests deterministic. */
 export interface HostdWsHubOptions {
@@ -44,8 +54,8 @@ interface Subscriber {
   lastSeq: number
 }
 
-/** Per-hold waiter driver state. */
-interface PerHoldWaiter {
+/** Per-session waiter driver state. */
+interface PerSessionWaiter {
   readonly record: HostdSessionRecord
   readonly abort: AbortController
 }
@@ -53,10 +63,9 @@ interface PerHoldWaiter {
 /** Persistent hostd WebSocket fan-out: RPC multiplexing, single-waiter-per-hold push, heartbeat. */
 export class HostdWsHub {
   private readonly wss: WebSocketServer
-  private readonly waiters = new Map<string, PerHoldWaiter>()
+  private readonly waiters = new Map<RemoteSessionId, PerSessionWaiter>()
   private readonly subscribersBySession = new Map<RemoteSessionId, Map<WebSocket, Subscriber>>()
   private readonly socketToSessions = new WeakMap<WebSocket, Set<RemoteSessionId>>()
-  private readonly recordByHoldId = new Map<string, HostdSessionRecord>()
   private pushSeq = 0
   private heartbeatTimer: NodeJS.Timeout | undefined
   private closed = false
@@ -113,29 +122,9 @@ export class HostdWsHub {
     return this.wss.clients.size
   }
 
-  /** Per-hold waiter map (test seam). */
-  waitersForTesting(): Map<string, PerHoldWaiter> {
+  /** Per-session waiter map (test seam). */
+  waitersForTesting(): Map<RemoteSessionId, PerSessionWaiter> {
     return this.waiters
-  }
-
-  /** Drop all in-memory state for a hold; called when a session is dropped or restarted. */
-  forgetHold(holdId: string): void {
-    const waiter = this.waiters.get(holdId)
-    if (waiter !== undefined) {
-      waiter.abort.abort()
-      this.waiters.delete(holdId)
-    }
-    const record = this.recordByHoldId.get(holdId)
-    if (record === undefined) return
-    const sessionSubs = this.subscribersBySession.get(RemoteSessionId(record.sessionId))
-    if (sessionSubs !== undefined) {
-      for (const subscriber of sessionSubs.values()) {
-        subscriber.ws.close(1011, `hold ${holdId} dropped`)
-      }
-      sessionSubs.clear()
-      this.subscribersBySession.delete(RemoteSessionId(record.sessionId))
-    }
-    this.recordByHoldId.delete(holdId)
   }
 
   private registerConnection(ws: WebSocket): void {
@@ -144,9 +133,24 @@ export class HostdWsHub {
     ws.on('error', () => { /* swallow; the close handler cleans up */ })
   }
 
+  /** Drop all in-memory state for one session; called when it is released or restarted. */
+  forgetSession(sessionId: RemoteSessionId): void {
+    const waiter = this.waiters.get(sessionId)
+    if (waiter !== undefined) {
+      waiter.abort.abort()
+      this.waiters.delete(sessionId)
+    }
+    const sessionSubs = this.subscribersBySession.get(sessionId)
+    if (sessionSubs === undefined) return
+    for (const subscriber of sessionSubs.values()) {
+      subscriber.ws.close(1011, `session ${sessionId} dropped`)
+    }
+    sessionSubs.clear()
+    this.subscribersBySession.delete(sessionId)
+  }
+
   private async handleClientMessage(ws: WebSocket, data: unknown): Promise<void> {
-    const text = wsText(data)
-    if (text === '') return
+    const text = typeof data === 'string' ? data : Buffer.from(data as Buffer).toString('utf8')
     let parsed: unknown
     try { parsed = JSON.parse(text) } catch { return }
     let frame: RemoteHostdWsFrame
@@ -166,7 +170,6 @@ export class HostdWsHub {
     }
     if (frame.direction === 'unsubscribe') {
       this.handleUnsubscribe(ws, frame.sessionId)
-      return
     }
   }
 
@@ -228,8 +231,7 @@ export class HostdWsHub {
     const sessions = this.socketToSessions.get(ws) ?? new Set<RemoteSessionId>()
     sessions.add(sessionId)
     this.socketToSessions.set(ws, sessions)
-    this.recordByHoldId.set(record.holdId, record)
-    this.ensureWaiter(record, subscribers.get(ws)!.lastSeq)
+    this.ensureWaiter(record)
   }
 
   private handleUnsubscribe(ws: WebSocket, sessionId: RemoteSessionId): void {
@@ -258,57 +260,48 @@ export class HostdWsHub {
     this.socketToSessions.delete(ws)
   }
 
-  private ensureWaiter(record: HostdSessionRecord, _initialLastSeq: number): void {
-    const holdId = record.holdId
-    const existing = this.waiters.get(holdId)
-    if (existing !== undefined) return
+  private ensureWaiter(record: HostdSessionRecord): void {
+    const sessionId = RemoteSessionId(record.sessionId)
+    if (this.waiters.has(sessionId)) return
     const abort = new AbortController()
-    const waiter: PerHoldWaiter = { record, abort }
-    this.waiters.set(holdId, waiter)
+    const waiter: PerSessionWaiter = { record, abort }
+    this.waiters.set(sessionId, waiter)
     void this.runWaiter(waiter)
   }
 
   private stopWaiterIfEmpty(sessionId: RemoteSessionId): void {
-    const holdId = this.holdIdForSession(sessionId)
-    if (holdId === undefined) return
-    if (this.holdHasSubscribers(holdId)) return
-    const waiter = this.waiters.get(holdId)
+    if (this.sessionHasSubscribers(sessionId)) return
+    const waiter = this.waiters.get(sessionId)
     if (waiter === undefined) return
     waiter.abort.abort()
-    this.waiters.delete(holdId)
+    this.waiters.delete(sessionId)
   }
 
-  private holdHasSubscribers(holdId: string): boolean {
-    for (const record of this.recordByHoldId.values()) {
-      if (record.holdId !== holdId) continue
-      const sessionSubs = this.subscribersBySession.get(RemoteSessionId(record.sessionId))
-      if (sessionSubs !== undefined && sessionSubs.size > 0) return true
-    }
-    return false
-  }
-
-  private holdIdForSession(sessionId: RemoteSessionId): string | undefined {
-    for (const record of this.recordByHoldId.values()) {
-      if (record.sessionId === (sessionId as unknown as string)) return record.holdId
-    }
-    return undefined
+  /**
+   * Whether any browser still streams this session. The idle reaper consults
+   * this so a session someone is actively watching is never reclaimed underneath
+   * them, even if no new prompt has been sent for a while.
+   */
+  sessionHasSubscribers(sessionId: RemoteSessionId): boolean {
+    return (this.subscribersBySession.get(sessionId)?.size ?? 0) > 0
   }
 
   private holdGenerationChanged(record: HostdSessionRecord, generation: string): boolean {
     return record.generation !== generation
   }
 
-  private async runWaiter(waiter: PerHoldWaiter): Promise<void> {
+  private async runWaiter(waiter: PerSessionWaiter): Promise<void> {
     const { record, abort } = waiter
-    let afterSeq = this.minLastSeqForHold(record.holdId)
+    const sessionId = RemoteSessionId(record.sessionId)
+    let afterSeq = this.minLastSeqForSession(sessionId)
     while (!abort.signal.aborted) {
       const subscriberCount = this.subscribersFor(record).size
       if (subscriberCount === 0) {
-        this.waiters.delete(record.holdId)
+        this.waiters.delete(sessionId)
         return
       }
       try {
-        let response: HoldResponse
+        let response: HostdSessionResponse
         try {
           response = await this.hostd.holdRequest(
             record,
@@ -318,23 +311,20 @@ export class HostdWsHub {
               timeoutMs: this.options.waitTimeoutMs,
               generation: record.generation,
             },
-            undefined,
             abort.signal,
-          ) as HoldResponse
+          )
         } catch {
           if (abort.signal.aborted) return
           await this.hostd.holdRequest(
             record,
             { operation: 'wait-seq', afterSeq, timeoutMs: this.options.waitTimeoutMs },
-            undefined,
             abort.signal,
           )
           response = await this.hostd.holdRequest(
             record,
             { operation: 'read', afterSeq, generation: record.generation },
-            undefined,
             abort.signal,
-          ) as HoldResponse
+          )
         }
         if (!response.ok) {
           if (abort.signal.aborted) return
@@ -353,22 +343,19 @@ export class HostdWsHub {
         if (page.events.length > this.options.maxEventsPerPage) continue
       } catch (error) {
         if (abort.signal.aborted) return
-        if (holdSocketDead(error)) this.fanoutHoldDead(record)
-        this.waiters.delete(record.holdId)
+        if (bridgeGone(error)) this.fanoutBridgeGone(record)
+        this.waiters.delete(sessionId)
         return
       }
     }
   }
 
-  private minLastSeqForHold(holdId: string): number {
+  private minLastSeqForSession(sessionId: RemoteSessionId): number {
+    const sessionSubs = this.subscribersBySession.get(sessionId)
+    if (sessionSubs === undefined) return 0
     let min = Number.POSITIVE_INFINITY
-    for (const record of this.recordByHoldId.values()) {
-      if (record.holdId !== holdId) continue
-      const sessionSubs = this.subscribersBySession.get(RemoteSessionId(record.sessionId))
-      if (sessionSubs === undefined) continue
-      for (const subscriber of sessionSubs.values()) {
-        if (subscriber.lastSeq < min) min = subscriber.lastSeq
-      }
+    for (const subscriber of sessionSubs.values()) {
+      if (subscriber.lastSeq < min) min = subscriber.lastSeq
     }
     return min === Number.POSITIVE_INFINITY ? 0 : min
   }
@@ -382,22 +369,24 @@ export class HostdWsHub {
     return this.subscribersBySession.get(RemoteSessionId(record.sessionId)) ?? new Map()
   }
 
-  private fanoutHoldDead(record: HostdSessionRecord): void {
-    for (const candidate of this.recordByHoldId.values()) {
-      if (candidate.holdId !== record.holdId) continue
-      const sessionId = RemoteSessionId(candidate.sessionId)
-      const sessionSubs = this.subscribersBySession.get(sessionId)
-      if (sessionSubs === undefined || sessionSubs.size === 0) continue
-      const event: RemoteHostdWsEvent = {
-        type: 'journal.gap',
-        sessionId,
-        droppedThrough: 0,
-        generation: candidate.generation,
-      }
-      const payload = JSON.stringify({ direction: 'push', seq: ++this.pushSeq, event } satisfies RemoteHostdWsFrame)
-      for (const subscriber of sessionSubs.values()) {
-        if (subscriber.ws.readyState === WS_OPEN) subscriber.ws.send(payload)
-      }
+  /**
+   * Tell the gateway this session's Agent connection is gone, so it can leave the
+   * session `running` and re-attach rather than waiting for frames that will
+   * never come.
+   */
+  private fanoutBridgeGone(record: HostdSessionRecord): void {
+    const sessionId = RemoteSessionId(record.sessionId)
+    const sessionSubs = this.subscribersBySession.get(sessionId)
+    if (sessionSubs === undefined || sessionSubs.size === 0) return
+    const event: RemoteHostdWsEvent = {
+      type: 'journal.gap',
+      sessionId,
+      droppedThrough: 0,
+      generation: record.generation,
+    }
+    const payload = JSON.stringify({ direction: 'push', seq: ++this.pushSeq, event } satisfies RemoteHostdWsFrame)
+    for (const subscriber of sessionSubs.values()) {
+      if (subscriber.ws.readyState === WS_OPEN) subscriber.ws.send(payload)
     }
   }
 

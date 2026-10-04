@@ -139,110 +139,76 @@ describe('AgentManager', () => {
     await expect(manager.install('grok')).resolves.toMatchObject({ alreadyInstalled: true })
   })
 
-  it('installs DSH with the official pip --user command and discovers it in the pip scripts directory', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'threadharbor-agent-dsh-'))
+  it('plans and runs the official npm recipe for the DeepSeek Harness CLI', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'threadharbor-agent-dsh-npm-'))
     roots.push(root)
-    const scripts = join(root, 'scripts')
-    await mkdir(scripts)
-    const python = join(root, 'python')
-    await writeFile(python, [
-      '#!/bin/sh',
-      'if [ "$1" = "-m" ]; then',
-      `  printf '%s\\n' '#!/bin/sh' > '${scripts}/dsh-jsonrpc-agent'`,
-      `  chmod 700 '${scripts}/dsh-jsonrpc-agent'`,
-      '  exit 0',
-      'fi',
-      'if [ "$1" = "-c" ]; then',
-      `  printf '%s\\n' '${scripts}'`,
-      '  exit 0',
-      'fi',
-      'exit 1',
+    const npm = join(root, 'npm')
+    await writeFile(npm, [
+      '#!/usr/bin/env node',
+      "const { mkdirSync, writeFileSync, chmodSync } = require('node:fs')",
+      "const { join } = require('node:path')",
+      'const args = process.argv.slice(2)',
+      `const prefix = ${JSON.stringify(root)}`,
+      "if (args[0] === 'prefix') { process.stdout.write(prefix + '\\n'); process.exit(0) }",
+      "const bin = join(prefix, 'bin')",
+      'mkdirSync(bin, { recursive: true, mode: 0o700 })',
+      "if (!args.includes('-g') && !args.includes('--global')) process.exit(3)",
+      "if (!args.some(arg => arg.startsWith('@deepseek-ai/dsh@'))) process.exit(2)",
+      "const dest = join(bin, 'threadharbor-test-dsh')",
+      "writeFileSync(dest, '#!/bin/sh\\n')",
+      'chmodSync(dest, 0o700)',
       '',
     ].join('\n'))
-    await chmod(python, 0o700)
+    await chmod(npm, 0o700)
     const manager = new AgentManager({
       ...options(root, '/missing/agent'),
-      dshCommand: 'dsh-jsonrpc-agent',
-      pythonCommand: python,
+      dshCommand: 'threadharbor-test-dsh',
+      npmCommand: [process.execPath, npm],
     })
+
     const plan = await manager.installPlan('dsh')
-    expect(plan.version).toBe('deepseek-harness-runtime-bin==0.1.1rc1')
-    expect(plan.steps).toHaveLength(1)
-    expect(plan.steps[0]?.command).toContain('pip install --user --upgrade --break-system-packages')
+    expect(plan).toMatchObject({ component: 'dsh', alreadyInstalled: false, requiresConfirmation: true })
+    expect(plan.unavailableReason).toBeUndefined()
+    expect(plan.steps[0]?.command).toBe('npm install -g @deepseek-ai/dsh@0.1.5-rc.1')
+    expect(plan.steps[0]?.command).not.toContain('pip')
+
     const installed = await manager.install('dsh')
     expect(installed.alreadyInstalled).toBe(true)
+    await expect(manager.resolvedDshLaunch()).resolves.toBe(join(root, 'bin', 'threadharbor-test-dsh'))
   })
 
-  it('uses --break-system-packages so Homebrew Python PEP 668 does not block DSH install', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'threadharbor-agent-dsh-pep668-'))
+  it('treats an installed DeepSeek Harness CLI as session-ready without a hostd-stored key', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'threadharbor-agent-dsh-ready-'))
     roots.push(root)
-    const scripts = join(root, 'scripts')
-    await mkdir(scripts)
-    const python = join(root, 'python')
-    await writeFile(python, [
-      '#!/bin/sh',
-      'if [ "$1" = "-m" ]; then',
-      '  for arg in "$@"; do',
-      '    if [ "$arg" = "--break-system-packages" ]; then',
-      `      printf '%s\\n' '#!/bin/sh' > '${scripts}/dsh-jsonrpc-agent'`,
-      `      chmod 700 '${scripts}/dsh-jsonrpc-agent'`,
-      '      exit 0',
-      '    fi',
-      '  done',
-      '  printf \'%s\\n\' \'error: externally-managed-environment\' >&2',
-      '  exit 1',
-      'fi',
-      'if [ "$1" = "-c" ]; then',
-      `  printf '%s\\n' '${scripts}'`,
-      '  exit 0',
-      'fi',
-      'exit 1',
+    vi.stubEnv('DEEPSEEK_API_KEY', '')
+    const binDir = join(root, 'bin')
+    await mkdir(binDir)
+    const dsh = join(binDir, 'threadharbor-test-dsh')
+    await writeFile(dsh, '#!/bin/sh\n')
+    await chmod(dsh, 0o700)
+    const npm = join(root, 'npm')
+    await writeFile(npm, [
+      '#!/usr/bin/env node',
+      `if (process.argv[2] === 'prefix') { process.stdout.write(${JSON.stringify(root)} + '\\n'); process.exit(0) }`,
+      'process.exit(9)',
       '',
     ].join('\n'))
-    await chmod(python, 0o700)
+    await chmod(npm, 0o700)
     const manager = new AgentManager({
       ...options(root, '/missing/agent'),
-      dshCommand: 'dsh-jsonrpc-agent',
-      pythonCommand: python,
+      dshCommand: 'threadharbor-test-dsh',
+      npmCommand: [process.execPath, npm],
     })
-    await expect(manager.install('dsh')).resolves.toMatchObject({ alreadyInstalled: true })
-  })
 
-  it('discovers DSH from the official wheel locator when pip does not install a PATH command', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'threadharbor-agent-dsh-wheel-'))
-    roots.push(root)
-    const scripts = join(root, 'scripts')
-    const runtime = join(root, 'dsh-jsonrpc-agent-pkg-macos-arm64')
-    const config = join(root, 'cordis.yml')
-    await mkdir(scripts)
-    await writeFile(runtime, '#!/bin/sh\n')
-    await chmod(runtime, 0o700)
-    await writeFile(config, 'name: test\n')
-    const python = join(root, 'python')
-    await writeFile(python, [
-      '#!/bin/sh',
-      'if [ "$1" = "-m" ]; then exit 0; fi',
-      'if [ "$1" = "-c" ]; then',
-      '  case "$2" in',
-      `    *bundled_runtime_path*) printf '%s\\n%s\\n' '${runtime}' '${config}' ;;`,
-      `    *) printf '%s\\n' '${scripts}' ;;`,
-      '  esac',
-      '  exit 0',
-      'fi',
-      'exit 1',
-      '',
-    ].join('\n'))
-    await chmod(python, 0o700)
-    const manager = new AgentManager({
-      ...options(root, '/missing/agent'),
-      dshCommand: 'dsh-jsonrpc-agent',
-      pythonCommand: python,
-    })
-    const installed = await manager.install('dsh')
-    expect(installed.alreadyInstalled).toBe(true)
-    await expect(manager.resolvedDshLaunch()).resolves.toMatchObject({
-      command: runtime, configPath: config,
-    })
+    // Models and credentials belong to the host user's own DSH configuration, so
+    // the CLI alone is what makes the backend ready: an absent hostd-stored key
+    // must not gate session creation or report the backend as unauthenticated.
+    const entry = (await manager.inventory(new Set())).find(candidate => candidate.backend === 'dsh')
+    expect(entry).toMatchObject({ installed: true, authenticated: true, sessionCapable: true })
+    expect(entry?.detail).toContain('DSH 配置')
+    expect(manager.dshCredentialStatus()).toEqual({ configured: false })
+    await expect(manager.installPlan('dsh')).resolves.toMatchObject({ alreadyInstalled: true })
+    await expect(manager.resolvedDshLaunch()).resolves.toBe(dsh)
   })
 
   it('reads Codex and Grok login from local auth files without launching the CLI', async () => {
