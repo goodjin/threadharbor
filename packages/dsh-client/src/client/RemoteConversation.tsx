@@ -1463,7 +1463,7 @@ function AgentSetupRow({ backend, host, store, operations }: {
       : backend === 'claude'
         ? '已安装，可通过配置提供凭据'
         : backend === 'dsh'
-          ? entry.authenticated ? '已安装，API Key 已配置' : '已安装，未配置 API Key'
+          ? entry.authenticated ? '已安装；另有本机存储的兜底密钥' : '已安装，模型与凭据来自 DSH 配置'
           : entry.authenticated ? '已安装并已认证' : '已安装，未登录')
 
   // Once the install operation started by this row succeeds, drop the plan
@@ -1508,8 +1508,14 @@ function AgentSetupRow({ backend, host, store, operations }: {
       if (!dshInitialized) {
         setDshInitialized(true)
         setDshApiKey('')
-        setDshSaved(entry?.authenticated === true)
-        setDshEditing(entry?.authenticated !== true)
+        setDshSaved(false)
+        setDshEditing(false)
+        // Models and credentials belong to the host's own DSH configuration; this
+        // only asks whether an override key happens to be stored here too.
+        void tracked('credential-status', () => store.dshCredentialStatus(host.hostId)).then((status) => {
+          setDshSaved(status.configured)
+          setDshEditing(!status.configured)
+        }).catch(() => { setDshEditing(true) })
       }
       return
     }
@@ -1603,22 +1609,22 @@ function AgentSetupRow({ backend, host, store, operations }: {
             dshSaved && !dshEditing
               ? (
                 <div className={`${css.setupCard} ${css.setupCardSuccess}`}>
-                  <strong>DSH API Key 已配置</strong>
-                  <p>密钥已保存在远程主机，不会回传到浏览器。之后新建的 DSH 会话会使用该密钥。</p>
+                  <strong>已存储兜底密钥</strong>
+                  <p>密钥保存在远程主机，不会回传到浏览器。它作为 DEEPSEEK_API_KEY 注入 DSH 进程，会优先于 DSH 配置里的 DeepSeek 凭据；其它提供方请在 DSH 自己的设置里配置。</p>
                   <Button size="sm" variant="outline" onClick={() => { setDshEditing(true); setDshApiKey('') }}>修改</Button>
                 </div>
               )
               : (
                 <div className={css.setupCard}>
-                  <strong>DSH API Key</strong>
-                  <p>密钥保存在远程主机的 hostd 私有凭据文件中，不会再回传到浏览器；对之后新建的 DSH 会话生效。</p>
+                  <strong>兜底密钥（可选）</strong>
+                  <p>模型的清单和切换、以及常规凭据都由主机上的 DSH 配置管理，这里不需要填写。只有想让这个主机上的 DSH 会话改用一个显式的 DeepSeek 密钥时才需要保存：它会作为 DEEPSEEK_API_KEY 注入 DSH 进程，优先于 DSH 配置里的 DeepSeek 凭据。</p>
                   <div className={css.inlineCreate}>
                     <input
                       type="password"
                       aria-label="DSH API Key"
                       autoComplete="off"
                       value={dshApiKey}
-                      placeholder={entry?.authenticated ? '输入新密钥以替换现有配置' : '输入 DeepSeek API Key'}
+                      placeholder={dshSaved ? '输入新密钥以替换现有配置' : '输入 DeepSeek API Key'}
                       onChange={(event) => { setDshApiKey(event.target.value) }}
                     />
                     <Button size="sm" variant="primary" disabled={busy || dshApiKey.trim() === ''} onClick={() => {
@@ -1629,7 +1635,7 @@ function AgentSetupRow({ backend, host, store, operations }: {
                         void store.refreshInventory(host.hostId).catch(() => undefined)
                       }).catch((error: unknown) => { setLocalError(String(error)) })
                     }}>{busyAction === 'credential-save' ? '保存中…' : '保存 API Key'}</Button>
-                    {entry?.authenticated === true && (
+                    {dshSaved && (
                       <Button size="sm" variant="ghost" disabled={busy} onClick={() => { setDshEditing(false); setDshApiKey('') }}>取消</Button>
                     )}
                   </div>
@@ -2149,51 +2155,56 @@ function DraftConversation({ project, host, projectSessions, store, error, promp
   promptProgress: RemotePromptProgress | undefined
 }) {
   const backends = availableBackends(host)
+  // The Agent is chosen *before* the first message now, so the picker starts
+  // empty and picking it creates the session: the backend's own model catalog
+  // only exists once a session does, and the user must be able to pick a model
+  // before talking. The last Agent used in this project is offered first.
   const preferredBackend = preferredProjectBackend(backends, projectSessions)
+  const orderedBackends = preferredBackend === ''
+    ? backends
+    : [preferredBackend, ...backends.filter(value => value !== preferredBackend)]
   const backendSignature = backends.join(',')
-  const [backend, setBackend] = useState<RemoteAgentBackend | ''>(() => preferredBackend)
-  const [preferences, setPreferences] = useState<SessionPreferences>(() =>
-    preferredBackend === ''
-      ? defaultSessionPreferences('codex')
-      : resolveSessionPreferences(preferredBackend, {}, undefined, host.hostId))
-  const [draft, setDraft] = useState('')
+  const [backend, setBackend] = useState<RemoteAgentBackend | ''>('')
   useEffect(() => {
-    setBackend(current => current !== '' && backends.includes(current) ? current : preferredBackend)
-  }, [backendSignature, preferredBackend])
+    setBackend(current => current !== '' && backends.includes(current) ? current : '')
+  }, [backendSignature])
   useEffect(() => {
     if (backends.length > 0 || host.inventory !== undefined) return
     void store.refreshInventory(host.hostId).catch(() => undefined)
   }, [backends.length, host.hostId, host.inventory, store])
-  useEffect(() => {
-    if (backend === '') return
-    setPreferences(resolveSessionPreferences(backend, {}, undefined, host.hostId))
-  }, [backend, host.hostId])
   const progress = promptProgress?.projectId === project.projectId && promptProgress.sessionId === undefined
     ? promptProgress
     : undefined
   // Only block this draft while ITS OWN create RPC is in flight. The store's
   // global `pending` covers every in-flight RPC — including one for a draft
   // the user has since abandoned — and applying it here would leave a newly
-  // opened draft with a disabled Agent picker and send button.
+  // opened draft with a disabled Agent picker.
   const draftBusy = progress !== undefined && progress.phase !== 'failed'
-  const draftStage: ConversationStage = progress?.phase === 'failed'
+  // A failed create keeps the draft so the user can retry; the picker must show
+  // its placeholder again, otherwise re-picking the same Agent would be a no-op.
+  const failed = progress?.phase === 'failed'
+  useEffect(() => {
+    if (failed) setBackend('')
+  }, [failed])
+  const draftStage: ConversationStage = failed
     ? {
-      kind: /timeout|timed out|超时/i.test(progress.message ?? '') ? 'timeout' : 'failed',
-      label: /timeout|timed out|超时/i.test(progress.message ?? '') ? '连接超时' : '会话创建失败',
-      detail: progress.message ?? error ?? '无法创建远程会话。', state: 'error', visible: true,
+      kind: /timeout|timed out|超时/i.test(progress?.message ?? '') ? 'timeout' : 'failed',
+      label: /timeout|timed out|超时/i.test(progress?.message ?? '') ? '连接超时' : '会话创建失败',
+      detail: progress?.message ?? error ?? '无法创建远程会话。', state: 'error', visible: true,
     }
     : progress === undefined
-      ? { kind: 'idle', label: '尚未发送', detail: '选择 Agent 后发送第一条消息。', state: 'done', visible: false }
+      ? { kind: 'idle', label: '尚未选择 Agent', detail: '选择 Agent 后立即创建远程会话。', state: 'done', visible: false }
       : {
         kind: 'connecting',
-        label: progress.phase === 'sending' ? '正在连接 Agent' : '正在创建远程会话',
-        detail: progress.message ?? '正在创建远程会话并建立通信通道。',
+        label: '正在创建远程会话',
+        detail: progress.message ?? '正在与远程主机建立通信通道，通常只需几秒。',
         state: 'ongoing', visible: true,
       }
-  const send = (): void => {
-    const text = draft.trim()
-    if (text === '' || backend === '' || draftBusy) return
-    void store.promptSessionDraft(backend, text).catch(() => undefined)
+  const pickAgent = (raw: string): void => {
+    if (raw === '' || draftBusy) return
+    const value = raw as RemoteAgentBackend
+    setBackend(value)
+    void store.createSessionDraft(value).catch(() => undefined)
   }
   return (
     <main className={css.conversation}>
@@ -2212,7 +2223,12 @@ function DraftConversation({ project, host, projectSessions, store, error, promp
           <div className={css.blankConversation}>
             <span className={css.blankIcon}><IconAgentPresetOutline16 size={22} /></span>
             <strong>开始一个新会话</strong>
-            <p>第一次发送时创建远程会话并锁定 Agent。</p>
+            {/* The idle instructions go stale the moment creation starts and
+                would just repeat the connecting banner below; on failure they
+                come back so the user knows to re-pick the Agent and retry. */}
+            {!draftBusy && (
+              <p>选择 Agent 会创建远程会话；可以先选模型和思考强度，再发送第一条消息。</p>
+            )}
             <ConversationActivity stage={draftStage} />
           </div>
         </div>
@@ -2220,34 +2236,6 @@ function DraftConversation({ project, host, projectSessions, store, error, promp
       <div className={css.composerDock}>
         <div className={css.composer}>
           {error !== undefined && <div className={css.composerError}>{error}</div>}
-          {backend !== '' && (
-            <SessionControls
-              backend={backend}
-              preferences={preferences}
-              disabled={draftBusy}
-              onChange={(next) => {
-                setPreferences(next)
-                const updated = {
-                  ...readPersistedSessionPreferences(),
-                  [sessionPreferencesKey(host.hostId, backend)]: normalizeSessionPreferences(backend, next),
-                }
-                writePersistedSessionPreferences(updated)
-              }}
-            />
-          )}
-          <textarea
-            aria-label="发送给远程 Agent"
-            value={draft}
-            placeholder="输入第一条消息"
-            disabled={draftBusy}
-            onChange={(event) => { setDraft(event.target.value) }}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.shiftKey) {
-                event.preventDefault()
-                send()
-              }
-            }}
-          />
           <div className={css.composerActions}>
             <label className={css.agentPicker}>
               <IconAgentPresetOutline16 />
@@ -2255,14 +2243,15 @@ function DraftConversation({ project, host, projectSessions, store, error, promp
                 aria-label="选择 Agent"
                 value={backend}
                 disabled={draftBusy || backends.length === 0}
-                onChange={(event) => { setBackend(event.target.value as RemoteAgentBackend) }}
+                onChange={(event) => { pickAgent(event.target.value) }}
               >
                 <option value="">{backends.length === 0 ? '没有可用 Agent，请检查远端安装和登录状态' : '选择 Agent'}</option>
-                {backends.map(value => <option key={value} value={value}>{value}</option>)}
+                {orderedBackends.map(value => (
+                  <option key={value} value={value}>{value === preferredBackend ? `${value}（上次使用）` : value}</option>
+                ))}
               </select>
             </label>
-            <span>首次发送后不可更改</span>
-            <Button size="sm" variant="primary" icon={<IconSendOutline16 />} aria-label="发送" disabled={backend === '' || draft.trim() === '' || draftBusy} onClick={send} />
+            <span>{draftBusy ? '正在创建会话…' : '选择 Agent 后创建会话，再选模型'}</span>
           </div>
         </div>
       </div>
@@ -2555,7 +2544,7 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
         <main className={css.hero}>
           <div className={css.heroMark}>话</div>
           <h1>从项目新建 Agent 会话</h1>
-          <p>主机和项目已经准备好。先打开会话占位，首次发送前再选择 Agent。</p>
+          <p>主机和项目已经准备好。打开新建会话后先选择 Agent，再选模型，然后发第一条消息。</p>
           <Button size="sm" variant="primary" onClick={() => { store.startSessionDraft(firstProject.projectId) }}>新建会话</Button>
         </main>
       )

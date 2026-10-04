@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
+  defaultHostdDataDir,
   hostdRestartArgv,
   isEphemeralHostdDataDir,
   parseHostdCommand,
   resolveLoopbackHostdDataDir,
 } from '../src/local-hostd.ts'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -31,10 +33,36 @@ describe('local hostd restart argv', () => {
     const bin = join(root, 'bin.js')
     await writeFile(bin, '#!/usr/bin/env node\n')
     expect(hostdRestartArgv(
-      'node packages/hostd/lib/bin.js --data-dir /Users/good/.local/state/threadharbor --port 62846',
+      'node packages/hostd/lib/bin.js --data-dir /Users/good/.local/state/threadharbor/test/hostd --port 62846',
       bin,
       62846,
-    )).toEqual([bin, '--host', '127.0.0.1', '--port', '62846', '--data-dir', '/Users/good/.local/state/threadharbor'])
+      '/Users/good/.local/state/threadharbor/test/hostd',
+    )).toEqual([bin, '--host', '127.0.0.1', '--port', '62846', '--data-dir', '/Users/good/.local/state/threadharbor/test/hostd'])
+  })
+
+  it('moves an ephemeral dataDir onto the designed root passed by the caller', async () => {
+    const ephemeral = await mkdtemp(join(tmpdir(), 'threadharbor-hostd-run.'))
+    roots.push(ephemeral)
+    const root = await mkdtemp(join(tmpdir(), 'threadharbor-local-hostd-'))
+    roots.push(root)
+    const bin = join(root, 'bin.js')
+    await writeFile(bin, '#!/usr/bin/env node\n')
+    const designed = join(tmpdir(), `threadharbor-designed-${process.pid}-${Date.now()}`)
+    roots.push(designed)
+    expect(hostdRestartArgv(
+      `node packages/hostd/lib/bin.js --data-dir ${ephemeral} --port 62846`,
+      bin,
+      62846,
+      designed,
+    )).toEqual([bin, '--host', '127.0.0.1', '--port', '62846', '--data-dir', designed])
+  })
+})
+
+describe('designed hostd data root', () => {
+  it('is channel-scoped and never a generated path', () => {
+    expect(defaultHostdDataDir('test')).toBe(join(homedir(), '.local', 'state', 'threadharbor', 'test', 'hostd'))
+    expect(defaultHostdDataDir('stable')).toBe(join(homedir(), '.local', 'state', 'threadharbor', 'stable', 'hostd'))
+    expect(isEphemeralHostdDataDir(defaultHostdDataDir('test'))).toBe(false)
   })
 })
 
@@ -60,8 +88,8 @@ describe('ephemeral hostd dataDir detection', () => {
 
 describe('resolveLoopbackHostdDataDir', () => {
   it('returns a persistent dataDir unchanged', () => {
-    expect(resolveLoopbackHostdDataDir('/Users/good/.local/state/threadharbor-test/hostd'))
-      .toBe('/Users/good/.local/state/threadharbor-test/hostd')
+    expect(resolveLoopbackHostdDataDir('/Users/good/.local/state/threadharbor/test/hostd', { persistentRoot: '/Users/good/.local/state/threadharbor/test/hostd' }))
+      .toBe('/Users/good/.local/state/threadharbor/test/hostd')
   })
 
   it('copies an ephemeral dataDir into the persistent root when one does not exist yet', async () => {
@@ -86,7 +114,10 @@ describe('resolveLoopbackHostdDataDir', () => {
     roots.push(destination)
     await writeFile(join(destination, 'marker'), 'keep\n', { mode: 0o600 })
 
-    expect(resolveLoopbackHostdDataDir(ephemeralRoot, { persistentRoot: destination })).toBe(destination)
+    // A designed root that already exists is never merged or switched to
+    // silently: the running hostd keeps its own root so no session, journal or
+    // secret is stranded, and the operator consolidates by hand.
+    expect(resolveLoopbackHostdDataDir(ephemeralRoot, { persistentRoot: destination })).toBe(ephemeralRoot)
     expect(await readFile(join(destination, 'marker'), 'utf8')).toBe('keep\n')
   })
 })

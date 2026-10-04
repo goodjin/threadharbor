@@ -28,8 +28,8 @@ export function parseHostdCommand(command: string): { readonly port?: number; re
 /**
  * Paths the OS may clear on reboot or sooner. A hostd launched with
  * `--data-dir` under one of these (e.g. a manual `mktemp -d` from a previous
- * developer) would lose `sessions.json`, every hold journal, and the
- * `dsh-sessions/` tree the moment the temp area gets reaped.
+ * developer) would lose `sessions.json` and every hold journal the moment the
+ * temp area gets reaped.
  */
 const EPHEMERAL_DIR_PATTERNS: readonly RegExp[] = [
   /^\/tmp\//,
@@ -37,9 +37,17 @@ const EPHEMERAL_DIR_PATTERNS: readonly RegExp[] = [
   /^\/var\/folders\//,
 ]
 
-/** Return the hostd private state root the binary uses by default. */
-export function defaultHostdDataDir(): string {
-  return join(homedir(), '.local', 'state', 'threadharbor')
+/**
+ * Return the designed private state root for this machine's hostd.
+ *
+ * One root per deployment channel, mirroring the remote layout
+ * (`~/.local/state/threadharbor/<channel>/hostd`) so a local hostd and an SSH
+ * host never share state and switching channels never reuses another channel's
+ * holds. Nothing about the path is generated: `mktemp`-style roots are exactly
+ * what this function exists to replace.
+ */
+export function defaultHostdDataDir(channel: string): string {
+  return join(homedir(), '.local', 'state', 'threadharbor', channel, 'hostd')
 }
 
 /** True when `dataDir` lives under a path the host can clear without notice. */
@@ -51,27 +59,32 @@ export function isEphemeralHostdDataDir(dataDir: string): boolean {
 }
 
 /**
- * Move an ephemeral `--data-dir` onto the persistent default root so the next
- * hostd restart does not get wiped. If the persistent root already exists the
- * call is a no-op aside from logging — overwriting an existing root would risk
- * silently dropping live sessions that another hostd is already writing.
+ * Move an ephemeral `--data-dir` onto the designed root so a hostd launched
+ * against `/tmp` (a manual `mktemp -d`) does not get wiped with the temp area.
+ *
+ * Only an empty destination is populated. If the designed root already exists
+ * — a live hostd is writing it, or a previous generation left it behind —
+ * the current root is kept as-is: merging could hand two hostds the same holds,
+ * and switching would strand this process's sessions, journals and secrets on
+ * the ephemeral path. Consolidation is left to an operator (stop, copy, start),
+ * which the caller's log line states.
  *
  * @param dataDir - the path the running hostd was launched with.
- * @param options.persistentRoot - override the destination, used by tests so
- *   they do not touch the real `~/.local/state/threadharbor` home.
+ * @param options.persistentRoot - designed root to migrate into.
  * @returns the path argv should hand to the next hostd process.
  */
 export function resolveLoopbackHostdDataDir(
   dataDir: string,
-  options: { readonly persistentRoot?: string } = {},
+  options: { readonly persistentRoot: string },
 ): string {
   if (!isEphemeralHostdDataDir(dataDir)) return dataDir
-  const destination = options.persistentRoot ?? defaultHostdDataDir()
+  const destination = options.persistentRoot
   if (existsSync(destination)) {
     process.stderr.write(
-      `threadharbor-hostd: ephemeral dataDir ${dataDir} kept as-is; persistent root ${destination} already exists and was not merged\n`,
+      `threadharbor-hostd: ephemeral dataDir ${dataDir} kept; designed root ${destination} already exists. `
+      + 'Stop hostd, copy the ephemeral root into the designed root (or remove the empty designed root first), then start it again.\n',
     )
-    return destination
+    return dataDir
   }
   mkdirSync(destination, { recursive: true, mode: 0o700 })
   cpSync(dataDir, destination, { recursive: true, verbatimSymlinks: true })
@@ -79,13 +92,18 @@ export function resolveLoopbackHostdDataDir(
   return destination
 }
 
-export function hostdRestartArgv(command: string, artifactBin: string, listenPort: number): string[] {
+export function hostdRestartArgv(
+  command: string,
+  artifactBin: string,
+  listenPort: number,
+  persistentRoot: string,
+): string[] {
   const parsed = parseHostdCommand(command)
   if (parsed === undefined) throw new Error('端口上的进程不是 threadharbor-hostd')
   if (!existsSync(artifactBin)) throw new Error(`缺少 hostd 制品 ${artifactBin}，请先构建 ThreadHarbor`)
   const originalDataDir = parsed.dataDir
   if (originalDataDir === undefined || originalDataDir === '') throw new Error('本机 hostd 没有 --data-dir，无法安全重启')
-  const dataDir = resolveLoopbackHostdDataDir(originalDataDir)
+  const dataDir = resolveLoopbackHostdDataDir(originalDataDir, { persistentRoot })
   return [artifactBin, '--host', '127.0.0.1', '--port', String(parsed.port ?? listenPort), '--data-dir', dataDir]
 }
 
@@ -132,11 +150,15 @@ function processAlive(pid: number): boolean {
 }
 
 /** Replace the loopback hostd listening on `port` with the current artifact. */
-export async function restartLoopbackHostd(port: number, artifactDirectory: string): Promise<void> {
+export async function restartLoopbackHostd(
+  port: number,
+  artifactDirectory: string,
+  persistentRoot: string,
+): Promise<void> {
   const pid = listenerPid(port)
   if (pid === undefined) throw new Error('找不到本机 hostd 进程。请确认它仍在监听后再点升级。')
   const command = processCommand(pid)
-  const argv = hostdRestartArgv(command, join(artifactDirectory, 'bin.js'), port)
+  const argv = hostdRestartArgv(command, join(artifactDirectory, 'bin.js'), port, persistentRoot)
   process.kill(pid, 'SIGTERM')
   const deadline = Date.now() + 8_000
   while (processAlive(pid) && Date.now() < deadline) await wait(50)

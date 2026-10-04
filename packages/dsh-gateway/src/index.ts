@@ -58,7 +58,7 @@ import { applyConfigFrame, configSwitchRequest, withSwitchedValue } from './sess
 import { remoteAgentDomainSpec, remoteAgentLegacyDomainSpec, type RemoteAgentCatalogState } from './spec.ts'
 import { TranscriptStore } from './transcript-store.ts'
 import { SshManager, type SshDeploymentProgress } from './ssh-manager.ts'
-import { restartLoopbackHostd } from './local-hostd.ts'
+import { defaultHostdDataDir, restartLoopbackHostd } from './local-hostd.ts'
 import { WsBroadcaster } from './ws-broadcaster.ts'
 import { HostdConnectionPool } from './hostd-connection-pool.ts'
 
@@ -79,6 +79,9 @@ export interface Config {
   maxRequestBytes: number
   /** Complete hostd HTTP request bound. */
   hostdRequestTimeoutMs: number
+  /** How long a hostd request may wait for a connection before it is rejected
+   *  as undeliverable. Optional; defaults to HOSTD_CONNECT_DEADLINE_MS. */
+  hostdConnectDeadlineMs?: number
   /** Browser journal refresh cadence. */
   pollIntervalMs: number
   /** Ceiling of journal-silence before a `running` turn is concluded as stuck.
@@ -124,6 +127,24 @@ interface NativeChildUpdate {
 }
 
 type TranscriptInput = Omit<RemoteTranscriptEntry, 'sessionId' | 'seq' | 'createdAt'>
+
+/** Placeholder title a session carries between creation and its first message.
+ *  The browser creates the session when the user picks an Agent (so the composer
+ *  can offer that backend's own model catalog before anything is sent), which
+ *  means the first message no longer arrives together with the create. */
+const NEW_SESSION_TITLE = '新会话'
+
+/** Title derived from a first message; mirrors the browser's `promptTitle`. */
+function firstMessageTitle(text: string): string {
+  const firstLine = text.trim().split(/\r?\n/, 1)[0] ?? ''
+  return firstLine.length <= 40 ? firstLine : `${firstLine.slice(0, 39)}…`
+}
+
+/** How many trailing journal frames may hold the settings a backend published
+ *  while a hold was binding: `initialize`, its answer, then the
+ *  `session/new` / `session/resume` / `session/load` answer. Nothing else has
+ *  happened yet at that point, so a handful is always enough. */
+const BIND_TIME_SETTINGS_WINDOW = 8
 
 /** Bound each durability slice so a large recovered journal cannot starve the Web event loop. */
 const MAX_JOURNAL_EVENTS_PER_SYNC = 100
@@ -171,6 +192,24 @@ function trace(stage: string, fields: Record<string, unknown>): void {
   process.stderr.write(`threadharbor-gateway ${stage} ${parts}\n`)
 }
 
+/** One best-effort hostd hold teardown, snapshotted while the session rows
+ *  still exist so the network calls can run after they are deleted. */
+interface HoldRelease {
+  readonly host: RemoteHostView
+  readonly sessionId: ReturnType<typeof RemoteSessionId>
+}
+
+/** Access one per-key serial chain stored in a map as a get/set slot. */
+function mapTailSlot(
+  tails: Map<string, Promise<void>>,
+  key: string,
+): { get(): Promise<void>; set(tail: Promise<void>): void } {
+  return {
+    get: () => tails.get(key) ?? Promise.resolve(),
+    set: (tail) => { tails.set(key, tail) },
+  }
+}
+
 function jsonRecord(value: JsonValue | undefined): Record<string, JsonValue> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : undefined
 }
@@ -187,6 +226,29 @@ function nativeFrameSessionId(frame: JsonValue): string | undefined {
   const record = jsonRecord(frame)
   const params = jsonRecord(record?.['params'])
   return typeof params?.['sessionId'] === 'string' ? params['sessionId'] : undefined
+}
+
+/** The `session/update` body and its `_meta.claudeCode` block. The Claude ACP
+ *  adapter reports subagent activity as tool frames on the parent session,
+ *  tagged with the owning Task tool use instead of a separate native session. */
+function claudeUpdateMeta(frame: JsonValue): {
+  readonly update: Record<string, JsonValue> | undefined
+  readonly claude: Record<string, JsonValue> | undefined
+} {
+  const params = jsonRecord(jsonRecord(frame)?.['params'])
+  const update = jsonRecord(params?.['update'])
+  return { update, claude: jsonRecord(jsonRecord(update?.['_meta'])?.['claudeCode']) }
+}
+
+/** Human title of a Claude Task (subagent) tool call: prefer the raw input
+ *  description; the generic `Task`/`Agent` titles carry no information. */
+function claudeTaskTitle(update: Record<string, JsonValue> | undefined): string | undefined {
+  const rawInput = jsonRecord(update?.['rawInput'])
+  const description = rawInput?.['description']
+  if (typeof description === 'string' && description.trim() !== '') return description
+  const title = update?.['title']
+  if (typeof title === 'string' && title.trim() !== '' && title !== 'Task' && title !== 'Agent') return title
+  return undefined
 }
 
 function nativeChildUpdate(frame: JsonValue): NativeChildUpdate | undefined {
@@ -279,6 +341,74 @@ function latestTurnRemaining(entries: readonly RemoteTranscriptEntry[]): number 
   return entries.length - from
 }
 
+/**
+ * Whether a turn is still in flight: being answered, or parked on a card the
+ * user has not answered yet. `idle` / `stopped` / `failed` are verdicts on a
+ * round that already ended.
+ */
+function inFlightTurn(turnState: RemoteSessionView['turnState']): boolean {
+  return turnState === 'running' || turnState === 'waiting-permission'
+}
+
+/** Drop the request cards a dead channel can no longer answer. */
+function withoutPendingRequests(session: RemoteSessionView): RemoteSessionView {
+  const { pendingRequestIds: _pending, ...rest } = session
+  return rest
+}
+
+/**
+ * A channel that died ends whatever turn was in flight (running, or parked on a
+ * card that can never be answered) as failed, and drops those dead cards. A
+ * round that already has a verdict keeps it — the channel's death is not news
+ * about that round's outcome.
+ */
+function withDeadChannel(session: RemoteSessionView): RemoteSessionView {
+  return {
+    ...withoutPendingRequests(session),
+    turnState: inFlightTurn(session.turnState) ? 'failed' : session.turnState,
+  }
+}
+
+/** Status line naming the repair that cleared a round's failed mark. */
+function failedMarkCleared(action: string): string {
+  return `${action}，上一轮的失败标记已清除。`
+}
+
+/**
+ * Fold one projected fragment's turn state into the state the session will be
+ * stored with.
+ *
+ * A finished round stays finished, because neither kind of late frame is a
+ * real turn ending and no further frame will arrive to correct the mistake:
+ *
+ *  - A `running` fragment after the round reached `idle` — Claude keeps
+ *    streaming background-subagent output after `prompt_complete`. Trusting it
+ *    wedged the session in `running` forever.
+ *  - A `failed` fragment after the round settled (`idle` / `stopped`) — the
+ *    Agent process exiting (exit code, signal, redeploy), or a late error
+ *    report for the same round. Applying it repainted finished conversations
+ *    with "本轮执行失败 / 在当前会话重开" over work that had already answered —
+ *    and, per the settled product rule, a late 「本轮失败」 never rewrites a
+ *    round that already ended.
+ *
+ * A real next round never comes through a journal frame: `session.prompt`
+ * admission sets `running` before any frame for it can exist. A round that is
+ * still in flight (running / waiting-permission) does take `failed` from these
+ * frames — its request really was left unfinished.
+ * @param current - turn state folded so far for this page/session.
+ * @param projected - the fragment's own turn state, if it has one.
+ * @returns the turn state to keep folding with.
+ */
+function foldFragmentTurnState(
+  current: RemoteSessionView['turnState'],
+  projected: RemoteSessionView['turnState'] | undefined,
+): RemoteSessionView['turnState'] {
+  if (projected === undefined) return current
+  if (current === 'idle' && projected === 'running') return current
+  if (!inFlightTurn(current) && projected === 'failed') return current
+  return projected
+}
+
 function requiredName(record: Record<string, JsonValue>, key: string): string {
   const value = stringField(record, key).trim()
   if (value === '') throw new Error(`${key} must not be blank`)
@@ -340,7 +470,7 @@ function errorMessage(error: unknown): string {
 
 function inventoryFailure(error: unknown): string {
   const message = errorMessage(error)
-  if (/fetch failed|Failed to fetch|ECONNREFUSED|ECONNRESET/i.test(message)) {
+  if (/fetch failed|Failed to fetch|ECONNREFUSED|ECONNRESET|not delivered/i.test(message)) {
     return '无法连接到 hostd。请确认远端服务已启动后再试。'
   }
   if (/timed out|timeout|TimeoutError|AbortError/i.test(message)) {
@@ -363,6 +493,50 @@ function holdUnreachable(error: unknown): boolean {
 }
 
 /**
+ * The link to hostd itself failed — it was too slow, went away mid-call, or was
+ * not reachable at all. The host never answered anything about the session.
+ *
+ * That says nothing about the session: its record is intact, its transcript is
+ * readable, and it works again as soon as the host responds. A 45-second budget
+ * over an SSH tunnel is easy to blow by resuming a large session, and calling
+ * that "disconnected" is how a healthy session ends up wearing a red badge.
+ *
+ * Deliberately narrow: when the message names a hold socket / named pipe, hostd
+ * answered to say the process behind it is gone, and when it says the record is
+ * unknown the record really is missing. Those are answers about the session and
+ * mean it needs attention. Silence — or a refused link — does not.
+ */
+function hostNeverAnswered(error: unknown): boolean {
+  const message = errorMessage(error)
+  if (/timed out|timeout|not delivered|connection closed|socket hang up|ECONNRESET|terminated|aborted/i.test(message)) {
+    return true
+  }
+  // A link-level failure with no hold socket named: hostd itself was
+  // unreachable. Bare `ENOENT` is not one of these — hostd reports missing
+  // working directories and missing socket paths the same way, so it stays
+  // "answered" and keeps the sharper diagnosis.
+  return /ECONNREFUSED|EPIPE|ENOTSOCK|fetch failed/i.test(message) && !/\.sock|named pipe/i.test(message)
+}
+
+/**
+ * The link to hostd is demonstrably broken: the request never left the
+ * gateway, or the transport died under it. Narrower than
+ * `hostNeverAnswered` on purpose — a request that was written to an open
+ * socket and simply went unanswered is *not* proof the host is down (a big
+ * resume can outlive the budget), so it does not flip the host offline.
+ * The explicit `hostd connection closed` rejection comes from the pool
+ * being torn down (host removed, gateway shutdown), not from a broken
+ * link, and must not mark anything offline either.
+ */
+function hostLinkBroken(error: unknown): boolean {
+  const message = errorMessage(error)
+  if (/hostd connection closed/i.test(message)) return false
+  return /not delivered|ECONNREFUSED|ECONNRESET|EPIPE|ENOTSOCK|fetch failed|socket hang up|terminated|aborted/i
+    .test(message)
+    && !/\.sock|named pipe/i.test(message)
+}
+
+/**
  * hostd answered but has no record for this session id: its data directory
  * was cleared or replaced (a dev hostd under /tmp after a reboot, a redeploy
  * that moved --data-dir). The hold can never be re-attached; it has to be
@@ -371,6 +545,16 @@ function holdUnreachable(error: unknown): boolean {
 function isMissingHostdSession(error: unknown): boolean {
   return /unknown hostd session/i.test(errorMessage(error))
 }
+
+/** hostd could not reopen the Agent's own session, so the context has to be
+ *  rebuilt from the transcript instead. */
+function isUnrecoverableAgentState(error: unknown): boolean {
+  return /could not reopen session|already owned by an active write handle/i.test(errorMessage(error))
+}
+
+/** Longest conversation the gateway will offer as recovered context, matching
+ *  hostd's own bound so the two never disagree about what fits. */
+const CONTEXT_SEED_MAX_CHARS = 80_000
 
 const MISSING_HOSTD_SESSION_HINT = '远程主机上已没有该会话的记录（hostd 数据目录可能已被清空或更换）。'
   + '可以点「在当前会话重开」，系统会重新创建 Agent 进程，对话记录会保留，但先前的模型上下文不会恢复。'
@@ -391,6 +575,17 @@ function holdSessionFailure(error: unknown): string {
     return '远程会话进程已停止。可以点「在当前会话重开」，系统会在当前会话上重启 Agent，对话记录会保留。'
   }
   return displayError(error)
+}
+
+/** How the record should say a turn was cut off: the Agent process is gone, or
+ *  the host merely could not be reached. The two need different actions — one
+ *  needs the reopen button, the other just a retry — so they must not share one
+ *  sentence that blames the Agent for a network blip. */
+function turnCutOffText(error: unknown): string {
+  const message = errorMessage(error)
+  const agentGone = /process is not running|did not start/i.test(message)
+    || (/ECONNREFUSED|ENOENT|ENOTSOCK|EPIPE|ECONNRESET/i.test(message) && /\.sock|named pipe/i.test(message))
+  return agentGone ? '远程 Agent 进程已停止' : '远程主机暂时联系不上，本轮已中断'
 }
 
 function operationFailureDetail(kind: RemoteOperationView['kind'], error: unknown): string {
@@ -427,6 +622,7 @@ export class RemoteAgentGateway extends Service {
   static Config: z<Config> = z.object({
     maxRequestBytes: z.natural().min(1).required(),
     hostdRequestTimeoutMs: z.natural().min(1).required(),
+    hostdConnectDeadlineMs: z.natural().min(1),
     pollIntervalMs: z.natural().min(1).required(),
     runningTurnIdleTimeoutMs: z.natural().min(1),
     maxTranscriptEntriesPerSession: z.natural().min(1).required(),
@@ -441,8 +637,20 @@ export class RemoteAgentGateway extends Service {
   private tables?: Tables
   private global?: DomainGlobal<RemoteAgentCatalogState>
   private transcriptStore?: TranscriptStore
-  /** Serial chain for quick browser RPC mutations (add/rename/hide/prompt…). */
-  private operationTail: Promise<void> = Promise.resolve()
+  /** Serial chain for quick local catalog mutations (rename/hide/delete…).
+   *  Network I/O must never run inside this chain: one dead tunnel would park
+   *  every unrelated browser RPC behind its request timeout. */
+  private catalogTail: Promise<void> = Promise.resolve()
+  /** Serial chains keyed by session id for interactive session RPCs
+   *  (prompt/attach/restart/cancel/permission/configure). Sessions on
+   *  different hosts — and different sessions on one host — never wait on
+   *  each other's network I/O; operations on the same session keep their
+   *  order. */
+  private readonly sessionTails = new Map<string, Promise<void>>()
+  /** Serial chains keyed by host scope (host id, or `target:port:user` for
+   *  SSH deploys before a host row exists) for host-level RPCs. One host's
+   *  stuck tunnel never blocks another host's management traffic. */
+  private readonly hostTails = new Map<string, Promise<void>>()
   /** Serial chain for background operation work (SSH deploys, agent installs).
    *  Kept separate so a long SSH step (budget up to sshInstallTimeoutMs) never
    *  parks unrelated browser RPCs — and a slow hostd RPC never delays a queued
@@ -477,6 +685,9 @@ export class RemoteAgentGateway extends Service {
     })
     this.hostdConnections = new HostdConnectionPool(this.sshManager, {
       requestTimeoutMs: config.hostdRequestTimeoutMs,
+      ...(config.hostdConnectDeadlineMs === undefined
+        ? {}
+        : { connectDeadlineMs: config.hostdConnectDeadlineMs }),
     })
     ctx.effect(() => () => { this.sshManager.close() }, 'threadharbor.sshClose')
     ctx.effect(() => () => { void this.hostdConnections.closeAll() }, 'remoteAgent.hostdConnectionsClose')
@@ -488,6 +699,9 @@ export class RemoteAgentGateway extends Service {
   setHostdSocketFactory(factory: (url: string) => import('ws').WebSocket): void {
     this.hostdConnections = new HostdConnectionPool(this.sshManager, {
       requestTimeoutMs: this.config.hostdRequestTimeoutMs,
+      ...(this.config.hostdConnectDeadlineMs === undefined
+        ? {}
+        : { connectDeadlineMs: this.config.hostdConnectDeadlineMs }),
       socketFactory: factory,
     })
   }
@@ -534,6 +748,33 @@ export class RemoteAgentGateway extends Service {
       if (session?.turnState === 'running' || session?.turnState === 'waiting-permission') {
         this.ensureFollowedSync(sessionId)
       }
+    }
+    await this.demotePersistedChannels()
+  }
+
+  /**
+   * No channel survived this process, so nothing on disk may claim otherwise.
+   *
+   * The session view persists `open`, and a gateway that trusted it after a
+   * restart believed sessions were still attached to a live Agent that had
+   * exited with it. The user opened a session, saw a complete transcript and a
+   * normal row, sent a message, and got "unknown session" with nothing on disk
+   * to explain it. Demoting the state costs one attach per session and buys an
+   * honest starting point: the first real round trip decides.
+   *
+   * The state it lands on is `lost` rather than `connecting` on purpose: that
+   * is the state the follow path already knows how to repair, so opening the
+   * session re-attaches it. Leaving it `open` was what let the client believe
+   * no attach was needed, and `connecting` would have shown a build that
+   * nothing is ever going to finish.
+   */
+  private async demotePersistedChannels(): Promise<void> {
+    const tables = this.requireTables()
+    for (const sessionId of this.requireGlobal().get().sessionIds) {
+      const session = tables.sessions.get(sessionId)
+      if (session === undefined) continue
+      if (session.channelState !== 'open' && session.channelState !== 'lost') continue
+      await tables.sessions.put(sessionId, { ...session, channelState: 'lost' })
     }
   }
 
@@ -604,28 +845,42 @@ export class RemoteAgentGateway extends Service {
     switch (request.method) {
       case 'state':
         return this.state() as unknown as JsonValue
-      case 'host.add':
-        return await this.enqueue(() => this.addHost(request.params)) as unknown as JsonValue
+      case 'host.add': {
+        // Local record write stays on the catalog chain; the inventory fetch
+        // runs outside it so a dead endpoint cannot park unrelated RPCs.
+        const catalogued = await this.enqueue(() => this.addHostRecord(request.params))
+        return await this.refreshHostInventory(catalogued) as unknown as JsonValue
+      }
       case 'host.update':
-        return await this.enqueue(() => this.updateHost(request.params)) as unknown as JsonValue
+        return await this.enqueueHostScope(stringField(request.params, 'hostId'), () => this.updateHost(request.params)) as unknown as JsonValue
       case 'host.hide':
         return await this.enqueue(() => this.hideHost(request.params)) as unknown as JsonValue
       case 'host.unhide':
         return await this.enqueue(() => this.unhideHost(request.params)) as unknown as JsonValue
-      case 'host.delete':
-        return await this.enqueue(() => this.deleteHost(request.params)) as unknown as JsonValue
+      case 'host.delete': {
+        // Rows go first on the catalog chain; the best-effort hostd hold
+        // releases run after it, off every shared chain.
+        const result = await this.enqueue(() => this.deleteHost(request.params))
+        await this.releaseHostdHolds(result.releases)
+        return result.host as unknown as JsonValue
+      }
       case 'hidden.list':
         return this.hiddenItems() as unknown as JsonValue
       case 'host.ssh.inspect':
         return await this.sshManager.inspect(this.sshManager.parseInspectionConfig(request.params['ssh'])) as unknown as JsonValue
-      case 'host.ssh.deploy':
-        return await this.enqueue(() => this.deploySshHost(request.params)) as unknown as JsonValue
+      case 'host.ssh.deploy': {
+        // Scope by SSH target (the host row may not exist yet): deploys to one
+        // box serialize with each other, never with other hosts or sessions.
+        const ssh = this.sshManager.parseApprovedConfig(request.params['ssh'])
+        const scope = `${ssh.target}:${ssh.port}:${ssh.user}`
+        return await this.enqueueHostScope(scope, () => this.deploySshHost(request.params)) as unknown as JsonValue
+      }
       case 'host.ssh.add':
         return await this.enqueue(() => this.addSshHost(request.params)) as unknown as JsonValue
       case 'host.ssh.redeploy':
         return this.redeploySshHost(request.params) as unknown as JsonValue
       case 'host.upgrade':
-        return await this.enqueue(() => this.upgradeHost(request.params)) as unknown as JsonValue
+        return await this.enqueueHostScope(stringField(request.params, 'hostId'), () => this.upgradeHost(request.params)) as unknown as JsonValue
       case 'operation.start':
         return this.startOperation(request.params) as unknown as JsonValue
       case 'operation.list':
@@ -645,49 +900,57 @@ export class RemoteAgentGateway extends Service {
       case 'grok.serve.restart':
         return await this.proxyHostOperation(request.method, request.params)
       case 'inventory':
-        return await this.enqueue(() => this.refreshInventory(request.params)) as unknown as JsonValue
+        // The host row update is an atomic read-modify-write, so concurrent
+        // refreshes (or a stuck one) never block other RPCs.
+        return await this.refreshInventory(request.params) as unknown as JsonValue
       case 'project.create':
-        return await this.enqueue(() => this.createProject(request.params)) as unknown as JsonValue
+        return await this.createProject(request.params) as unknown as JsonValue
       case 'project.rename':
         return await this.enqueue(() => this.renameProject(request.params)) as unknown as JsonValue
       case 'project.hide':
         return await this.enqueue(() => this.hideProject(request.params)) as unknown as JsonValue
       case 'project.unhide':
         return await this.enqueue(() => this.unhideProject(request.params)) as unknown as JsonValue
-      case 'project.delete':
-        return await this.enqueue(() => this.deleteProject(request.params)) as unknown as JsonValue
+      case 'project.delete': {
+        const result = await this.enqueue(() => this.deleteProject(request.params))
+        await this.releaseHostdHolds(result.releases)
+        return result.project as unknown as JsonValue
+      }
       case 'session.start':
         return await this.startSessionAndWait(request.params) as unknown as JsonValue
       case 'session.attach':
-        return await this.enqueue(() => this.attachSession(request.params, { recreateMissing: true })) as unknown as JsonValue
+        return await this.enqueueSession(stringField(request.params, 'sessionId'), () => this.attachSession(request.params, { recreateMissing: true })) as unknown as JsonValue
       case 'session.restart':
-        return await this.enqueue(() => this.restartSession(request.params)) as unknown as JsonValue
+        return await this.enqueueSession(stringField(request.params, 'sessionId'), () => this.restartSession(request.params)) as unknown as JsonValue
       case 'session.rename':
         return await this.enqueue(() => this.renameSession(request.params)) as unknown as JsonValue
       case 'session.archive':
         return await this.enqueue(() => this.archiveSession(request.params)) as unknown as JsonValue
       case 'session.unarchive':
         return await this.enqueue(() => this.unarchiveSession(request.params)) as unknown as JsonValue
-      case 'session.delete':
-        return await this.enqueue(() => this.deleteSession(request.params)) as unknown as JsonValue
+      case 'session.delete': {
+        const result = await this.enqueue(() => this.deleteSession(request.params))
+        await this.releaseHostdHolds(result.releases)
+        return result.root as unknown as JsonValue
+      }
       case 'session.prompt':
-        return await this.enqueue(() => this.prompt(request.params))
+        return await this.enqueueSession(stringField(request.params, 'sessionId'), () => this.prompt(request.params))
       case 'session.cancel':
-        return await this.enqueue(() => this.cancel(request.params))
+        return await this.enqueueSession(stringField(request.params, 'sessionId'), () => this.cancel(request.params))
       case 'session.permission':
-        return await this.enqueue(() => this.permission(request.params))
+        return await this.enqueueSession(stringField(request.params, 'sessionId'), () => this.permission(request.params))
       case 'session.configure':
-        return await this.enqueue(() => this.configure(request.params))
+        return await this.enqueueSession(stringField(request.params, 'sessionId'), () => this.configure(request.params))
       case 'transcript.read':
         return this.readTranscript(request.params) as unknown as JsonValue
       case 'events.read':
-        return await this.enqueue(() => this.syncEvents(request.params)) as unknown as JsonValue
+        return await this.syncEvents(request.params) as unknown as JsonValue
       case 'session.follow':
         return this.handleFollow(request.params)
       case 'session.unfollow':
         return this.handleUnfollow(request.params)
       case 'session.catchup':
-        return await this.enqueue(() => this.syncEvents(request.params)) as unknown as JsonValue
+        return await this.syncEvents(request.params) as unknown as JsonValue
       case 'browser.hello':
         return this.handleHello(request.params)
       case 'fs.list':
@@ -725,24 +988,26 @@ export class RemoteAgentGateway extends Service {
     }
   }
 
-  private async addHost(params: Record<string, JsonValue>): Promise<RemoteHostView> {
+  /** Catalogue a loopback host record — local state only, no network I/O, so
+   *  it is safe on the catalog chain. The caller refreshes inventory outside
+   *  that chain: a dead endpoint must not park unrelated RPCs. */
+  private async addHostRecord(params: Record<string, JsonValue>): Promise<RemoteHostView> {
     const endpoint = loopbackEndpoint(stringField(params, 'endpoint'))
     const title = requiredName(params, 'title')
     const tables = this.requireTables()
     const duplicate = [...tables.hosts.entries()].find(([, host]) => host.endpoint === endpoint)
     if (duplicate !== undefined) {
       const now = new Date().toISOString()
-      const renamed = await tables.hosts.update(duplicate[0], (current) => ({
+      return await tables.hosts.update(duplicate[0], (current) => ({
         ...current, title, updatedAt: now,
       }))
-      return await this.refreshHostInventory(renamed)
     }
     const hostId = RemoteHostId(randomUUID())
     const now = new Date().toISOString()
     const host: RemoteHostView = { hostId, title, endpoint, createdAt: now, updatedAt: now }
     await tables.hosts.put(hostId, host)
     await this.mutateGlobal((state) => ({ ...state, hostIds: [...state.hostIds, hostId] }))
-    return await this.refreshHostInventory(host)
+    return host
   }
 
   private async updateHost(
@@ -803,7 +1068,7 @@ export class RemoteAgentGateway extends Service {
     const url = new URL(host.endpoint)
     const port = url.port === '' ? 80 : Number(url.port)
     if (!Number.isSafeInteger(port) || port <= 0) throw new Error('本机 hostd 地址没有有效端口')
-    await restartLoopbackHostd(port, hostdArtifactDirectory())
+    await restartLoopbackHostd(port, hostdArtifactDirectory(), defaultHostdDataDir(this.config.deploymentChannel))
     return await this.refreshHostInventory(host)
   }
 
@@ -1135,29 +1400,47 @@ export class RemoteAgentGateway extends Service {
       // Atomic read-modify-write: background operations and browser RPCs can
       // refresh the same host concurrently, so never overwrite a record built
       // from a stale snapshot (that would drop a concurrent rename/hide).
-      return await this.requireTables().hosts.update(host.hostId, (current) => {
+      const updated = await this.requireTables().hosts.update(host.hostId, (current) => {
         const { inventoryError: _staleError, ...rest } = current
         return { ...rest, inventory, updatedAt: now }
       })
+      // The host row the sidebar renders changes with every refresh; push it
+      // so an offline→online recovery (or the reverse) is visible without a
+      // manual reload.
+      this.wsBroadcaster.broadcast({ type: 'host.changed', host: updated })
+      return updated
     } catch (error) {
       // Do NOT release the SSH tunnel here: the tunnel is a shared resource the
       // persistent hostd connection re-resolves on every request. Killing it on
       // one failed inventory only forces the next request to open a fresh port,
       // which churns tunnels and strands every later RPC on the dead one.
       const now = new Date().toISOString()
-      return await this.requireTables().hosts.update(host.hostId, (current) => {
+      const updated = await this.requireTables().hosts.update(host.hostId, (current) => {
         const { inventory: _staleInventory, ...rest } = current
         return { ...rest, inventoryError: inventoryFailure(error), updatedAt: now }
       })
+      this.wsBroadcaster.broadcast({ type: 'host.changed', host: updated })
+      return updated
     }
   }
 
   private async createProject(params: Record<string, JsonValue>): Promise<RemoteProjectView> {
     const host = this.requireHost(RemoteHostId(stringField(params, 'hostId')))
+    // Directory listing over the network BEFORE entering the catalog chain:
+    // a slow or dead host must not park unrelated catalog RPCs.
     const listing = await this.callHostd(host, 'fs.list', { path: stringField(params, 'cwd') }) as unknown as RemoteDirectoryListing
-    const cwd = listing.path
+    return await this.enqueue(() => this.commitCreateProject(params, host.hostId, listing.path))
+  }
+
+  /** Register the project row — local state only; runs on the catalog chain so
+   *  the duplicate check and the index append are one atomic step. */
+  private async commitCreateProject(
+    params: Record<string, JsonValue>,
+    hostId: ReturnType<typeof RemoteHostId>,
+    cwd: string,
+  ): Promise<RemoteProjectView> {
     const tables = this.requireTables()
-    const duplicate = [...tables.projects.entries()].find(([, project]) => project.hostId === host.hostId && project.cwd === cwd)
+    const duplicate = [...tables.projects.entries()].find(([, project]) => project.hostId === hostId && project.cwd === cwd)
     const now = new Date().toISOString()
     if (duplicate !== undefined) {
       const [duplicateId, existing] = duplicate
@@ -1171,7 +1454,7 @@ export class RemoteAgentGateway extends Service {
     }
     const projectId = RemoteProjectId(randomUUID())
     const project: RemoteProjectView = {
-      projectId, hostId: host.hostId, title: stringField(params, 'title'), cwd, createdAt: now, updatedAt: now,
+      projectId, hostId, title: stringField(params, 'title'), cwd, createdAt: now, updatedAt: now,
     }
     await tables.projects.put(projectId, project)
     await this.mutateGlobal((state) => ({ ...state, projectIds: [...state.projectIds, projectId] }))
@@ -1250,7 +1533,7 @@ export class RemoteAgentGateway extends Service {
   }
 
   /** Permanently delete a catalogued host and every project + session that lives on it. */
-  private async deleteHost(params: Record<string, JsonValue>): Promise<RemoteHostView> {
+  private async deleteHost(params: Record<string, JsonValue>): Promise<{ host: RemoteHostView; releases: readonly HoldRelease[] }> {
     const hostId = RemoteHostId(stringField(params, 'hostId'))
     const current = this.requireHost(hostId)
     const tables = this.requireTables()
@@ -1262,7 +1545,7 @@ export class RemoteAgentGateway extends Service {
       return session !== undefined && projectIds.includes(session.projectId)
     })
     if (current.ssh !== undefined) this.sshManager.releaseTunnel(current.ssh)
-    await this.deleteSessionRecords(sessionIds)
+    const releases = await this.deleteSessionRecords(sessionIds)
     for (const id of projectIds) await tables.projects.delete(id)
     await tables.hosts.delete(hostId)
     // Recompute the index from the live state inside the serialized global
@@ -1274,7 +1557,7 @@ export class RemoteAgentGateway extends Service {
       projectIds: live.projectIds.filter(id => !projectIds.includes(id)),
       sessionIds: live.sessionIds.filter(id => !sessionIds.includes(id)),
     }))
-    return current
+    return { host: current, releases }
   }
 
   /** Mark a catalogued project as hidden so the browser omits it from the normal projection. */
@@ -1304,37 +1587,39 @@ export class RemoteAgentGateway extends Service {
   }
 
   /** Permanently delete a catalogued project and every session that lives on it. */
-  private async deleteProject(params: Record<string, JsonValue>): Promise<RemoteProjectView> {
+  private async deleteProject(params: Record<string, JsonValue>): Promise<{ project: RemoteProjectView; releases: readonly HoldRelease[] }> {
     const projectId = RemoteProjectId(stringField(params, 'projectId'))
     const current = this.requireProject(projectId)
     const tables = this.requireTables()
     const global = this.requireGlobal()
     const state = global.get()
     const sessionIds = state.sessionIds.filter(id => tables.sessions.get(id)?.projectId === projectId)
-    await this.deleteSessionRecords(sessionIds)
+    const releases = await this.deleteSessionRecords(sessionIds)
     await tables.projects.delete(projectId)
     await this.mutateGlobal((live) => ({
       ...live,
       projectIds: live.projectIds.filter(id => id !== projectId),
       sessionIds: live.sessionIds.filter(id => !sessionIds.includes(id)),
     }))
-    return current
+    return { project: current, releases }
   }
 
-  /** Persist the connecting row under the catalog lock, then wait for the hold
-   *  outside that lock so other RPCs are not blocked on agent spawn.
+  /** Persist the connecting row, then wait for the hold without holding any
+   *  shared chain, so other RPCs are not blocked on agent spawn.
    *
    *  When the request carries a first message (`text`/`clientId`/`requestId`),
    *  the row is returned immediately — the message is already queued and the
    *  gateway drives hold startup plus auto-delivery in the background, feeding
    *  the browser fine-grained `session.progress` events. Plain row-only
    *  creation keeps the previous blocking semantics so callers can rely on a
-   *  bound row before issuing prompts. */
+   *  bound row before issuing prompts. The row write and the index append each
+   *  take their own lock (record put / global chain), so no serialization
+   *  around the network steps is needed. */
   private async startSessionAndWait(params: Record<string, JsonValue>): Promise<RemoteSessionView> {
     const stageStartedAt = performance.now()
     const hasFirstMessage = params['text'] !== undefined
       && params['clientId'] !== undefined && params['requestId'] !== undefined
-    const started = await this.enqueue(() => this.startSession(params))
+    const started = await this.startSession(params)
     trace('session.start', { stage: 'catalog', elapsedMs: Number((performance.now() - stageStartedAt).toFixed(2)) })
     if (hasFirstMessage) {
       // Fast return: the connecting row is already broadcast; hold startup and
@@ -1383,10 +1668,16 @@ export class RemoteAgentGateway extends Service {
     const host = cached.inventoryError === undefined && cached.inventory?.healthy === true
       ? cached
       : await this.refreshHostInventory(cached)
+    // An unreachable hostd must fail the create here, with the reason the
+    // refresh already recorded — falling through to the backend check below
+    // would dress a dead host up as "backend is not installed", which sends
+    // the user off to reinstall an Agent that is perfectly fine.
+    if (host.inventoryError !== undefined) {
+      throw new Error(`主机 ${host.title} 当前不可达：${host.inventoryError}`)
+    }
     const available = host.inventory?.backends.find(entry => entry.backend === backend)
     if (available === undefined || !available.installed) throw new Error(`backend ${backend} is not installed on host ${host.title}`)
     if (!available.sessionCapable) throw new Error(`backend ${backend} has no configured ThreadHarbor session adapter`)
-    if (backend === 'dsh' && !available.authenticated) throw new Error('DSH 需要先在主机设置中配置 API Key')
     if (!isRemoteBackendSessionReady(available)) throw new Error(`backend ${backend} is not authenticated on host ${host.title}`)
     const sessionId = RemoteSessionId(randomUUID())
     const now = new Date().toISOString()
@@ -1472,14 +1763,19 @@ export class RemoteAgentGateway extends Service {
         progress(stage as RemoteSessionStartStage, message)
       }) as unknown as RemoteSessionAttachResult
       ready = this.withAttachment(initial, attached)
+      // Fold the settings published during binding before the row is announced
+      // (and before any first message is delivered), so the session the browser
+      // receives already carries the backend's own model catalog.
+      await tables.sessions.put(sessionId, ready)
+      await this.captureBindTimeSettings(ready, attached.latestSeq)
+      ready = this.requireSession(sessionId)
       // Do not broadcast the intermediate idle/open row when a first message
       // is queued: `deliverPrompt` immediately flips it to running and that
       // single broadcast is what the browser should observe.
-      await tables.sessions.put(sessionId, ready)
       if (firstMessage !== undefined) {
         delivering = true
         await this.deliverPrompt(ready, firstMessage.clientId, firstMessage.requestId, firstMessage.text)
-        progress('prompt-delivered', '消息已提交，等待 Agent 回复')
+        progress('prompt-delivered', '请求已送达远程 Agent，等待模型响应')
         return
       }
       this.broadcastSessionView(ready)
@@ -1493,11 +1789,30 @@ export class RemoteAgentGateway extends Service {
       }
       const failed: RemoteSessionView = {
         ...initial,
-        channelState: 'lost',
+        // Same boundary as `markPromptUndelivered`: the host never answering is
+        // a link failure — `reconnecting`, self-heals on the next successful
+        // call. Only hostd's own bad news (backend missing, auth refused,
+        // agent boot failure) means the create genuinely failed: `lost`.
+        channelState: hostNeverAnswered(error) ? 'reconnecting' as const : 'lost' as const,
         turnState: 'failed',
         updatedAt: new Date().toISOString(),
       }
       await tables.sessions.put(sessionId, failed)
+      // The failure banner tells the user "原因见上方记录"; a create that never
+      // bound leaves no record above unless we write one. State what actually
+      // happened — an unreachable host reads very differently from a rejected
+      // backend, and neither should be a bare English timeout string.
+      const failureId = RemoteTranscriptId(`start:${sessionId}`)
+      if (this.requireTranscriptStore().get(failureId) === undefined) {
+        await this.appendTranscript(sessionId, {
+          transcriptId: failureId,
+          role: 'system',
+          kind: 'status',
+          text: `会话创建失败：${hostNeverAnswered(error)
+            ? '无法连接到主机上的 hostd（请求未送达）。主机恢复后可重新创建会话。'
+            : displayError(error)}`,
+        })
+      }
       this.broadcastSessionView(failed)
       this.wsBroadcaster.broadcast({
         type: 'operation.progress',
@@ -1519,50 +1834,85 @@ export class RemoteAgentGateway extends Service {
     options: { readonly recreateMissing?: boolean } = {},
   ): Promise<RemoteSessionView> {
     const session = this.requireSession(RemoteSessionId(stringField(params, 'sessionId')))
+    // Projected subagent sessions have no hold of their own; attaching would
+    // only mark them lost. Their state rides the parent's journal sync.
+    if (session.parentSessionId !== undefined && session.binding === undefined) return session
     const project = this.requireProject(session.projectId)
     const host = this.requireHost(project.hostId)
     const { attached, recreated } = await this.attachOrRecreateHold(host, project, session, 'session.attach', options)
-    if (!recreated && session.binding !== undefined && session.binding.generation !== attached.generation) {
-      const lost: RemoteSessionView = {
-        ...session,
-        channelState: 'lost',
-        turnState: session.turnState === 'running' ? 'failed' : session.turnState,
-        binding: { ...session.binding, state: 'lost' },
-        updatedAt: new Date().toISOString(),
+    // Derive and write the row inside the per-session journal gate, from the
+    // latest row: journal projection and failure markers for this session can
+    // run concurrently now, and a write derived from the stale entry snapshot
+    // would bury theirs.
+    const outcome = await this.withSessionJournalApply(session.sessionId, async () => {
+      const latest = this.requireTables().sessions.get(session.sessionId) ?? session
+      if (!recreated && latest.binding !== undefined && latest.binding.generation !== attached.generation) {
+        // The hold was replaced by a newer instance: the session record is fine,
+        // this binding is simply not the one hostd is serving now. That is
+        // `superseded` — a replaced generation — not `lost` (the record is gone).
+        const superseded: RemoteSessionView = {
+          ...withDeadChannel(latest),
+          channelState: 'lost',
+          binding: { ...latest.binding, state: 'superseded' },
+          updatedAt: new Date().toISOString(),
+        }
+        await this.requireTables().sessions.put(session.sessionId, superseded)
+        return { superseded: true as const, view: superseded, reopened: false, clearsFailedMark: false }
       }
-      await this.requireTables().sessions.put(session.sessionId, lost)
+      const reopened = recreated || attached.reopened === true
+      // A live in-flight turn interrupted by a reopen is reported as failed (the
+      // native context was replaced) so the user is not left waiting on a turn
+      // that can never complete. A terminal failed turn, though, is a stale
+      // marker of the outage that this successful attach just repaired: leaving
+      // it set would make the conversation render a persistent
+      // "本轮执行失败 / 在当前会话重开" banner even though the channel is open.
+      // Failed is the round's repairable verdict — clear it here, and say so in
+      // the record so the user can see which action cleared it. `stopped` is not
+      // a repair signal but the round's own outcome; a reconnect must not rewrite
+      // it (it clears at the next prompt instead).
+      const interrupted = reopened && inFlightTurn(latest.turnState)
+      const clearsFailedMark = !interrupted && latest.turnState === 'failed'
+      const base: RemoteSessionView = interrupted
+        ? withDeadChannel(latest)
+        : clearsFailedMark
+          ? { ...withoutPendingRequests(latest), turnState: 'idle' }
+          : latest
+      const ready = this.withAttachment(base, attached, reopened)
+      await this.requireTables().sessions.put(session.sessionId, ready)
+      this.broadcastSessionView(ready)
+      if (reopened) {
+        await this.appendTranscript(session.sessionId, {
+          transcriptId: RemoteTranscriptId(`reopen:${session.sessionId}:${attached.generation}:${attached.latestSeq}`),
+          role: 'system',
+          kind: 'status',
+          text: recreated
+            ? RECREATED_HOLD_STATUS
+            : '远程 Agent 已在当前会话上重新打开。先前的模型上下文可能未恢复，可以继续发送新请求。',
+        })
+        await this.markChildrenLost(session.sessionId)
+      }
+      if (clearsFailedMark) {
+        // Name the repair action so the record shows what cleared the failure.
+        await this.appendTranscript(session.sessionId, {
+          transcriptId: RemoteTranscriptId(`mark-cleared:${session.sessionId}:${attached.generation}:${attached.latestSeq}`),
+          role: 'system',
+          kind: 'status',
+          text: failedMarkCleared(reopened ? '重新打开远程 Agent' : '重新连接会话'),
+        })
+      }
+      return { superseded: false as const, view: ready, reopened, clearsFailedMark }
+    })
+    if (outcome.superseded) {
       throw new Error('remote hold generation changed; any in-flight prompt outcome is unknown and was not resent')
     }
-    const reopened = recreated || attached.reopened === true
-    // A live in-flight turn interrupted by a reopen is reported as failed (the
-    // native context was replaced) so the user is not left waiting on a turn
-    // that can never complete. A terminal failed/stopped turn, however, is a
-    // stale marker of the outage that this successful attach just repaired:
-    // leaving it set would make the conversation render a persistent
-    // "本轮执行失败 / 在当前会话重开" banner even though the channel is open,
-    // so the reopen looks like it "flashed and reverted". Clear it to idle.
-    const interrupted = reopened && (session.turnState === 'running' || session.turnState === 'waiting-permission')
-    const staleTerminal = session.turnState === 'failed' || session.turnState === 'stopped'
-    const base: RemoteSessionView = interrupted
-      ? { ...session, turnState: 'failed' }
-      : staleTerminal
-        ? { ...session, turnState: 'idle' }
-        : session
-    const ready = this.withAttachment(base, attached, reopened)
-    await this.requireTables().sessions.put(session.sessionId, ready)
-    this.broadcastSessionView(ready)
-    if (reopened) {
-      await this.appendTranscript(session.sessionId, {
-        transcriptId: RemoteTranscriptId(`reopen:${session.sessionId}:${attached.generation}:${attached.latestSeq}`),
-        role: 'system',
-        kind: 'status',
-        text: recreated
-          ? RECREATED_HOLD_STATUS
-          : '远程 Agent 已在当前会话上重新打开。先前的模型上下文可能未恢复，可以继续发送新请求。',
-      })
-      await this.markChildrenLost(session.sessionId)
+    // A reopened hold reverts to the backend's default model, and a session
+    // created before this capture existed has no catalog at all; read the
+    // binding window back so the composer shows what the backend actually
+    // offers. Network I/O — kept outside the journal gate.
+    if (outcome.reopened || outcome.view.configOptions === undefined) {
+      await this.captureBindTimeSettings(outcome.view, attached.latestSeq)
     }
-    return ready
+    return outcome.view
   }
 
   /**
@@ -1585,8 +1935,27 @@ export class RemoteAgentGateway extends Service {
       const attached = await this.callHostd(host, method, params) as unknown as RemoteSessionAttachResult
       return { attached, recreated: false }
     } catch (error) {
+      // The Agent could not reopen its own session. The conversation did not
+      // disappear with it: this gateway projected every turn into its transcript
+      // store, so offer that text as the seed for a fresh Agent session. Without
+      // it the user is left with a choice between a blank agent and a dead
+      // session; with it, the model can read what was already discussed.
+      if (isUnrecoverableAgentState(error)) {
+        const seed = await this.conversationText(session.sessionId)
+        if (seed !== undefined) {
+          const seeded = await this.callHostd(host, method, {
+            ...params,
+            context: { transcript: seed.text, ...(seed.truncated ? { truncated: true } : {}) },
+          }) as unknown as RemoteSessionAttachResult
+          process.stderr.write(
+            `threadharbor-gateway: rebuilt context from the transcript for session=${session.sessionId} `
+            + `chars=${seed.text.length}${seed.truncated ? ' (truncated)' : ''}\n`,
+          )
+          return { attached: seeded, recreated: false }
+        }
+      }
       if (options.recreateMissing !== true || !isMissingHostdSession(error)) {
-        await this.markSessionLost(session)
+        await this.markChannelBroken(session, error)
         throw new Error(holdSessionFailure(error))
       }
       process.stderr.write(
@@ -1600,19 +1969,84 @@ export class RemoteAgentGateway extends Service {
         }) as unknown as RemoteSessionAttachResult
         return { attached, recreated: true }
       } catch (recreateError) {
-        await this.markSessionLost(session)
+        await this.markChannelBroken(session, recreateError)
         throw new Error(holdSessionFailure(recreateError))
       }
     }
   }
 
+  /**
+   * The prior conversation as plain text, oldest first, or `undefined` when
+   * there is nothing worth rebuilding from.
+   *
+   *  Only what the model actually said and was told is kept. Reasoning, usage
+   *  counters and tool chatter are dropped: they cost context budget and teach
+   *  the model nothing it needs to continue. Tool calls are kept as one line
+   *  each, so the model can see what was done without re-reading every result.
+   */
+  private async conversationText(
+    sessionId: RemoteSessionId,
+  ): Promise<{ text: string; truncated: boolean } | undefined> {
+    const entries = this.transcriptStore?.session(sessionId) ?? []
+    const lines: string[] = []
+    for (const entry of entries) {
+      if (entry.kind === 'message' && (entry.role === 'user' || entry.role === 'assistant')) {
+        const text = entry.text.trim()
+        if (text === '') continue
+        lines.push(`${entry.role === 'user' ? '用户' : '助手'}：${text}`)
+        continue
+      }
+      if (entry.kind === 'tool-call' && entry.text.trim() !== '') {
+        lines.push(`工具：${entry.text.trim()}`)
+      }
+    }
+    if (lines.length === 0) return undefined
+    let text = lines.join('\n\n')
+    let truncated = false
+    if (text.length > CONTEXT_SEED_MAX_CHARS) {
+      // Keep the tail: the recent turns are what "continue" means.
+      text = text.slice(text.length - CONTEXT_SEED_MAX_CHARS)
+      truncated = true
+    }
+    return { text, truncated }
+  }
+
+  /**
+   * Record that the channel could not be established.
+   *
+   * A host that was merely slow or briefly gone leaves the session intact, so
+   * that is `reconnecting` and it clears itself on the next successful call.
+   * Only a host that answered and reported the session missing is `lost`, and
+   * only that deserves to be shown to the user as a red error.
+   */
+  private async markChannelBroken(session: RemoteSessionView, error: unknown): Promise<void> {
+    if (!hostNeverAnswered(error)) {
+      await this.markSessionLost(session)
+      return
+    }
+    // Fresh read inside the journal gate: this can race a projection write now
+    // that dispatches are scoped per session instead of globally serialized.
+    await this.withSessionJournalApply(session.sessionId, async () => {
+      const current = this.requireTables().sessions.get(session.sessionId) ?? session
+      const next: RemoteSessionView = {
+        ...current, channelState: 'reconnecting', updatedAt: new Date().toISOString(),
+      }
+      await this.requireTables().sessions.put(session.sessionId, next)
+      this.broadcastSessionView(next)
+    })
+  }
+
   private async markSessionLost(session: RemoteSessionView): Promise<void> {
-    await this.requireTables().sessions.put(session.sessionId, {
-      ...session,
-      channelState: 'lost',
-      turnState: session.turnState === 'running' ? 'failed' : session.turnState,
-      ...(session.binding === undefined ? {} : { binding: { ...session.binding, state: 'lost' } }),
-      updatedAt: new Date().toISOString(),
+    await this.withSessionJournalApply(session.sessionId, async () => {
+      const current = this.requireTables().sessions.get(session.sessionId) ?? session
+      const lost: RemoteSessionView = {
+        ...withDeadChannel(current),
+        channelState: 'lost',
+        ...(current.binding === undefined ? {} : { binding: { ...current.binding, state: 'lost' } }),
+        updatedAt: new Date().toISOString(),
+      }
+      await this.requireTables().sessions.put(session.sessionId, lost)
+      this.broadcastSessionView(lost)
     })
   }
 
@@ -1625,38 +2059,66 @@ export class RemoteAgentGateway extends Service {
    */
   private async restartSession(params: Record<string, JsonValue>): Promise<RemoteSessionView> {
     const session = this.requireSession(RemoteSessionId(stringField(params, 'sessionId')))
+    // Virtual subagent sessions have nothing to restart; mirror attachSession.
+    if (session.parentSessionId !== undefined && session.binding === undefined) return session
     const project = this.requireProject(session.projectId)
     const host = this.requireHost(project.hostId)
     const { attached, recreated } = await this.attachOrRecreateHold(
       host, project, session, 'session.restart', { recreateMissing: true },
     )
-    if (!recreated && session.binding !== undefined && session.binding.generation !== attached.generation) {
-      const lost: RemoteSessionView = {
-        ...session,
-        channelState: 'lost',
-        turnState: session.turnState === 'running' ? 'failed' : session.turnState,
-        binding: { ...session.binding, state: 'lost' },
-        updatedAt: new Date().toISOString(),
+    // Same gate discipline as `attachSession`: derive and write the row from
+    // the latest record inside the per-session journal gate.
+    const outcome = await this.withSessionJournalApply(session.sessionId, async () => {
+      const latest = this.requireTables().sessions.get(session.sessionId) ?? session
+      if (!recreated && latest.binding !== undefined && latest.binding.generation !== attached.generation) {
+        // Same as `attachSession`: a replaced generation is `superseded`, not
+        // `lost` — the record is fine, this binding is simply no longer the one.
+        const superseded: RemoteSessionView = {
+          ...withDeadChannel(latest),
+          channelState: 'lost',
+          binding: { ...latest.binding, state: 'superseded' },
+          updatedAt: new Date().toISOString(),
+        }
+        await this.requireTables().sessions.put(session.sessionId, superseded)
+        return { superseded: true as const, view: superseded, reopened: false }
       }
-      await this.requireTables().sessions.put(session.sessionId, lost)
+      const reopened = recreated || attached.reopened === true
+      // This is the user's explicit repair action, so it resets an abandoned
+      // in-flight turn and clears the failed mark (naming the action in the
+      // record below). A user-stopped round keeps its own verdict, same as on
+      // attach: the restart repairs the channel, not the round's history.
+      const clearsFailedMark = latest.turnState === 'failed'
+      const base: RemoteSessionView = latest.turnState === 'stopped'
+        ? withoutPendingRequests(latest)
+        : { ...withoutPendingRequests(latest), turnState: 'idle' }
+      const ready = this.withAttachment(base, attached, reopened)
+      await this.requireTables().sessions.put(session.sessionId, ready)
+      this.broadcastSessionView(ready)
+      await this.appendTranscript(session.sessionId, {
+        transcriptId: RemoteTranscriptId(`force-restart:${session.sessionId}:${attached.generation}:${attached.latestSeq}`),
+        role: 'system',
+        kind: 'status',
+        text: recreated
+          ? RECREATED_HOLD_STATUS
+          : 'Agent 长时间没有响应，已结束其进程并在当前会话重新打开。'
+            + (reopened ? '先前的模型上下文可能未恢复。' : '')
+            + '对话记录已保留，可以继续发送新请求。',
+      })
+      if (clearsFailedMark) {
+        await this.appendTranscript(session.sessionId, {
+          transcriptId: RemoteTranscriptId(`mark-cleared-restart:${session.sessionId}:${attached.generation}:${attached.latestSeq}`),
+          role: 'system',
+          kind: 'status',
+          text: failedMarkCleared('结束进程并在当前会话重开'),
+        })
+      }
+      if (reopened) await this.markChildrenLost(session.sessionId)
+      return { superseded: false as const, view: ready, reopened }
+    })
+    if (outcome.superseded) {
       throw new Error('remote hold generation changed; any in-flight prompt outcome is unknown and was not resent')
     }
-    const reopened = recreated || attached.reopened === true
-    const ready = this.withAttachment({ ...session, turnState: 'idle' }, attached, reopened)
-    await this.requireTables().sessions.put(session.sessionId, ready)
-    this.broadcastSessionView(ready)
-    await this.appendTranscript(session.sessionId, {
-      transcriptId: RemoteTranscriptId(`force-restart:${session.sessionId}:${attached.generation}:${attached.latestSeq}`),
-      role: 'system',
-      kind: 'status',
-      text: recreated
-        ? RECREATED_HOLD_STATUS
-        : 'Agent 长时间没有响应，已结束其进程并在当前会话重新打开。'
-          + (reopened ? '先前的模型上下文可能未恢复。' : '')
-          + '对话记录已保留，可以继续发送新请求。',
-    })
-    if (reopened) await this.markChildrenLost(session.sessionId)
-    return ready
+    return outcome.view
   }
 
   private async renameSession(params: Record<string, JsonValue>): Promise<RemoteSessionView> {
@@ -1697,16 +2159,16 @@ export class RemoteAgentGateway extends Service {
     return restored
   }
 
-  private async deleteSession(params: Record<string, JsonValue>): Promise<RemoteSessionView> {
+  private async deleteSession(params: Record<string, JsonValue>): Promise<{ root: RemoteSessionView; releases: readonly HoldRelease[] }> {
     const sessionId = RemoteSessionId(stringField(params, 'sessionId'))
     const root = this.requireSession(sessionId)
     const ids = [...this.sessionSubtree(sessionId)]
-    await this.deleteSessionRecords(ids)
+    const releases = await this.deleteSessionRecords(ids)
     await this.mutateGlobal((state) => ({
       ...state,
       sessionIds: state.sessionIds.filter(id => !ids.includes(id)),
     }))
-    return root
+    return { root, releases }
   }
 
   private sessionSubtree(sessionId: ReturnType<typeof RemoteSessionId>): Set<ReturnType<typeof RemoteSessionId>> {
@@ -1777,12 +2239,60 @@ export class RemoteAgentGateway extends Service {
     }
   }
 
-  private async deleteSessionRecords(ids: readonly ReturnType<typeof RemoteSessionId>[]): Promise<void> {
+  /** Delete the gateway-local rows and return which remote holds to release.
+   *  The release snapshot is captured while the rows still exist; the network
+   *  teardown runs after, outside every shared chain. */
+  private async deleteSessionRecords(ids: readonly ReturnType<typeof RemoteSessionId>[]): Promise<readonly HoldRelease[]> {
+    const releases = this.collectHoldReleases(ids)
     const tables = this.requireTables()
     for (const id of ids) {
       const session = tables.sessions.get(id)
       if (session !== undefined) await this.requireTranscriptStore().deleteSession(session.sessionId)
       await tables.sessions.delete(id)
+    }
+    return releases
+  }
+
+  /** Snapshot which holds must be released for these sessions while the rows
+   *  still exist — pure local reads, safe inside any chain. */
+  private collectHoldReleases(ids: readonly ReturnType<typeof RemoteSessionId>[]): HoldRelease[] {
+    const seen = new Set<string>()
+    const releases: HoldRelease[] = []
+    for (const id of ids) {
+      const session = this.requireTables().sessions.get(id)
+      if (session === undefined) continue
+      const project = this.requireTables().projects.get(session.projectId)
+      if (project === undefined) continue
+      const host = this.requireTables().hosts.get(project.hostId)
+      if (host === undefined) continue
+      const key = `${host.hostId}:${session.sessionId}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      releases.push({ host, sessionId: session.sessionId })
+    }
+    return releases
+  }
+
+  /**
+   * Tell hostd to tear down the detached hold behind each session. Deleting a
+   * session (or its project/host) used to touch only gateway-local rows, so the
+   * remote `hold-worker` and its agent child outlived the session forever and
+   * every session ever opened kept burning memory. Best-effort per session:
+   * one unreachable host must not fail the user's delete, and a hold that is
+   * already gone is not an error. Runs outside every shared chain — a dead
+   * tunnel here delays only this delete RPC, never unrelated traffic.
+   */
+  private async releaseHostdHolds(
+    releases: readonly HoldRelease[],
+  ): Promise<void> {
+    for (const { host, sessionId } of releases) {
+      try {
+        await this.callHostd(host, 'session.release', { sessionId })
+      } catch (error) {
+        process.stderr.write(
+          `threadharbor-gateway: releasing hold failed session=${sessionId}: ${String(error)}\n`,
+        )
+      }
     }
   }
 
@@ -1849,9 +2359,8 @@ export class RemoteAgentGateway extends Service {
     for (const [id, child] of tables.sessions.entries()) {
       if (child.parentSessionId !== parentSessionId || child.channelState === 'lost') continue
       const lost: RemoteSessionView = {
-        ...child,
+        ...withDeadChannel(child),
         channelState: 'lost',
-        turnState: child.turnState === 'running' || child.turnState === 'waiting-permission' ? 'failed' : child.turnState,
         ...(child.binding === undefined ? {} : { binding: { ...child.binding, state: 'lost' } }),
         updatedAt: now,
       }
@@ -1948,12 +2457,18 @@ export class RemoteAgentGateway extends Service {
   ): Promise<JsonValue> {
     const current = this.requireTables().sessions.get(session.sessionId) ?? session
     const nativeSessionId = current.binding?.nativeSessionId ?? current.sessionId
-    const frame = current.backend === 'dsh'
-      ? { jsonrpc: '2.0', id: requestId, method: 'session/prompt', params: { sessionId: nativeSessionId, contentBlocks: [{ type: 'text', text }] } }
-      : { jsonrpc: '2.0', id: requestId, method: 'session/prompt', params: { sessionId: nativeSessionId, prompt: [{ type: 'text', text }] } }
+    // Every backend now takes the ACP prompt shape (`prompt`), including the
+    // DeepSeek Harness ACP profile.
+    const frame = {
+      jsonrpc: '2.0', id: requestId, method: 'session/prompt',
+      params: { sessionId: nativeSessionId, prompt: [{ type: 'text', text }] },
+    }
+    const titled: RemoteSessionView = current.title === NEW_SESSION_TITLE
+      ? { ...current, title: firstMessageTitle(text) }
+      : current
     const now = new Date().toISOString()
     const running: RemoteSessionView = {
-      ...current, turnState: 'running', channelState: 'open', updatedAt: now, lastPromptAt: now,
+      ...titled, turnState: 'running', channelState: 'open', updatedAt: now, lastPromptAt: now,
     }
     await this.requireTables().sessions.put(session.sessionId, running)
     this.broadcastSessionView(running)
@@ -1973,27 +2488,41 @@ export class RemoteAgentGateway extends Service {
     requestId: string,
     error: unknown,
   ): Promise<void> {
-    const current = this.requireTables().sessions.get(session.sessionId) ?? session
-    const holdDead = holdUnreachable(error) || isMissingHostdSession(error)
-    const failed: RemoteSessionView = {
-      ...current,
-      turnState: 'failed',
-      channelState: holdDead ? 'lost' : current.channelState,
-      ...(holdDead && current.binding !== undefined ? { binding: { ...current.binding, state: 'lost' } } : {}),
-      updatedAt: new Date().toISOString(),
-    }
-    await this.requireTables().sessions.put(session.sessionId, failed)
-    this.broadcastSessionView(failed)
-    const failureId = RemoteTranscriptId(`delivery:${session.sessionId}:${clientId}:${requestId}`)
-    if (this.requireTranscriptStore().get(failureId) === undefined) {
-      await this.appendTranscript(session.sessionId, {
-        transcriptId: failureId,
-        role: 'system',
-        kind: 'status',
-        text: `消息提交失败：${holdDead ? holdSessionFailure(error) : displayError(error)}`,
-        requestId,
-      })
-    }
+    // Join the journal-apply gate like `concludeTurn` does. A projection that is
+    // mid-flight holds a stale row in its hands; its write would land after
+    // this marker and bury it, leaving the turn stuck at running (「正在生成回复」)
+    // for a prompt that demonstrably never reached the Agent. Inside the gate
+    // the marker is the last word until the next prompt.
+    await this.withSessionJournalApply(session.sessionId, async () => {
+      const current = this.requireTables().sessions.get(session.sessionId) ?? session
+      const holdDead = holdUnreachable(error) || isMissingHostdSession(error)
+      // The same boundary as `markChannelBroken`: a link failure (the host never
+      // answered) is `reconnecting` and self-heals on the next successful call;
+      // only hostd's own bad news — the record is missing or the hold process is
+      // gone — marks the session `lost` and invalidates the binding.
+      const channelState = hostNeverAnswered(error) ? 'reconnecting' as const
+        : holdDead ? 'lost' as const
+          : current.channelState
+      const failed: RemoteSessionView = {
+        ...withoutPendingRequests(current),
+        turnState: 'failed',
+        channelState,
+        ...(channelState === 'lost' && current.binding !== undefined ? { binding: { ...current.binding, state: 'lost' } } : {}),
+        updatedAt: new Date().toISOString(),
+      }
+      await this.requireTables().sessions.put(session.sessionId, failed)
+      this.broadcastSessionView(failed)
+      const failureId = RemoteTranscriptId(`delivery:${session.sessionId}:${clientId}:${requestId}`)
+      if (this.requireTranscriptStore().get(failureId) === undefined) {
+        await this.appendTranscript(session.sessionId, {
+          transcriptId: failureId,
+          role: 'system',
+          kind: 'status',
+          text: `消息提交失败：${holdDead ? holdSessionFailure(error) : displayError(error)}`,
+          requestId,
+        })
+      }
+    })
   }
 
   private async cancel(params: Record<string, JsonValue>): Promise<JsonValue> {
@@ -2179,15 +2708,18 @@ export class RemoteAgentGateway extends Service {
       await this.applyJournalPage(session, binding, page)
     } catch (error) {
       if (holdUnreachable(error) && (session.turnState === 'running' || session.turnState === 'waiting-permission')) {
-        await this.concludeTurn(session, 'failed', '远程 Agent 进程已停止', 'reconnecting')
+        await this.concludeTurn(session, 'failed', turnCutOffText(error), 'reconnecting')
         process.stderr.write(
           `threadharbor-gateway: turn failed session=${session.sessionId} reason=hold-unreachable ${errorMessage(error)}\n`,
         )
         return this.state()
       }
-      await this.requireTables().sessions.put(session.sessionId, {
-        ...session, channelState: 'reconnecting', updatedAt: new Date().toISOString(),
-      })
+      // Atomic read-modify-write from the live row: syncs run unqueued now, so
+      // a plain put derived from the entry snapshot could bury a concurrent
+      // attach or projection write for this session.
+      await this.requireTables().sessions.update(session.sessionId, (current) => ({
+        ...current, channelState: 'reconnecting', updatedAt: new Date().toISOString(),
+      }))
       throw error
     }
     return this.state()
@@ -2225,18 +2757,63 @@ export class RemoteAgentGateway extends Service {
     })
   }
 
+  /**
+   * Fold the settings a backend advertised while its hold was binding.
+   *
+   * `session/new` (or `session/resume` / `session/load`) answers carry the
+   * backend's `configOptions` — the model catalog and reasoning levels the
+   * composer renders. Those answers are journaled *before* the binding exists,
+   * and the ordinary sync only reads frames after `binding.lastSeq`, so a
+   * backend that never re-announces them (the Harness ACP profile publishes
+   * them only at handshake) would leave the selector empty or on a built-in
+   * guess. Read just that window back and fold settings only: the transcript
+   * still belongs to the normal sync.
+   *
+   * @param session - session view right after its binding was (re)established.
+   * @param latestSeq - journal head the binding reported.
+   */
+  private async captureBindTimeSettings(session: RemoteSessionView, latestSeq: number): Promise<void> {
+    const binding = session.binding
+    if (binding === undefined) return
+    let page: RemoteJournalPage
+    try {
+      page = await this.callSessionHostd(session, 'events.read', {
+        sessionId: session.sessionId,
+        generation: binding.generation,
+        afterSeq: Math.max(0, latestSeq - BIND_TIME_SETTINGS_WINDOW),
+      }) as unknown as RemoteJournalPage
+    } catch {
+      return // The first follow sync still folds the window on its own pass.
+    }
+    if (page.generation !== binding.generation) return
+    let configOptions = session.configOptions
+    for (const event of page.events) {
+      if (event.seq > latestSeq) break
+      configOptions = applyConfigFrame(configOptions, event.frame)
+    }
+    if (configOptions === undefined || configOptions === session.configOptions) return
+    const current = this.requireTables().sessions.get(session.sessionId)
+    if (current === undefined || current.binding?.generation !== binding.generation) return
+    const next: RemoteSessionView = { ...current, configOptions, updatedAt: new Date().toISOString() }
+    await this.requireTables().sessions.put(session.sessionId, next)
+    this.broadcastSessionView(next)
+  }
+
   private async projectJournalPage(
     session: RemoteSessionView,
     binding: NonNullable<RemoteSessionView['binding']>,
     page: RemoteJournalPage,
   ): Promise<number> {
     if (page.generation !== binding.generation) {
-      const lost: RemoteSessionView = {
-        ...session, channelState: 'lost', turnState: session.turnState === 'running' ? 'failed' : session.turnState,
-        binding: { ...binding, state: 'lost' }, updatedAt: new Date().toISOString(),
+      // The hold was replaced by a newer instance: this binding is `superseded`
+      // — a replaced generation — not `lost` (the record is gone). The channel
+      // still needs a repair action, so the channel reads `lost` either way.
+      const superseded: RemoteSessionView = {
+        ...withDeadChannel(session), channelState: 'lost',
+        binding: { ...binding, state: 'superseded' }, updatedAt: new Date().toISOString(),
       }
-      await this.requireTables().sessions.put(session.sessionId, lost)
-      this.broadcastSessionView(lost)
+      await this.requireTables().sessions.put(session.sessionId, superseded)
+      this.broadcastSessionView(superseded)
       throw new Error('remote hold generation changed; in-flight outcome is unknown')
     }
     const transcript: TranscriptInput[] = []
@@ -2251,6 +2828,15 @@ export class RemoteAgentGateway extends Service {
     // subagent still reporting — must not flip the turn back to `running` and
     // bury the unanswered card.
     const pendingRequests = new Set(session.pendingRequestIds ?? [])
+    // Claude subagent activity routed to its child session: fragments buffered
+    // per owning Task tool use, plus titles seen on the Task frames themselves.
+    const childBuffers = new Map<string, { readonly childSessionId: ReturnType<typeof RemoteSessionId>; readonly inputs: TranscriptInput[] }>()
+    const childTitles = new Map<string, string>()
+    let roundEnded = false
+    // Whether the parent's round is still in flight as far as this page has
+    // seen. Child rows only flip to `running` while it is: subagent output that
+    // arrives after the parent's round ended must not revive a settled child.
+    let roundOpen = inFlightTurn(session.turnState)
     const events = page.events
       .filter(event => event.seq > binding.lastSeq)
       .slice(0, MAX_JOURNAL_EVENTS_PER_SYNC)
@@ -2259,9 +2845,53 @@ export class RemoteAgentGateway extends Service {
     let configOptions = session.configOptions
     for (const event of events) {
       const child = nativeChildUpdate(event.frame)
-      if (child !== undefined) await this.upsertNativeChild(session, child)
+      if (child !== undefined) await this.upsertNativeChild(session, child, roundOpen)
       configOptions = applyConfigFrame(configOptions, event.frame)
       this.captureGatewayRpcResponse(event.frame)
+      const { update: frameUpdate, claude } = claudeUpdateMeta(event.frame)
+      const parentToolUseId = typeof claude?.['parentToolUseId'] === 'string' && claude['parentToolUseId'] !== ''
+        ? claude['parentToolUseId']
+        : undefined
+      const taskToolCallId = (claude?.['toolName'] === 'Task' || claude?.['toolName'] === 'Agent')
+        && typeof claude?.['toolCallId'] === 'string' && claude['toolCallId'] !== ''
+        ? claude['toolCallId']
+        : undefined
+      if (taskToolCallId !== undefined) {
+        const title = claudeTaskTitle(frameUpdate)
+        if (title !== undefined) childTitles.set(taskToolCallId, title)
+      }
+      if (parentToolUseId !== undefined) {
+        // Subagent tool activity: keep it out of the parent's transcript (it
+        // would otherwise split the streaming 正文 mid-sentence) and append it
+        // to the owning child session's own transcript instead. Routed even
+        // for a suppressed round: this is the subagent's own record.
+        let buffer = childBuffers.get(parentToolUseId)
+        if (buffer === undefined) {
+          const child = await this.ensureClaudeChildSession(session, parentToolUseId, childTitles.get(parentToolUseId), roundOpen)
+          buffer = { childSessionId: child.sessionId, inputs: [] }
+          childBuffers.set(parentToolUseId, buffer)
+        }
+        const fragments = projectNativeFrame(session.backend, event.frame)
+        for (const [fragmentIndex, fragment] of fragments.entries()) {
+          const previous = buffer.inputs.at(-1)
+          if (fragment.role === 'assistant' && previous?.role === 'assistant' && previous.kind === fragment.kind) {
+            buffer.inputs[buffer.inputs.length - 1] = { ...previous, text: `${previous.text}${fragment.text}` }
+            continue
+          }
+          buffer.inputs.push({
+            transcriptId: RemoteTranscriptId(`native:${buffer.childSessionId}:${page.generation}:${event.seq}:${fragmentIndex}`),
+            role: fragment.role,
+            kind: fragment.kind,
+            text: fragment.text,
+            // Child transcripts keep every native frame — they are the only
+            // record of what the subagent actually did. The parent's size
+            // rule (retainsNativeFrame) does not apply here; the volume is
+            // bounded by the same per-session rotation as any transcript.
+            nativeFrame: event.frame,
+          })
+        }
+        continue
+      }
       if (suppressNativeTranscript) continue
       const targetSessionId = nativeFrameSessionId(event.frame)
       const nativeSessionId = binding.nativeSessionId ?? session.sessionId
@@ -2276,6 +2906,10 @@ export class RemoteAgentGateway extends Service {
       const runningUsage = reading === undefined ? pending : mergeUsage(pending, reading)
       if (runningUsage !== undefined) this.pendingRunUsage.set(sessionKey, runningUsage)
       const terminal = isRoundTerminalFrame(session.backend, event.frame)
+      if (terminal) {
+        roundEnded = true
+        roundOpen = false
+      }
       const fragments = projectNativeFrame(session.backend, event.frame)
       let terminalFragmentIndex = -1
       if (terminal) {
@@ -2304,17 +2938,7 @@ export class RemoteAgentGateway extends Service {
             ...(fragmentIndex === terminalFragmentIndex && stampUsage !== undefined ? { usage: stampUsage } : {}),
           })
         }
-        // A finished round stays finished: Claude keeps streaming
-        // session/update frames after prompt_complete — typically a
-        // background subagent still reporting — and every such fragment
-        // projects `running`, but no second end-of-round frame will ever
-        // arrive for that round. Trusting them wedged sessions in `running`
-        // forever. The content above still lands; a real next round always
-        // opens through prompt admission, which sets `running` before any
-        // journal frame can exist.
-        if (!(fragment.turnState === 'running' && turnState === 'idle') && fragment.turnState !== undefined) {
-          turnState = fragment.turnState
-        }
+        turnState = foldFragmentTurnState(turnState, fragment.turnState)
         if (fragment.role === 'permission' && fragment.requestId !== undefined) {
           pendingRequests.add(fragment.requestId)
         } else if (fragment.turnState === 'idle' || fragment.turnState === 'failed') {
@@ -2324,11 +2948,13 @@ export class RemoteAgentGateway extends Service {
     }
     if (pendingRequests.size > 0 && turnState === 'running') turnState = 'waiting-permission'
     await this.appendTranscriptBatch(session.sessionId, transcript)
+    await this.flushChildTranscripts(session, childBuffers, roundEnded, roundOpen)
     const processedThrough = events.at(-1)?.seq ?? binding.lastSeq
     const latest = this.requireTables().sessions.get(session.sessionId) ?? session
-    if (latest.turnState === 'stopped' && turnState !== 'failed') {
-      // User-initiated stop is a durable marker until the next prompt.
-      // A later native end_turn must not rewrite it back to idle/running.
+    if (latest.turnState === 'stopped') {
+      // User-initiated stop is the round's verdict until the next prompt. No
+      // later frame rewrites it — a late end_turn must not turn it back to
+      // idle, and a late 「本轮失败」 must not turn it into failed either.
       turnState = 'stopped'
     } else if (latest.turnState === 'failed'
       && (turnState === 'running' || turnState === 'waiting-permission')) {
@@ -2342,8 +2968,13 @@ export class RemoteAgentGateway extends Service {
     const pendingChanged = pendingRequestIds.join('\u0000') !== (latest.pendingRequestIds ?? []).join('\u0000')
     const updated: RemoteSessionView = {
       ...latestWithoutPending,
-      channelState: latest.channelState === 'connecting' || latest.channelState === 'open'
-        ? 'open'
+      // Projected content is not proof that the live channel is back: the
+      // journal is hostd's record on disk and stays readable while the Agent
+      // channel is down. So red (`lost`) and yellow (`reconnecting`) only clear
+      // on a call that actually touched the channel — attach, restart, prompt —
+      // never on a projection. `connecting` is an admission state, not a red:
+      // the first sync completes it.
+      channelState: latest.channelState === 'connecting' || latest.channelState === 'open' ? 'open'
         : latest.channelState,
       turnState,
       binding: { ...binding, lastSeq: processedThrough },
@@ -2380,9 +3011,19 @@ export class RemoteAgentGateway extends Service {
     })
   }
 
-  private async upsertNativeChild(parent: RemoteSessionView, update: NativeChildUpdate): Promise<void> {
+  private async upsertNativeChild(
+    parent: RemoteSessionView,
+    update: NativeChildUpdate,
+    roundOpen: boolean,
+  ): Promise<void> {
     const parentNativeSessionId = parent.binding?.nativeSessionId ?? parent.sessionId
     if (update.parentNativeSessionId !== undefined && update.parentNativeSessionId !== parentNativeSessionId) return
+    // A settled child is only reopened by activity that belongs to a round
+    // still in flight; late subagent reports do not revive it. The child's own
+    // end-of-task report still settles it either way.
+    const turnState = update.finished
+      ? update.failed ? 'failed' : 'idle'
+      : roundOpen ? 'running' : undefined
     const tables = this.requireTables()
     const existing = [...tables.sessions.entries()].find(([, candidate]) =>
       candidate.projectId === parent.projectId && candidate.binding?.nativeSessionId === update.nativeSessionId)
@@ -2393,7 +3034,7 @@ export class RemoteAgentGateway extends Service {
         ...child,
         title: child.title === '子任务' ? update.title : child.title,
         channelState: 'open',
-        turnState: update.finished ? update.failed ? 'failed' : 'idle' : 'running',
+        turnState: turnState ?? child.turnState,
         updatedAt: new Date().toISOString(),
       })
       return
@@ -2414,7 +3055,7 @@ export class RemoteAgentGateway extends Service {
       title: update.title,
       backend: parent.backend,
       channelState: 'open',
-      turnState: update.finished ? update.failed ? 'failed' : 'idle' : 'running',
+      turnState: turnState ?? 'idle',
       binding: {
         holdId: attached.holdId,
         nativeSessionId: update.nativeSessionId,
@@ -2427,6 +3068,86 @@ export class RemoteAgentGateway extends Service {
     }
     await tables.sessions.put(sessionId, child)
     await this.mutateGlobal((state) => ({ ...state, sessionIds: [...state.sessionIds, sessionId] }))
+  }
+
+  /** Create or find the virtual child session owning one Claude Task tool
+   *  use. Virtual children carry no hold binding: they are pure projections
+   *  of the parent's journal, so attach, prompt and restart refuse them and
+   *  the browser renders them as read-only tree nodes under the parent. */
+  private async ensureClaudeChildSession(
+    parent: RemoteSessionView,
+    nativeChildKey: string,
+    title: string | undefined,
+    roundOpen: boolean,
+  ): Promise<RemoteSessionView> {
+    const tables = this.requireTables()
+    const existing = [...tables.sessions.entries()].find(([, candidate]) =>
+      candidate.parentSessionId === parent.sessionId && candidate.nativeChildKey === nativeChildKey)
+    if (existing !== undefined) {
+      const [id, child] = existing
+      if (title === undefined || child.title !== '子任务') return child
+      const renamed = { ...child, title, updatedAt: new Date().toISOString() }
+      await tables.sessions.put(id, renamed)
+      this.broadcastSessionView(renamed)
+      return renamed
+    }
+    const sessionId = RemoteSessionId(randomUUID())
+    const now = new Date().toISOString()
+    const child: RemoteSessionView = {
+      sessionId,
+      projectId: parent.projectId,
+      parentSessionId: parent.sessionId,
+      title: title ?? '子任务',
+      backend: parent.backend,
+      channelState: 'open',
+      turnState: roundOpen ? 'running' : 'idle',
+      nativeChildKey,
+      createdAt: now,
+      updatedAt: now,
+    }
+    await tables.sessions.put(sessionId, child)
+    await this.mutateGlobal((state) => ({ ...state, sessionIds: [...state.sessionIds, sessionId] }))
+    this.broadcastSessionView(child)
+    return child
+  }
+
+  /** Persist buffered subagent fragments onto their child sessions and keep
+   *  the child lifecycle honest: fresh activity re-opens a settled child only
+   *  while the parent's round is still in flight, and the end of the parent's
+   *  round settles the ones still running. */
+  private async flushChildTranscripts(
+    parent: RemoteSessionView,
+    buffers: ReadonlyMap<string, { readonly childSessionId: ReturnType<typeof RemoteSessionId>; readonly inputs: TranscriptInput[] }>,
+    roundEnded: boolean,
+    roundOpen: boolean,
+  ): Promise<void> {
+    const tables = this.requireTables()
+    const now = new Date().toISOString()
+    for (const buffer of buffers.values()) {
+      if (buffer.inputs.length === 0) continue
+      await this.appendTranscriptBatch(buffer.childSessionId, buffer.inputs)
+      if (!roundOpen) continue
+      const current = tables.sessions.get(buffer.childSessionId)
+      if (current === undefined || (current.turnState === 'running' && current.channelState === 'open')) continue
+      const running: RemoteSessionView = { ...current, channelState: 'open', turnState: 'running', updatedAt: now }
+      await tables.sessions.put(current.sessionId, running)
+      this.broadcastSessionView(running)
+    }
+    if (roundEnded) await this.settleVirtualChildren(parent)
+  }
+
+  /** The end of a round settles every virtual child still running under it:
+   *  they have no round of their own to end. */
+  private async settleVirtualChildren(parent: RemoteSessionView): Promise<void> {
+    const tables = this.requireTables()
+    const now = new Date().toISOString()
+    for (const [id, candidate] of tables.sessions.entries()) {
+      if (candidate.parentSessionId !== parent.sessionId || candidate.nativeChildKey === undefined) continue
+      if (candidate.turnState !== 'running') continue
+      const settled: RemoteSessionView = { ...candidate, turnState: 'idle', updatedAt: now }
+      await tables.sessions.put(id, settled)
+      this.broadcastSessionView(settled)
+    }
   }
 
   private async concludeTurn(
@@ -2453,6 +3174,10 @@ export class RemoteAgentGateway extends Service {
           transcriptId, role: 'system', kind: 'status', text,
         })
       }
+      // Whatever ended this round — user stop, watchdog, dead channel — also
+      // ends the virtual children still running under it. They have no round
+      // of their own to close them.
+      await this.settleVirtualChildren(next)
     })
   }
 
@@ -2533,9 +3258,17 @@ export class RemoteAgentGateway extends Service {
     const store = this.requireTranscriptStore()
     const novel = inputs.filter(input => store.get(input.transcriptId) === undefined)
     if (novel.length === 0) return []
-    const global = this.requireGlobal()
-    const state = global.get()
-    const firstSeq = state.nextTranscriptSeq[sessionId] ?? 0
+    // Claim the seq window atomically on the global chain: with scoped
+    // operation chains, appends for different sessions can overlap in flight,
+    // and a lost increment here would hand out duplicate seq numbers inside
+    // one transcript.
+    const firstSeq = await this.mutateGlobalValue((state) => {
+      const base = state.nextTranscriptSeq[sessionId] ?? 0
+      return {
+        state: { ...state, nextTranscriptSeq: { ...state.nextTranscriptSeq, [sessionId]: base + novel.length } },
+        value: base,
+      }
+    })
     const createdAt = new Date().toISOString()
     const entries = novel.map((input, index): RemoteTranscriptEntry => ({
       ...input, sessionId, seq: firstSeq + index, createdAt,
@@ -2548,13 +3281,12 @@ export class RemoteAgentGateway extends Service {
     // Mirrors hostd's `droppedThrough` convention; the count of lost entries
     // equals `droppedThrough + 1` because the projected seq starts at 0.
     const lastDropped = excess.at(-1)?.seq
-    await global.set({
-      ...state,
-      nextTranscriptSeq: { ...state.nextTranscriptSeq, [sessionId]: firstSeq + entries.length },
-      ...(lastDropped !== undefined
-        ? { droppedThrough: { ...(state.droppedThrough ?? {}), [sessionId]: lastDropped } }
-        : {}),
-    })
+    if (lastDropped !== undefined) {
+      await this.mutateGlobal((state) => ({
+        ...state,
+        droppedThrough: { ...(state.droppedThrough ?? {}), [sessionId]: lastDropped },
+      }))
+    }
     this.wsBroadcaster.broadcastTranscriptBatch(sessionId, entries)
     return entries
   }
@@ -2648,7 +3380,7 @@ export class RemoteAgentGateway extends Service {
         if (catchup.events.length >= MAX_JOURNAL_EVENTS_PER_SYNC) continue
       } catch (error) {
         if (holdUnreachable(error)) {
-          await this.concludeTurn(session, 'failed', '远程 Agent 进程已停止', 'reconnecting')
+          await this.concludeTurn(session, 'failed', turnCutOffText(error), 'reconnecting')
           const current = this.requireTables().sessions.get(sessionId) ?? session
           if (current.channelState === 'open') {
             const reconnecting: RemoteSessionView = {
@@ -2710,9 +3442,8 @@ export class RemoteAgentGateway extends Service {
             const cb = current.binding
             if (cb === undefined) return
             const next: RemoteSessionView = {
-              ...current,
+              ...withDeadChannel(current),
               channelState: 'lost',
-              turnState: current.turnState === 'running' ? 'failed' : current.turnState,
               binding: { ...cb, state: 'lost' },
               updatedAt: new Date().toISOString(),
             }
@@ -2787,7 +3518,7 @@ export class RemoteAgentGateway extends Service {
               await this.catchupSessionJournal(sessionId)
             } catch (error) {
               if (holdUnreachable(error)) {
-                await this.concludeTurn(waiting, 'failed', '远程 Agent 进程已停止', 'reconnecting')
+                await this.concludeTurn(waiting, 'failed', turnCutOffText(error), 'reconnecting')
                 process.stderr.write(
                   `threadharbor-gateway: turn failed session=${sessionId} reason=hold-unreachable ${errorMessage(error)}\n`,
                 )
@@ -2863,6 +3594,7 @@ export class RemoteAgentGateway extends Service {
         elapsedMs: Number((performance.now() - hostdStartedAt).toFixed(2)),
         ok: true,
       })
+      this.healHostStatus(host)
       return result
     } catch (error) {
       trace('hostd.call.end', {
@@ -2872,8 +3604,74 @@ export class RemoteAgentGateway extends Service {
         ok: false,
         error: error instanceof Error ? error.message : String(error),
       })
+      this.markHostOffline(host, error)
       throw error
     }
+  }
+
+  /** Host-status writes in flight, so a burst of failed calls marks a host
+   *  offline exactly once and a heal does not race itself. */
+  private readonly hostStatusWrites = new Set<ReturnType<typeof RemoteHostId>>()
+
+  /**
+   * Record that the link to a host's hostd is broken, so the sidebar stops
+   * showing a stale healthy badge.
+   *
+   * The catalog's inventory is a cache with no expiry of its own; before this
+   * existed a hostd that died kept its last `healthy: true` until someone
+   * manually refreshed it, and every create against it looked like a slow
+   * connecting session instead of an offline host. Only link-level failures
+   * reach here — hostd answering with an error says the host is fine.
+   */
+  private markHostOffline(host: RemoteHostView, error: unknown): void {
+    if (!hostLinkBroken(error)) return
+    const hostId = host.hostId
+    if (this.hostStatusWrites.has(hostId)) return
+    this.hostStatusWrites.add(hostId)
+    void (async () => {
+      try {
+        const current = this.tables?.hosts.get(hostId)
+        if (current === undefined || current.inventoryError !== undefined) return
+        const reason = inventoryFailure(error)
+        const updated = await this.requireTables().hosts.update(hostId, record => ({
+          ...record,
+          inventoryError: reason,
+          updatedAt: new Date().toISOString(),
+        }))
+        trace('host.markOffline', { hostId, reason, ok: true })
+        this.wsBroadcaster.broadcast({ type: 'host.changed', host: updated })
+      } catch (markError) {
+        trace('host.markOffline', {
+          hostId,
+          ok: false,
+          error: markError instanceof Error ? markError.message : String(markError),
+        })
+      } finally {
+        this.hostStatusWrites.delete(hostId)
+      }
+    })()
+  }
+
+  /**
+   * A successful hostd call proves the host is reachable again; if its record
+   * still carries an offline marker, refresh the inventory in the background
+   * so the badge recovers on its own instead of waiting for a manual refresh.
+   */
+  private healHostStatus(host: RemoteHostView): void {
+    const hostId = host.hostId
+    if (this.hostStatusWrites.has(hostId)) return
+    const current = this.tables?.hosts.get(hostId)
+    if (current === undefined || current.inventoryError === undefined) return
+    this.hostStatusWrites.add(hostId)
+    void (async () => {
+      try {
+        await this.refreshHostInventory(current)
+      } catch {
+        // The heal is opportunistic; the next successful call tries again.
+      } finally {
+        this.hostStatusWrites.delete(hostId)
+      }
+    })()
   }
 
   private requireHost(id: ReturnType<typeof RemoteHostId>): RemoteHostView {
@@ -2933,21 +3731,56 @@ export class RemoteAgentGateway extends Service {
     }
   }
 
+  /** Serialize one quick local catalog mutation. Never await network I/O
+   *  inside this chain: it is shared by every browser RPC. */
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    return this.enqueueChain('catalog', {
+      get: () => this.catalogTail,
+      set: (tail) => { this.catalogTail = tail },
+    }, operation)
+  }
+
+  /** Serialize one interactive session RPC on its per-session chain. */
+  private enqueueSession<T>(
+    sessionId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.enqueueChain(`session:${sessionId}`, mapTailSlot(this.sessionTails, sessionId), operation)
+  }
+
+  /** Serialize one host-level RPC on its per-host chain. */
+  private enqueueHostScope<T>(
+    scope: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.enqueueChain(`host:${scope}`, mapTailSlot(this.hostTails, scope), operation)
+  }
+
+  /** Run `operation` after every earlier operation on the same chain, tracing
+   *  how long it waited and ran. Chains are scoped (catalog / per session /
+   *  per host) so unrelated requests never queue behind each other's network
+   *  I/O — the single global chain used to freeze every RPC behind one stuck
+   *  tunnel request until its timeout expired. */
+  private enqueueChain<T>(
+    scope: string,
+    slot: { get(): Promise<void>; set(tail: Promise<void>): void },
+    operation: () => Promise<T>,
+  ): Promise<T> {
     const enqueuedAt = performance.now()
     const startOp = (): Promise<T> => {
       const opStartedAt = performance.now()
       const waitMs = Number((opStartedAt - enqueuedAt).toFixed(2))
-      if (waitMs > 5) trace('enqueue.wait', { waitMs })
+      if (waitMs > 5) trace('enqueue.wait', { scope, waitMs })
       return operation().finally(() => {
         trace('enqueue.run', {
+          scope,
           waitMs,
           runMs: Number((performance.now() - opStartedAt).toFixed(2)),
         })
       })
     }
-    const current = this.operationTail.then(startOp, startOp)
-    this.operationTail = current.then(() => {}, () => {})
+    const current = slot.get().then(startOp, startOp)
+    slot.set(current.then(() => {}, () => {}))
     return current
   }
 
@@ -2958,17 +3791,29 @@ export class RemoteAgentGateway extends Service {
     return current
   }
 
-  /** Serialize a read-modify-write of the catalog global across every tail so
-   *  index appends/removes are never computed from a stale snapshot. */
+  /** Serialize a read-modify-write of the catalog global across the RPC and
+   *  background-operation tails so a concurrent index append/remove never
+   *  drops rows (the domain's write chain orders each set, not the pair). */
   private mutateGlobal(
     update: (state: RemoteAgentCatalogState) => RemoteAgentCatalogState,
   ): Promise<void> {
+    return this.mutateGlobalValue((state) => ({ state: update(state), value: undefined }))
+  }
+
+  /** Atomic read-modify-write of the catalog global that also returns a value
+   *  computed from the fresh state (e.g. a claimed transcript seq window). */
+  private async mutateGlobalValue<T>(
+    update: (state: RemoteAgentCatalogState) => { readonly state: RemoteAgentCatalogState; readonly value: T },
+  ): Promise<T> {
+    let value!: T
     const current = this.globalTail.then(async () => {
-      const state = this.requireGlobal().get()
-      await this.requireGlobal().set(update(state))
+      const result = update(this.requireGlobal().get())
+      value = result.value
+      await this.requireGlobal().set(result.state)
     })
     this.globalTail = current.then(() => {}, () => {})
-    return current
+    await current
+    return value
   }
 }
 

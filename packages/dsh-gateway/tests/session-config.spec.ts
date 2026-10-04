@@ -48,7 +48,53 @@ const CODEX_NEW_RESULT: JsonValue = {
   },
 }
 
+const DSH_ACP_NEW_RESULT: JsonValue = {
+  sessionId: 'native-3',
+  configOptions: [
+    {
+      id: 'model', name: 'Model', category: 'model', type: 'select',
+      currentValue: '["deepseek-official","deepseek-v4-flash"]',
+      options: [
+        {
+          group: 'deepseek-official', name: 'DeepSeek',
+          options: [
+            { value: '["deepseek-official","deepseek-flash"]', name: 'DeepSeek-V41-Flash' },
+            { value: '["deepseek-official","deepseek-v4-pro"]', name: 'DeepSeek-V4-Pro', description: 'Stronger agentic coding.' },
+          ],
+        },
+      ],
+    },
+    {
+      id: 'reasoning_effort', name: 'Reasoning effort', category: 'thought_level', type: 'select',
+      currentValue: 'high',
+      options: [{ value: 'off', name: 'Off' }, { value: 'high', name: 'High' }, { value: 'max', name: 'Max' }],
+    },
+  ],
+}
+
 describe('session config projection', () => {
+  it('flattens provider-grouped ACP options instead of dropping the whole setting', () => {
+    const options = configOptionsFromResult(DSH_ACP_NEW_RESULT)
+    expect(options?.map(option => option.id)).toEqual(['model', 'reasoning_effort'])
+    const model = options?.[0]
+    expect(model).toMatchObject({
+      id: 'model', category: 'model', currentValue: '["deepseek-official","deepseek-v4-flash"]', setter: 'config',
+    })
+    expect(model?.options).toEqual([
+      { value: '["deepseek-official","deepseek-flash"]', name: 'DeepSeek · DeepSeek-V41-Flash' },
+      {
+        value: '["deepseek-official","deepseek-v4-pro"]',
+        name: 'DeepSeek · DeepSeek-V4-Pro',
+        description: 'Stronger agentic coding.',
+      },
+    ])
+    expect(configSwitchRequest(model as RemoteSessionConfigOption, 'native-3', '["deepseek-official","deepseek-v4-pro"]', 'rpc-9'))
+      .toEqual({
+        jsonrpc: '2.0', id: 'rpc-9', method: 'session/set_config_option',
+        params: { sessionId: 'native-3', configId: 'model', value: '["deepseek-official","deepseek-v4-pro"]' },
+      })
+  })
+
   it('prefers native ACP configOptions and drops options without choices', () => {
     const options = configOptionsFromResult(CLAUDE_NEW_RESULT)
     expect(options?.map(option => option.id)).toEqual(['mode', 'model'])

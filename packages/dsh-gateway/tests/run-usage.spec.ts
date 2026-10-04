@@ -86,7 +86,9 @@ describe('run-usage frame reading', () => {
 describe('round terminal detection', () => {
   it('recognizes the completion frames of every backend', () => {
     expect(isRoundTerminalFrame('claude', resp({ jsonrpc: '2.0', method: '_x.ai/session/prompt_complete', params: {} }))).toBe(true)
-    expect(isRoundTerminalFrame('codex', resp({ jsonrpc: '2.0', method: '_dsh/transport_closed', params: {} }))).toBe(true)
+    // The Agent process exiting is a lifecycle frame, not a turn ending: it
+    // must not steal the round's usage totals off the completion frame.
+    expect(isRoundTerminalFrame('codex', resp({ jsonrpc: '2.0', method: '_dsh/transport_closed', params: {} }))).toBe(false)
     expect(isRoundTerminalFrame('grok', resp({ jsonrpc: '2.0', method: 'session.status', params: { status: 'idle' } }))).toBe(true)
     expect(isRoundTerminalFrame('dsh', resp({
       jsonrpc: '2.0', method: 'session.event',

@@ -7,7 +7,7 @@ import { hostdArtifactVersionFromDirectory } from '@threadharbor/hostd/version'
 import { Context } from '@deepseek-ai/cordis'
 import Storage from '@deepseek-ai/dsh-storage'
 import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
-import { MemoryStorageBackend } from './helpers/memory-backend.ts'
+import { MemoryStorageBackend, MemoryMediaPool } from './helpers/memory-backend.ts'
 import {
   REMOTE_AGENT_GATEWAY_WS_PATH,
   RemoteHostId, RemoteProjectId, RemoteSessionId, type JsonValue, type RemoteControlRequest,
@@ -70,7 +70,7 @@ function makeMockSocket(onSend: (text: string) => string | undefined): MockSocke
 
 const sockets: MockSocket[] = []
 
-function respondToRequest(request: RemoteControlRequest, port: string, events: JsonValue[]): JsonValue {
+function respondToRequest(request: RemoteControlRequest, port: string, events: JsonValue[], startLatestSeq = 0): JsonValue {
   const sessionId = typeof request.params['sessionId'] === 'string' ? request.params['sessionId'] : 'none'
   switch (request.method) {
     case 'inventory':
@@ -92,7 +92,14 @@ function respondToRequest(request: RemoteControlRequest, port: string, events: J
     case 'session.start':
     case 'session.attach':
     case 'session.restart':
-      return { holdId: `hold-${port}-${sessionId}`, nativeSessionId: `native-${port}-${sessionId}`, generation: 'g1', latestSeq: 0 }
+      return {
+        holdId: `hold-${port}-${sessionId}`, nativeSessionId: `native-${port}-${sessionId}`,
+        generation: 'g1', latestSeq: startLatestSeq,
+        // A real hostd reports where the model's context actually came from, and
+        // reports `reconstructed` only when it was handed text to stand in for
+        // an Agent session it could not reopen.
+        contextSource: request.params['context'] === undefined ? 'resumed' : 'reconstructed',
+      }
     case 'session.adopt':
       return {
         holdId: `hold-${port}-shared`,
@@ -123,7 +130,8 @@ function respondToRequest(request: RemoteControlRequest, port: string, events: J
 async function harness(events: JsonValue[] = [], configOverride: Partial<typeof CONFIG> = {}) {
   const ctx = new Context()
   await ctx.plugin(Storage)
-  ctx.storage.backend.register('memory', new MemoryStorageBackend())
+  const mediaPool = new MemoryMediaPool()
+  ctx.storage.backend.register('memory', new MemoryStorageBackend(mediaPool))
   const storageDomain = new DomainFacility(ctx, { backend: 'memory', routes: {} })
   ctx.storage.mount('domain', storageDomain)
   ctx.reflect.provide('storageDomain', storageDomain)
@@ -142,13 +150,31 @@ async function harness(events: JsonValue[] = [], configOverride: Partial<typeof 
   const methodErrors = new Map<string, string>()
   /** Method@port pairs whose next hostd request is consumed but never answered. */
   const silenced = new Set<string>()
+  /** Ports whose sockets never open, like a hostd that is not running. */
+  const deadPorts = new Set<string>()
+  /** Every live-port socket by port, so a port can be killed mid-test. */
+  const socketsByPort = new Map<string, MockSocket[]>()
   let nextAttach: Record<string, JsonValue> | undefined
+  /** Journal head a fake `session.start` reports; tests that inject bind-time
+   *  frames (the session/new answer) set it so the gateway's window read sees them. */
+  let nextStartLatestSeq: number | undefined
   /** Per-socket map of subscribed sessions for the WS push fan-out. */
   const subscriptionsBySocket = new WeakMap<MockSocket, Map<string, { generation: string; lastSeq: number }>>()
   let pushSeq = 0
   function socketFactory(url: string): MockSocket {
     const portMatch = /:(\d+)/.exec(url)
     const port = portMatch?.[1] ?? '0'
+    if (deadPorts.has(port)) {
+      // A refused connection: the socket errors out instead of hanging, so the
+      // reconnect ladder keeps advancing exactly like a real ECONNREFUSED.
+      const dead = makeMockSocket(() => undefined)
+      dead.readyState = CONNECTING
+      setImmediate(() => {
+        dead.emit('error', new Error('connect ECONNREFUSED 127.0.0.1:' + port))
+        dead.emit('close')
+      })
+      return dead
+    }
     let socket!: MockSocket
     socket = makeMockSocket((text: string) => {
       if (failing) throw new TypeError('fetch failed')
@@ -173,8 +199,8 @@ async function harness(events: JsonValue[] = [], configOverride: Partial<typeof 
           })
         }
         const result = request.method === 'session.attach' && nextAttach !== undefined
-          ? { ...respondToRequest(request, port, events) as Record<string, JsonValue>, ...nextAttach }
-          : respondToRequest(request, port, events)
+          ? { ...respondToRequest(request, port, events, nextStartLatestSeq ?? 0) as Record<string, JsonValue>, ...nextAttach }
+          : respondToRequest(request, port, events, nextStartLatestSeq ?? 0)
         if (request.method === 'session.attach') nextAttach = undefined
         return JSON.stringify({ direction: 'response', id: request.id, ok: true, result })
       }
@@ -196,12 +222,32 @@ async function harness(events: JsonValue[] = [], configOverride: Partial<typeof 
       return undefined
     })
     sockets.push(socket)
+    const tracked = socketsByPort.get(port) ?? []
+    tracked.push(socket)
+    socketsByPort.set(port, tracked)
     queueMicrotask(() => {
       socket.readyState = OPEN
       socket.emit('open')
     })
     void url
     return socket
+  }
+
+  /** Make one port's hostd unreachable: new sockets never open, and existing
+   *  live sockets for the port die, like the daemon being stopped. */
+  function killPort(port: string): void {
+    deadPorts.add(port)
+    for (const socket of socketsByPort.get(port) ?? []) {
+      if (socket.readyState !== CLOSED) {
+        socket.readyState = CLOSED
+        socket.emit('close')
+      }
+    }
+  }
+
+  /** Bring one port's hostd back. */
+  function revivePort(port: string): void {
+    deadPorts.delete(port)
   }
 
   /** Push one journal page to every socket subscribed to this session. */
@@ -239,11 +285,14 @@ async function harness(events: JsonValue[] = [], configOverride: Partial<typeof 
   await ctx.plugin(RemoteAgentGateway, { ...CONFIG, transcriptDir, ...configOverride }).await()
   ctx.remoteAgentGateway.setHostdSocketFactory(socketFactory as unknown as (url: string) => import('ws').WebSocket)
   return {
-    ctx, gateway: ctx.remoteAgentGateway, calls, storageDomain, transcriptDir,
+    ctx, gateway: ctx.remoteAgentGateway, calls, storageDomain, transcriptDir, mediaPool,
     failNext: () => { failing = true },
     failMethod: (method: string, message: string) => { methodErrors.set(method, message) },
     silenceMethod: (method: string, port: string) => { silenced.add(`${method}@${port}`) },
+    killPort,
+    revivePort,
     setNextAttach: (value: Record<string, JsonValue>) => { nextAttach = value },
+    setNextStartLatestSeq: (value: number) => { nextStartLatestSeq = value },
     pushJournalPage,
     subscribeEvents,
     upgradePath,
@@ -606,6 +655,139 @@ describe('RemoteAgentGateway', () => {
       expect(switched.configOptions?.find(option => option.id === 'mode')?.currentValue).toBe('bypassPermissions')
       const stored = gateway.state().sessions.find(entry => entry.sessionId === RemoteSessionId(session.sessionId))
       expect(stored?.configOptions?.find(option => option.id === 'mode')?.currentValue).toBe('bypassPermissions')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('flattens grouped model options from the Harness ACP profile and switches them by opaque value', async () => {
+    // The Harness acp profile groups every model under its provider route and
+    // hands back an opaque encoded provider/model pair as the value. A flat read
+    // of `options` would find no choices and drop the model selector entirely.
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', id: 'hostd-session-1', result: {
+        sessionId: 'native-4302-x',
+        configOptions: [
+          { id: 'model', name: 'Model', category: 'model', type: 'select',
+            currentValue: '["deepseek-official","deepseek-v4-flash"]',
+            options: [{ group: 'deepseek-official', name: 'DeepSeek', options: [
+              { value: '["deepseek-official","deepseek-v4-flash"]', name: 'DeepSeek-V4-Flash' },
+              { value: '["deepseek-official","deepseek-v4-pro"]', name: 'DeepSeek-V4-Pro' },
+            ] }] },
+          { id: 'reasoning_effort', name: 'Reasoning effort', category: 'thought_level', type: 'select',
+            currentValue: 'high', options: [{ value: 'high', name: 'High' }, { value: 'max', name: 'Max' }] },
+        ],
+      } },
+    ]
+    const { ctx, gateway, calls } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4302' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'dsh' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      const announced = gateway.state().sessions.find(entry => entry.sessionId === RemoteSessionId(session.sessionId))
+      expect(announced?.configOptions?.map(option => option.id)).toEqual(['model', 'reasoning_effort'])
+      expect(announced?.configOptions?.[0]?.options.map(choice => choice.name))
+        .toEqual(['DeepSeek · DeepSeek-V4-Flash', 'DeepSeek · DeepSeek-V4-Pro'])
+
+      const switched = await gateway.dispatch(request('session.configure', {
+        sessionId: session.sessionId, configId: 'model', value: '["deepseek-official","deepseek-v4-pro"]',
+      })) as unknown as { configOptions?: { id: string; currentValue: string }[] }
+      const forwarded = calls.filter(call => call.request.method === 'session.native').at(-1)?.request
+      expect(forwarded?.params['frame']).toMatchObject({
+        jsonrpc: '2.0', method: 'session/set_config_option',
+        params: {
+          sessionId: `native-4302-${session.sessionId}`,
+          configId: 'model', value: '["deepseek-official","deepseek-v4-pro"]',
+        },
+      })
+      expect(switched.configOptions?.find(option => option.id === 'model')?.currentValue)
+        .toBe('["deepseek-official","deepseek-v4-pro"]')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('delivers a DeepSeek Harness prompt in the ACP shape its acp profile expects', async () => {
+    const { ctx, gateway, calls } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4303' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'dsh' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'dsh-acp-prompt', text: 'hello',
+      }))
+      const delivered = calls.filter(call => call.request.method === 'session.prompt')
+      expect(delivered).toHaveLength(1)
+      const admission = delivered[0]?.request.params['admission'] as Record<string, JsonValue>
+      const frame = admission['frame'] as Record<string, JsonValue>
+      expect(frame['method']).toBe('session/prompt')
+      expect(frame['params']).toMatchObject({ prompt: [{ type: 'text', text: 'hello' }] })
+      expect((frame['params'] as Record<string, JsonValue>)['contentBlocks']).toBeUndefined()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('carries the settings a backend published during binding into the created session', async () => {
+    // `initialize` and the `session/new` answer land in the hold journal before
+    // the binding exists. The gateway must fold that window itself: the Harness
+    // ACP profile only publishes its model catalog at handshake, so waiting for
+    // a later journal sync would leave the composer with a built-in guess.
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', id: 'init-1', result: { protocolVersion: 1 } },
+      { jsonrpc: '2.0', id: 'new-1', result: {
+        sessionId: 'native-4305-x',
+        configOptions: [
+          { id: 'model', name: 'Model', category: 'model', currentValue: '["deepseek-official","deepseek-v4-pro"]',
+            options: [{ group: 'deepseek-official', name: 'DeepSeek', options: [
+              { value: '["deepseek-official","deepseek-v4-pro"]', name: 'DeepSeek-V4-Pro' },
+              { value: '["zai-coding-cn","glm-5.3"]', name: 'GLM-5.3' },
+            ] }] },
+        ],
+      } },
+    ]
+    const { ctx, gateway, setNextStartLatestSeq } = await harness(events)
+    try {
+      setNextStartLatestSeq(events.length)
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4305' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: '新会话', backend: 'dsh',
+      })) as unknown as {
+        sessionId: string
+        configOptions?: { id: string; setter: string; options: { readonly name: string }[] }[]
+      }
+      expect(session.configOptions?.map(option => `${option.id}:${option.setter}`)).toEqual(['model:config'])
+      expect(session.configOptions?.[0]?.options.map(choice => choice.name))
+        .toEqual(['DeepSeek · DeepSeek-V4-Pro', 'DeepSeek · GLM-5.3'])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('names a session from its first message when the Agent was picked before the message existed', async () => {
+    const { ctx, gateway } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4304' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      // Picking the Agent creates the session with the placeholder title so the
+      // composer can offer the backend's own catalog before anything is sent.
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: '新会话', backend: 'dsh',
+      })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      const title = (): string | undefined => gateway.state().sessions
+        .find(entry => entry.sessionId === RemoteSessionId(session.sessionId))?.title
+      expect(title()).toBe('新会话')
+
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'p1',
+        text: '继续优化一下桌面版的交互\n第二行不该进标题',
+      }))
+      expect(title()).toBe('继续优化一下桌面版的交互')
     } finally {
       await ctx.fiber.dispose()
     }
@@ -1051,6 +1233,68 @@ describe('RemoteAgentGateway', () => {
     }
   })
 
+  it('routes Claude subagent tool frames into a virtual child session and keeps the parent transcript continuous', async () => {
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { text: '三处需' } } } },
+      { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { text: '要改。' } } } },
+      { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'tool_call', toolCallId: 'task-1', title: 'Task', rawInput: { description: 'Test the fix' }, _meta: { claudeCode: { toolName: 'Agent', toolCallId: 'task-1', subagent: true } } } } },
+      { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'tool_call', toolCallId: 'sub-1', title: 'git diff', _meta: { claudeCode: { toolName: 'Bash', toolCallId: 'sub-1', parentToolUseId: 'task-1', title: 'Read production diff' } } } } },
+      { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'tool_call_update', toolCallId: 'sub-1', status: 'completed', _meta: { claudeCode: { toolName: 'Bash', toolCallId: 'sub-1', parentToolUseId: 'task-1' } } } } },
+      { jsonrpc: '2.0', method: '_x.ai/session/prompt_complete', params: { stopReason: 'end_turn' } },
+    ]
+    const { ctx, gateway } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4440' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      // The routing keys off the frame's `_meta.claudeCode` marker, not the
+      // catalog backend field; the harness inventory cannot start claude
+      // sessions, and the ACP projection path is shared by all ACP backends.
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', { sessionId: session.sessionId, clientId: 'browser', requestId: 'sub-1', text: 'hello' }))
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+
+      const child = gateway.state().sessions.find(entry => entry.parentSessionId === session.sessionId)
+      expect(child).toBeDefined()
+      expect(child?.nativeChildKey).toBe('task-1')
+      expect(child?.title).toBe('Test the fix')
+      expect(child?.backend).toBe('codex')
+      expect(child?.channelState).toBe('open')
+      // The round ended (prompt_complete), so the projected child settles.
+      expect(child?.turnState).toBe('idle')
+
+      // The parent keeps its own narration (adjacent deltas merge), the Task
+      // spawn card and the round status — never the subagent's tool frames.
+      const parent = (await readTranscript(gateway, session.sessionId)).entries
+      expect(parent.map(entry => [entry.role, entry.kind, entry.text])).toEqual([
+        ['user', 'message', 'hello'],
+        ['assistant', 'message', '三处需要改。'],
+        ['tool', 'tool-call', 'Task'],
+        ['system', 'status', '远程轮次完成'],
+      ])
+
+      // The subagent's activity lives in the child session's own transcript.
+      const childTranscript = (await readTranscript(gateway, child!.sessionId)).entries
+      expect(childTranscript.map(entry => [entry.role, entry.kind, entry.text])).toEqual([
+        ['tool', 'tool-call', 'git diff'],
+        ['tool', 'tool-result', '远程工具更新'],
+      ])
+      // Child rows keep the complete native frame — the parent's size rule
+      // (choice/plan rows only) does not apply to the subagent's own record.
+      const childFrames = (childTranscript as Array<{ nativeFrame?: Record<string, JsonValue> }>).map(entry => entry.nativeFrame)
+      expect(childFrames[0]?.['params']).toMatchObject({ update: { sessionUpdate: 'tool_call', toolCallId: 'sub-1' } })
+      expect(childFrames[1]?.['params']).toMatchObject({ update: { sessionUpdate: 'tool_call_update', toolCallId: 'sub-1' } })
+
+      // Re-applying the same journal page (reconnect replay) creates neither
+      // a second child session nor duplicate rows.
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.filter(entry => entry.parentSessionId === session.sessionId)).toHaveLength(1)
+      expect((await readTranscript(gateway, child!.sessionId)).entries).toHaveLength(2)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('imports transcript rows left in the storage domain once and drops tool frames on the way', async () => {
     const ctx = new Context()
     await ctx.plugin(Storage)
@@ -1072,7 +1316,7 @@ describe('RemoteAgentGateway', () => {
       await legacy.table('hosts').put(hostId, { hostId, title: 'h', endpoint: 'http://127.0.0.1:1', createdAt: now, updatedAt: now })
       await legacy.table('projects').put(projectId, { projectId, hostId, title: 'p', cwd: '/repo', createdAt: now, updatedAt: now })
       await legacy.table('sessions').put(sessionId, {
-        sessionId, projectId, title: 's', backend: 'codex', channelState: 'closed', turnState: 'idle', createdAt: now, updatedAt: now,
+        sessionId, projectId, title: 's', backend: 'codex', channelState: 'lost', turnState: 'idle', createdAt: now, updatedAt: now,
       })
       const toolFrame = { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'tool_call', toolCallId: 'c1', title: 'read_file' } } }
       const permissionFrame = { jsonrpc: '2.0', id: 4, method: 'session/request_permission', params: { title: 'Allow?', options: [] } }
@@ -1315,7 +1559,55 @@ describe('RemoteAgentGateway', () => {
         turnState: 'failed', channelState: 'reconnecting',
       })
       const page = await readTranscript(gateway, session.sessionId)
-      expect(page.entries.some(entry => entry.kind === 'status' && entry.text.includes('已停止'))).toBe(true)
+      // A bare connection refusal is the host being unreachable — the record
+      // must not claim the Agent process died (that is the dead-socket case,
+      // covered separately).
+      expect(page.entries.some(entry => entry.kind === 'status' && entry.text.includes('远程主机暂时联系不上'))).toBe(true)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps a failed prompt delivery failed instead of stranding the turn at running', async () => {
+    // The follow loop starts projecting the journal in the same breath as the
+    // prompt call it races. Writes commit after I/O, so a projection reading
+    // the row while the failure marker is still queued sees the old turnState
+    // and writes it back over the marker — and the UI then showed 正在生成回复
+    // for a turn that had already failed. The injected write latency widens
+    // that real window instead of racing real timers for it.
+    const { ctx, gateway, failMethod, mediaPool } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4231',
+      })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'repo', cwd: '/repo',
+      })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'dsh',
+      })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      mediaPool.writeDelayMs = 100
+      failMethod('session.prompt', 'agent dsh could not reopen session native-1: Invalid params: session is already active: native-1')
+      const failure = gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'undelivered', text: 'hello',
+      })).catch(() => undefined)
+      // Land a projection inside the window where the failure marker is
+      // queued but not yet committed.
+      await new Promise(resolveWait => setTimeout(resolveWait, 150))
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      await failure
+      mediaPool.writeDelayMs = 0
+      await new Promise(resolveWait => setTimeout(resolveWait, 300))
+      const find = (): string | undefined => gateway.state()
+        .sessions.find(entry => entry.sessionId === RemoteSessionId(session.sessionId))?.turnState
+      expect(find()).toBe('failed')
+      // Later journal catchups must not resurrect the turn either.
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      await new Promise(resolveWait => setTimeout(resolveWait, 50))
+      expect(find()).toBe('failed')
+      const page = await readTranscript(gateway, session.sessionId)
+      expect(page.entries.some(entry => entry.kind === 'status' && entry.text.includes('消息提交失败'))).toBe(true)
     } finally {
       await ctx.fiber.dispose()
     }
@@ -1495,6 +1787,611 @@ describe('RemoteAgentGateway', () => {
       await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
       expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState)
         .toBe('idle')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('leaves a completed round idle when the Agent process exits afterwards', async () => {
+    // The Agent's own exit is a journal frame (`_dsh/transport_closed`), and the
+    // projector paints it "远程 Agent 已停止（…）" with turnState=failed. When the
+    // round already ended — the ordinary case, a backend that exits after the
+    // turn, or a redeploy that SIGKILLs it — that late frame used to flip a
+    // finished session back to failed, so the conversation kept a red banner and
+    // "在当前会话重开" for a round that had actually completed.
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', method: 'session/update', params: {
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'done' } },
+      } },
+      { jsonrpc: '2.0', method: '_x.ai/session/prompt_complete', params: { stopReason: 'end_turn' } },
+      { jsonrpc: '2.0', method: '_dsh/transport_closed', params: { code: 0, signal: null } },
+    ]
+    const { ctx, gateway } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4401',
+      })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'repo', cwd: '/repo',
+      })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'dsh',
+      })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'exit-after-turn', text: 'hello',
+      }))
+      // One page: the round ends, then the Agent's exit arrives.
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState)
+        .toBe('idle')
+      // The exit is still recorded — it just does not rewrite the round's outcome.
+      const page = await readTranscript(gateway, session.sessionId)
+      expect(page.entries.some(entry => entry.kind === 'status' && entry.text === '远程 Agent 已停止（code 0）'))
+        .toBe(true)
+      expect(page.entries.some(entry => entry.kind === 'status' && entry.text === '远程轮次完成'))
+        .toBe(true)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps a user-stopped round stopped when the Agent exit arrives afterwards', async () => {
+    // Same late frame against the other settled state: 用户主动停止 marks the
+    // round over too. An exit the user never saw (redeploy SIGKILL, idle exit)
+    // must not rewrite that verdict — "stopped" is what the user did, and the
+    // prompt-complete/sticky rules already treat it as durable.
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', method: 'session/update', params: {
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'working' } },
+      } },
+    ]
+    const { ctx, gateway } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4405',
+      })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'repo', cwd: '/repo',
+      })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'dsh',
+      })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'stopped-exit', text: 'hello',
+      }))
+      await gateway.dispatch(request('session.cancel', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState)
+        .toBe('stopped')
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState)
+        .toBe('stopped')
+      // The Agent exits long after the user's stop landed.
+      events.push({ jsonrpc: '2.0', method: '_dsh/transport_closed', params: { code: null, signal: 'SIGKILL' } })
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState)
+        .toBe('stopped')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('leaves an idle session idle when the Agent exit arrives in a later page', async () => {
+    // Second shape of the same late frame: the round is already projected and
+    // the session has been idle for a while (the browser switched away, or the
+    // hold kept living) when the Agent's exit lands in its own journal page.
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', method: '_x.ai/session/prompt_complete', params: { stopReason: 'end_turn' } },
+    ]
+    const { ctx, gateway } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4403',
+      })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'repo', cwd: '/repo',
+      })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'dsh',
+      })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'idle-exit', text: 'hello',
+      }))
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState)
+        .toBe('idle')
+      // The Agent exits while the session sits idle.
+      events.push({ jsonrpc: '2.0', method: '_dsh/transport_closed', params: { code: 0, signal: null } })
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState)
+        .toBe('idle')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('still fails a turn whose Agent dies before reporting the round over', async () => {
+    // The guard must not swallow the case it exists around: a transport that
+    // dies mid-turn leaves the turn unfinished, and that has to read as failed.
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', method: 'session/update', params: {
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'half an ans' } },
+      } },
+      { jsonrpc: '2.0', method: '_dsh/transport_closed', params: { code: null, signal: 'SIGKILL' } },
+    ]
+    const { ctx, gateway } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4404',
+      })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'repo', cwd: '/repo',
+      })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'dsh',
+      })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'dies-mid-turn', text: 'hello',
+      }))
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState)
+        .toBe('failed')
+      const page = await readTranscript(gateway, session.sessionId)
+      expect(page.entries.some(entry => entry.kind === 'status' && entry.text === '远程 Agent 已停止（signal SIGKILL）'))
+        .toBe(true)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('does not let a late round failure rewrite a settled round', async () => {
+    // 定调：迟到的「本轮失败」不能把已经结束的轮次改成失败。轮次真正的结局由
+    // 开轮（发消息）到收轮（完成帧/停止/死亡）之间的证据决定；收轮之后到达的
+    // 失败报告只是记录，不再改写状态。
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', method: 'session/update', params: {
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'done' } },
+      } },
+      { jsonrpc: '2.0', method: '_x.ai/session/prompt_complete', params: { stopReason: 'end_turn' } },
+    ]
+    const { ctx, gateway } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4406',
+      })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'repo', cwd: '/repo',
+      })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'dsh',
+      })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'late-failure', text: 'hello',
+      }))
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState)
+        .toBe('idle')
+      // 同一轮次稍后报了个失败（重复的收轮帧 / 迟到的错误报告）。
+      events.push({
+        jsonrpc: '2.0', method: '_x.ai/session/prompt_complete',
+        params: { stopReason: 'error', message: 'Internal error: turn failed' },
+      })
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState)
+        .toBe('idle')
+      // 状态不改，但事实照记。
+      const page = await readTranscript(gateway, session.sessionId)
+      expect(page.entries.some(entry => entry.kind === 'status' && entry.text === '远程轮次失败：Internal error: turn failed'))
+        .toBe(true)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('clears the failed mark on reconnect with a visible notice', async () => {
+    // 定调：失败是「待修」信号，重连修好后清掉，但要在记录里写明是哪个动作清的。
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', method: 'session/update', params: {
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'half' } },
+      } },
+      { jsonrpc: '2.0', method: '_dsh/transport_closed', params: { code: null, signal: 'SIGKILL' } },
+    ]
+    const { ctx, gateway } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4407',
+      })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'repo', cwd: '/repo',
+      })) as unknown as { projectId: string }
+      const reattach = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'dsh',
+      })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, reattach.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: reattach.sessionId, clientId: 'browser', requestId: 'dies-mid-turn-2', text: 'hello',
+      }))
+      await gateway.dispatch(request('events.read', { sessionId: reattach.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === reattach.sessionId)?.turnState)
+        .toBe('failed')
+      // 重连成功（同一个代际、hold 还在）：失败标记清掉，并写明是「重新连接」清的。
+      await gateway.dispatch(request('session.attach', { sessionId: reattach.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === reattach.sessionId)?.turnState)
+        .toBe('idle')
+      const page = await readTranscript(gateway, reattach.sessionId)
+      expect(page.entries.some(entry => entry.kind === 'status' && entry.text === '重新连接会话，上一轮的失败标记已清除。'))
+        .toBe(true)
+
+      // 显式「结束进程并在当前会话重开」也是修复动作，同样写明是它清的。
+      const restarted = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'dsh',
+      })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, restarted.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: restarted.sessionId, clientId: 'browser', requestId: 'dies-then-restart', text: 'hello',
+      }))
+      await gateway.dispatch(request('events.read', { sessionId: restarted.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === restarted.sessionId)?.turnState)
+        .toBe('failed')
+      await gateway.dispatch(request('session.restart', { sessionId: restarted.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === restarted.sessionId)?.turnState)
+        .toBe('idle')
+      const restartedPage = await readTranscript(gateway, restarted.sessionId)
+      expect(restartedPage.entries.some(entry => entry.kind === 'status' && entry.text === '结束进程并在当前会话重开，上一轮的失败标记已清除。'))
+        .toBe(true)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('a reconnect does not rewrite a user-stopped round', async () => {
+    // 「用户主动停止」是上一轮的结局，不是待修信号：重连不该改写它（下一次
+    // 发消息才进入下一轮）。
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', method: 'session/update', params: {
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'half' } },
+      } },
+    ]
+    const { ctx, gateway } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4410',
+      })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'repo', cwd: '/repo',
+      })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'dsh',
+      })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'stop-then-attach', text: 'hello',
+      }))
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      await gateway.dispatch(request('session.cancel', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState)
+        .toBe('stopped')
+      await gateway.dispatch(request('session.attach', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState)
+        .toBe('stopped')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('fails a parked turn whose channel died, instead of leaving it waiting for an answer', async () => {
+    // 「等待你的确认」是本轮在途的一种：通道死了它也是死了，卡片没有可答的对象。
+    // 原来只有 running 判失败，waiting-permission 会被留在原地挂着。
+    const events: JsonValue[] = [
+      {
+        jsonrpc: '2.0', id: 9, method: 'session/request_permission',
+        params: { title: 'Allow shell?', options: [{ optionId: 'once', name: 'Allow once' }] },
+      },
+    ]
+    const { ctx, gateway, failMethod } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4408',
+      })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'repo', cwd: '/repo',
+      })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'codex',
+      })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'parked-dies', text: 'hello',
+      }))
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.turnState)
+        .toBe('waiting-permission')
+      // hostd 应答了「没有这个会话」，重建也失败：通道确认死亡。
+      failMethod('session.attach', 'Error: unknown hostd session gone-2')
+      failMethod('session.start', 'Error: backend will not start')
+      await expect(gateway.dispatch(request('session.attach', { sessionId: session.sessionId }))).rejects.toThrow()
+      const view = gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)
+      expect(view?.turnState).toBe('failed')
+      expect(view?.pendingRequestIds ?? []).toEqual([])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('does not let late subagent frames reopen a settled child session', async () => {
+    // 09-18 的漏网：父会话有「已收拢不复开」保护，子会话没有。父轮次已经结束
+    // 之后到达的子 agent 输出，会把子会话永久翻回「进行中」。
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', method: 'session/update', params: { update: {
+        sessionUpdate: 'tool_call', toolCallId: 'task-1', title: 'Task',
+        rawInput: { description: 'Test the fix' },
+        _meta: { claudeCode: { toolName: 'Agent', toolCallId: 'task-1', subagent: true } },
+      } } },
+      { jsonrpc: '2.0', method: 'session/update', params: { update: {
+        sessionUpdate: 'tool_call', toolCallId: 'sub-1', title: 'git diff',
+        _meta: { claudeCode: { toolName: 'Bash', toolCallId: 'sub-1', parentToolUseId: 'task-1' } },
+      } } },
+      { jsonrpc: '2.0', method: '_x.ai/session/prompt_complete', params: { stopReason: 'end_turn' } },
+    ]
+    const { ctx, gateway } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4409',
+      })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'repo', cwd: '/repo',
+      })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'codex',
+      })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'child-late', text: 'hello',
+      }))
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      const child = gateway.state().sessions.find(entry => entry.parentSessionId === session.sessionId)
+      expect(child?.turnState).toBe('idle')
+      // 父轮次结束后才到的子 agent 输出：内容照常进子会话，但不把子会话翻回进行中。
+      events.push({ jsonrpc: '2.0', method: 'session/update', params: { update: {
+        sessionUpdate: 'tool_call_update', toolCallId: 'sub-1', status: 'completed',
+        _meta: { claudeCode: { toolName: 'Bash', toolCallId: 'sub-1', parentToolUseId: 'task-1' } },
+      } } })
+      await gateway.dispatch(request('events.read', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === child?.sessionId)?.turnState)
+        .toBe('idle')
+      expect((await readTranscript(gateway, child!.sessionId)).entries).toHaveLength(2)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('does not paint a session red when the host was only slow, and lets a stale red clear itself', async () => {
+    const { ctx, gateway, failMethod } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4402' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+
+      // A host that is merely slow says nothing about the session: the record
+      // is intact and the next call works. Resuming a large session over a
+      // tunnel blows a 45s budget easily, and that must not read as "disconnected".
+      failMethod('session.attach', 'Error: hostd request session.attach timed out')
+      await expect(gateway.dispatch(request('session.attach', { sessionId: session.sessionId }))).rejects.toThrow()
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.channelState)
+        .not.toBe('lost')
+
+      // The slow moment is not a verdict: the next good call clears it, instead
+      // of the session wearing the failure until someone reopens it by hand.
+      await gateway.dispatch(request('session.attach', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.channelState).toBe('open')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('still marks a session lost when the host says it has no such record', async () => {
+    const { ctx, gateway, failMethod } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4402' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+
+      // This one is real: hostd answered and reported the record missing, and
+      // the recreate failed too. That is the case the red badge is for.
+      failMethod('session.attach', 'Error: unknown hostd session gone-1')
+      failMethod('session.start', 'Error: backend will not start')
+      await expect(gateway.dispatch(request('session.attach', { sessionId: session.sessionId }))).rejects.toThrow()
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.channelState).toBe('lost')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('does not clear a lost session from journal content — the repair call does that', async () => {
+    // 回归守卫（钉住口径）：日志是 hostd 盘上的记录，Agent 通道死了照样读得到内容，
+    // 所以「内容到了」不能证明通道活了。红条（含黄条）只认真正碰到通道的调用
+    // （重连/重开/发消息成功）才清。红条期间内容也进不来：读取直接被拒。
+    const { ctx, gateway, failMethod } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4411',
+      })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'repo', cwd: '/repo',
+      })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'codex',
+      })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+
+      // hostd 应答说 hold 进程的套接字没了：会话需要重开，记红。
+      failMethod('session.attach', 'Error: connect ECONNREFUSED /tmp/threadharbor-hostd-501/h-dead.sock')
+      await gateway.dispatch(request('session.attach', { sessionId: session.sessionId })).catch(() => undefined)
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.channelState)
+        .toBe('lost')
+
+      // 红条期间内容进不来 —— 也不因任何内容而消。
+      await expect(gateway.dispatch(request('events.read', { sessionId: session.sessionId })))
+        .rejects.toThrow('no active remote binding')
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.channelState)
+        .toBe('lost')
+
+      // 修复调用才清红。
+      await gateway.dispatch(request('session.attach', { sessionId: session.sessionId }))
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.channelState)
+        .toBe('open')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('marks a message that never reached the host as a reconnecting channel, not a lost session', async () => {
+    // 「连不上」和「记录没了」是两回事：前者自己会好，后者要重开。原来发不出去
+    // 的消息一律把会话记成「丢失」，红条就是这么来的。
+    const { ctx, gateway, failMethod } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4412',
+      })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'repo', cwd: '/repo',
+      })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'codex',
+      })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+
+      failMethod('session.prompt', 'connect ECONNREFUSED 127.0.0.1:4412')
+      failMethod('session.attach', 'connect ECONNREFUSED 127.0.0.1:4412')
+      await expect(gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'no-route', text: 'hi',
+      }))).rejects.toThrow()
+      expect(gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)?.channelState)
+        .toBe('reconnecting')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('records a replaced generation as superseded, not lost', async () => {
+    // 会话被新实例顶替时，旧绑定是「被取代」（superseded）：旧实例作废，不是
+    // 会话丢了。原来一律记「丢失」，语义上是错的。
+    const { ctx, gateway, setNextAttach } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4413',
+      })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'repo', cwd: '/repo',
+      })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'codex',
+      })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+
+      setNextAttach({ generation: 'g2' })
+      await expect(gateway.dispatch(request('session.attach', { sessionId: session.sessionId })))
+        .rejects.toThrow('generation changed')
+      const view = gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)
+      expect(view?.binding?.state).toBe('superseded')
+      expect(view?.channelState).toBe('lost')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('says in the record whether the Agent died or the host merely went unreachable', async () => {
+    // 两种中断分开说：进程死了说进程死了，够不着说够不着。原来两种都写成
+    // 「远程 Agent 进程已停止」，查问题时分不清是哪一环。
+    const { ctx, gateway, failMethod } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'host', endpoint: 'http://127.0.0.1:4414',
+      })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'repo', cwd: '/repo',
+      })) as unknown as { projectId: string }
+
+      const unreachable = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'codex',
+      })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, unreachable.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: unreachable.sessionId, clientId: 'browser', requestId: 'unreachable-turn', text: 'hi',
+      }))
+      failMethod('events.read', 'connect ECONNREFUSED 127.0.0.1:4414')
+      await gateway.dispatch(request('events.read', { sessionId: unreachable.sessionId })).catch(() => undefined)
+      await vi.waitFor(async () => {
+        const page = await readTranscript(gateway, unreachable.sessionId)
+        expect(page.entries.some(entry => entry.kind === 'status' && entry.text === '远程主机暂时联系不上，本轮已中断'))
+          .toBe(true)
+      }, { timeout: 2000, interval: 10 })
+
+      const agentGone = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'codex',
+      })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, agentGone.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: agentGone.sessionId, clientId: 'browser', requestId: 'agent-gone-turn', text: 'hi',
+      }))
+      failMethod('events.read', 'Error: process is not running')
+      await gateway.dispatch(request('events.read', { sessionId: agentGone.sessionId })).catch(() => undefined)
+      await vi.waitFor(async () => {
+        const page = await readTranscript(gateway, agentGone.sessionId)
+        expect(page.entries.some(entry => entry.kind === 'status' && entry.text === '远程 Agent 进程已停止'))
+          .toBe(true)
+      }, { timeout: 2000, interval: 10 })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('rebuilds a reopen it cannot resume by handing hostd the conversation, and says which it got', async () => {
+    // Real turns, as the gateway would have projected them: the user's question
+    // and the answer. Both sides matter — an answer with no question behind it
+    // tells a fresh model nothing.
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '聊天区已经改完了' } } } },
+      { jsonrpc: '2.0', method: '_x.ai/session/prompt_complete', params: { stopReason: 'end_turn' } },
+    ]
+    const { ctx, gateway, failMethod, calls } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4402' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      // The user side of a turn enters the transcript through the prompt, not
+      // through an Agent frame — the Agent never echoes the question back.
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'r-1', text: '先把聊天区改完',
+      }))
+      // The answer arrives through the background follow loop; with scoped
+      // dispatch chains that projection can land a few ticks after the prompt
+      // RPC resolves, so wait for it instead of assuming the ordering.
+      await vi.waitFor(async () => {
+        const settled = await gateway.dispatch(request('transcript.read', { sessionId: session.sessionId })) as unknown as { entries: Array<{ role: string; text: string }> }
+        expect(settled.entries.map(row => row.text).join('|')).toContain('聊天区已经改完了')
+      }, { timeout: 2000, interval: 10 })
+      // The Agent cannot reopen its own session.
+      failMethod('session.attach', 'Error: agent codex could not reopen session native-old: gone')
+
+      await gateway.dispatch(request('session.attach', { sessionId: session.sessionId }))
+      // The first attach could not resume; the retry must carry the conversation
+      // both ways round, not just the agent's half.
+      const attachCalls = calls.filter(call => call.request.method === 'session.attach')
+      expect(attachCalls.length).toBe(2)
+      expect(attachCalls[0]?.request.params['context']).toBeUndefined()
+      const context = attachCalls[1]?.request.params['context'] as Record<string, JsonValue> | undefined
+      expect(typeof context?.['transcript']).toBe('string')
+      const transcript = String(context?.['transcript'])
+      expect(transcript).toContain('聊天区已经改完了')
+      expect(transcript).toContain('先把聊天区改完')
     } finally {
       await ctx.fiber.dispose()
     }
@@ -2052,6 +2949,119 @@ describe('RemoteAgentGateway', () => {
     }
   })
 
+  it('fails a session create fast and honestly when the host is already known unreachable', async () => {
+    // The recorded 45-second "creating a session is slow" outage: hostd down,
+    // every create sat out the whole request budget before a generic timeout.
+    // The create must instead fail at the inventory gate, in about the connect
+    // deadline, with the reason the refresh already recorded.
+    const { ctx, gateway, killPort } = await harness([], {
+      hostdRequestTimeoutMs: 5000, hostdConnectDeadlineMs: 50,
+    })
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'mac-good', endpoint: 'http://127.0.0.1:4421',
+      })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'repo', cwd: '/repo',
+      })) as unknown as { projectId: string }
+      killPort('4421')
+      // One refresh records the unreachable state the create should reuse.
+      await gateway.dispatch(request('inventory', { hostId: host.hostId }))
+
+      const startedAt = Date.now()
+      await expect(gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'codex',
+      }))).rejects.toThrow(/主机 mac-good 当前不可达：无法连接到 hostd/)
+      // The connect deadline (50ms per refresh attempt) must dominate, not the
+      // 5s request budget — two sequential failing refreshes stay well under a
+      // tenth of it.
+      expect(Date.now() - startedAt).toBeLessThan(1000)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('marks the host offline and records an honest failure when a create hits an unreachable hostd', async () => {
+    const { ctx, gateway, killPort } = await harness([], {
+      hostdRequestTimeoutMs: 5000, hostdConnectDeadlineMs: 50,
+    })
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'mac-good', endpoint: 'http://127.0.0.1:4422',
+      })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'repo', cwd: '/repo',
+      })) as unknown as { projectId: string }
+      const browser = makeBrowserSocket()
+      gateway.registerBrowserForTesting(browser as unknown as WebSocket, 'watcher')
+
+      killPort('4422')
+      // Create carries a first message, so the RPC returns while the hold
+      // startup runs detached; its failure has to reach the row, the
+      // transcript and the host badge without any manual refresh.
+      const startedAt = Date.now()
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'work', backend: 'codex',
+        text: 'hi', clientId: 'browser', requestId: 'r-dead-host',
+      })) as unknown as { sessionId: string }
+      const view = await vi.waitFor(() => {
+        const row = gateway.state().sessions.find(entry => entry.sessionId === session.sessionId)
+        if (row?.turnState !== 'failed') throw new Error(`turn state ${row?.turnState ?? 'missing'}`)
+        return row
+      }, { timeout: 3000, interval: 10 })
+      // The host never answered: a link failure, self-healing on the next
+      // successful call — not a `lost` create that asks for a reopen.
+      expect(view.channelState).toBe('reconnecting')
+      expect(Date.now() - startedAt).toBeLessThan(2000)
+
+      const transcript = await readTranscript(gateway, session.sessionId)
+      expect(transcript.entries.some(entry =>
+        entry.role === 'system' && entry.text.includes('会话创建失败：无法连接到主机上的 hostd'))).toBe(true)
+
+      // The sidebar's stale healthy badge is the other half of the outage: the
+      // host row must flip to offline on its own, and say so over the push
+      // channel so an open browser updates without a reload.
+      await vi.waitFor(() => {
+        const row = gateway.state().hosts.find(entry => entry.hostId === host.hostId)
+        if (row?.inventoryError === undefined) throw new Error('host not marked offline')
+      }, { timeout: 2000, interval: 10 })
+      expect(browser.sent.join('\n')).toContain('"host.changed"')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('clears the offline badge and creates sessions once hostd answers again', async () => {
+    const { ctx, gateway, killPort, revivePort } = await harness([], {
+      hostdRequestTimeoutMs: 5000, hostdConnectDeadlineMs: 50,
+    })
+    try {
+      const host = await gateway.dispatch(request('host.add', {
+        title: 'mac-good', endpoint: 'http://127.0.0.1:4423',
+      })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', {
+        hostId: host.hostId, title: 'repo', cwd: '/repo',
+      })) as unknown as { projectId: string }
+      killPort('4423')
+      await gateway.dispatch(request('inventory', { hostId: host.hostId }))
+      expect(gateway.state().hosts.find(entry => entry.hostId === host.hostId)?.inventoryError).toContain('无法连接到 hostd')
+
+      revivePort('4423')
+      // Let any in-flight dead socket error out so the next request opens a
+      // live one instead of waiting on the reconnect ladder.
+      await new Promise(resolve => setTimeout(resolve, 20))
+      const session = await gateway.dispatch(request('session.start', {
+        projectId: project.projectId, title: 'recovered', backend: 'codex',
+      })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      const healed = gateway.state().hosts.find(entry => entry.hostId === host.hostId)
+      expect(healed?.inventoryError).toBeUndefined()
+      expect(healed?.inventory?.healthy).toBe(true)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('runs background operation work without waiting behind a slow browser RPC', async () => {
     const { ctx, gateway, silenceMethod } = await harness()
     try {
@@ -2091,6 +3101,81 @@ describe('RemoteAgentGateway', () => {
       // Let the parked RPC resolve (it times out and records inventoryError).
       const refreshed = await slowRefresh as unknown as { inventoryError?: string }
       expect(refreshed.inventoryError).toContain('hostd')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('tells hostd to release the hold when a session is deleted', async () => {
+    const { ctx, gateway, calls } = await harness()
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:4412' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+
+      await gateway.dispatch(request('session.delete', { sessionId: session.sessionId }))
+
+      // The detached hold must actually be torn down: dropping only the local
+      // row is the leak this covers.
+      const releases = calls.filter(call => call.request.method === 'session.release')
+      expect(releases.map(call => call.request.params['sessionId'])).toContain(session.sessionId)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('never queues a prompt behind a stuck request on another host', async () => {
+    // Regression shape of the real outage: one host's tunnel goes silent and a
+    // request on it sits until its timeout; every RPC on the other host must
+    // still go through immediately.
+    const { ctx, gateway, silenceMethod } = await harness([], { hostdRequestTimeoutMs: 6000 })
+    try {
+      const stuck = await gateway.dispatch(request('host.add', { title: 'stuck', endpoint: 'http://127.0.0.1:5501' })) as unknown as { hostId: string }
+      const healthy = await gateway.dispatch(request('host.add', { title: 'healthy', endpoint: 'http://127.0.0.1:5502' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: healthy.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+
+      silenceMethod('inventory', '5501')
+      const parkedInventory = gateway.dispatch(request('inventory', { hostId: stuck.hostId })).catch(() => undefined)
+      const prompt = gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'isolation-1', text: 'hi',
+      }))
+      const deadline = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('prompt queued behind the stuck host request')), 3000)
+      })
+      await Promise.race([prompt, deadline])
+      await prompt
+      // The parked request settles on its own timeout after the test; the
+      // .catch above keeps that rejection handled.
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('never queues one session behind a stuck request of another session on the same host', async () => {
+    const { ctx, gateway, silenceMethod } = await harness([], { hostdRequestTimeoutMs: 6000 })
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:5503' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const first = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'one', backend: 'codex' })) as unknown as { sessionId: string }
+      const second = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'two', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, first.sessionId)
+      await waitForSessionBinding(gateway, second.sessionId)
+
+      silenceMethod('session.attach', '5503')
+      const parkedAttach = gateway.dispatch(request('session.attach', { sessionId: first.sessionId })).catch(() => undefined)
+      const prompt = gateway.dispatch(request('session.prompt', {
+        sessionId: second.sessionId, clientId: 'browser', requestId: 'isolation-2', text: 'hi',
+      }))
+      const deadline = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('prompt queued behind the stuck attach of another session')), 3000)
+      })
+      await Promise.race([prompt, deadline])
+      await prompt
+      // The parked attach settles on its own timeout after the test; the
+      // .catch above keeps that rejection handled.
     } finally {
       await ctx.fiber.dispose()
     }

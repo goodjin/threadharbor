@@ -71,12 +71,17 @@ function SelectableRow({ onClick, children, ...rest }: {
 }
 
 function sessionState(session: RemoteSessionView): 'done' | 'warning' | 'ongoing' | 'error' {
-  if (session.channelState === 'lost') return 'error'
-  if (session.channelState === 'reconnecting') return 'warning'
-  if (session.channelState === 'connecting') return 'ongoing'
+  // The turn comes first: a failed or interrupted turn is the real error, and
+  // it stays visible whatever the channel is doing.
   if (session.turnState === 'failed') return 'error'
   if (session.turnState === 'waiting-permission') return 'warning'
   if (session.turnState === 'running') return 'ongoing'
+  if (session.channelState === 'connecting') return 'ongoing'
+  // A channel that is not established while nothing is in flight is a dormant
+  // session, not a failure. Almost every session is dormant most of the time,
+  // so painting that red put an error badge on the whole sidebar and buried
+  // the one session that actually needs attention.
+  if (session.channelState === 'reconnecting' || session.channelState === 'lost') return 'warning'
   return 'done'
 }
 
@@ -84,6 +89,13 @@ function sessionState(session: RemoteSessionView): 'done' | 'warning' | 'ongoing
 function sessionBadge(session: RemoteSessionView, attaching: boolean): string {
   if (attaching) return '连接中…'
   if (session.channelState === 'connecting') return '建立远端…'
+  // A dormant session has no live channel, and that is normal. Announcing
+  // "已断开" in red made every ordinary row in the sidebar look broken, which
+  // buried the one session that actually needed attention. A turn that really
+  // was cut off keeps its own label below.
+  if (session.channelState === 'lost' && (session.turnState === 'idle' || session.turnState === 'stopped')) {
+    return session.backend
+  }
   if (session.channelState === 'lost') return '已断开'
   if (session.channelState === 'reconnecting') return '重连中…'
   if (session.turnState === 'failed') return '本轮失败'

@@ -105,6 +105,10 @@ function projectAcp(frame: Record<string, JsonValue>): ProjectedFragment[] {
     }]
   }
   if (method === '_dsh/transport_closed' || method === '_dsh/transport_error') {
+    // `failed` is the frame's own reading of "the process is gone", not a
+    // verdict on the round: the fold applies it only while a turn is still in
+    // flight, and never rewrites a round that already settled (see
+    // `foldFragmentTurnState`). The status text below is still recorded.
     const detail = typeof params?.['message'] === 'string' ? params['message']
       : typeof params?.['signal'] === 'string' ? `signal ${params['signal']}`
         : params?.['code'] !== undefined && params['code'] !== null ? `code ${String(params['code'])}` : ''
@@ -215,12 +219,19 @@ function projectDsh(frame: Record<string, JsonValue>): ProjectedFragment[] {
 
 /**
  * Derive browser display fragments without translating or mutating the native frame.
- * @param backend - immutable session backend.
+ *
+ * Selection is by frame shape, not by backend name: a hold started before the
+ * Harness backend moved onto the ACP profile keeps streaming `session.event` /
+ * `session.status` frames while it lives, and the two vocabularies are disjoint.
+ * @param backend - immutable session backend; the frame shape decides projection.
  * @param frame - backend-native JSON frame.
  * @returns zero or more display fragments.
  */
 export function projectNativeFrame(backend: RemoteAgentBackend, frame: JsonValue): ProjectedFragment[] {
+  void backend
   const record = object(frame)
   if (record === undefined) return []
-  return backend === 'dsh' ? projectDsh(record) : projectAcp(record)
+  const method = frameMethod(record)
+  const harnessSdkFrame = method === 'session.event' || method === 'session.status'
+  return harnessSdkFrame ? projectDsh(record) : projectAcp(record)
 }

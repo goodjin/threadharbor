@@ -489,4 +489,137 @@ describe('HostdConnection', () => {
     void conn
     await conn.close()
   })
+
+  it('rejects an unsent request at the connect deadline, long before the request timeout', async () => {
+    // A socket that never opens is a hostd that is not running: the request
+    // cannot even be written. Before the connect deadline existed, it sat in
+    // the pending map until the full request budget expired and the caller
+    // read a generic timeout as "creating a session is slow".
+    const scripts = makeSocketFactory()
+    const conn = new HostdConnection({
+      endpoint: 'http://127.0.0.1:1',
+      requestTimeoutMs: 5000,
+      heartbeatMs: 60_000,
+      reconnectStepsMs: [10_000, 10_000],
+      handshakeTimeoutMs: 100,
+      connectDeadlineMs: 50,
+      socketFactory: scripts.factory as unknown as (url: string) => import('ws').WebSocket,
+    })
+    conn.open()
+    // The factory's socket stays CONNECTING; nothing ever emits 'open'.
+    const startedAt = Date.now()
+    await expect(conn.request('session.start', {})).rejects.toThrow(
+      /session\.start not delivered: no hostd connection within 50ms/)
+    const elapsed = Date.now() - startedAt
+    expect(elapsed).toBeLessThan(1000)
+    void conn
+    await conn.close()
+  })
+
+  it('still delivers a request that gets a socket within the connect deadline', async () => {
+    const scripts = makeSocketFactory()
+    const conn = new HostdConnection({
+      endpoint: 'http://127.0.0.1:1',
+      requestTimeoutMs: 5000,
+      heartbeatMs: 60_000,
+      reconnectStepsMs: [10_000, 10_000],
+      handshakeTimeoutMs: 100,
+      connectDeadlineMs: 200,
+      socketFactory: scripts.factory as unknown as (url: string) => import('ws').WebSocket,
+    })
+    conn.open()
+    scripts.scriptResponse({
+      matchRequest: frame => frame['method'] === 'inventory',
+      reply: (frame) => JSON.stringify({ direction: 'response', id: frame['id'] as string, ok: true, result: { recovered: true } }),
+    })
+    const promise = conn.request('inventory', {})
+    // The hostd comes up while the request is still waiting to be sent.
+    scripts.openLatest()
+    await expect(promise).resolves.toEqual({ recovered: true })
+    void conn
+    await conn.close()
+  })
+
+  it('narrows a sent request back to the connect deadline when the socket drops', async () => {
+    const scripts = makeSocketFactory()
+    const conn = new HostdConnection({
+      endpoint: 'http://127.0.0.1:1',
+      requestTimeoutMs: 5000,
+      heartbeatMs: 60_000,
+      reconnectStepsMs: [10_000, 10_000],
+      handshakeTimeoutMs: 100,
+      connectDeadlineMs: 50,
+      socketFactory: scripts.factory as unknown as (url: string) => import('ws').WebSocket,
+    })
+    conn.open()
+    scripts.openLatest()
+    // The request is written to the open socket and never answered; when the
+    // socket dies the frame is unsent again and must not keep the full 5s
+    // budget — an unreachable host has to fail in seconds.
+    const promise = conn.request('session.start', {})
+    scripts.closeLatest()
+    await expect(promise).rejects.toThrow(
+      /session\.start not delivered: no hostd connection within 50ms/)
+    void conn
+    await conn.close()
+  })
+
+  it('keeps the full request budget for a request that was sent on an open socket', async () => {
+    const scripts = makeSocketFactory()
+    const conn = new HostdConnection({
+      endpoint: 'http://127.0.0.1:1',
+      requestTimeoutMs: 80,
+      heartbeatMs: 60_000,
+      reconnectStepsMs: [10_000, 10_000],
+      handshakeTimeoutMs: 100,
+      connectDeadlineMs: 30,
+      socketFactory: scripts.factory as unknown as (url: string) => import('ws').WebSocket,
+    })
+    conn.open()
+    scripts.openLatest()
+    // Sent but never answered: the connect deadline must not cut it short.
+    await expect(conn.request('session.attach', {})).rejects.toThrow(/session\.attach timed out/)
+    void conn
+    await conn.close()
+  })
+
+  it('does not extend the connect deadline across failed reconnect attempts', async () => {
+    // Live-drill regression: every failed reconnect used to hand the unsent
+    // request a fresh connect budget, so a ladder of ECONNREFUSED pushed the
+    // rejection out to "last attempt + budget" (~18s with the default ladder
+    // and a 10s budget). The deadline is absolute from the moment the request
+    // is issued; re-arms only consume what is left of it.
+    const sockets: MockSocket[] = []
+    const factory = (url: string): MockSocket => {
+      const socket = new EventEmitter() as MockSocket
+      socket.readyState = CONNECTING
+      socket.send = (): void => undefined
+      socket.close = (): void => { socket.readyState = CLOSED; socket.emit('close') }
+      sockets.push(socket)
+      setImmediate(() => {
+        socket.emit('error', new Error('connect ECONNREFUSED'))
+        socket.emit('close')
+      })
+      void url
+      return socket
+    }
+    const conn = new HostdConnection({
+      endpoint: 'http://127.0.0.1:1',
+      requestTimeoutMs: 5000,
+      heartbeatMs: 60_000,
+      reconnectStepsMs: [25, 25, 25, 25, 25, 25, 25, 25],
+      handshakeTimeoutMs: 100,
+      connectDeadlineMs: 80,
+      socketFactory: factory as unknown as (url: string) => import('ws').WebSocket,
+    })
+    const startedAt = Date.now()
+    await expect(conn.request('session.start', {})).rejects.toThrow(
+      /not delivered: no hostd connection within 80ms/)
+    const elapsed = Date.now() - startedAt
+    // Fresh-budget re-arms would land at ~155ms (failure at 75ms + a new 80ms
+    // budget); the absolute deadline rejects at 80ms.
+    expect(elapsed).toBeLessThan(120)
+    expect(sockets.length).toBeGreaterThan(1)
+    await conn.close()
+  })
 })

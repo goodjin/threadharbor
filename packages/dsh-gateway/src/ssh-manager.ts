@@ -269,7 +269,8 @@ export class SshManager {
       `set -eu; channel=${shellQuote(channel)}; release="$HOME/.local/share/threadharbor/$channel/current"; state="$HOME/.local/state/threadharbor/$channel"; mkdir -p "$release" "$state" "$HOME/.config/systemd/user"`,
     ], this.handshakeBudgetMs())
     if (prepare.code !== 0) throw new Error('unable to prepare the remote ThreadHarbor user directories')
-    const hostdFiles = ['bin.js', 'hold-worker.js'] as const
+    // One artifact: hostd runs the Agent in-process, so there is no worker to ship.
+    const hostdFiles = ['bin.js'] as const
     for (const [index, file] of hostdFiles.entries()) {
       onProgress({ phase: 'uploading-hostd', detail: `正在上传 hostd 文件 ${index + 1}/${hostdFiles.length}。`, current: index + 1, total: hostdFiles.length })
       const artifact = join(this.options.hostdArtifactDirectory, file)
@@ -304,10 +305,10 @@ export class SshManager {
       `node=${shellQuote(nodePath)}`,
       'node_dir="$(dirname "$node")"',
       'common_path="$node_dir:$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"',
-      'test -x "$bin" && test -x "$release/hold-worker.js"',
+      'test -x "$bin"',
       'envfile="$state/hostd.env"',
       ': > "$envfile"',
-      "if command -v zsh >/dev/null 2>&1; then zsh -lic 'export -p' 2>/dev/null | awk '/^export (http_proxy|https_proxy|HTTP_PROXY|HTTPS_PROXY|all_proxy|ALL_PROXY|no_proxy|NO_PROXY|DSH_CORDIS_CONFIG)=/{sub(/^export /,\"\"); gsub(/\\047/,\"\"); print}' >> \"$envfile\" || true; elif command -v bash >/dev/null 2>&1; then bash -lc 'export -p' 2>/dev/null | awk '/^export (http_proxy|https_proxy|HTTP_PROXY|HTTPS_PROXY|all_proxy|ALL_PROXY|no_proxy|NO_PROXY|DSH_CORDIS_CONFIG)=/{sub(/^export /,\"\"); gsub(/\\047/,\"\"); print}' >> \"$envfile\" || true; fi",
+      "if command -v zsh >/dev/null 2>&1; then zsh -lic 'export -p' 2>/dev/null | awk '/^export (http_proxy|https_proxy|HTTP_PROXY|HTTPS_PROXY|all_proxy|ALL_PROXY|no_proxy|NO_PROXY)=/{sub(/^export /,\"\"); gsub(/\\047/,\"\"); print}' >> \"$envfile\" || true; elif command -v bash >/dev/null 2>&1; then bash -lc 'export -p' 2>/dev/null | awk '/^export (http_proxy|https_proxy|HTTP_PROXY|HTTPS_PROXY|all_proxy|ALL_PROXY|no_proxy|NO_PROXY)=/{sub(/^export /,\"\"); gsub(/\\047/,\"\"); print}' >> \"$envfile\" || true; fi",
       'chmod 600 "$envfile"',
       'service_name="threadharbor-hostd-$channel.service"',
       'service="$HOME/.config/systemd/user/$service_name"',

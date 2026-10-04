@@ -82,7 +82,7 @@ const sessionRecord = z.object({
   parentSessionId: sessionId.optional(),
   title: z.string(),
   backend: z.enum(['grok', 'codex', 'claude', 'dsh']),
-  channelState: z.enum(['connecting', 'open', 'reconnecting', 'closed', 'lost']),
+  channelState: z.enum(['connecting', 'open', 'reconnecting', 'lost']),
   turnState: z.enum(['idle', 'running', 'waiting-permission', 'stopped', 'failed']),
   createdAt: z.string(),
   updatedAt: z.string(),

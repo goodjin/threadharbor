@@ -9,10 +9,11 @@
  *  - Grok: same response carries it under `result._meta.usage`; cache writes
  *    are reported as `cacheCreationTokens` and cache reads as
  *    `cachedReadTokens` (plus `reasoningTokens`).
- *  - DeepSeek Harness: usage arrives inside `session.event` stream payloads
- *    (`data.chunk.usage` / `data.usage`, fields `inputTokens`,
- *    `outputTokens`, `cacheReadTokens`, `reasoningTokens`, …) once per
- *    request, so values are summed while a round is open.
+ *  - DeepSeek Harness: its ACP profile answers `session/prompt` like Codex /
+ *    Claude (captured from the response). Holds created before ThreadHarbor
+ *    moved the Harness backend onto ACP stream usage inside `session.event`
+ *    payloads (`data.chunk.usage` / `data.usage`); those frames are still read
+ *    while such a hold lives.
  *
  *  Usage is attached (in the gateway projection) to the round's terminal
  *  status row so the browser can show "last round" numbers without carrying
@@ -108,27 +109,35 @@ function eventUsage(frame: JsonValue): FrameUsageReading | undefined {
 
 /**
  * Read one native frame for usage data. Tolerant of both flat numbers and
- * the common nested locations; fields that are absent stay absent.
- * @param backend - session backend (affects where usage may hide).
+ * the common nested locations; fields that are absent stay absent. The two
+ * carriers are disjoint by frame shape (a response vs a `session.event`
+ * notification), so no backend name is needed to tell them apart.
+ * @param backend - session backend (kept for callers; the frame shape decides).
  * @param frame - one journaled native frame.
  * @returns a usage reading, or `undefined` when the frame carries none.
  */
 export function frameUsageReading(backend: RemoteAgentBackend, frame: JsonValue): FrameUsageReading | undefined {
-  return backend === 'dsh' ? eventUsage(frame) ?? responseUsage(frame) : responseUsage(frame) ?? eventUsage(frame)
+  void backend
+  return responseUsage(frame) ?? eventUsage(frame)
 }
 
-/** Round-completion frames that should carry the collected usage. */
+/** Round-completion frames that should carry the collected usage.
+ *
+ *  A transport closure is deliberately absent: the Agent process ending is not
+ *  the model finishing a turn. Counting it as one moved the round's usage
+ *  totals (and its "本轮结束" marker) off the completion frame onto a later
+ *  status row that may belong to no turn at all. */
 export function isRoundTerminalFrame(backend: RemoteAgentBackend, frame: JsonValue): boolean {
+  void backend
   const recordValue = record(frame)
   if (recordValue === undefined) return false
   const method = recordValue['method']
   if (method === '_x.ai/session/prompt_complete') return true
-  if (method === '_dsh/transport_closed' || method === '_dsh/transport_error') return true
   if (method === 'session.status') {
     const params = record(recordValue['params'] as JsonValue)
     return params?.['status'] === 'idle' || params?.['running'] === false
   }
-  if (method !== 'session.event' || backend !== 'dsh') return false
+  if (method !== 'session.event') return false
   const params = record(recordValue['params'] as JsonValue)
   const event = record(params?.['event'] as JsonValue)
   return event?.['type'] === 'turn/end'

@@ -34,6 +34,7 @@ import {
   type RemoteAuthChallenge,
   type RemoteBackendInventory,
   type RemoteDirectoryListing,
+  type RemoteDshCredentialStatus,
   type RemoteErrorFixKind,
   type RemoteHiddenItems,
   type RemoteHostDeployState,
@@ -393,7 +394,7 @@ function inFlightCreatedSessionId(
   if (progress === undefined || progress.phase === 'failed') return undefined
   // A prompt in flight only pins the selection while the user is still on
   // that session (or has no selection yet, i.e. it was just created from a
-  // draft). Every catalog reload during "等待 Agent 响应" runs through here;
+  // draft). Every catalog reload during "等待模型响应" runs through here;
   // re-adopting the prompting session unconditionally yanked the user back
   // from whichever other session they had just clicked.
   if (progress.sessionId !== undefined
@@ -672,7 +673,7 @@ function parseSession(value: JsonValue): RemoteSessionView {
     ...(parentSessionId === undefined ? {} : { parentSessionId: RemoteSessionId(parentSessionId) }),
     title: stringField(record, 'title'),
     backend: remoteAgentBackend(record['backend']),
-    channelState: oneOf(record['channelState'], ['connecting', 'open', 'reconnecting', 'closed', 'lost'] as const, 'channelState'),
+    channelState: oneOf(record['channelState'], ['connecting', 'open', 'reconnecting', 'lost'] as const, 'channelState'),
     turnState: oneOf(record['turnState'], ['idle', 'running', 'waiting-permission', 'stopped', 'failed'] as const, 'turnState'),
     createdAt: stringField(record, 'createdAt'),
     updatedAt: stringField(record, 'updatedAt'),
@@ -871,6 +872,15 @@ export class RemoteAgentStore {
   private liveWait: { timer: number; resolve: () => void } | undefined
   private reloadSerial = 0
   private autoArchiveInFlight = false
+  /** Sessions this browser already sent `session.archive` for. Every reload
+   *  fires another sweep, and the sweep only converges because the gateway
+   *  drops archived rows from the projection. If a projection keeps listing a
+   *  session it accepted the archive for (stale gateway, lagging projection, a
+   *  protocol-violating double), "archive succeeded → reload → sweep again"
+   *  would spin at timer-less async speed and burn CPU plus heap until the tab
+   *  dies. This set makes each session archivable once per browser session;
+   *  `unarchive` and a threshold change clear the entries that must re-arm. */
+  private readonly autoArchivedSessionIds = new Set<string>()
   private readonly cache: TranscriptCache | null
   /** Prompts interrupted by a transport drop or hostd restart, awaiting automatic redelivery. */
   private redeliverQueue: PendingRedelivery[] = []
@@ -1326,6 +1336,16 @@ export class RemoteAgentStore {
     return this.mutate('agent.credential.set', { hostId, apiKey })
   }
 
+  /** Whether the optional DSH override key is stored on the host. Models and
+   *  credentials normally come from the host user's own DSH configuration, so
+   *  this only answers "did someone also store an override here?".
+   * @param hostId - target host.
+   * @returns the browser-safe credential state; never the key itself.
+   */
+  dshCredentialStatus(hostId: ReturnType<typeof RemoteHostId>): Promise<RemoteDshCredentialStatus> {
+    return this.run(async () => await this.call('agent.credential.status', { hostId }) as unknown as RemoteDshCredentialStatus)
+  }
+
   /** Start a detached login command on hostd.
    * @param hostId - target host.
    * @param backend - installed agent.
@@ -1493,110 +1513,52 @@ export class RemoteAgentStore {
   }
 
   /**
-   * Submit the visible draft's first message together with `session.start`.
-   * The gateway acknowledges immediately (connecting row) and drives hold
-   * startup in the background, delivering the first message automatically once
-   * the remote session is bound. The browser performs a single RPC: the UI
-   * moves to `sending` as soon as the message is accepted, and each remote
-   * stage (`session.progress`) is shown until backend events take over.
-   * Once the Agent starts, the Agent cannot be changed even when prompt
-   * delivery subsequently reports an error.
+   * Create the remote session for the visible draft the moment the user picks
+   * an Agent.
+   *
+   * The backend's real settings — the model catalog, reasoning levels, and the
+   * permission modes it offers — are published with the session and exist
+   * nowhere else. Creating here is therefore what lets the composer offer the
+   * same choices as the Agent's own UI *before* the first message is sent;
+   * sending the first message together with `session.start` would leave the
+   * user choosing blind from a built-in list. The first message itself then
+   * travels the ordinary `prompt` path.
    */
-  async promptSessionDraft(backend: RemoteAgentBackend, text: string): Promise<void> {
+  async createSessionDraft(backend: RemoteAgentBackend): Promise<void> {
     const draft = this.snapshot.draftSession
     if (draft === undefined) throw new Error('no new-session draft is active')
-    const clientId = this.clientId()
-    const requestId = `${clientId}-${Date.now()}-${++this.requestSerial}`
     const startedAt = Date.now()
     this.publish({
       ...withoutError(this.snapshot),
       promptProgress: { projectId: draft.projectId, phase: 'connecting', startedAt, baselineSeq: -1 },
     })
-    this.tracePromptPhase('connecting', startedAt, { projectId: draft.projectId })
     try {
       await this.run(async () => {
         const result = await this.call('session.start', {
           projectId: draft.projectId,
-          title: promptTitle(text),
+          title: draft.title,
           backend,
-          text,
-          clientId,
-          requestId,
         })
         const session = parseSession(result)
         const nextState = withSessionView(this.snapshot.state, session)
-        // The gateway accepts the message in the same RPC, so the UI can stop
-        // showing a bare "connecting" the moment the session row exists: the
-        // hold is being created and the first prompt is queued for auto-delivery.
-        const sending: RemotePromptProgress = {
-          projectId: draft.projectId,
-          sessionId: session.sessionId,
-          phase: 'sending',
-          startedAt,
-          baselineSeq: -1,
-          message: '消息已提交，正在建立远程会话',
-        }
-        const { draftSession: _draftSession, panel: _panel, ...snapshot } = withoutError(this.snapshot)
-        this.publish({
-          ...snapshot,
-          state: nextState,
-          currentSessionId: session.sessionId,
-          promptProgress: sending,
-          pending: true,
-        })
-        this.tracePromptPhase('sending', startedAt, { sessionId: session.sessionId, stage: 'rpcReturned' })
-        this.applyTranscriptEntries(session.sessionId, [{
-          transcriptId: RemoteTranscriptId(`user:${session.sessionId}:${clientId}:${requestId}`),
-          sessionId: session.sessionId,
-          seq: 0,
-          role: 'user',
-          kind: 'message',
-          text,
-          requestId,
-          createdAt: new Date().toISOString(),
-        }])
+        const { draftSession: _draftSession, panel: _panel, promptProgress: _promptProgress, ...snapshot } = withoutError(this.snapshot)
+        this.publish({ ...snapshot, state: nextState, currentSessionId: session.sessionId })
         this.liveBackoffIndex = 0
-        await this.catchupTranscript(session.sessionId, 'high')
+        void this.catchupTranscript(session.sessionId, 'high')
+        void this.backfillOpenedTranscript(session.sessionId, this.transcriptWork)
+        this.queueBackgroundTranscripts()
         this.ensureLiveTranscriptSync()
-        // Wait for the remote session to open. The gateway auto-delivers the
-        // first message once the hold is bound, so no second session.prompt RPC
-        // is issued here; failure surfaces as a lost/failed row or a delivery
-        // failure status entry that reconcilePromptProgress turns into `failed`.
-        await this.awaitSessionOpen(session.sessionId)
-        this.tracePromptPhase('sending', startedAt, { sessionId: session.sessionId, stage: 'holdOpen' })
-        try {
-          await this.reload(session.sessionId)
-        } finally {
-          void this.catchupTranscript(session.sessionId, 'high')
-        }
-        const current = this.snapshot.state.sessions.find(candidate => candidate.sessionId === session.sessionId)
-        if (current?.turnState === 'running') {
-          this.publish({ ...withoutError(this.snapshot), promptProgress: { ...sending, phase: 'waiting' } })
-          this.tracePromptPhase('waiting', startedAt, { sessionId: session.sessionId })
-        } else if (current?.turnState === 'failed' || current?.channelState === 'lost') {
-          const failedMessage = this.snapshot.error
-            ?? (current.channelState === 'lost' ? '远程会话已丢失，可以点「在当前会话重开」再试。' : '消息未能送达远程 Agent。')
-          this.publish({
-            ...withoutError(this.snapshot),
-            promptProgress: { ...sending, phase: 'failed', message: failedMessage },
-          })
-          this.tracePromptPhase('failed', startedAt, { sessionId: session.sessionId, message: failedMessage })
-        } else {
-          const { promptProgress: _promptProgress, ...snapshot } = withoutError(this.snapshot)
-          this.publish(snapshot)
-        }
       }, true)
     } catch (error) {
-      const progress = this.snapshot.promptProgress
+      // Keep the draft visible with the failure attached: the picker stays, so
+      // the user can pick the same Agent again and retry.
       this.publish({
         ...this.snapshot,
         promptProgress: {
           projectId: draft.projectId,
-          ...(progress?.sessionId === undefined ? {} : { sessionId: progress.sessionId }),
-          phase: 'failed', startedAt, baselineSeq: progress?.baselineSeq ?? -1, message: errorText(error),
+          phase: 'failed', startedAt, baselineSeq: -1, message: errorText(error),
         },
       })
-      this.tracePromptPhase('failed', startedAt, { message: errorText(error) })
       throw error
     }
   }
@@ -1671,8 +1633,8 @@ export class RemoteAgentStore {
     if (session === undefined) throw new Error(`unknown session ${sessionId}`)
     const baselineSeq = lastTranscriptSeq(this.snapshot.state, sessionId)
     // Optimistic local user bubble so Send feels instantaneous. The transcriptId
-    // matches `promptSessionDraft`'s shape so the gateway can echo the same id
-    // and `applyTranscriptEntries` will dedup the eventual server-side push.
+    // is derived from the same client/request pair the gateway will echo back, so
+    // `applyTranscriptEntries` dedups the eventual server-side push.
     this.applyTranscriptEntries(sessionId, [{
       transcriptId: RemoteTranscriptId(`user:${sessionId}:${clientId}:${requestId}`),
       sessionId,
@@ -1981,6 +1943,8 @@ export class RemoteAgentStore {
 
   /** Restore a previously archived session to the normal session tree. */
   unarchiveSession(sessionId: ReturnType<typeof RemoteSessionId>): Promise<void> {
+    // A restored session can go stale again, so it must be sweepable once more.
+    this.autoArchivedSessionIds.delete(sessionId)
     return this.mutate('session.unarchive', { sessionId })
   }
 
@@ -2005,6 +1969,9 @@ export class RemoteAgentStore {
       autoHideSessionsAfterDays: next.autoHideSessionsAfterDays ?? current.autoHideSessionsAfterDays,
     }
     writeDisplayPreferences(merged)
+    // A threshold change re-evaluates every row, including sessions an earlier
+    // threshold already archived out of the sidebar.
+    this.autoArchivedSessionIds.clear()
     void this.archiveStaleSessions().catch(() => undefined)
     return merged
   }
@@ -2026,6 +1993,7 @@ export class RemoteAgentStore {
     try {
       const targets = this.snapshot.state.sessions.filter(session => {
         if (session.archivedAt !== undefined) return false
+        if (this.autoArchivedSessionIds.has(session.sessionId)) return false
         return session.updatedAt < cutoff
       })
       let archived = 0
@@ -2037,6 +2005,9 @@ export class RemoteAgentStore {
         }
         try {
           await this.call('session.archive', { sessionId: session.sessionId })
+          // Mark before the refresh sweep: the reload this success triggers
+          // must not offer the same row straight back to the next sweep.
+          this.autoArchivedSessionIds.add(session.sessionId)
           archived += 1
         } catch (error) {
           console.warn('threadharbor: auto-archive failed for session', session.sessionId, error)
@@ -2528,8 +2499,15 @@ export class RemoteAgentStore {
     // The catalog can lag session.start; keep in-flight progress until a later
     // upsert, reload, or RPC error settles the row.
     if (session === undefined) return progress
-    if (session.turnState === 'failed' || session.channelState === 'lost' || session.channelState === 'closed') {
-      return { ...progress, phase: 'failed', message: this.snapshot.error ?? '远程会话未能完成本轮请求。' }
+    if (session.turnState === 'failed' || session.channelState === 'lost') {
+      // Never borrow `snapshot.error` (the whole gateway's latest connection
+      // error) as this round's reason — the real reason is on the session's
+      // own transcript status rows.
+      return {
+        ...progress,
+        phase: 'failed',
+        message: '远程会话未能完成本轮请求，原因见上方记录。可以点「在当前会话重开」，或重新发送。',
+      }
     }
     // While the socket is down a catalog reload must not clear a prompt that is
     // still waiting to be (re)delivered — otherwise the header would flip to a

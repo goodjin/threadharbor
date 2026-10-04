@@ -439,10 +439,10 @@ describe('RemoteAgentStore', () => {
 
   it('parses a reviewable agent install plan', () => {
     expect(parseInstallPlan({
-      component: 'dsh', version: 'deepseek-harness-runtime-bin==0.1.1rc1', alreadyInstalled: false,
+      component: 'dsh', version: '@deepseek-ai/dsh@0.1.5-rc.1', alreadyInstalled: false,
       requiresConfirmation: true,
-      steps: [{ title: 'Install DSH', command: 'python3 -m pip install --user --upgrade deepseek-harness-runtime-bin==0.1.1rc1' }],
-    })).toMatchObject({ component: 'dsh', requiresConfirmation: true, steps: [{ command: expect.stringContaining('pip install') }] })
+      steps: [{ title: 'Install DSH', command: 'npm install -g @deepseek-ai/dsh@0.1.5-rc.1' }],
+    })).toMatchObject({ component: 'dsh', requiresConfirmation: true, steps: [{ command: expect.stringContaining('npm install -g @deepseek-ai/dsh') }] })
     expect(() => parseInstallPlan({
       component: 'dsh', version: 'x', alreadyInstalled: false, requiresConfirmation: false, steps: [],
     })).toThrow('require confirmation')
@@ -458,8 +458,8 @@ describe('RemoteAgentStore', () => {
         title: '部署 dsh', detail: '已排队。', target: 'host:h:agent:dsh', cancellable: false,
         hostId: 'h', backend: 'dsh', startedAt: 'a', updatedAt: 'a',
       } : body.method === 'agent.install.plan' ? {
-        component: 'dsh', version: 'deepseek-harness-runtime-bin==0.1.1rc1', alreadyInstalled: false,
-        requiresConfirmation: true, steps: [{ title: 'Install DSH', command: 'python3 -m pip install --user x' }],
+        component: 'dsh', version: '@deepseek-ai/dsh@0.1.5-rc.1', alreadyInstalled: false,
+        requiresConfirmation: true, steps: [{ title: 'Install DSH', command: 'npm install -g @deepseek-ai/dsh@0.1.5-rc.1' }],
       } : {}
       return Response.json({ id: body.id, ok: true, result })
     }))
@@ -497,6 +497,26 @@ describe('RemoteAgentStore', () => {
     }
   })
 
+  it('asks whether an optional DSH override key is stored, without any value coming back', async () => {
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = []
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(requestBody(init)) as { id: string; method: string; params: Record<string, unknown> }
+      calls.push({ method: body.method, params: body.params })
+      return Response.json({
+        id: body.id, ok: true,
+        result: body.method === 'state' ? EMPTY : { backend: 'dsh', configured: true },
+      })
+    }))
+    const store = new RemoteAgentStore()
+    try {
+      await store.start()
+      await expect(store.dshCredentialStatus(RemoteHostId('h'))).resolves.toEqual({ backend: 'dsh', configured: true })
+      expect(calls.find(call => call.method === 'agent.credential.status')?.params).toEqual({ hostId: 'h' })
+    } finally {
+      store.dispose()
+    }
+  })
+
   it('persists a session rename and reloads the updated catalog title', async () => {
     const calls: Array<{ method: string; params: Record<string, unknown> }> = []
     let session = {
@@ -529,58 +549,52 @@ describe('RemoteAgentStore', () => {
     }
   })
 
-  it('keeps a new session as a local placeholder and locks the Agent on first send', async () => {
+  it('creates the remote session as soon as the Agent is picked so its catalog precedes the first message', async () => {
     const calls: Array<{ method: string; params: Record<string, unknown> }> = []
-    const connectingRow = {
-      sessionId: 's-new', projectId: 'p', title: 'first question', backend: 'grok',
-      channelState: 'connecting', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
-    }
-    const session = {
-      ...connectingRow,
-      channelState: 'open', turnState: 'running',
+    const created = {
+      sessionId: 's-new', projectId: 'p', title: '新会话', backend: 'dsh',
+      channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
       binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
+      configOptions: [{
+        id: 'model', name: 'Model', category: 'model', setter: 'config',
+        currentValue: '["deepseek-official","deepseek-v4-pro"]',
+        options: [
+          { value: '["deepseek-official","deepseek-v4-pro"]', name: 'DeepSeek-V4-Pro' },
+          { value: '["zai-coding-cn","glm-5.3"]', name: 'GLM-5.3' },
+        ],
+      }],
     }
-    let created = false
     vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
       const body = JSON.parse(requestBody(init)) as { id: string; method: string; params: Record<string, unknown> }
       calls.push({ method: body.method, params: body.params })
-      const state = { ...EMPTY, sessions: created ? [session] : [] }
-      if (body.method === 'session.start') {
-        created = true
-        return Response.json({ id: body.id, ok: true, result: connectingRow })
+      if (body.method === 'session.start') return Response.json({ id: body.id, ok: true, result: created })
+      if (body.method === 'transcript.read') {
+        return Response.json({ id: body.id, ok: true, result: { entries: [], latestSeq: -1, fromSeq: 0, toSeq: -1, hasMore: false } })
       }
-      return Response.json({ id: body.id, ok: true, result: state })
+      return Response.json({ id: body.id, ok: true, result: { ...EMPTY, sessions: [created] } })
     }))
     const store = new RemoteAgentStore()
     try {
       await store.start()
       store.startSessionDraft(RemoteProjectId('p'))
       expect(store.getSnapshot()).toMatchObject({ draftSession: { projectId: 'p', title: '新会话' } })
-      expect(calls.map(call => call.method)).toEqual(['state'])
+      expect(calls.map(call => call.method).filter(method => method !== 'transcript.read')).toEqual(['state'])
 
-      const pending = store.promptSessionDraft('grok', 'first question')
-      // Wait for the accepted connecting row, then simulate the gateway's WS
-      // push announcing the bound/running view (which arrives after the RPC).
-      await vi.waitFor(() => {
-        expect(store.getSnapshot().currentSessionId).toBe('s-new')
-      })
-      expect(store.getSnapshot().state.sessions[0]?.channelState).toBe('connecting')
-      store.consume({ type: 'session.view.changed', session })
-      await pending
+      await store.createSessionDraft('dsh')
 
+      // No message travels with the create: the session exists so the composer
+      // can offer the backend's own catalog, and the first message is then an
+      // ordinary prompt.
+      expect(calls.find(call => call.method === 'session.start')?.params)
+        .toEqual({ projectId: 'p', title: '新会话', backend: 'dsh' })
       expect(store.getSnapshot().draftSession).toBeUndefined()
       expect(store.getSnapshot().currentSessionId).toBe('s-new')
-      expect(store.getSnapshot().state.sessions.map(entry => entry.sessionId)).toEqual(['s-new'])
-      // One-shot create + auto-deliver: the gateway receives session.start and
-      // delivers the first message itself, so the browser issues no second
-      // session.prompt RPC.
-      expect(calls.map(call => call.method).filter(method => method !== 'transcript.read'))
-        .toEqual(['state', 'session.start', 'state'])
-      expect(calls.find(call => call.method === 'session.start')?.params).toMatchObject({
-        projectId: 'p', backend: 'grok', title: 'first question', text: 'first question',
+      expect(store.getSnapshot().state.sessions[0]).toMatchObject({
+        sessionId: 's-new', channelState: 'open', configOptions: [{ id: 'model' }],
       })
-      expect(calls.find(call => call.method === 'session.start')?.params).toHaveProperty('clientId')
-      expect(calls.find(call => call.method === 'session.start')?.params).toHaveProperty('requestId')
+      expect(store.getSnapshot().promptProgress).toBeUndefined()
+      expect(store.getSnapshot().state.sessions[0]?.configOptions?.[0]?.options.map(choice => choice.name))
+        .toEqual(['DeepSeek-V4-Pro', 'GLM-5.3'])
     } finally {
       store.dispose()
     }
@@ -652,69 +666,48 @@ describe('RemoteAgentStore', () => {
     }
   })
 
-  it('keeps the created session visible while the first message waits for the remote binding', async () => {
-    const connecting = {
-      sessionId: 's-new', projectId: 'p', title: 'first question', backend: 'grok',
-      channelState: 'connecting', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
-    }
-    const opened = {
-      ...connecting,
-      channelState: 'open',
-      turnState: 'running',
-      updatedAt: 'c',
+  it('keeps the draft with the reason when creating the session fails, then adopts the retry', async () => {
+    const created = {
+      sessionId: 's-new', projectId: 'p', title: '新会话', backend: 'dsh',
+      channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
       binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
     }
-    let created = false
+    let attempts = 0
     vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
       const body = JSON.parse(requestBody(init)) as { id: string; method: string }
       if (body.method === 'session.start') {
-        created = true
-        return Response.json({ id: body.id, ok: true, result: connecting })
+        attempts += 1
+        if (attempts === 1) {
+          return Response.json({
+            id: body.id, ok: false,
+            error: { message: 'backend dsh is not installed on host Mac-good' },
+          })
+        }
+        return Response.json({ id: body.id, ok: true, result: created })
+      }
+      if (body.method === 'transcript.read') {
+        return Response.json({ id: body.id, ok: true, result: { entries: [], latestSeq: -1, fromSeq: 0, toSeq: -1, hasMore: false } })
       }
       return Response.json({
-        id: body.id,
-        ok: true,
-        result: { ...EMPTY, sessions: created ? [opened] : [] },
+        id: body.id, ok: true,
+        result: { ...EMPTY, sessions: attempts > 1 ? [created] : [] },
       })
     }))
     const store = new RemoteAgentStore()
     try {
       await store.start()
       store.startSessionDraft(RemoteProjectId('p'))
-      const pending = store.promptSessionDraft('grok', 'first question')
-      await vi.waitFor(() => {
-        expect(store.getSnapshot().currentSessionId).toBe('s-new')
-      })
-      expect(store.getSnapshot().draftSession).toBeUndefined()
-      // The message was submitted in the same RPC: once the connecting row is
-      // known the prompt is already queued for gateway auto-delivery, so the
-      // UI moves to `sending` (with a stage message) instead of staying in a
-      // bare `connecting` state until the hold is bound.
-      expect(store.getSnapshot().promptProgress?.phase).toBe('sending')
-      expect(store.getSnapshot().promptProgress?.message).toBeTruthy()
-      expect(store.getSnapshot().state.sessions).toEqual([expect.objectContaining({
-        sessionId: 's-new', channelState: 'connecting',
-      })])
+      await expect(store.createSessionDraft('dsh')).rejects.toThrow(/not installed/)
+      // The draft survives so the same Agent can be picked again, and the reason
+      // is attached to it instead of a session row.
+      expect(store.getSnapshot().draftSession).toEqual({ projectId: 'p', title: '新会话' })
+      expect(store.getSnapshot().currentSessionId).toBeUndefined()
+      expect(store.getSnapshot().promptProgress).toMatchObject({ phase: 'failed' })
 
-      store.consume({
-        type: 'transcript.append',
-        sessionId: 's-other',
-        seq: 1,
-        entry: {
-          transcriptId: 't-other', sessionId: 's-other', seq: 1, role: 'assistant', kind: 'message',
-          text: 'unrelated', createdAt: 'a',
-        },
-      })
-      expect(store.getSnapshot().state.sessions[0]?.channelState).toBe('connecting')
-
-      store.consume({ type: 'session.view.changed', session: opened })
-      await pending
+      await store.createSessionDraft('dsh')
       expect(store.getSnapshot().draftSession).toBeUndefined()
-      expect(store.getSnapshot()).toMatchObject({
-        currentSessionId: 's-new',
-        state: { sessions: [{ sessionId: 's-new', channelState: 'open' }] },
-      })
-      expect(store.getSnapshot().promptProgress?.phase).toBe('waiting')
+      expect(store.getSnapshot().currentSessionId).toBe('s-new')
+      expect(store.getSnapshot().state.sessions.map(entry => entry.sessionId)).toEqual(['s-new'])
     } finally {
       store.dispose()
     }
@@ -762,68 +755,49 @@ describe('RemoteAgentStore', () => {
     }
   })
 
-  it('opens the created session when a catalog reload arrives while the draft is still showing', async () => {
+  it('keeps the created session when a catalog reload started mid-create lands without it', async () => {
     const created = {
-      sessionId: 's-new', projectId: 'p', title: 'first question', backend: 'grok',
-      channelState: 'open', turnState: 'running',
-      createdAt: new Date().toISOString(), updatedAt: 'c',
+      sessionId: 's-new', projectId: 'p', title: '新会话', backend: 'dsh',
+      channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
       binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
     }
     let releaseStart: (() => void) | undefined
     const startHeld = new Promise<void>(resolve => { releaseStart = resolve })
-    let stateCalls = 0
     vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
       const body = JSON.parse(requestBody(init)) as { id: string; method: string }
       if (body.method === 'session.start') {
         await startHeld
         return Response.json({ id: body.id, ok: true, result: created })
       }
-      if (body.method === 'state') {
-        stateCalls += 1
-        return Response.json({
-          id: body.id, ok: true,
-          result: { ...EMPTY, sessions: stateCalls === 1 ? [] : [created] },
-        })
-      }
       return Response.json({
         id: body.id, ok: true,
         result: body.method === 'transcript.read'
-          ? {
-            sessionId: 's-new', entries: [{
-              transcriptId: 't1', sessionId: 's-new', seq: 1, role: 'assistant', kind: 'message',
-              text: 'hello from agent', createdAt: 'c',
-            }],
-            afterSeq: 0, latestSeq: 1, fromSeq: 1, toSeq: 1, hasMore: false,
-          }
-          : { ...EMPTY, sessions: [created] },
+          ? { entries: [], latestSeq: -1, fromSeq: 0, toSeq: -1, hasMore: false }
+          // A reload that started before the create cannot know about it.
+          : { ...EMPTY, sessions: [] },
       })
     }))
     const store = new RemoteAgentStore()
     try {
       await store.start()
       store.startSessionDraft(RemoteProjectId('p'))
-      const pending = store.promptSessionDraft('grok', 'first question')
+      const pending = store.createSessionDraft('dsh')
       await vi.waitFor(() => {
         expect(store.getSnapshot().promptProgress?.phase).toBe('connecting')
       })
-      expect(store.getSnapshot().draftSession).toEqual({ projectId: 'p', title: '新会话' })
-
+      // Catalog reload while the create is still in flight: its result has no
+      // row for the session being created.
       store.consume({ type: 'host.changed', host: { hostId: 'h' } })
-      await vi.waitFor(() => {
-        expect(store.getSnapshot().currentSessionId).toBe('s-new')
-      })
-      expect(store.getSnapshot().draftSession).toBeUndefined()
-      await vi.waitFor(() => {
-        expect(store.getSnapshot().state.transcript.some(entry => entry.text === 'hello from agent')).toBe(true)
-      })
       releaseStart?.()
       await pending
+      expect(store.getSnapshot().currentSessionId).toBe('s-new')
+      expect(store.getSnapshot().state.sessions.map(entry => entry.sessionId)).toEqual(['s-new'])
     } finally {
       store.dispose()
     }
   })
 
-  it('clears promptProgress when a different project starts a new draft mid-flight', async () => {
+  it('clears promptProgress when a different project starts a new draft mid-create', async () => {
     // First draft's session.start is stalled, leaving promptProgress pointing at
     // project A. The user then abandons it and starts a new draft for project B.
     // The store must clear promptProgress so the new draft's UI is not blocked by
@@ -836,28 +810,31 @@ describe('RemoteAgentStore', () => {
       if (body.method === 'session.start') {
         startCalls += 1
         if (startCalls === 1) {
-          // Stall the first create RPC so promptProgress for project A stays visible
-          // while we exercise the cross-draft switch.
+          // Stall the first create RPC so promptProgress for project A stays
+          // visible while we exercise the cross-draft switch.
           await startHeld
         }
         return Response.json({
           id: body.id, ok: true,
           result: {
-            sessionId: `s-${startCalls}`, projectId: 'p', title: 't', backend: 'grok',
-            channelState: 'connecting', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+            sessionId: `s-${startCalls}`, projectId: 'p', title: 't', backend: 'dsh',
+            channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+            binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
           },
         })
       }
       return Response.json({
         id: body.id, ok: true,
-        result: body.method === 'session.prompt' ? {} : { ...EMPTY },
+        result: body.method === 'transcript.read'
+          ? { entries: [], latestSeq: -1, fromSeq: 0, toSeq: -1, hasMore: false }
+          : { ...EMPTY },
       })
     }))
     const store = new RemoteAgentStore()
     try {
       await store.start()
       store.startSessionDraft(RemoteProjectId('p-a'))
-      const firstDraft = store.promptSessionDraft('grok', 'first question')
+      const firstDraft = store.createSessionDraft('dsh')
 
       await vi.waitFor(() => {
         expect(store.getSnapshot().promptProgress?.projectId).toBe('p-a')
@@ -869,19 +846,14 @@ describe('RemoteAgentStore', () => {
       const snapshot = store.getSnapshot()
       expect(snapshot.draftSession).toEqual({ projectId: 'p-b', title: '新会话' })
 
-      // The new draft's promptProgress check must be false: the previous progress
-      // entry belonged to project A and was cleared by startSessionDraft.
+      // The new draft must not look busy: the previous progress entry belonged
+      // to project A and was cleared by startSessionDraft.
       const draftBusyForB = snapshot.promptProgress?.projectId === 'p-b'
         && snapshot.promptProgress.sessionId === undefined
         && snapshot.promptProgress.phase !== 'failed'
       expect(draftBusyForB).toBeFalsy()
-
-      // pending remains true while the first RPC is in flight, but DraftConversation
-      // intentionally ignores snapshot.pending and only blocks when its OWN draft's
-      // promptProgress matches.
       expect(snapshot.pending).toBe(true)
 
-      // Release the held fetch so the dangling promise resolves after dispose().
       releaseStart?.()
       // Intentionally do not await firstDraft — we already verified the invariant.
       void firstDraft.catch(() => undefined)
@@ -929,43 +901,43 @@ describe('RemoteAgentStore', () => {
     }
   })
 
-  it('does not reopen Agent selection after session creation when first prompt delivery fails', async () => {
-    const connecting = {
-      sessionId: 's-created', projectId: 'p', title: 'question', backend: 'codex',
-      channelState: 'connecting', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+  it('keeps the created session selected when a later turn fails instead of reopening Agent selection', async () => {
+    const created = {
+      sessionId: 's-created', projectId: 'p', title: '新会话', backend: 'codex',
+      channelState: 'open', turnState: 'idle', createdAt: 'a', updatedAt: 'b',
+      binding: { holdId: 'hold', generation: 'g', state: 'active', lastSeq: 0 },
     }
     const failed = {
-      ...connecting,
+      ...created,
       channelState: 'lost', turnState: 'failed', updatedAt: 'c',
       binding: { holdId: 'hold', generation: 'g', state: 'lost', lastSeq: 0 },
     }
-    let store: RemoteAgentStore | undefined
-    let created = false
-    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
-      const body = JSON.parse(requestBody(init)) as { id: string; method: string }
-      if (body.method === 'session.start') {
-        created = true
-        return Response.json({ id: body.id, ok: true, result: connecting })
-      }
-      return Response.json({ id: body.id, ok: true, result: { ...EMPTY, sessions: created ? [failed] : [] } })
-    }))
-    store = new RemoteAgentStore()
+    let lost = false
+    const store = new RemoteAgentStore()
     try {
+      vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(requestBody(init)) as { id: string; method: string }
+        if (body.method === 'session.start') return Response.json({ id: body.id, ok: true, result: created })
+        return Response.json({
+          id: body.id, ok: true,
+          result: body.method === 'transcript.read'
+            ? { entries: [], latestSeq: -1, fromSeq: 0, toSeq: -1, hasMore: false }
+            : { ...EMPTY, sessions: [lost ? failed : created] },
+        })
+      }))
       await store.start()
       store.startSessionDraft(RemoteProjectId('p'))
-      // The create RPC succeeds (one-shot submit); the failure surfaces when
-      // the gateway pushes the lost/failed row that follows auto-delivery.
-      const pending = store.promptSessionDraft('codex', 'question').catch((error: unknown) => String(error))
-      await vi.waitFor(() => {
-        expect(store.getSnapshot().currentSessionId).toBe('s-created')
-      })
+      await store.createSessionDraft('codex')
+      expect(store.getSnapshot().currentSessionId).toBe('s-created')
+
+      // The agent dies after creation: the session stays selected as the
+      // tombstone the user can reopen, and the Agent picker is NOT reopened.
+      lost = true
       store.consume({ type: 'session.view.changed', session: failed })
-      await expect(pending).resolves.toMatch(/建立失败|失败/)
-      // The tombstone stays selected; the Agent picker is NOT reopened.
       expect(store.getSnapshot().currentSessionId).toBe('s-created')
       expect(store.getSnapshot().draftSession).toBeUndefined()
       expect(store.getSnapshot().state.sessions[0]?.turnState).toBe('failed')
-      await expect(store.promptSessionDraft('grok', 'retry')).rejects.toThrow('no new-session draft')
+      await expect(store.createSessionDraft('dsh')).rejects.toThrow('no new-session draft')
     } finally {
       store.dispose()
     }
@@ -2071,8 +2043,13 @@ describe('RemoteAgentStore', () => {
 
   it('auto-archives only the unarchived sessions older than the configured threshold', async () => {
     const archivedCalls: string[] = []
-    const fresh = '2026-09-04T12:00:00.000Z'
-    const stale = '2026-07-15T12:00:00.000Z'
+    // Ages are computed against the real clock so the test never expires:
+    // "fresh" stays 1 day old (kept at any sane threshold), the stale rows sit
+    // 51 days back (archived at the 30-day threshold used below). Hard-coded
+    // calendar dates aged past the threshold once and started archiving the
+    // "fresh" row — a time bomb that also fed the archive/reload loop.
+    const fresh = new Date(Date.now() - 1 * 86_400_000).toISOString()
+    const stale = new Date(Date.now() - 51 * 86_400_000).toISOString()
     const initialState = {
       ...EMPTY,
       // Pre-populate the host with inventory so `start()` does not call
@@ -2124,8 +2101,8 @@ describe('RemoteAgentStore', () => {
       store.updateDisplayPreferences({ autoHideSessionsAfterDays: 0 })
       await store.start()
       archivedCalls.length = 0
-      // Tighten the threshold to 30 days; both stale rows are ~51 days old
-      // at the freeze date used by the test, fresh is today.
+      // Tighten the threshold to 30 days; both stale rows are 51 days old,
+      // fresh is 1 day old.
       store.updateDisplayPreferences({ autoHideSessionsAfterDays: 30 })
       // The fire-and-forget chain may schedule several archive passes; wait
       // until the call count stabilizes before asserting.
@@ -2183,7 +2160,7 @@ describe('RemoteAgentStore', () => {
   })
 
   it('archiveStaleSessions keeps going when a single archive RPC fails', async () => {
-    const stale = '2026-07-15T12:00:00.000Z'
+    const stale = new Date(Date.now() - 51 * 86_400_000).toISOString()
     const initialState = {
       ...EMPTY,
       hosts: [{
@@ -2232,7 +2209,7 @@ describe('RemoteAgentStore', () => {
   })
 
   it('updateDisplayPreferences re-evaluates against the new threshold', async () => {
-    const fresh = '2026-09-04T12:00:00.000Z'
+    const fresh = new Date(Date.now() - 1 * 86_400_000).toISOString()
     const initialState = {
       ...EMPTY,
       hosts: [{
@@ -2246,9 +2223,9 @@ describe('RemoteAgentStore', () => {
       sessions: [{
         sessionId: 'mid', projectId: 'p', title: 'mid', backend: 'codex',
         channelState: 'open', turnState: 'idle',
-        // 45 days old at the freeze date used by the test → "stale" at 30d
-        // but "fresh" at 60d.
-        createdAt: '2026-07-21T12:00:00.000Z', updatedAt: '2026-07-21T12:00:00.000Z',
+        // 45 days old → "stale" at the 30-day threshold below, "fresh" at 60d.
+        createdAt: new Date(Date.now() - 45 * 86_400_000).toISOString(),
+        updatedAt: new Date(Date.now() - 45 * 86_400_000).toISOString(),
       }, {
         sessionId: 'recent', projectId: 'p', title: 'recent', backend: 'codex',
         channelState: 'open', turnState: 'idle', createdAt: fresh, updatedAt: fresh,
@@ -2367,7 +2344,7 @@ describe('RemoteAgentStore', () => {
     // "清理中…" while every per-session RPC timed out individually.
     // The sweep budget must cap the wall clock so the UI can re-render,
     // even if many RPCs are slow enough to starve subsequent targets.
-    const stale = '2026-07-15T12:00:00.000Z'
+    const stale = new Date(Date.now() - 51 * 86_400_000).toISOString()
     const initialState = {
       ...EMPTY,
       hosts: [{ hostId: 'h', title: 'box', endpoint: 'http://127.0.0.1:3091', createdAt: 'a', updatedAt: 'b',

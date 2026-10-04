@@ -413,9 +413,9 @@ describe('remote conversation view model', () => {
       session: remoteSession, entries: [], now: 10_000,
       progress: { sessionId: 'session', phase: 'sending' as const, startedAt: 1_000, baselineSeq: -1 },
     }
-    expect(conversationStage(base)).toMatchObject({ kind: 'sending', label: '正在发送消息', state: 'ongoing' })
+    expect(conversationStage(base)).toMatchObject({ kind: 'sending', label: '正在发送请求', state: 'ongoing' })
     expect(conversationStage({ ...base, progress: { ...base.progress, phase: 'waiting' } }))
-      .toMatchObject({ kind: 'waiting', label: '等待 Agent 响应' })
+      .toMatchObject({ kind: 'waiting', label: '等待模型响应' })
     expect(conversationStage({
       session: remoteSession,
       entries: [
@@ -423,9 +423,9 @@ describe('remote conversation view model', () => {
         entry('2', 'user', 'message', '新问题'),
       ],
       now: Date.parse('2026-08-29T00:00:01.000Z'),
-    })).toMatchObject({ kind: 'waiting', label: '等待 Agent 响应' })
+    })).toMatchObject({ kind: 'waiting', label: '等待模型响应' })
     expect(conversationStage({ ...base, now: 20_000, progress: { ...base.progress, phase: 'waiting' } }))
-      .toMatchObject({ kind: 'waiting', label: '等待 Agent 响应' })
+      .toMatchObject({ kind: 'waiting', label: '等待模型响应' })
     // A slow first frame reads as model work (large-context prefill or
     // extended thinking), not as a failure: ongoing state, no reopen offer.
     expect(conversationStage({ ...base, now: 32_000, progress: { ...base.progress, phase: 'waiting' } }))
@@ -446,25 +446,157 @@ describe('remote conversation view model', () => {
     })).toMatchObject({ kind: 'timeout', label: '请求超时', state: 'error' })
   })
 
+  it('shows each model round-trip: dispatched, waiting, response received', () => {
+    const t0 = Date.parse('2026-08-29T00:00:00.000Z')
+    // Round 1 dispatched: the request is out, nothing has come back yet.
+    const roundOne = conversationStage({
+      session: session(),
+      entries: [entry('1', 'user', 'message', '新问题')],
+      now: t0 + 4_000,
+    })
+    expect(roundOne).toMatchObject({ kind: 'waiting', label: '等待模型响应', state: 'ongoing' })
+    expect(roundOne.detail).toContain('请求已发送完成')
+    expect(roundOne.detail).toContain('已等待 4 秒')
+
+    // Response received: a reasoning row is the model answering; the timer
+    // shows how long since its latest output, so a silent model is visible.
+    const thinking = conversationStage({
+      session: session(),
+      entries: [
+        entry('1', 'user', 'message', '新问题'),
+        entry('2', 'assistant', 'reasoning', '分析'),
+      ],
+      now: t0 + 6_000,
+    })
+    expect(thinking).toMatchObject({ kind: 'thinking', label: '思考中' })
+    expect(thinking.detail).toContain('已收到模型响应')
+    expect(thinking.detail).toContain('已持续 6 秒')
+
+    // A tool result landing is the next round's dispatch: waiting again,
+    // named as such instead of the old vague "正在处理工具结果".
+    const roundTwo = conversationStage({
+      session: session(),
+      entries: [
+        entry('1', 'user', 'message', '新问题'),
+        entry('2', 'tool', 'tool-call', 'read_file'),
+        entry('3', 'tool', 'tool-result', '文件内容'),
+      ],
+      now: t0 + 8_000,
+    })
+    expect(roundTwo).toMatchObject({ kind: 'waiting', label: '等待模型响应', state: 'ongoing' })
+    expect(roundTwo.detail).toContain('第 2 轮')
+    expect(roundTwo.detail).toContain('工具结果已发回模型')
+    expect(roundTwo.detail).toContain('已等待 8 秒')
+
+    // The wait may also silently grow into the large-context hint past 30s —
+    // for later rounds exactly as for the first one.
+    const slowRound = conversationStage({
+      session: session(),
+      entries: [
+        entry('1', 'user', 'message', '新问题'),
+        entry('2', 'tool', 'tool-call', 'read_file'),
+        entry('3', 'tool', 'tool-result', '文件内容'),
+      ],
+      now: t0 + 45_000,
+    })
+    expect(slowRound).toMatchObject({ kind: 'thinking', label: '模型正在读取长上下文 / 思考中' })
+
+    // A bare turn marker is bookkeeping, not model output: still waiting.
+    expect(conversationStage({
+      session: session(),
+      entries: [
+        entry('1', 'user', 'message', '新问题'),
+        entry('2', 'system', 'status', '远程轮次运行中'),
+      ],
+      now: t0 + 1_000,
+    })).toMatchObject({ kind: 'waiting', label: '等待模型响应' })
+
+    // Text streaming says the response is being received, with freshness.
+    const generating = conversationStage({
+      session: session(),
+      entries: [
+        entry('1', 'user', 'message', '新问题'),
+        entry('2', 'assistant', 'message', '答案的前半段'),
+      ],
+      now: t0 + 3_000,
+    })
+    expect(generating).toMatchObject({ kind: 'responding', label: '正在生成回复' })
+    expect(generating.detail).toContain('已持续 3 秒')
+  })
+
+  it('shows a per-stage elapsed timer on every ongoing stage', () => {
+    const t0 = Date.parse('2026-08-29T00:00:00.000Z')
+    const at = (offsetMs: number): string => new Date(t0 + offsetMs).toISOString()
+    // Sending counts from the browser's own submit time.
+    expect(conversationStage({
+      session: session(),
+      entries: [],
+      now: t0 + 9_000,
+      progress: { sessionId: 'session', phase: 'sending', startedAt: t0, baselineSeq: -1 },
+    }).detail).toContain('已发送 9 秒')
+    // Channel connecting counts the same submit time — this is the timer the
+    // dead-hostd incident needed in the first place.
+    expect(conversationPresentation({
+      session: session({ channelState: 'connecting', turnState: 'idle' }),
+      entries: [],
+      now: t0 + 12_000,
+      progress: { sessionId: 'session', phase: 'connecting', startedAt: t0, baselineSeq: -1 },
+    }).channel.detail).toContain('已尝试 12 秒')
+    // Waiting for a permission counts from the ask, not the turn start.
+    expect(conversationStage({
+      session: session({ turnState: 'waiting-permission' }),
+      entries: [entry('1', 'permission', 'permission', '允许执行命令吗？')],
+      now: t0 + 7_000,
+    }).detail).toContain('已等待 7 秒')
+    // A tool batch times from its first call: a second parallel call joining
+    // the batch must not restart the timer.
+    expect(conversationStage({
+      session: session(),
+      entries: [
+        { ...entry('1', 'tool', 'tool-call', 'grep -r todo'), createdAt: at(0) },
+        { ...entry('2', 'tool', 'tool-call', 'read file'), createdAt: at(5_000) },
+      ],
+      now: t0 + 9_000,
+    }).detail).toContain('已运行 9 秒')
+    // A fresh thought stretch after a tool round restarts its own timer.
+    expect(conversationStage({
+      session: session(),
+      entries: [
+        entry('1', 'user', 'message', '问题'),
+        { ...entry('2', 'tool', 'tool-call', 'grep'), createdAt: at(0) },
+        { ...entry('3', 'tool', 'tool-result', '结果'), createdAt: at(1_000) },
+        { ...entry('4', 'assistant', 'reasoning', '再想想'), createdAt: at(4_000) },
+        { ...entry('5', 'assistant', 'reasoning', '继续想'), createdAt: at(6_000) },
+      ],
+      now: t0 + 8_000,
+    }).detail).toContain('已持续 4 秒')
+  })
+
   it('derives thinking, tool, permission, reconnecting, and failure stages without generic running text', () => {
     expect(conversationStage({ session: session(), entries: [entry('1', 'assistant', 'reasoning', '分析')], now: 0 }))
       .toMatchObject({ kind: 'thinking', label: '思考中' })
     expect(conversationStage({ session: session(), entries: [entry('2', 'tool', 'tool-call', 'read_file')], now: 0 }))
-      .toMatchObject({ kind: 'tool', label: '工具执行中', detail: 'read_file' })
+      .toMatchObject({ kind: 'tool', label: '工具执行中', detail: 'read_file · 已运行 0 秒' })
     expect(conversationStage({ session: session({ turnState: 'waiting-permission' }), entries: [], now: 0 }))
       .toMatchObject({ kind: 'permission', state: 'warning' })
     expect(conversationPresentation({
       session: session({ channelState: 'reconnecting', turnState: 'failed' }), entries: [], now: 0,
     })).toMatchObject({
-      channel: { kind: 'reconnecting', label: '会话通道中断', visible: true },
+      channel: {
+        kind: 'reconnecting', label: '会话通道中断', visible: true,
+        detail: '暂时联系不上远程主机，正在自动重试，恢复后自动继续。',
+      },
       turn: { kind: 'failed', label: '本轮执行失败', visible: true },
       headerLabel: '会话通道中断 · 本轮执行失败',
       actions: { canReconnect: true, canSend: false, canStop: false, canCompose: false },
     })
     expect(conversationPresentation({
-      session: session({ channelState: 'lost', turnState: 'idle' }), entries: [], now: 0,
+      session: session({ channelState: 'lost', turnState: 'failed' }), entries: [], now: 0,
     })).toMatchObject({
-      channel: { kind: 'failed', label: '连接已丢失', detail: '远程会话进程已停止。可以点「在当前会话重开」，对话记录会保留。' },
+      channel: {
+        kind: 'failed', label: '连接已丢失',
+        detail: '远程主机上这个会话已不可用（记录没了、Agent 进程没了或被新实例取代）。可以点「在当前会话重开」继续，对话记录会保留。',
+      },
       actions: { canReconnect: true, canCompose: false },
     })
     expect(conversationPresentation({
@@ -499,6 +631,73 @@ describe('remote conversation view model', () => {
       .toMatchObject({ kind: 'failed', label: '本轮执行失败' })
     expect(conversationStage({ session: session({ turnState: 'stopped' }), entries: [], now: 0 }))
       .toMatchObject({ kind: 'stopped', label: '用户主动停止', state: 'done', visible: true })
+  })
+
+  it('treats a lost channel on a settled session as dormant, not a failure', () => {
+    // hostd 会在会话闲置后回收远端进程；上一轮正常结束（idle/stopped）的"丢失"
+    // 是休眠，不是故障。红色横幅只留给真正断掉的轮次，与侧栏的判定一致。
+    const dormant = conversationPresentation({
+      session: session({ channelState: 'lost', turnState: 'idle' }), entries: [], now: 0,
+    })
+    expect(dormant.channel).toMatchObject({
+      kind: 'dormant', label: '会话空闲', state: 'done', visible: true,
+    })
+    expect(dormant.channel.detail).toContain('自动重开')
+    expect(dormant.channel.detail).toContain('对话记录保留')
+    expect(dormant.actions).toMatchObject({ canCompose: true, canSend: true, canReconnect: true, canStop: false })
+
+    expect(conversationPresentation({
+      session: session({ channelState: 'lost', turnState: 'stopped' }), entries: [], now: 0,
+    }).channel).toMatchObject({ kind: 'dormant', label: '会话空闲', state: 'done' })
+
+    // 一轮还在跑或已失败时渠道断掉，仍按故障展示，不能被中性化。
+    expect(conversationPresentation({
+      session: session({ channelState: 'lost', turnState: 'running' }), entries: [], now: 0,
+    })).toMatchObject({ channel: { kind: 'failed', label: '连接已丢失' }, actions: { canCompose: false } })
+    expect(conversationPresentation({
+      session: session({ channelState: 'lost', turnState: 'failed' }), entries: [], now: 0,
+    })).toMatchObject({ channel: { kind: 'failed', label: '连接已丢失' }, actions: { canCompose: false } })
+
+    // 浏览器到网关的传输断了照样优先提示重连：休眠判定不得越过传输层。
+    expect(conversationPresentation({
+      session: session({ channelState: 'lost', turnState: 'idle' }),
+      entries: [], now: 0, transportPhase: 'reconnecting',
+    })).toMatchObject({ channel: { kind: 'transport' }, actions: { canCompose: false } })
+  })
+
+  it('does not borrow an unrelated connection error as the failed turn reason', () => {
+    // snapshot.error 是整个网关连接最近的错误，和这个会话为什么失败没有关系。
+    // 失败的真实原因在转录里的状态行（"远程 Agent 已停止（…" / "消息提交失败：…"）。
+    const stage = conversationStage({
+      session: session({ turnState: 'failed' }),
+      entries: [],
+      now: 0,
+      error: 'connect ENOENT /tmp/th-501/h-dead.sock',
+    })
+    expect(stage.label).toBe('本轮执行失败')
+    expect(stage.detail ?? '').not.toContain('ENOENT')
+    expect(stage.detail ?? '').not.toContain('h-dead.sock')
+  })
+
+  it('does not borrow an unrelated connection error as the channel banner reason either', () => {
+    // 通道横幅同理：写死说清是哪一环（够不着 / 记录没了），不拿全局错误顶替。
+    const lost = conversationPresentation({
+      session: session({ channelState: 'lost', turnState: 'failed' }),
+      entries: [],
+      now: 0,
+      error: 'connect ENOENT /tmp/th-501/h-dead.sock',
+    }).channel
+    expect(lost.detail ?? '').not.toContain('ENOENT')
+    expect(lost.detail ?? '').toContain('记录没了')
+    expect(lost.detail ?? '').toContain('被新实例取代')
+    const reconnecting = conversationPresentation({
+      session: session({ channelState: 'reconnecting', turnState: 'idle' }),
+      entries: [],
+      now: 0,
+      error: 'connect ECONNREFUSED 127.0.0.1:9',
+    }).channel
+    expect(reconnecting.detail ?? '').not.toContain('ECONNREFUSED')
+    expect(reconnecting.detail ?? '').toContain('正在自动重试')
   })
 
   it('hides dot-directories from picker rows without changing explicit paths', () => {

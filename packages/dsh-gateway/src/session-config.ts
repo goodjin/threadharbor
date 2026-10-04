@@ -27,18 +27,34 @@ function choice(value: JsonValue, idKey: string): RemoteSessionConfigChoice | un
   return { value: id, name: text(row?.['name']) ?? id, ...(description === undefined ? {} : { description }) }
 }
 
+/** ACP `configOptions` may nest its selectable entries in provider groups
+ *  (`{group, name, options:[…]}`) instead of listing them flat. The Harness ACP
+ *  profile groups every model under its provider route, so a flat read would
+ *  find no choices at all and drop the whole option — the selector would then
+ *  silently disappear from the composer. */
+function flatConfigChoices(entries: JsonValue | undefined): RemoteSessionConfigChoice[] {
+  if (!Array.isArray(entries)) return []
+  return entries.flatMap((entry): RemoteSessionConfigChoice[] => {
+    const parsed = choice(entry, 'value')
+    if (parsed !== undefined) return [parsed]
+    const row = record(entry)
+    const groupName = text(row?.['name'])
+    const nested = row?.['options']
+    if (nested === undefined) return []
+    return flatConfigChoices(nested).map(candidate => (groupName === undefined
+      ? candidate
+      : { ...candidate, name: `${groupName} · ${candidate.name}` }))
+  })
+}
+
 function nativeConfigOptions(value: JsonValue | undefined): RemoteSessionConfigOption[] | undefined {
   if (!Array.isArray(value)) return undefined
   const options = value.flatMap((entry): RemoteSessionConfigOption[] => {
     const row = record(entry)
     const id = text(row?.['id'])
     const currentValue = text(row?.['currentValue'])
-    const rawOptions = Array.isArray(row?.['options']) ? row['options'] : []
+    const choices = flatConfigChoices(row?.['options'])
     if (id === undefined || currentValue === undefined) return []
-    const choices = rawOptions.flatMap(candidate => {
-      const parsed = choice(candidate, 'value')
-      return parsed === undefined ? [] : [parsed]
-    })
     if (choices.length === 0) return []
     const description = text(row?.['description'])
     const category = text(row?.['category'])

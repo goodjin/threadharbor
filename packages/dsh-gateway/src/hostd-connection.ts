@@ -45,9 +45,20 @@ export interface HostdConnectionOptions {
   readonly heartbeatMs: number
   readonly reconnectStepsMs: readonly number[]
   readonly handshakeTimeoutMs: number
+  /** How long a request may sit unsent while the socket is down before it is
+   *  rejected as undeliverable. Independent of `requestTimeoutMs`: a request
+   *  that has actually been written to an open socket keeps the full budget,
+   *  because the backend may legitimately take that long to answer. */
+  readonly connectDeadlineMs?: number
   /** Override the WebSocket constructor (used by tests to inject a fake). */
   readonly socketFactory?: (url: string) => WebSocket
 }
+
+/** Default unsent-request budget. Covers several rungs of the reconnect
+ *  ladder (0.5s/1s/2s/5s) so a hostd that is merely restarting still gets its
+ *  queued requests flushed, while a dead host fails in seconds, not after the
+ *  whole request timeout. */
+export const HOSTD_CONNECT_DEADLINE_MS = 10_000
 
 /** Per-session subscription entry. */
 interface Subscription {
@@ -60,11 +71,23 @@ interface Subscription {
 
 /** Resolver for one in-flight RPC. */
 interface PendingRequest {
+  readonly id: string
   readonly resolve: (result: JsonValue) => void
   readonly reject: (error: Error) => void
-  readonly timer: NodeJS.Timeout
+  timer: NodeJS.Timeout
   readonly method: RemoteHostdMethod
   readonly params: Record<string, JsonValue>
+  /** Full answer budget once the frame has been written to an open socket. */
+  readonly timeoutMs: number
+  /** Configured unsent budget, reported verbatim in the rejection. */
+  readonly connectDeadlineMs: number
+  /** Absolute time by which the frame must reach an open socket. Fixed when
+   *  the request is issued: every dropped-socket re-arm uses the remaining
+   *  budget, so a ladder of failed reconnects cannot extend the wait past the
+   *  deadline the caller was promised. */
+  readonly connectDeadlineAt: number
+  /** Whether the frame has actually been written to an open socket. */
+  sent: boolean
   /** Optional per-request progress sink for streaming hostd RPCs such as session.start. */
   readonly onProgress?: ((stage: string, message: string) => void) | undefined
 }
@@ -188,13 +211,50 @@ export class HostdConnection {
     const id = this.allocateId()
     const frame: RemoteHostdWsFrame = { direction: 'request', id, method, params }
     return await new Promise<JsonValue>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id)
-        reject(new Error(`hostd request ${method} timed out`))
-      }, timeoutMs)
-      this.pending.set(id, { resolve, reject, timer, method, params, onProgress })
-      this.send(frame)
+      const connectDeadlineMs = Math.min(
+        this.options.connectDeadlineMs ?? HOSTD_CONNECT_DEADLINE_MS, timeoutMs)
+      const entry: PendingRequest = {
+        id,
+        resolve,
+        reject,
+        timer: undefined as unknown as NodeJS.Timeout,
+        method,
+        params,
+        timeoutMs,
+        connectDeadlineMs,
+        connectDeadlineAt: Date.now() + connectDeadlineMs,
+        sent: false,
+        onProgress,
+      }
+      this.pending.set(id, entry)
+      this.armPendingTimer(entry)
+      // A socket that is down swallows the frame silently; the entry stays
+      // pending and `flushPending()` re-sends it on the next open. Its timer
+      // runs on the connect deadline until then, so an unreachable hostd
+      // rejects in seconds instead of sitting out the whole request budget.
+      if (this.send(frame)) this.markSent(entry)
     })
+  }
+
+  /** (Re)arm one pending request's timeout for its current delivery state:
+   *  the (remaining) connect deadline while the frame is still unsent, the
+   *  full request budget once it has been written to an open socket. */
+  private armPendingTimer(entry: PendingRequest): void {
+    clearTimeout(entry.timer)
+    const delay = entry.sent ? entry.timeoutMs : Math.max(0, entry.connectDeadlineAt - Date.now())
+    entry.timer = setTimeout(() => {
+      this.pending.delete(entry.id)
+      entry.reject(entry.sent
+        ? new Error(`hostd request ${entry.method} timed out`)
+        : new Error(`hostd request ${entry.method} not delivered: no hostd connection within ${entry.connectDeadlineMs}ms`))
+    }, delay)
+  }
+
+  /** Record that the frame reached an open socket and widen its budget. */
+  private markSent(entry: PendingRequest): void {
+    if (entry.sent) return
+    entry.sent = true
+    this.armPendingTimer(entry)
   }
 
   /** Subscribe a session. Returns an unsubscribe function. */
@@ -311,7 +371,14 @@ export class HostdConnection {
     for (const sub of this.subscriptions.values()) sub.subscribed = false
     // Pending requests are NOT rejected here; they will be re-sent on the next
     // open via flushPending(), or rejected by the explicit `close()` path or
-    // their per-request timeout.
+    // their per-request timeout. A frame that already went out is unsent again
+    // now, so its budget narrows back to the connect deadline: if no socket
+    // comes up within it, the caller learns the host is unreachable in
+    // seconds instead of waiting out the full request timeout.
+    for (const entry of this.pending.values()) {
+      entry.sent = false
+      this.armPendingTimer(entry)
+    }
     this.emitLifecycle('close')
     if (this.closed) return
     if (!wasOpen && this.reconnectAttempts === 0) {
@@ -374,10 +441,10 @@ export class HostdConnection {
 
   private flushPending(): void {
     if (this.pending.size === 0) return
-    const inflight = [...this.pending.entries()]
-    for (const [id, entry] of inflight) {
-      const frame: RemoteHostdWsFrame = { direction: 'request', id, method: entry.method, params: entry.params }
-      if (this.state === 'open') this.send(frame)
+    const inflight = [...this.pending.values()]
+    for (const entry of inflight) {
+      const frame: RemoteHostdWsFrame = { direction: 'request', id: entry.id, method: entry.method, params: entry.params }
+      if (this.state === 'open' && this.send(frame)) this.markSent(entry)
     }
   }
 

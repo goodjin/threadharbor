@@ -44,6 +44,18 @@ export class MemoryMediaPool {
    * untouched after a durability failure.
    */
   failNextWrites = 0
+  /**
+   * Latency every write primitive spends before it touches the medium, in ms.
+   * Real backends commit after I/O, so a record read while a write is queued
+   * still shows the old value — the window lost updates slip through. Tests
+   * that exercise that window widen it here instead of racing real timers.
+   */
+  writeDelayMs = 0
+
+  /** Spend the injected write latency before a primitive mutates the medium. */
+  async settleWrite(): Promise<void> {
+    if (this.writeDelayMs > 0) await new Promise(resolveWait => setTimeout(resolveWait, this.writeDelayMs))
+  }
 
   /** Consume one injected failure, throwing in a rejected write's place. */
   consumeInjectedFailure(): void {
@@ -82,6 +94,7 @@ class MemoryKvUnit implements KvUnit {
 
   async putRecord(table: string, key: string, value: unknown): Promise<void> {
     this.assertOpen()
+    await this.pool.settleWrite()
     this.pool.consumeInjectedFailure()
     let records = this.medium.tables.get(table)
     if (records === undefined) {
@@ -93,12 +106,14 @@ class MemoryKvUnit implements KvUnit {
 
   async deleteRecord(table: string, key: string): Promise<void> {
     this.assertOpen()
+    await this.pool.settleWrite()
     this.pool.consumeInjectedFailure()
     this.medium.tables.get(table)?.delete(key)
   }
 
   async setGlobal(value: unknown): Promise<void> {
     this.assertOpen()
+    await this.pool.settleWrite()
     this.pool.consumeInjectedFailure()
     this.medium.global = value
   }

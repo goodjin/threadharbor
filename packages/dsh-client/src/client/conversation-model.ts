@@ -25,7 +25,7 @@ export interface PromptProgressView {
 
 /** One user-visible conversation stage rendered in both the header and transcript tail. */
 export interface ConversationStage {
-  readonly kind: 'idle' | 'connecting' | 'sending' | 'waiting' | 'thinking' | 'tool' | 'responding' | 'permission' | 'reconnecting' | 'timeout' | 'stopped' | 'failed' | 'transport'
+  readonly kind: 'idle' | 'connecting' | 'sending' | 'waiting' | 'thinking' | 'tool' | 'responding' | 'permission' | 'reconnecting' | 'timeout' | 'stopped' | 'failed' | 'transport' | 'dormant'
   readonly label: string
   readonly detail: string
   readonly state: 'done' | 'ongoing' | 'warning' | 'error'
@@ -96,6 +96,17 @@ export function toolGlyphKind(title: string): ToolGlyphKind {
 
 const FIRST_RESPONSE_TIMEOUT_MS = 30_000
 
+/** Whole seconds since an entry's creation, floored at zero for clock skew. */
+function elapsedSeconds(iso: string, now: number): number {
+  const parsed = Date.parse(iso)
+  return Number.isFinite(parsed) ? Math.floor(Math.max(0, now - parsed) / 1000) : 0
+}
+
+/** Whole seconds since a wall-clock start (epoch ms), floored at zero. */
+function elapsedSinceMs(startedAt: number, now: number): number {
+  return Math.floor(Math.max(0, now - startedAt) / 1000)
+}
+
 function failureLabel(message: string | undefined): string {
   if (message !== undefined && /timeout|timed out|超时/i.test(message)) return '请求超时'
   if (message !== undefined && /fetch|network|connect|socket|tunnel|ECONN|连接/i.test(message)) return '连接失败'
@@ -141,8 +152,8 @@ function turnStage(input: {
   if (progress?.phase === 'sending') {
     return {
       kind: 'sending',
-      label: '正在发送消息',
-      detail: progress.message ?? '正在把请求提交到远程 Agent。',
+      label: '正在发送请求',
+      detail: `${progress.message ?? '正在把请求发送给远程 Agent，发送完成后自动开始等待模型响应。'}已发送 ${elapsedSinceMs(progress.startedAt, now)} 秒。`,
       state: 'ongoing',
       visible: true,
     }
@@ -151,7 +162,10 @@ function turnStage(input: {
     return {
       kind: 'failed',
       label: '本轮执行失败',
-      detail: error ?? '远程 Agent 未能完成本轮请求。可以点「在当前会话重开」，或直接发送新的请求。',
+      // Never borrow `error` (the whole gateway's latest connection error) as
+      // this round's reason — it is usually about a different session or hop.
+      // The real reason is on the transcript's own status rows right above.
+      detail: '远程 Agent 未能完成本轮请求，原因见上方记录。可以点「在当前会话重开」，或直接发送新的请求。',
       state: 'error',
       visible: true,
     }
@@ -167,10 +181,14 @@ function turnStage(input: {
   if (session.turnState === 'waiting-permission') {
     const pending = pendingPermissionEntry(entries)
     const asking = pending !== undefined && parseChoicePrompt(pending)?.kind === 'question'
+    const waited = pending === undefined ? undefined : elapsedSeconds(pending.createdAt, now)
+    const waitedText = waited === undefined ? '' : `已等待 ${waited} 秒。`
     return {
       kind: 'permission',
       label: asking ? '等待你的选择' : '等待你的确认',
-      detail: asking ? '远程 Agent 在等你选择方案。点选项继续，或停止本轮。' : '远程 Agent 需要权限后才能继续。点选项或停止本轮。',
+      detail: asking
+        ? `远程 Agent 在等你选择方案。${waitedText}点选项继续，或停止本轮。`
+        : `远程 Agent 需要权限后才能继续。${waitedText}点选项或停止本轮。`,
       state: 'warning', visible: true,
     }
   }
@@ -179,11 +197,38 @@ function turnStage(input: {
     const backendEntries = progress === undefined
       ? entries.filter(entry => entry.seq > lastUserSeq && entry.role !== 'user')
       : entries.filter(entry => entry.seq > progress.baselineSeq && entry.role !== 'user')
+    // One "model round" per request that leaves for the model: round 1 is the
+    // user's prompt, every later round is a tool result being fed back. What
+    // the browser can observe is each round's dispatch (prompt delivered /
+    // tool result journaled) and each response's arrival (reasoning, text or
+    // tool-call rows); the agent's internal model call in between is exactly
+    // the wait this stage names.
+    const lastRoundFeed = backendEntries.findLast(entry => entry.kind === 'tool-result')
+    const round = backendEntries.filter(entry => entry.kind === 'tool-result').length + 1
     const last = backendEntries.at(-1)
-    if (last === undefined) {
+    // How long the current stage has been running: the trailing run of
+    // same-kind entries starts when the stage was entered (a second tool call
+    // joining a running batch does not restart the timer; a fresh thought
+    // stretch after a tool round does).
+    const stageSeconds = (entry: RemoteTranscriptEntry): number => {
+      let start = entry
+      for (let index = backendEntries.length - 1; index >= 0; index -= 1) {
+        const candidate = backendEntries.at(index)
+        if (candidate === undefined || candidate.kind !== entry.kind || candidate.role !== entry.role) break
+        start = candidate
+      }
+      return elapsedSeconds(start.createdAt, now)
+    }
+    // No model output yet this round: either nothing has arrived at all, or
+    // only status rows (turn markers), or the round has just been dispatched
+    // by a tool result landing. All of it is "sent, waiting for the model".
+    const waitingForModel = last === undefined || last.kind === 'status' || last.kind === 'tool-result'
+    if (waitingForModel) {
       const lastUser = entries.findLast(entry => entry.role === 'user')
       const userStartedAt = lastUser === undefined ? Number.NaN : Date.parse(lastUser.createdAt)
-      const startedAt = progress?.startedAt ?? (Number.isFinite(userStartedAt) ? userStartedAt : now)
+      const startedAt = lastRoundFeed === undefined
+        ? progress?.startedAt ?? (Number.isFinite(userStartedAt) ? userStartedAt : now)
+        : Date.parse(lastRoundFeed.createdAt)
       const elapsed = Math.max(0, now - startedAt)
       if (elapsed >= FIRST_RESPONSE_TIMEOUT_MS) {
         // Slow first frame is normal for large-context sessions (cold cache
@@ -193,25 +238,45 @@ function turnStage(input: {
         // unresponsive banner after several minutes.
         return {
           kind: 'thinking', label: '模型正在读取长上下文 / 思考中',
-          detail: `已等待 ${Math.floor(elapsed / 1000)} 秒还没有可见输出。上下文较大或模型在深度思考时，第一个可见内容可能需要 1-2 分钟；可以继续等待，或停止本轮。`,
+          detail: `已等待 ${Math.floor(elapsed / 1000)} 秒还没有可见输出。上下文较大或模型在深度思考时，本轮第一个可见内容可能需要 1-2 分钟；可以继续等待，或停止本轮。`,
           state: 'ongoing', visible: true,
         }
       }
-      return { kind: 'waiting', label: '等待 Agent 响应', detail: '请求已送达，正在等待第一个后台事件。', state: 'ongoing', visible: true }
+      return {
+        kind: 'waiting', label: '等待模型响应',
+        detail: round === 1
+          ? `请求已发送完成，正在等待模型返回第一个响应。已等待 ${Math.floor(elapsed / 1000)} 秒。`
+          : `第 ${round} 轮请求已发出：工具结果已发回模型，正在等待下一个响应。已等待 ${Math.floor(elapsed / 1000)} 秒。`,
+        state: 'ongoing', visible: true,
+      }
     }
     if (last.role === 'permission') {
-      return { kind: 'permission', label: '等待你的确认', detail: '远程 Agent 需要权限后才能继续。点选项或停止本轮。', state: 'warning', visible: true }
+      return {
+        kind: 'permission', label: '等待你的确认',
+        detail: `远程 Agent 需要权限后才能继续。已等待 ${elapsedSeconds(last.createdAt, now)} 秒。点选项或停止本轮。`,
+        state: 'warning', visible: true,
+      }
     }
     if (last.kind === 'reasoning') {
-      return { kind: 'thinking', label: '思考中', detail: 'Agent 正在分析请求。', state: 'ongoing', visible: true }
+      return {
+        kind: 'thinking', label: '思考中',
+        detail: `已收到模型响应，正在思考。已持续 ${stageSeconds(last)} 秒。`,
+        state: 'ongoing', visible: true,
+      }
     }
     if (last.kind === 'tool-call') {
-      return { kind: 'tool', label: '工具执行中', detail: last.text.trim() || 'Agent 正在调用远程工具。', state: 'ongoing', visible: true }
+      const title = last.text.trim() || 'Agent 正在调用远程工具。'
+      return {
+        kind: 'tool', label: '工具执行中',
+        detail: `${title} · 已运行 ${stageSeconds(last)} 秒`,
+        state: 'ongoing', visible: true,
+      }
     }
-    if (last.kind === 'tool-result') {
-      return { kind: 'responding', label: '正在处理工具结果', detail: 'Agent 已收到工具结果，正在继续处理。', state: 'ongoing', visible: true }
+    return {
+      kind: 'responding', label: '正在生成回复',
+      detail: `已收到模型响应，正在输出内容。已持续 ${stageSeconds(last)} 秒。`,
+      state: 'ongoing', visible: true,
     }
-    return { kind: 'responding', label: '正在生成回复', detail: 'Agent 已开始返回内容。', state: 'ongoing', visible: true }
   }
   if (error !== undefined && session.channelState === 'open') {
     return { kind: 'failed', label: '状态同步失败', detail: error, state: 'warning', visible: true }
@@ -221,9 +286,12 @@ function turnStage(input: {
 
 function channelStage(input: {
   readonly channelState: RemoteChannelState
+  readonly turnState: RemoteTurnState
   readonly creating: boolean
   readonly progressPhase?: PromptProgressView['phase']
   readonly progressMessage?: string
+  readonly progressStartedAt?: number
+  readonly now?: number
   readonly transportPhase?: 'loading' | 'ready' | 'reconnecting' | 'error'
   readonly error?: string
 }): ConversationStage {
@@ -241,36 +309,54 @@ function channelStage(input: {
     }
   }
   if ((input.channelState === 'connecting' || input.creating) && input.progressPhase !== 'failed') {
+    // Elapsed is shown only when the browser watched the attempt start
+    // (progress.startedAt); a session row that merely loads as `connecting`
+    // has no honest t0 to count from.
+    const triedText = input.creating
+      && input.progressStartedAt !== undefined
+      && input.now !== undefined
+      ? `已尝试 ${elapsedSinceMs(input.progressStartedAt, input.now)} 秒。`
+      : ''
     return {
       kind: 'connecting',
       label: input.creating ? '正在连接 Agent' : '正在接入实时通道',
       detail: input.creating
-        ? (input.progressMessage ?? '正在创建远程会话并建立通信通道。')
+        ? `${input.progressMessage ?? '正在与远程主机建立通信通道，通常只需几秒。'}${triedText}`
         : '会话已打开，正在接入 WebSocket 推送。',
       state: 'ongoing', visible: true,
     }
   }
   if (input.channelState === 'reconnecting') {
+    // Fixed wording, never borrowed from `input.error`: that field is the
+    // snapshot-wide error, which is often an unrelated call's failure. What
+    // actually cut the round is recorded in the transcript rows.
     return {
       kind: 'reconnecting',
       label: '会话通道中断',
-      detail: input.error ?? '远端会话进程暂时不可用。点重新连接，系统会尝试在当前会话上恢复。',
+      detail: '暂时联系不上远程主机，正在自动重试，恢复后自动继续。',
       state: 'warning', visible: true,
     }
   }
+  if (input.channelState === 'lost' && (input.turnState === 'idle' || input.turnState === 'stopped')) {
+    // A session whose last round settled lost its hold to hostd's idle
+    // cleanup, not to a failure — the same call the sidebar badge makes.
+    // Almost every session is dormant most of the time, so the alarm banner
+    // belongs to rounds that were actually cut off; sending a message revives
+    // the hold automatically, so say that instead of demanding a reopen.
+    return {
+      kind: 'dormant',
+      label: '会话空闲',
+      detail: '远端进程已自动回收。发送新消息会自动重开，对话记录保留，首次可能需要几秒。',
+      state: 'done', visible: true,
+    }
+  }
   if (input.channelState === 'lost') {
+    // Same: the reason is in the transcript rows (or the attach error), not in
+    // `input.error`.
     return {
       kind: 'failed',
       label: '连接已丢失',
-      detail: input.error ?? '远程会话进程已停止。可以点「在当前会话重开」，对话记录会保留。',
-      state: 'error', visible: true,
-    }
-  }
-  if (input.channelState === 'closed') {
-    return {
-      kind: 'failed',
-      label: '会话已关闭',
-      detail: input.error ?? '无法继续读取远程 Agent 状态。',
+      detail: '远程主机上这个会话已不可用（记录没了、Agent 进程没了或被新实例取代）。可以点「在当前会话重开」继续，对话记录会保留。',
       state: 'error', visible: true,
     }
   }
@@ -286,9 +372,14 @@ function sessionActionGates(input: {
   readonly progress?: PromptProgressView
 }): SessionActionGates {
   const transportDown = input.transportPhase === 'reconnecting' || input.transportPhase === 'loading'
-  const live = input.channelState === 'open' && !transportDown
+  const open = input.channelState === 'open' && !transportDown
+  // A dormant session (hold released after the last round settled) accepts
+  // composition directly: the gateway's prompt path revives the hold before
+  // delivery, so the user does not have to click reopen first. Preferences
+  // stay gated on a live channel — config writes need the hold to exist.
+  const dormant = input.channelState === 'lost' && (input.turnState === 'idle' || input.turnState === 'stopped') && !transportDown
   const turnBusy = input.turnState === 'running' || input.turnState === 'waiting-permission'
-  const canCompose = !input.child && live
+  const canCompose = !input.child && (open || dormant)
   const sendFailed = input.progress?.phase === 'failed'
   return {
     canCompose,
@@ -301,7 +392,7 @@ function sessionActionGates(input: {
       || sendFailed
     ),
     canResend: canCompose && !input.pending && !turnBusy,
-    canChangePreferences: !input.child && live && !input.pending,
+    canChangePreferences: !input.child && open && !input.pending,
   }
 }
 
@@ -324,9 +415,12 @@ export function conversationPresentation(input: {
       || (progress.phase === 'sending' && input.session.channelState === 'connecting'))
   const channel = channelStage({
     channelState: input.session.channelState,
+    turnState: input.session.turnState,
     creating,
     ...(progress?.phase === undefined ? {} : { progressPhase: progress.phase }),
     ...(progress?.message === undefined ? {} : { progressMessage: progress.message }),
+    ...(progress?.startedAt === undefined ? {} : { progressStartedAt: progress.startedAt }),
+    now: input.now,
     ...(input.transportPhase === undefined ? {} : { transportPhase: input.transportPhase }),
     ...(input.error === undefined ? {} : { error: input.error }),
   })

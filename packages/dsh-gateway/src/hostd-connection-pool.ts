@@ -25,6 +25,8 @@ export interface HostdConnectionPoolOptions {
   readonly heartbeatMs?: number
   readonly reconnectStepsMs?: readonly number[]
   readonly handshakeTimeoutMs?: number
+  /** Unsent-request budget handed to every connection; see HostdConnectionOptions. */
+  readonly connectDeadlineMs?: number
   readonly socketFactory?: (url: string) => import('ws').WebSocket
 }
 
@@ -155,6 +157,7 @@ export class HostdConnectionPool {
         heartbeatMs: this.options.heartbeatMs ?? 15_000,
         reconnectStepsMs: this.options.reconnectStepsMs ?? HOSTD_BACKOFF_STEPS_MS,
         handshakeTimeoutMs: this.options.handshakeTimeoutMs ?? 5_000,
+        ...(this.options.connectDeadlineMs === undefined ? {} : { connectDeadlineMs: this.options.connectDeadlineMs }),
         ...(this.options.socketFactory ? { socketFactory: this.options.socketFactory } : {}),
       })
       conn.onConnection((event) => {
