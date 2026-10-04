@@ -12,7 +12,7 @@ config:
   hostdRemotePort: 3091
 ```
 
-Gateway 从自己已安装的 `@threadharbor/hostd` 包读取 `bin.js` 与 `hold-worker.js`，通过受 host-key 校验保护的 SSH stdin 上传。远端不会再次从 npm 下载 hostd，因此部署版本与 Web 插件依赖的版本完全一致。
+Gateway 从自己已安装的 `@threadharbor/hostd` 包读取自包含的 `bin.js`，通过受 host-key 校验保护的 SSH stdin 上传。远端不会再次从 npm 下载 hostd，因此部署版本与 Web 插件依赖的版本完全一致。
 
 ## SSH 输入
 
@@ -38,29 +38,29 @@ ThreadHarbor 不自动安装系统 Node.js，也不调用 sudo。缺少合格 No
 
 ## 运行日志
 
-hostd 和 detached hold-worker 的运行日志进入同一个服务日志流。systemd user service 下使用 `journalctl --user -u threadharbor-hostd-<channel>.service` 查看；没有 systemd、使用 detached fallback 时查看 `~/.local/state/threadharbor/<channel>/hostd.log`。
+hostd 及它启动的 Agent 子进程的运行日志进入同一个服务日志流。systemd user service 下使用 `journalctl --user -u threadharbor-hostd-<channel>.service` 查看；没有 systemd、使用 detached fallback 时查看 `~/.local/state/threadharbor/<channel>/hostd.log`。
 
-hold-worker 会输出低频 JSON line 指标，前缀为 `threadharbor-hold-journal`，用于实际运行后分析 journal IO 行为。当前记录恢复、追加采样和 compact 事件，包含 backend、holdId、journalEvents、journalBytes、latestSeq、droppedThrough、appendsSinceCompact 和写入耗时。设置 `THREADHARBOR_HOLD_JOURNAL_METRICS=0` 可以关闭这类指标日志。
+hostd（进程内的 Agent 桥接）会输出低频 JSON line 指标，前缀为 `threadharbor-hold-journal`，用于实际运行后分析 journal IO 行为。当前记录恢复、追加采样和 compact 事件，包含 backend、holdId、journalEvents、journalBytes、latestSeq、droppedThrough、appendsSinceCompact 和写入耗时。设置 `THREADHARBOR_HOLD_JOURNAL_METRICS=0` 可以关闭这类指标日志。
 
 ## Agent 发现与部署
 
-hostd 从服务 `PATH`、当前 Node 的 `npm prefix -g`/bin、Python user scripts，以及 `deepseek_harness_runtime.bundled_runtime_path()` 发现下面的命令。未安装时，主机设置会显示部署按钮；确认后 hostd 在该主机上执行官方安装命令，安装到 npm/pip 自己的目录，而不是 ThreadHarbor 另开前缀：
+hostd 从服务 `PATH`、当前 Node 的 `npm prefix -g`/bin 发现下面的命令。未安装时，主机设置会显示部署按钮；确认后 hostd 在该主机上执行官方安装命令，安装到 npm 自己的目录，而不是 ThreadHarbor 另开前缀：
 
 - Codex：`npm install -g @openai/codex@0.150.1 @agentclientprotocol/codex-acp@1.6.2`
 - Grok：`npm install -g @xai-official/grok@1.0.5`
 - Claude Code：`npm install -g @anthropic-ai/claude-code@2.1.251 @agentclientprotocol/claude-agent-acp@0.69.0`
-- DSH：`python3 -m pip install --user --upgrade --break-system-packages deepseek-harness-runtime-bin==0.1.1rc1`（`--break-system-packages` 用于 Homebrew 等 PEP 668 环境，软件仍写入 Python user scripts，不改系统 Python）
+- DSH：`npm install -g @deepseek-ai/dsh@0.1.5-rc.1`
 
 远端管理员也可以按各 Agent 的官方方式自行安装。hostd 发现的命令：
 
 - Codex：`codex` 与 `codex-acp`；
 - Grok：`grok`；
 - Claude Code：`claude` 与 `claude-agent-acp`；
-- DSH：`dsh-jsonrpc-agent`。
+- DSH：`dsh`。
 
 SSH 自动部署为 hostd 配置以下通用路径：Node.js 可执行文件所在目录、`~/.local/bin`、`~/bin`、`/opt/homebrew/bin`、`/usr/local/bin`、`/usr/bin` 和 `/bin`。使用其他位置时，应把命令链接到这些目录之一；直接启动 hostd 时也可以通过 `--codex-cli-command`、`--codex-command`、`--grok-command`、`--claude-command`、`--claude-acp-command` 和 `--dsh-command` 指定绝对路径。
 
-`dsh-jsonrpc-agent` 还需要配置文件路径。远端可设置 `DSH_CORDIS_CONFIG`，或在直接启动 hostd 时传入 `--dsh-arg <cordis.yml>`。打开主机后，每个 backend 会显示 installed、authenticated、running 和 session-capable 状态；重新安装或调整 `PATH` 后刷新库存即可。Codex / Grok 的登录状态来自本机 `auth.json` 或环境变量中的 API key，刷新库存时不会启动 CLI。
+每个 DSH 会话由 hostd 启动 `dsh --profile acp`（默认 `--dsh-arg`，随包发布的 automation-only profile）。可用模型、默认模型和凭据来自该主机上当前用户自己的 `$DSH_HOME`（`settings.yaml` / `.credentials.yaml`），也就是 DSH Web 的 Models 页配置的同一份文档：ThreadHarbor 不注入自己的模型表，模型清单和切换都跟 DSH 保持一致。要让会话用上更多提供方，先在那台主机的 DSH 里配好对应路由和凭据。打开主机后，每个 backend 会显示 installed、authenticated、running 和 session-capable 状态；重新安装或调整 `PATH` 后刷新库存即可。Codex / Grok 的登录状态来自本机 `auth.json` 或环境变量中的 API key，刷新库存时不会启动 CLI。
 
 ## Agent 配置
 
