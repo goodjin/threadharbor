@@ -378,7 +378,9 @@ async function waitForHealth(port, pid, timeoutMs = 30_000) {
     if (!processAlive(pid)) fail(`DSH Web exited before port ${port} became healthy`)
     try {
       const response = await fetch(`http://127.0.0.1:${port}/`)
-      if (response.ok) return
+      // 401 counts as healthy: newer DSH Web requires a browser login for `/`,
+      // and an auth challenge is proof the server is up and answering.
+      if (response.ok || response.status === 401) return
       lastError = `HTTP ${response.status}`
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error)
@@ -439,7 +441,8 @@ export async function channelStatus(channel, options) {
   let healthy = false
   try {
     const response = await fetch(`http://127.0.0.1:${config.port}/`)
-    healthy = response.ok
+    // Same rule as waitForHealth: an auth challenge means the server is up.
+    healthy = response.ok || response.status === 401
   } catch {
     healthy = false
   }
