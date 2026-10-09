@@ -1,10 +1,9 @@
 /**
  * grok dialect tests.
  *
- * The frames are the ones already pinned by `packages/dsh-grok-agent`'s own
- * regression suite, captured from a live `grok agent serve` (grok 1.0.46).
- * They are here so the shared layer is proven against all three agents before
- * the grok package is rewired onto it.
+ * The shapes here are the ones grok emits; `grok-turns.spec.ts` next door pins
+ * the same dialect against frames captured from a live `grok agent serve`
+ * (grok 1.0.46), session and call ids included.
  *
  * grok is the odd one in two ways worth keeping tests for:
  *   - The tool's name is in `title`, and **only on the opening frame** — later

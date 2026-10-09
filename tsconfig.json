@@ -3,7 +3,6 @@
   "references": [
     { "path": "packages/dsh-client" },
     { "path": "packages/dsh-acp-agent" },
-    { "path": "packages/dsh-grok-agent" },
     { "path": "packages/dsh-preset-dispatch" },
     { "path": "packages/dsh-host-federation" },
     { "path": "tsconfig.plugin.json" }
