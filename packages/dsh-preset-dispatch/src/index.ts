@@ -24,3 +24,5 @@ export type { CatalogAdapterLike, CatalogDeps, CatalogModel } from './catalog.ts
 export { decideOnSelection } from './switch.ts'
 export type { SelectionDecision, SelectionState } from './switch.ts'
 export { presetsForHost } from './host-filter.ts'
+export { decideHandover } from './handover.ts'
+export type { HandoverDecision, HandoverInput, HandoverOptions } from './handover.ts'
