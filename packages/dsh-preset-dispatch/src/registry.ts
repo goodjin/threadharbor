@@ -21,6 +21,13 @@ export type AcpPresetConfig = {
   readonly model?: string
   readonly mode?: string
   readonly cwd?: string
+  /**
+   * Hosts this preset is offered on.
+   *
+   * Absent means everywhere — adding a constraint is opt-in. An empty list is
+   * a deliberate "off", which is how a preset gets disabled without deleting it.
+   */
+  readonly hosts?: readonly string[]
 }
 
 export type PresetConfig = { readonly presets: Readonly<Record<string, AcpPresetConfig>> }

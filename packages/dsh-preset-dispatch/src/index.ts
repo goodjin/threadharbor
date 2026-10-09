@@ -23,3 +23,4 @@ export { catalogAdapter, presetForModel, presetOfRoute, providerRoute } from './
 export type { CatalogAdapterLike, CatalogDeps, CatalogModel } from './catalog.ts'
 export { decideOnSelection } from './switch.ts'
 export type { SelectionDecision, SelectionState } from './switch.ts'
+export { presetsForHost } from './host-filter.ts'
