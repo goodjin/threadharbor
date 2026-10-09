@@ -8,3 +8,5 @@ export type {
   StepDecisionLike,
   StepEndReason,
 } from './dispatch.ts'
+export { AcpTurnRunner } from './runner.ts'
+export type { AcpClientPort, RunnerOptions } from './runner.ts'
