@@ -11,6 +11,7 @@ import type { AcpFrame, AcpSession } from './acp-client.ts'
 import type { AcpDialect } from './dialects/types.ts'
 import type { AcpTransport } from './transport.ts'
 import { TerminalService } from './terminals.ts'
+import { FsService } from './files.ts'
 
 type Pending = {
   resolve: (value: unknown) => void
@@ -59,6 +60,14 @@ export class AcpClient {
    * report the failure rather than wait forever.
    */
   terminals: TerminalService | undefined = undefined
+
+  /**
+   * Serves the file sub-protocol, when this client offers it.
+   *
+   * Same reasoning as the terminal: grok reaches for the file API before it
+   * reaches for a shell, and an unanswered call stalls the turn with no error.
+   */
+  files: FsService | undefined = new FsService()
 
   private readonly transport: AcpTransport
   private readonly dialect: { readonly id: string }
@@ -131,6 +140,7 @@ export class AcpClient {
     if (typeof frame.id === 'number' && frame.method !== undefined) {
       if (frame.method === 'session/request_permission') void this.answerPermission(frame)
       else if (frame.method.startsWith('terminal/')) void this.answerTerminal(frame)
+      else if (frame.method.startsWith('fs/')) void this.answerFile(frame)
       else this.respond(frame.id, undefined, `client cannot serve ${frame.method}`)
       return
     }
@@ -206,6 +216,41 @@ export class AcpClient {
       })()
       this.respond(id, result, undefined)
     } catch (error) {
+      this.respond(id, undefined, error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /** Answer a file read/write the agent asked for. */
+  private async answerFile(frame: AcpFrame): Promise<void> {
+    const id = frame.id as number
+    if (this.files === undefined) {
+      this.respond(id, undefined, 'this client does not offer file access')
+      return
+    }
+    const params = (frame.params ?? {}) as { path?: unknown; content?: unknown; line?: unknown; limit?: unknown }
+    try {
+      switch (frame.method) {
+        case 'fs/read_text_file':
+          this.respond(id, await this.files.readTextFile({
+            ...(typeof params.path === 'string' ? { path: params.path } : {}),
+            ...(typeof params.line === 'number' ? { line: params.line } : {}),
+            ...(typeof params.limit === 'number' ? { limit: params.limit } : {}),
+          }))
+          return
+        case 'fs/write_text_file':
+          await this.files.writeTextFile({
+            ...(typeof params.path === 'string' ? { path: params.path } : {}),
+            ...(typeof params.content === 'string' ? { content: params.content } : {}),
+          })
+          this.respond(id, {})
+          return
+        default:
+          this.respond(id, undefined, `client cannot serve ${frame.method}`)
+          return
+      }
+    } catch (error) {
+      // The agent reads this text and decides what to try next, so naming the
+      // file is the difference between moving on and looking stuck.
       this.respond(id, undefined, error instanceof Error ? error.message : String(error))
     }
   }
