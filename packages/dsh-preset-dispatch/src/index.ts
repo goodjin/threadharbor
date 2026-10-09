@@ -17,7 +17,11 @@ export { buildPresetTable } from './registry.ts'
 export type { AcpPresetConfig, AcpSession, AcpSessionFactory, PresetConfig } from './registry.ts'
 export { adaptClient, makeSessionFactory } from './factory.ts'
 export type { FactoryDeps } from './factory.ts'
-export { applyAcpPlugin } from './plugin.ts'
+export { makeContentWriter } from './content-writer.ts'
+export type { ContentWriter, SessionAppend } from './content-writer.ts'
+export { ALLOWED_ONCE, makeApprovalBridge } from './approval-bridge.ts'
+export type { ApprovalBridge, ApprovalPort } from './approval-bridge.ts'
+
 export type { AcpPluginContext, AcpPluginDeps } from './plugin.ts'
 
 export type { AttachOptions } from './service.ts'
