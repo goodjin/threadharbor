@@ -12,8 +12,19 @@
  * surfaces belong to DSH, and this plugin only adds the view across hosts.
  */
 
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+// DSH 0.2 dropped `@deepseek-ai/dsh-client-runtime`: the client context is now
+// the ordinary cordis context, and every plugin entry in DSH's own source says
+// exactly this. Naming the 0.1 package here type-checked against an interface
+// that no longer ships, which is how a plugin came to depend on a DSH that is
+// two generations behind it.
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
+// Type-only: pulls in ui-sidebar's SlotMap merge, which is what makes
+// `sidebar.panellist` and `main` visible to the registry. Without it both slot
+// names read as typos, which is the one thing a registration must never be.
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+// Type-only: the renderer contributes `ctx.slots` itself.
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { applyHostFederation } from '@threadharbor/dsh-host-federation'
 import { createElement } from 'react'
 import { RollUpPanel } from './RollUpPanel.tsx'
@@ -58,15 +69,15 @@ export function apply(ctx: ClientContext): void {
       id: PANEL_ID,
       order: 100,
       label: () => PANEL_LABEL,
-    } as never,
+    },
     // Written as createElement: this entry is a `.ts` file, and renaming it
     // would move the built artifact's path for no gain.
-    ((props: { size?: number }) => createElement(RollUpIcon, props)) as never,
+    (props: { size?: number }) => createElement(RollUpIcon, props),
   ))
 
   ctx.slots.inject('main', () => ctx.slots.register(
-    { name: 'main', key: PANEL_ID, inject: () => face } as never,
-    ((props: object) => createElement(RollUpPanel, { federation, ...props })) as never,
+    { name: 'main', key: PANEL_ID, inject: () => face },
+    (props: object) => createElement(RollUpPanel, { federation, ...props }),
   ))
 
   ctx.effect(() => () => {
