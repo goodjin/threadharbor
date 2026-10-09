@@ -28,8 +28,8 @@ export type ReportedToolCall = {
   /** Raw arguments exactly as the external agent produced them. */
   arguments: unknown
   /** Human-readable activity line, which later updates overwrite the title with. */
-  title?: string
-  status?: string
+  title?: string | undefined
+  status?: string | undefined
   /** Output text harvested from the final update. */
   output: string
 }

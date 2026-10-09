@@ -5,6 +5,8 @@
     { "path": "packages/hostd" },
     { "path": "packages/dsh-gateway" },
     { "path": "packages/dsh-client" },
+    { "path": "packages/dsh-acp-agent" },
+    { "path": "packages/dsh-grok-agent" },
     { "path": "tsconfig.plugin.json" }
   ]
 }

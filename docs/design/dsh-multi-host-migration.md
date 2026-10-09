@@ -518,9 +518,58 @@ DSH 的模型选择器读的是 Host 级模型目录（来自 DSH 自己的厂�
 - 单向通知是 **best-effort，不回放**；需要可靠恢复的状态必须由拥有方提供查询/游标/初始基线
 - `dsh-api-remotes` **不拥有**物理传输和 Host 服务发现
 
+#### ⚠️ 2026-10-09 复核：原生 remote **不是多主机机制**
+
+原文说「复用 DSH 原生 remote 机制」就能得到多主机。**这个前提不成立**——原生 remote 是
+**「一个浏览器页面 ↔ 一个 Host」** 的通道，不是「一个界面连多台机器」。三条互相独立的证据：
+
+- Client 侧唯一的连接状态是单例 `ctx.connection.generation`（`packages/client/connection/src/client/connection.ts:13-18`），**没有 host id 概念**。
+- `isLoopback` 是**整页一个布尔**（`packages/client/connection/src/client/index.ts:248`），由 `location.hostname` 一次算出，非每连接一个。
+- WebSocket 地址只有两个来源：`__DSH_TRANSPORT__.streamBaseUrl ?? document.baseURI`（`packages/api/gateway/src/client/stream-client.ts:476-477`）——**即页面自身的源**，没有任何地方允许填入别的机器地址。
+
+官方 cookbook 对「远端」的表述也印证这点，只有二值区分、没有主机名：
+`return home ?? (isLoopback ? 'local host' : 'remote host')`（`docs/cookbook/adding-a-remote-api.md:145`）
+
+**含义：阶段 4 不能只靠挂 `dsh-api-remotes`。必须自建主机注册表与多连接管理。**
+原生一律没有、必须自己做的四件事：
+
+1. **主机注册表**：主机 id、显示名、地址/URL 的映射。
+2. **多连接管理**：`ctx.connection` 与 `ctx.remote` 都是单例，一个页面只能连一个 Host。
+3. **每台远端各自的凭据**（最大的结构性障碍）：原生认证是 HttpOnly + SameSite=Strict 的
+   **浏览器 cookie**（`packages/client/connection/src/browser-auth.ts:121-123`），
+   **应用代码读不到、也无法转发**。要么每台远端各开一个浏览器标签页，
+   要么实现一条非浏览器的认证路径（**源码中未找到此类路径**）。
+4. **事件按主机路由**：转发事件不带任何来源标识（`TypertRemoteEventFrame` 只有 `event` + `args`，
+   `packages/api/gateway/src/types.ts:30-35`），分组得由我们的连接层自己贴标签。
+
+**配对与认证的实际形态**（原文「确认配对配置入口」的核对结果）：
+
+- **没有配对码、没有设备指纹、没有双向确认。** 实际是两段式：
+  1. **进程 launch token**：每进程随机 32 字节 secret，存进程内 WeakMap、不落盘；
+     拼成 `?token=...` 由 `dsh web` 打印（`packages/client/connection/src/browser-auth.ts:20/52-58/223-227`）。
+  2. **authority 绑定的 HMAC 签名 cookie**：`v1.<payload>.<HMAC-SHA256>`，cookie 名绑定归一化的
+     host+port，默认活 30 天（`:27-32/106-108/129-132`）。签名密钥存在
+     `$DSH_HOME/.credentials.yaml`，删掉该记录并重启即吊销全部会话。
+- **配置入口是配置文件 + CLI，没有界面操作。** 关键项是 `client-connection` 插件的
+  `trustedHosts?: string[]`（`packages/client/connection/src/index.ts:110-115`），
+  CLI 为 `--trusted-host <authority...>`。带端口精确匹配，不带端口匹配任意端口；
+  **格式写错会导致插件加载失败**（`api-request-trust.ts:49-53`）。
+- 🔴 **`--host 0.0.0.0` 被 CLI 硬性拒绝**（`packages/bundle/web-app/src/startup.ts:88-90`，
+  理由是会把远程代码执行暴露到网络）。官方路径是 **loopback + SSH 端口转发 / 反向代理**。
+- **转发事件不做脱敏**（`packages/api/gateway/README.md:88`）。多主机场景下一个 Host 的事件会
+  原样送到连着它的浏览器——这一点在本项目的多租场景下要特别当心。
+
+**阶段 4 的验证标准需要相应调整**：原写「两台 DSH，界面能看到两边会话并按主机分组」，
+这隐含了「原生已有多连接」。实际上要么实现多连接，要么改成
+「每台主机一个浏览器标签页、我们的聚合层负责跨标签页汇总」——后者能绕开 cookie 不可读的问题。
+
 ### 8.2 主机身份（必须自己带）
 
-`RemoteHostFacts` 只有 `home` / `isLoopback`，**没有主机身份**。所以：
+`RemoteHostFacts` 只有 `home` / `isLoopback`，**没有主机身份**。2026-10-09 复核**确认该判断完全正确**：
+定义在 `packages/api/gateway/src/client/index.ts:118-124`，全部字段就这 2 个；底层帧
+`RemoteEventHostInfo` 也只有 `home`（`packages/api/gateway/src/stream-protocol.ts:27-31`）。
+
+所以：
 
 - 每台 DSH 需配置一个稳定 **hostId**（建议 `hostname` 或显式配置）与人类可读 **hostTitle**
 - 通过 remote 通道随会话/事件一起上报
