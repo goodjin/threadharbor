@@ -62,6 +62,17 @@ async function waitForGrokServe(port: number, secret: string, timeoutMs = 20_000
 }
 
 const LIVE = process.env['THREADHARBOR_LIVE_ACP'] === '1'
+
+/**
+ * Which binary each test drives.
+ *
+ * Overridable because the installed version is not always the pinned one:
+ * hostd pins `@agentclientprotocol/codex-acp@1.6.2`, and the machine may well
+ * have a different build on PATH. A live run against the wrong build says
+ * nothing about the shipped one, so the run has to be able to name its binary.
+ */
+const CODEX_ACP = process.env['THREADHARBOR_CODEX_ACP'] ?? 'codex-acp'
+const CLAUDE_ACP = process.env['THREADHARBOR_CLAUDE_ACP'] ?? 'claude-agent-acp'
 const CWD = process.cwd()
 const PROMPT = 'Run the shell command `echo ACP_LIVE_OK` and then tell me what it printed.'
 /**
@@ -176,7 +187,7 @@ async function runLiveAgentOver(
 
 describe.skipIf(!LIVE)('live ACP agents through the shared layer', () => {
   it('claude: opens a session, answers, and projects its tool call', async () => {
-    const result = await runLiveAgent('claude-agent-acp', claudeDialect, { modeId: 'default' })
+    const result = await runLiveAgent(CLAUDE_ACP, claudeDialect, { modeId: 'default' })
     expect(result.session.sessionId).toBeTruthy()
     expect(result.answer.length).toBeGreaterThan(0)
     expect(result.toolNames).toContain('Bash')
@@ -185,7 +196,7 @@ describe.skipIf(!LIVE)('live ACP agents through the shared layer', () => {
   }, 240_000)
 
   it('codex: opens a session, answers, and projects its tool call', async () => {
-    const result = await runLiveAgent('codex-acp', codexDialect)
+    const result = await runLiveAgent(CODEX_ACP, codexDialect)
     expect(result.session.sessionId).toBeTruthy()
     expect(result.session.models.length).toBeGreaterThan(0)
     expect(result.answer.length).toBeGreaterThan(0)
