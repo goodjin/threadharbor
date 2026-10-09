@@ -1,10 +1,10 @@
 # ThreadHarbor 迁移到 DSH 原生多主机架构 · 设计与实施方案
 
-> 状态：设计已定，待执行
-> 核对时间：2026-09-14
-> 核对基准：`deepseek-harness` 官方 master `5badb15009`；本机 DSH 0.2.0-rc.2；grok 1.0.46
-> 修订：补入界面适配一章（§七）；更正 claude 支持状态的误述（§五）
-> 原型验证：ThreadHarbor `packages/dsh-grok-agent`，已对真实 grok 跑通
+> 状态：阶段 1 已完成并固化为 §二；阶段 2 起待执行
+> 核对时间：2026-09-14（初核）／**2026-10-09（复核，结论见 §二 各小节的「复核」小节）**
+> 核对基准：`deepseek-harness` 官方 master `5badb15009`（复核确认未过期）；本机 DSH 0.2.0-rc.2；grok 1.0.46；codex-acp 1.6.0-grok.3；claude-agent-acp 0.76.0
+> 修订：补入界面适配一章（§七）；更正 claude 支持状态的误述（§五）；**2026-10-09 复核推翻 preset 读取路径、补齐六条实施约束、新增 §2.6/§2.7**
+> 原型验证：ThreadHarbor `packages/dsh-grok-agent`，已对真实 grok 跑通；codex / claude 帧形状 2026-10-09 实测补齐
 
 ---
 
@@ -27,22 +27,67 @@
 
 以下每条都来自官方源码或真实运行，不含推测。新会话执行时请勿凭印象推翻，但若 DSH 升级需重新核对。
 
+> **2026-10-09 复核**：官方 master 仍是 `5badb15009`，基准未过期，本节结论逐条重核过。
+> 本次复核**推翻一条、修正一条归属、补齐六条实施约束**，并新增 §2.6 / §2.7（实测帧形状与两处机制更正）。
+> 注意本机 DSH 运行版本 `0.2.0-rc.2` 落后于 master（master 已到 `0.2.1-alpha.1`），
+> 阶段 3 接进 DSH 时要按**实际运行的那个版本**验证，不能拿 master 的行号当运行时事实。
+
 ### 2.1 关于 DSH agent 架构
 
 | 事实 | 出处 | 影响 |
 |---|---|---|
-| 全仓唯一实现完整 `Agent` 能力的是 `ReactLoopAgent` | `packages/core/agent-loop/src/agent.ts` | 我们要做的是第二个实现 |
-| `Agent` 是**开放接口**，可被任意插件实现 | `packages/core/agent/src/runtime-types.ts` 的 `interface Agent` 合并声明 | 方案成立的前提 |
-| agent 工厂位**只能占一个**，重复注册直接抛错 | `packages/core/agent/src/index.ts` 的 `setFactory` | 不能靠注册第二个工厂接进去 |
-| 工厂槽字段是 TS `private`，**不是** `#private` | 同上，`private factory: FactorySlot \| undefined` | 运行时可读可改 |
-| `createAgent` 里**写死** `new ReactLoopAgent(...)` | `packages/core/agent-loop/src/index.ts` L576 | 没有构造器注入口 |
-| `CreateAgentOptions` 里 `meta.agentPreset` **被 agent-loop 完全忽略** | agent-loop 源码中零处引用 preset | preset 不参与选择实现 |
-| 会话头里带 preset：`session.header.meta.agentPreset` | `packages/core/session/src/types.ts` L158 | **可以在运行时按 preset 分流** |
-| `turn()` 负责全部回合/步骤边界记账，把模型工作交给 `step()` | `packages/core/agent-loop/src/agent.ts` L296–397 | `step()` 是唯一需要替换的接缝 |
-| `step()` 返回 `StepEndReason \| null`，完成时返回 `{ kind: 'completed' }` | 同上 L398；`TurnEndReason.completed` 见 session types L202 | 替换契约极简 |
+| 全仓唯一实现完整 `Agent` 能力的是 `ReactLoopAgent` | `packages/core/agent-loop/src/agent.ts:98` | 我们要做的是第二个实现 |
+| `Agent` 是**开放接口**，可被任意插件实现 | `packages/core/agent/src/types.ts:15-18`（基接口本体）+ `runtime-types.ts:163-243`（合并声明） | 方案成立的前提 |
+| agent 工厂位**只能占一个**，重复注册直接抛错 | `packages/core/agent/src/index.ts:358-360` | 不能靠注册第二个工厂接进去 |
+| 工厂槽字段是 TS `private`，**不是** `#private` | 同上，`:247` | 运行时可读可改 |
+| `createAgent` 里**写死** `new ReactLoopAgent(...)` | `packages/core/agent-loop/src/index.ts:576` | 没有构造器注入口 |
+| `CreateAgentOptions` 里 `meta.agentPreset` **被 agent-loop 完全忽略** | 对 `packages/core/agent-loop/src/` 全包 grep `preset` **零命中** | preset 不参与选择实现 |
+| 会话头里带 preset：**`session.header.agentPreset`（平铺，没有 `meta` 层）** | `packages/core/session/src/types.ts:130`（`SessionHeader`） | **可以在运行时按 preset 分流** |
+| `turn()` 负责全部回合/步骤边界记账，把模型工作交给 `step()` | `packages/core/agent-loop/src/agent.ts:296-396` | `step()` 是唯一需要替换的接缝 |
+| `step()` 返回 `StepEndReason \| null`，完成时返回 `{ kind: 'completed' }` | 同上 `:398`（签名）、`:530-538`（返回）；`TurnEndReason.completed` 见 session types `:202` | 替换契约极简 |
 | `step()` 是 TS `private`，运行时只是原型方法 | 同上 | 可通过原型改写替换 |
-| agent-loop 服务名是 `ctx.agentLoop` | `packages/core/agent-loop/src/index.ts` L355 | 可用 `inject` 约束加载顺序 |
-| 生命周期相关私有方法（`prepare`/`setupAndPublish`/`initializeAgent` 等）**外部零引用** | 全仓搜索确认 | 但我们仍然选择不抄（见 §四） |
+| agent-loop 服务名是 `ctx.agentLoop` | `packages/core/agent-loop/src/index.ts:355` | 可用 `inject` 约束加载顺序 |
+| `prepare` / `setupAndPublish` / `initializeAgent` **外部零引用** | 全在 `AgentLoop` 服务类（`index.ts:479/754/782`），排除自身文件后搜索零命中 | 但我们仍然选择不抄（见 §四） |
+
+#### 2026-10-09 复核更正
+
+**⚠️ 一条不成立，照原文写会让方案静默失效。**
+
+原文写「会话头里带 preset：`session.header.meta.agentPreset`」。**真实路径是 `session.header.agentPreset`，平铺，没有 `meta` 这一层。**
+
+- 原文引的 `packages/core/session/src/types.ts:158` 那行确实存在，但它属于 `CreateSessionOptions['meta']`，是**创建会话时传进去的入参**。
+- 真实字段在 `:130` 的 `SessionHeader` 上，而 `SessionHeader` 根本没有 `meta` 字段。
+- 旁证：`packages/bundle/headless/src/index.ts:193`（`let preset = header.agentPreset`）、`packages/subagent/subagent-in-process-driver/tests/preset-inheritance.spec.ts:104`。
+- **按原文写会永远读到 `undefined` → 分流 100% 落空、静默走回原生实现、且不报任何错。** 这是阶段 3 最高优先级的更正。
+
+**归属修正**：`prepare` / `setupAndPublish` / `initializeAgent` 不是 `ReactLoopAgent` 的方法，是 `AgentLoop` 服务类的私有方法。结论（零外部引用）不变。
+
+#### 2026-10-09 复核新增：六条实施约束
+
+以下六条原文没有，但直接决定实现怎么写。
+
+1. **`ReactLoopAgent` 拿不到类引用。** 它没从 `index.ts` re-export，`package.json` 的 `exports` 也没有 `./agent` 子路径——`import { ReactLoopAgent } from '@deepseek-ai/dsh-agent-loop'` 运行时是 `undefined`。
+   唯一可行绕法是从活着的实例反查：`Object.getPrototypeOf(agent).constructor`。
+   **代价：必须等第一个 agent 诞生才拿得到原型**，`inject: ['agentLoop']` 只保证加载顺序，不保证已有实例。
+
+2. **`step()` 的返回值不控制循环。** 完整签名：
+   ```ts
+   private async step(decision: { kind: 'enter'; messages: UserMessage[];
+                               startsRequestSeries?: true; assembly: PromptAssembly }): Promise<StepEndReason | null>
+   ```
+   `turn()` 调它时是 `this.step(decision)` 方法调用（`:338`），原型一改立刻生效。
+   但返回的 `completed` **只写进 `turnEnds`，不决定步骤是否继续**——真正的开关是 inbox 里还有没有 next-step 输入（`:359`、`:363`）。**想提前收尾收不回来。**
+
+3. **preset 是持久化字段**（`types.ts:124-129` 注释：恢复时必须读回同一 preset，否则会重放模型已无法处理的历史）。
+   **好消息**——重启恢复后分流依然成立，不只新建会话有效。
+
+4. **原型改写可行，且仓内有先例。** 类没被 freeze、无 `#private` 字段、调用点是方法调用；
+   `packages/experimental/webworker-runtime/src/polyfill/async-context/async-context-hooks.ts:49` 就直接改写了 `Promise.prototype.then`。
+
+5. **替代路径不可行。** 官方扩展点 `agent/pre-step` 水位线能 reject 整步，但 reject 只让回合以 `blocked` 结束，**接管不了这一步的模型工作**。所以改 `step` 是唯一路径，必须接受它是私有 API（仓内 AGENTS.md 明写 Public APIs are pre-stable）。
+   **改写时务必保留原实现引用，未命中 preset 一律走官方路径**——这样上游改签名时受影响面收敛。
+
+6. **`step()` 用的是 `this.loopCtx`（挂载作用域）不是 `this.ctx`**。外部实现要复刻原实现的写日志行为，可用字段是 `session` / `dispatch` / `inbox` / `id`（公开），其余 private 字段运行时可访问但 TS 里需断言。
 
 ### 2.2 关于会话事件词汇
 
@@ -50,28 +95,44 @@ DSH 会话日志能表达 ACP 的全部输出，无需扩展：
 
 | ACP 侧 | DSH 侧 |
 |---|---|
-| 助手正文 | `assistant/message`（`text` 内容块） |
-| 助手思考 | `assistant/message`（`reasoning` 内容块，`packages/llm/llm/src/types.ts` L67） |
-| 工具调用 | `tool/call { callId, name, arguments }`（arguments 保持原始字符串，不解析） |
-| 工具结果 | `tool/result { message: ToolResultMessage }`，message 含 `role:'tool'`、`source:{kind:'tool',callId}`、`toolCallId`、`isError` |
+| 助手正文 | `assistant/message`（`text` 内容块，`packages/llm/llm/src/types.ts:62-65`） |
+| 助手思考 | `assistant/message`（`reasoning` 内容块，同文件 `:67-71`） |
+| 工具调用 | `tool/call { turn, step, callId, name, arguments }`（arguments 保持原始字符串，不解析；`packages/core/session/src/types.ts:361`） |
+| 工具结果 | `tool/result { message: ToolResultMessage }`，message 含 `role:'tool'`、`source:{kind:'tool',callId}`、`toolCallId`、`isError?` |
 | 回合/步骤边界 | `turn/start`、`turn/end`、`step/start`、`step/end` |
 
-读日志的代码**明确容忍「没有 turn 事件的 agent」**（`packages/core/agent/src/types.ts` 中 `TurnBoundaryProjection` 注释：能力缺失 ≠ 数据损坏）。这是官方对「agent 不发 turn 事件」的显式让步。
+读日志的代码**明确容忍「没有 turn 事件的 agent」**（`packages/core/agent/src/types.ts:69-77` 中 `TurnBoundaryProjection` 注释：能力缺失 ≠ 数据损坏）。
+但注释同时点名了例外：**没有安全回退的读者（文中举例 step-open decision）允许直接 fail loud**。外部 agent 若不发 turn 事件，要先确认依赖的读路径属于哪一类。
+
+#### 2026-10-09 复核新增：三条 API 硬约束
+
+1. **`tool/call` 是 5 个字段，`turn` / `step` 也必填**，不是原文写的 3 个。
+2. **`message.isError` 是可选字段**（`packages/llm/llm/src/message.ts:179`）。外部 agent 的失败工具调用**必须显式填 `true`**，否则渲染成成功态。
+3. **消息类事件的 `Session.append` 第三个参数 `surfaceOp` 必填**（`types.ts:439-444`、`:462-478`；取值只有 `'append'` 或 `{op:'replace';startSeq;endSeq}`）。
+   另：`Session.append()` 同步返回已落库事件，但**不可重入**——上一次 append 还在发布时再调会抛（`index.ts:736-739`）。
 
 ### 2.3 关于模型列表（重要，修正早期误判）
 
-- **DSH 原生 agent**：模型列表来自 `modelCatalog()`，是 **Host 级**能力（`packages/api/session-controller`），能实时查，不需要会话。
-- **外部 agent（codex/grok/claude）**：模型列表只有 ACP `session/new` 的返回里才有，**没有「列出模型」的公开接口**。
+- **DSH 原生 agent**：模型列表来自 `modelCatalog()`，是 **Host 级**能力（`packages/api/session-controller/src/index.ts:316-319`，路由名 `session/modelCatalog`），能实时查，不需要会话。实现注释原话就是 "Build the browser model catalog **without requiring a Session**"（`src/catalog.ts:14-23`），每次调用实时查、无缓存。
+- **外部 agent（codex/grok/claude）**：模型列表**没有「列出模型」的公开接口**，只能从 `session/new` 的返回里拿。
+  ⚠️ 原文说「只有 `session/new` 返回里才有」**偏窄**：DSH 侧实现在模型拓扑变化时还会主动推 `config_option_update`（`packages/acp/acp/src/session.ts:211-228`），所以会话存续期间也能拿到。
 
 **结论**：外部 agent 的模型列表**只能在建会话时获得**。但由于我们的建会话流程本身就是「建会话时拿到模型」，所以**正常建会话路径不需要任何探测**。仅在「不建会话偷看另一台主机的模型」这一非主流场景才需要探测，且可复用已有会话缓存。
 
-grok 实测：`session/new` 返回 `{ sessionId, models: { currentModelId, availableModels[] } }`，同一帧内。
+> ⚠️ **2026-10-09 实测补正：三家返回的形状并不相同**，详见 §2.6 结论二。原文 §六 与 §7.2-(3) 假设「建会话时拿到一份同构的模型列表」，对 claude 不成立。
 
 ### 2.4 关于中途切换 agent
 
-DSH **硬拦**：`AgentPresetRegistry.select()` 检查回合边界，会话已开始即抛 `agent-preset/locked`（`packages/preset/agent-preset-registry/src/index.ts`）。
+DSH **硬拦**：`AgentPresetRegistry.select()` 检查回合边界，会话已开始即抛 `agent-preset/locked`（`packages/preset/agent-preset-registry/src/index.ts:346-352`，错误码字面量确认无误）。
 
 **结论**：中途切换只能走「新会话 + 完整历史交接」。ThreadHarbor 现有 `session.switch` 已实现并测试，直接复用。
+
+#### 2026-10-09 复核：锁的语义比原文更硬、也有前提
+
+- **一旦有过任何回合就是永久锁死。** `lastTurn` 是历史累计值——`turn/start` 置它，`turn/end` 只清 `openTurnStartSeq`、**不动 `lastTurn`**（`packages/core/agent-loop/src/agent.ts:305/385`）。所以不是「回合进行中锁、结束就解锁」。
+- **「硬拦」有前提。** 若 `turnBoundary` 投影没注册（agent-loop 不在场），`stateOf` 返回 `undefined`，`select()` **根本不进检查分支、直接放行**（`packages/session/session-projection/src/index.ts:319-327`）。
+  投影出来的外部 agent 若不注册该投影，preset 反而是可以中途切的——**这可能是个机会而非只是注意事项**。
+- `recompose()` 的 JSDoc 明写「是不是空会话由调用方负责」（`:329-334`），它自身不设防。
 
 ### 2.5 实测得到的 grok ACP 细节（读代码看不出来）
 
@@ -83,6 +144,94 @@ DSH **硬拦**：`AgentPresetRegistry.select()` 检查回合边界，会话已�
 6. **工具调用有 bug 陷阱**：首个 `tool_call` 的 `title` 是工具身份（`run_terminal_command`），后续 `tool_call_update` 会把 `title` 覆写成人话描述（`Execute \`echo ...\``）。**工具名只能取首帧**
 7. 工具输出是**双层嵌套**：`content: [{ type:'content', content:{ type:'text', text } }]`，需剥两层
 8. **grok 对失败的工具也报 `completed`**，`isError` 只能忠实反映 grok 的状态，不能自行推断
+
+### 2.6 2026-10-09 新增：codex / claude 的实测帧形状
+
+以下全部来自本机真实运行（`codex-acp`、`claude-agent-acp@0.76.0`）。抓帧工具与原始帧存于本仓 `.superpowers/sdd/dsh-multi-host-migration/`。
+
+**结论一：工具身份字段三家三个位置 —— 照抄 grok 必错。**
+
+| agent | 工具名在哪 | `title` 里是什么 | 输出在哪 |
+|---|---|---|---|
+| grok | `title`（首帧） | 工具身份 | `content`，**双层嵌套** |
+| **codex** | `kind: "execute"`（**没有工具名**） | 人话命令（`ls -la\nfind ...`） | `rawOutput.formatted_output`，**根本没有 `content` 字段** |
+| **claude** | `_meta.claudeCode.toolName`（如 `Bash`） | 人话描述 | `content` **双层嵌套**（同 grok）+ `rawOutput` |
+
+照抄 grok 的两条规则会同时失效：「工具名只取首帧」会把整条命令渲染成工具名；「剥两层取输出」永远取到空串，**codex 的工具输出全丢**。
+
+**结论二：模型列表三种形状，claude 最特殊。**
+
+| agent | `session/new` 返回 |
+|---|---|
+| grok | `{ sessionId, models: { currentModelId, availableModels[] } }` |
+| codex | `{ sessionId, models: { availableModels[] } }`（无 `currentModelId`） |
+| **claude** | `{ sessionId, modes, configOptions }` —— **顶层没有 `models` 键**；模型在 `configOptions[]` 中 `id:"model"` / `category:"model"` 的那一条（`type:"select"`, `currentValue`, `options[]`） |
+
+§六 与 §7.2-(3) 的「建会话时拿到模型」对 claude 需要换数据源，实现难度高于预期。
+
+**结论三：token 计数三家不同源。**
+
+- grok：`session/update` 的 `params._meta.totalTokens`。
+- codex / claude：`session/update` 上**完全没有 `_meta`**，改由 **`session/prompt` 的响应**携带 `{ stopReason, usage: {...}, _meta.quota.token_count }`。
+- 另有 `usage_update` 帧（codex 2 次 / claude 5 次），字段是 `{used, size}`——这是**上下文窗口占用，不是计费 token**，别当 token 数用。
+
+**结论四：必须过滤的非对话内容帧。**
+
+- 三家都有：`available_commands_update`、`usage_update`、`_auth/status_update`。
+- codex 独有：`session_info_update`（`_meta.codex.threadStatus`）。
+- ⚠️ **`_auth/status_update` 会带用户邮箱**（实测 codex 那次为 `{"kind":"account","email":"goodjin2@gmail.com","plan":"pro"}`）。不过滤会把邮箱写进会话日志。
+
+**结论五：思考帧只有 claude 确认发出。** claude 实测 112 帧 `agent_thought_chunk`；codex 本次未出现（`thoughtTokens: 0`），**待确认 codex 是否支持**。
+
+**结论六：权限请求帧形状（ACP 标准方法，三家同构）。**
+
+```
+{ method: "session/request_permission", id: <请求自带 id>,
+  params: { toolCall: { toolCallId, name, status:"pending", rawInput, title, kind, content, locations[] },
+            _meta: { permission: { version, title } },
+            options: [ {optionId:"allow-once",        kind:"allow_once"},
+                       {optionId:"allow-with-updates", kind:"allow_always"},
+                       {optionId:"reject",            kind:"reject_once"} ],
+            sessionId } }
+```
+
+**⚠️ 实测踩到的坑：应答必须回带同一个 `id` 的 JSON-RPC 响应帧。** 用通知帧应答会被静默接受，然后回合**挂死 240 秒**不返回——不报错、无超时提示。
+
+另注：权限请求帧里工具名在 `toolCall.name`，而同一 agent 的 update 帧里在 `_meta.claudeCode.toolName` —— **claude 自身内部就不一致**，提取器不能只认一处。
+
+**触发条件三家不同：**
+
+- claude 默认 `currentModeId: "bypassPermissions"`（**默认永远不问**），必须先 `session/set_mode` 切到 `default`（Manual）才会触发。
+- codex 取决于 `approval_policy`（取值 `"on-request"` / `"never"`），**本机这个构建默认是 `"never"`**，所以实测 0 次请求——是默认值问题，不是抓帧方法问题。相关配置项 `sandbox_mode`（`read-only` / `workspace-write` / `danger-full-access`）。
+- grok 未触发，待验。
+
+> **诚实标注**：本机 claude **不是真 Anthropic Claude**。`~/.claude/settings.json` 里 `ANTHROPIC_BASE_URL` 指向 `codeplan.iquestlab.com`、`ANTHROPIC_MODEL=iquest-q1`、`primaryApiKey: "any"`，是公司中转。
+> 所以 claude 那份抓帧的**帧形状来自真实的 `claude-agent-acp@0.76.0` 适配器**（这正是投影依赖的部分，形状结论成立），但**背后模型不是 Claude**，模型名相关的内容不代表 Claude 真实行为。
+>
+> 另：本机 codex-acp 是 `1.6.0-grok.3`（软链到 `~/github/codex-acp` 本地分叉），而 hostd 里 pin 的是 `1.6.2`。codex 的帧形状取自分叉版本，**阶段 2 落地前需在 pinned 版本上复验**。
+
+### 2.7 2026-10-09 新增：流式与审批的两处机制更正
+
+**（1）「流式记录」不存在 —— §7.2-(1) 的措辞必须改。**
+
+原文写「原生循环逐块产出，用 DSH 的流记录机制」。**前半对，后半错：没有「增量追加内容」的会话日志机制。**
+
+`assistant/message` 是流被消费完之后**一次性** append（`packages/core/agent-loop/src/agent.ts:520-529`）。
+
+流式来自**另一条完全独立的通道** `agent/assistant-stream`：**进程内、不落盘**（类型 `packages/core/agent/src/runtime-types.ts:127-161`，事件名 `:363`，发射点 `packages/core/agent-loop/src/assistant-stream.ts:60-71`，经 SessionController 走 follow 传输下发 `packages/api/session-controller/src/types.ts:563`）。
+
+> **准确表述**：历史与静态渲染完全复用 DSH 原生界面；**实时流式需要自己接一条 `agent/assistant-stream` 通道**，并接受「这些帧不落盘，重启/重连后靠 baseline 补齐」。
+> 只写日志的外部 agent，UI 必然「等半天整段出现」——但成因**不是缺一个增量接口，是增量在另一条通道上**。
+
+**（2）审批必须在打开的 turn 内部发起。**
+
+`ApprovalService.request()`（`packages/interaction/user-approval/src/index.ts:215`）硬检查 `hasOpenTurn(session)`，不在打开的 turn 内直接抛错（`:217-223`）——理由是回合是持久日志的提交/重放边界，回合之间落的裸事件在重载时和崩溃尾巴无法区分。
+
+策略恰好两个值 `'ask' | 'never'`（`:67`、`:70`），原文说对了。`request()` 自动 append `approval/asked` + `approval/decided` 审计对。
+结果闭集：`'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'`，其中 `unavailable` 是 fail-closed 值。
+`approval/request` 是 waterfall 事件——外部 agent 既能发起审批，也能自己挂 listener 当 answerer。
+
+**§7.1 的结论需要限定**：会话事件这一层确实可以完全复用；**流式渲染那一层不是从日志来的**。
 
 ---
 
@@ -209,38 +358,51 @@ ACP 连接（`grok agent serve` 进程 + secret + sessionId）按 sessionId 惰�
 
 **preset 按主机独立**：DSH 的 preset 注册表本就是每进程一份，远端 DSH 只注册自己实际装了/登录了的 agent。因此**未装 codex 的主机不会显示 codex preset**，天然满足需求。
 
-### 5.4 zcode（Z.ai / GLM）：不作为外部 agent 接入
+### 5.4 zcode（Z.ai / GLM）：目前无法接入
 
-**核对结论（2026-09-14，ZCode 3.14.5）：zcode 不支持 ACP，无法按外部 agent 接入。**
+**核对结论（2026-09-14，ZCode 3.14.5）：zcode 不支持 ACP，且没有可被程序驱动的外部接口。接不进来。**
 
-证据（对 `/Applications/ZCode.app/Contents/Resources/app.asar` 做符号检索）：
+#### 为什么接不进来
 
-| ACP 必需标记 | 出现次数 |
+**（1）没有 ACP。** 对应用包做符号检索，ACP 必需标记全部为 0：
+
+| 标记 | 次数 |
 |---|---|
 | `session/new` | 0 |
 | `session/prompt` | 0 |
 | `session/update` | 0 |
 | `agent-client-protocol` | 0 |
 
-zcode 内部确实出现 `agent_message_chunk` / `agent_thought_chunk` / `tool_call` / `tool_call_update` 这些名字，但它们读的是 `event.type`，是**zcode 自己的任务事件格式**，不是 ACP 的 `sessionUpdate` 结构。其 JSON-RPC 代码里带 `_meta`、`relatedRequestId`、`resumptionToken`，那是 **MCP（模型上下文协议）**——zcode 是 MCP 的使用者，不是 ACP 的提供者。
+包内虽有 `agent_message_chunk` / `agent_thought_chunk` / `tool_call` / `tool_call_update`，但读的是事件自身的 `type` 字段，是 **zcode 自己的任务事件格式**。其 JSON-RPC 代码里的 `_meta` / `resumptionToken` / `relatedRequestId` 属于 **MCP**——zcode 是 MCP 的使用者，不是 ACP 的提供者。
 
-zcode 是 Electron 桌面应用，没有可被外部驱动的无头服务入口（`--headless` / `--serve` 均来自打包进来的 Playwright 依赖，不是 zcode 自己的命令行）。
+**（2）没有可驱动的外部接口。**
 
-**但这不等于接不进来——换一条路即可。**
+- 深度链接只有两条：`zcode://workspace`、`zcode://oauth`。**没有「发消息」的路由。**
+- 包内 HTTP 路由全是示例/测试残件（`/hello`、`/about/me` 之类），不是产品 API。
+- 内部确实有 `sendPrompt({taskId, traceId, content, modelSelection})`、`listTasks`、`getTaskSnapshot`、`respondElicitation`，但都是 Electron 主进程与渲染进程之间的 IPC，**不对外暴露**。
+- `--headless` / `--serve` 来自打包的 Playwright 依赖，不是 zcode 自己的命令行。
 
-zcode 自己调模型走的是 **Anthropic 兼容端点**：
+#### 关于「150% 用量额度」
 
-```
-https://open.bigmodel.cn/api/anthropic     （BigModel API Key）
-https://api.z.ai/api/anthropic             （Z.ai）
-https://zcode.z.ai/api/v1/zcode-plan/anthropic （编码套餐）
-```
+这是接 zcode 的真正动机，但它**不能靠绕过界面拿到**。
 
-模型为 `GLM-5.3`、`GLM-5.3-Flash`。
+额度对应的编码套餐端点确实存在：`https://zcode.z.ai/api/v1/zcode-plan/anthropic`，凭据是配置里一个**签名的 JWT**，且必须通过自定义头 `x-coding-plan-api-key` 传递（不是标准的 `x-api-key`）。
 
-而 DSH 的 `dsh-llm-pi-ai` **原生支持 `anthropic-messages` 协议**（含 `x-api-key` + `anthropic-version` 的模型发现）。
+**实测直接调用该端点返回 401**（`x-api-key` 与 `x-coding-plan-api-key` 两种都试过，路径本身存在——返回 401 而非 404）。凭据可能已过期、需要额外头部，或由 zcode 运行时刷新。
 
-**所以正确做法是把 GLM 配成 DSH 的一个模型提供方，而不是把 zcode 当外部 agent 驱动：**
+**因此结论是：额度锁在 zcode 应用内，外部拿不到。**
+
+#### 剩下的可能性（都不是本项目能单方面完成的）
+
+| 方向 | 可行性 | 说明 |
+|---|---|---|
+| 驱动 GUI（AppleScript / 无障碍 / 注入 Electron IPC） | 不可行 | 需应用常驻前台，无法可靠流式，版本一升就碎 |
+| 向 Z.ai 申请该端点的正式接入 | **值得问** | 端点显然是为编程 agent 设计的，问官方最靠谱 |
+| 放弃额度优势，直接把 GLM 配成 DSH 模型 | 可行但**不满足需求** | 见下 |
+
+#### 附：GLM 作为 DSH 原生模型（仅在放弃额度需求时考虑）
+
+zcode 调模型走 Anthropic 兼容端点，而 DSH 的 `dsh-llm-pi-ai` 原生支持 `anthropic-messages` 协议，技术上能配：
 
 ```yaml
 - name: '@deepseek-ai/dsh-llm-pi-ai'
@@ -253,19 +415,9 @@ https://zcode.z.ai/api/v1/zcode-plan/anthropic （编码套餐）
         models:
           - id: GLM-5.3
             contextWindow: 200000
-          - id: GLM-5.3-Flash
 ```
 
-**这样得到的好处远大于「又一个外部 agent」：**
-
-- GLM 走 **DSH 原生 agent**，自带工具、审批、权限、会话恢复
-- 不需要 ACP 桥接、不需要进程看护、不需要新写一套帧投影
-- 模型列表由 DSH 的 Host 级目录提供，**实时可查**
-- 在界面上它就是一个普通模型，而不是一个需要单独适配的 agent
-
-**代价**：GLM 是「模型」不是「agent」。它没有 zcode 自己的工具集与工作流，走的是 DSH 的工具和循环。这是取舍，不是缺陷——若需要 zcode 那套特定行为，则另当别论（但那需要 zcode 提供 ACP 或 API，目前没有）。
-
-**执行时**：阶段 2 之前先按上面配一条 GLM 路由验证可用（需 Z.ai 的 API Key，从 zcode 凭据处取或单独申请）。这一步独立于其他 agent，成功即可多一个可用模型。
+但**这条路会丢掉 zcode 套餐的额度**，正是用户想保留的东西，因此**不作为 zcode 的替代方案**。仅在额度需求被放弃时作为「多一个可用模型」的可选项。
 
 ---
 
@@ -313,7 +465,12 @@ DSH 的会话区是**渲染器**，不执行工具（工具由 agent 执行，�
 
 原生循环逐块产出，界面文字是逐步显现的。我们的原型在回合结束时一次性提交完整文本，用户会看到「等半天然后整段出现」。
 
-处置建议：在 ACP 帧到达时增量提交（用 DSH 的流记录机制），而不是等回合结束。**这是体验差异里最明显的一条**，需在阶段 3 处理。
+> ⚠️ **2026-10-09 复核更正**：原文的处置建议「用 DSH 的流记录机制增量提交」**指向了一个不存在的机制**。
+> 会话日志**没有增量追加能力**——`assistant/message` 是流消费完后一次性落盘（`packages/core/agent-loop/src/agent.ts:520-529`）。
+> 流式在**另一条独立通道** `agent/assistant-stream` 上，且**进程内、不落盘**。详见 §2.7-(1)。
+> 阶段 3 的正确做法是接那条通道，而不是想办法把日志拆成多次写。
+
+**这是体验差异里最明显的一条**，需在阶段 3 处理。
 
 **（2）权限请求要接到 DSH 的审批界面。**
 
@@ -321,13 +478,16 @@ ACP 协议里外部 agent 会主动发权限请求（grok 执行命令前可能�
 
 DSH 侧有**自己的**审批服务（`ask`/`never` 两种策略）。需要把 ACP 的权限请求桥接过去，否则外部 agent 要批准时会卡住。
 
-**原型的 grok 测试没有触发过权限请求，这条未验证。** 需在阶段 2 专门验证。
+> ✅ **2026-10-09 已实测**：claude 侧走通「请求 → 批准 → 回合完成 → 被批准的操作真的执行」，帧形状见 §2.6 结论六。
+> 实施时注意两条硬约束：**审批必须在打开的 turn 内发起**（§2.7-(2)）；**应答必须回带同一个 `id` 的 JSON-RPC 响应帧**，用通知帧应答会被静默接受然后挂死。
 
 **（3）输入框的模型选择器要能显示外部 agent 的模型。**
 
 DSH 的模型选择器读的是 Host 级模型目录（来自 DSH 自己的厂商适配器）。外部 agent 不走这套，所以**选择器会显示 DSH 的模型，而不是 grok/codex 的**。
 
 处置：外部 agent 会话的模型列表来自 ACP `session/new` 的返回，需要让选择器在 ACP 会话下改读这个来源。
+
+> ⚠️ **2026-10-09 实测补正**：三家返回的形状**并不相同**，claude 顶层甚至没有 `models` 键。见 §2.6 结论二——这一条的实现难度高于原文预期。
 
 **（4）工具的「执行中」状态会一闪而过。**
 
@@ -387,11 +547,11 @@ DSH 的模型选择器读的是 Host 级模型目录（来自 DSH 自己的厂�
 
 ## 九、中途切换 agent
 
-### 8.1 事实
+### 9.1 事实
 
-DSH 硬拦（§2.4），不可绕过。
+DSH 硬拦（§2.4），不可绕过。注意复核结论：锁是**永久**的（有过任何回合即锁死），且只在 `turnBoundary` 投影在场时生效。
 
-### 8.2 做法
+### 9.2 做法
 
 复用 ThreadHarbor 已实现的 `session.switch`：
 
@@ -402,7 +562,7 @@ DSH 硬拦（§2.4），不可绕过。
 
 跨主机切换时，交接文本需通过 remote 通道送达目标主机。
 
-### 8.3 与「重新选择 preset」的区别
+### 9.3 与「重新选择 preset」的区别
 
 - **第一个回合之前**：DSH 原生支持改 preset（`select()`），可直接改
 - **已经开始对话**：只能新会话 + 历史交接
@@ -413,33 +573,41 @@ DSH 硬拦（§2.4），不可绕过。
 
 分阶段，每阶段独立可验证、可回退。**旧 hostd 路径在阶段 6 完成前一直保留。**
 
-### 阶段 1：核对与固化（不写生产代码）
+### 阶段 1：核对与固化（不写生产代码）✅ 已完成 2026-10-09
 
-1. 把 DSH 源码更新到最新官方 master
-2. 核对 §二 中所有事实是否仍成立（重点：工厂槽、`step()` 签名、`agentPreset` 在会话头）
-3. 核对 **codex / claude** 的真实帧形状（grok 已核对；两者 ThreadHarbor 侧均已有可用通路）
-4. **配置并验证 GLM 路由**（§5.4）：zcode 无 ACP，改走 DSH 原生模型提供方，需 Z.ai API Key
-5. **验证 ACP 权限请求**：强制外部 agent 请求批准，确认桥接到 DSH 审批可用（§7.2-(2)，原型未覆盖）
-6. 确认 DSH `remote` 的配对配置入口（认证、地址注册）
+1. ~~把 DSH 源码更新到最新官方 master~~ → 已拉到 `5badb15009`，与原基准一致
+2. ~~核对 §二 中所有事实~~ → 逐条重核，**1 条不成立**（preset 读取路径）、1 条归属修正、6 条实施约束补齐
+3. ~~核对 codex / claude 的真实帧形状~~ → 实测完成，结论见 §2.6（六条）
+4. ⏸ **配置并验证 GLM 路由**（§5.4）→ **阻塞**：需要 Z.ai API Key，且 §5.4 的最新结论已改为「GLM 路线会丢掉 zcode 套餐额度，不作为替代方案」，与本条要求冲突，**待定**
+5. ~~验证 ACP 权限请求~~ → claude 侧已验证打通（含一个静默挂死的坑，见 §2.6 结论六）；codex 默认 `approval_policy="never"` 不触发，需改配置复验；grok 未触发
+6. ⏳ 确认 DSH `remote` 的配对配置入口 → 进行中
 
-**产出**：一份核对结论，更新本文档 §二。
+**产出**：核对结论已固化为本文档 §二（含 §2.6 / §2.7 新增两节）。原始抓帧存于 `.superpowers/sdd/dsh-multi-host-migration/frames/`。
 
 ### 阶段 2：ACP 接入层通用化
 
 1. 把 `packages/dsh-grok-agent` 的 transport / projection 抽成通用 ACP 接入层
+   —— ⚠️ 按 §2.6 结论一，**三家工具名/输出字段位置各不相同，抽象层不能把提取规则写死**
 2. 让 claude / codex 各实现一套 transport + projection
+   —— ⚠️ claude 的模型列表在 `configOptions`，不在 `models`（§2.6 结论二）
 3. **桥接 ACP 权限请求到 DSH 审批服务**（§7.2-(2)，否则外部 agent 会卡住等批准）
+   —— ⚠️ 审批必须在打开的 turn 内发起（§2.7）；应答必须回带同一 `id` 的响应帧
 4. 每套都用真实 agent 抓帧做回归测试
+   —— ⚠️ codex 需先在 pinned `1.6.2` 上复验（本次抓的是 `1.6.0-grok.3` 分叉）
 
 **验证**：每个 agent 独立跑通「建会话 → 提问 → 收到回答 → 工具调用正确投影」，且**权限请求能被批准并让回合继续**。
 
 ### 阶段 3：接进 DSH（方案乙）
 
 1. 实现原型改写 + 按 preset 分流
+   —— ⚠️ **读 `session.header.agentPreset`，不是 `.meta.agentPreset`**（§2.1 复核更正，照原文写分流静默失效）
+   —— ⚠️ **拿不到 `ReactLoopAgent` 类引用**，须从活着的实例反查原型（§2.1 约束 1）
+   —— ⚠️ 改写处**必须保留原实现引用**，未命中 preset 一律走官方路径（§2.1 约束 5）
+   —— ⚠️ `step()` 返回 `completed` **收不回来**回合，开关是 inbox（§2.1 约束 2）
 2. 原生 dsh preset 回归验证零行为变化
 3. grok preset 跑通完整会话
-4. **输入框模型选择器在 ACP 会话下改读 ACP 模型列表**（§7.2-(3)）
-5. **增量提交 assistant 内容，恢复流式观感**（§7.2-(1)）
+4. **输入框模型选择器在 ACP 会话下改读 ACP 模型列表**（§7.2-(3)）—— 三家数据源形状不同
+5. **恢复流式观感**（§7.2-(1)）—— ⚠️ **不是「增量提交日志」**：日志没有增量接口，流式在**独立的 `agent/assistant-stream` 通道**且不落盘（§2.7-(1)）
 
 **验证**：同一台 DSH 里，dsh 会话和 grok 会话共存，界面都能正常对话。
 
