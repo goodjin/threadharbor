@@ -9,6 +9,6 @@ export type {
   StepEndReason,
 } from './dispatch.ts'
 export { AcpTurnRunner } from './runner.ts'
-export type { AcpClientPort, RunnerOptions } from './runner.ts'
+export type { AcpClientPort, RunnerOptions, TurnStreamPort } from './runner.ts'
 export { AcpAssistantStream } from './stream.ts'
-export type { StreamOptions, StreamRecord, TurnStreamPort } from './stream.ts'
+export type { StreamOptions, StreamRecord } from './stream.ts'
