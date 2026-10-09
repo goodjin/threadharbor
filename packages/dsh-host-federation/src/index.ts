@@ -11,3 +11,5 @@ export type {
   RollUp,
 } from './federation.ts'
 export { browserChannel } from './channel.ts'
+export { hostScopedSettings } from './settings.ts'
+export type { ScopedSettings, SettingStorage } from './settings.ts'
