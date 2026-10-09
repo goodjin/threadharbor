@@ -18,6 +18,7 @@
 
 import { presetIdOf } from './dispatch.ts'
 import type { AgentLike, PresetResolver } from './dispatch.ts'
+import type { PermissionDecision, PermissionRequest } from '@threadharbor/dsh-acp-agent'
 import { buildPresetTable } from './registry.ts'
 import type { AcpPresetConfig, PresetConfig } from './registry.ts'
 import { makeSessionFactory } from './factory.ts'
@@ -37,6 +38,13 @@ export type AcpPluginDeps = {
    * Handed the dialect that was resolved, so the caller need not re-derive it.
    */
   install(agent: AgentLike, presetId: string, dialect: AcpDialect, table: ReadonlyMap<string, AcpPresetBinding>): void
+  /**
+   * Ask the host whether an action is allowed.
+   *
+   * Omitted when the host has nowhere to ask, in which case every request is
+   * refused.
+   */
+  answerPermission?(request: PermissionRequest): Promise<PermissionDecision>
   /**
    * Say what went wrong on a session this row claimed.
    *
@@ -70,7 +78,13 @@ export function applyAcpPlugin(
 ): void {
   const presets: PresetConfig = { presets: { [presetId]: config } }
   const factory = makeSessionFactory(presets, {
-    answerPermission: () => Promise.resolve({ outcome: 'reject' }),
+    // Refusing without asking is the safe default and the honest one when there
+    // is nowhere to ask. Where there IS a host that answers, use it — a row
+    // that decides every permission for itself makes a capable agent look
+    // untrustworthy, and leaves nothing on screen to explain why.
+    answerPermission: request => (deps.answerPermission === undefined
+      ? Promise.resolve({ outcome: 'reject' })
+      : deps.answerPermission(request)),
   })
   const dialect = factory.dialectFor(presetId, config)
   // An unknown agent is a configuration mistake. Taking sessions over anyway

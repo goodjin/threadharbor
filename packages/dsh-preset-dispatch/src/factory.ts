@@ -15,7 +15,7 @@ import {
   codexDialect,
   grokDialect,
 } from '@threadharbor/dsh-acp-agent'
-import type { AcpDialect, PermissionDecision, PermissionRequest } from '@threadharbor/dsh-acp-agent'
+import type { AcpDialect, AcpTransport, PermissionDecision, PermissionRequest } from '@threadharbor/dsh-acp-agent'
 import type { AcpSession, AcpSessionFactory, PresetConfig } from './registry.ts'
 import { AcpTurnRunner } from './runner.ts'
 import type { AcpClientPort } from './runner.ts'
@@ -23,6 +23,14 @@ import type { AcpClientPort } from './runner.ts'
 export type FactoryDeps = {
   /** Answer an agent-initiated permission request. */
   answerPermission(request: PermissionRequest): Promise<PermissionDecision>
+  /**
+   * Build the transport a preset connects over.
+   *
+   * Supplied by tests so the client this factory builds can actually be driven —
+   * permission handling is decided inside a client the factory otherwise keeps
+   * to itself, which leaves nothing to assert against.
+   */
+  transport?(preset: { url?: string; command?: string }): AcpTransport
 }
 
 /** Which frame dialect an agent speaks. Unknown agents are not ours. */
@@ -40,9 +48,9 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
       const preset = config.presets[presetId]
       if (preset === undefined) throw new Error(`acp dispatch: no preset named ${presetId}`)
 
-      const transport = preset.url !== undefined
+      const transport = deps.transport?.(preset) ?? (preset.url !== undefined
         ? new WebSocketAcpTransport({ url: preset.url })
-        : new StdioAcpTransport({ command: preset.command ?? '' })
+        : new StdioAcpTransport({ command: preset.command ?? '' }))
 
       const client = new AcpClient(transport, DIALECTS[preset.agent ?? ''] ?? grokDialect)
       // grok delegates shell execution to the client. Without this the agent

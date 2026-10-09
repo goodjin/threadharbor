@@ -28,6 +28,7 @@ import { installAcpDispatch } from './dispatch.ts'
 import { makeContentWriter } from './content-writer.ts'
 import type { AcpPresetConfig } from './registry.ts'
 import type { AcpPresetBinding, AgentLike, ContentEvent } from './dispatch.ts'
+import type { PermissionDecision } from '@threadharbor/dsh-acp-agent'
 import type { AcpDialect } from '@threadharbor/dsh-acp-agent'
 import { projectStepContent } from '@threadharbor/dsh-acp-agent'
 
@@ -83,6 +84,8 @@ export type Config = {
 export function apply(ctx: unknown, config: Config): void {
   const host = ctx as {
     on(event: 'agent/created', handler: (payload: { agent: unknown }) => void): unknown
+    /** Optional: a row that injects it would refuse to mount without it. */
+    get?(key: 'approval'): { request(request: unknown): Promise<unknown> } | undefined
     sessionProjections?: { stateOf(session: unknown, key: string): unknown }
     logger?: { info(message: string): void; warn(message: string): void }
   }
@@ -104,21 +107,49 @@ export function apply(ctx: unknown, config: Config): void {
   // was never installed.
   const summary = `acp row mounted: preset=${config.presetId} agent=${config.agent} `
     + `transport=${config.url === undefined ? 'process' : 'websocket'} `
-    + `preset-reading=${readProjection(host) === undefined ? 'header-only' : 'projection'}`
+    + `preset-reading=${readProjection(host) === undefined ? 'header-only' : 'projection'} `
+    + `approvals=${host.get?.('approval') === undefined ? 'refuse-all' : 'host'}`
   host.logger?.info(summary)
   // Also to stderr: this row is silent by design, and whether it mounted at all
   // is the first question anyone asks when no session is taken over. The host's
   // log level is not ours to raise.
   process.stderr.write(`[threadharbor] ${summary}\n`)
 
+  // Where a permission request goes. The row must not answer these itself:
+  // deciding on the agent's behalf is how an external agent ends up able to do
+  // nothing, with nothing on screen to say why.
+  //
+  // The agent is looked up by session rather than captured: several sessions can
+  // be live at once, and a permission request names the session it belongs to.
+  const agents = new Map<string, unknown>()
+  // Opportunistic, like the native tool layer: injecting it would mean the row
+  // refuses to mount on a host that has no approval service, and taking every
+  // session with it.
+  const approval = host.get?.('approval')
+  const ask = approval === undefined ? undefined : async (request: unknown): Promise<PermissionDecision> => {
+    const described = describeRequest(request)
+    const sessionId = sessionIdOfRequest(request)
+    const outcome = await approval.request({
+      agent: sessionId === undefined ? undefined : agents.get(sessionId),
+      ...described,
+    })
+    // Only `allowed-once` means yes. Rejected, cancelled, unavailable and any
+    // value invented later all mean no — a bridge that guessed the other way
+    // would hand out permission nobody agreed to.
+    return outcome === ALLOWED_ONCE ? { outcome: 'allow' } : { outcome: 'reject' }
+  }
+
   applyAcpPlugin(host, config.presetId, preset, {
     ...(readProjection(host) === undefined ? {} : { presetOf: readProjection(host) }),
+    ...(ask === undefined ? {} : { answerPermission: ask }),
     report: message => {
       host.logger?.warn(message)
       process.stderr.write(`[threadharbor] ${message}\n`)
     },
     install: (agent, presetId, dialect, table) => {
       const line = `acp takeover: session=${String(sessionIdOf(agent) ?? '?')} preset=${presetId} dialect=${dialect.id}`
+      const sessionId = sessionIdOf(agent)
+      if (sessionId !== undefined) agents.set(sessionId, agent)
       host.logger?.info(line)
       process.stderr.write(`[threadharbor] ${line}\n`)
 
@@ -179,3 +210,28 @@ function readProjection(host: { sessionProjections?: { stateOf(session: unknown,
 
 /** Kept so the dialect type stays referenced from the entry. */
 export type { AcpDialect }
+
+/** Only this exact value is a grant; everything else is a refusal. */
+const ALLOWED_ONCE = 'allowed-once'
+
+function sessionIdOfRequest(request: unknown): string | undefined {
+  const sessionId = (request as { sessionId?: unknown } | undefined)?.sessionId
+  return typeof sessionId === 'string' ? sessionId : undefined
+}
+
+/**
+ * What the host needs to describe a permission prompt.
+ *
+ * A prompt that says only "allow?" tells the operator nothing about what they
+ * are agreeing to, so the tool's own name and arguments travel with it.
+ */
+function describeRequest(request: unknown): { toolName: string; callId?: string; reason?: string } {
+  const raw = (request ?? {}) as { toolName?: unknown; title?: unknown; rawInput?: unknown; reason?: unknown; callId?: unknown }
+  const toolName = typeof raw.title === 'string' && raw.title !== ''
+    ? raw.title
+    : typeof raw.toolName === 'string' && raw.toolName !== '' ? raw.toolName : 'unknown'
+  const callId = typeof raw.callId === 'string' ? raw.callId : undefined
+  const reason = typeof raw.reason === 'string' ? raw.reason
+    : raw.rawInput === undefined ? undefined : JSON.stringify(raw.rawInput).slice(0, 200)
+  return { toolName, ...(callId === undefined ? {} : { callId }), ...(reason === undefined ? {} : { reason }) }
+}
