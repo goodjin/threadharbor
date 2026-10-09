@@ -252,6 +252,42 @@ DSH 自己的代码也不读头。`session-controller` 读的是投影
 **已决（2026-10-09）：走「agent 当 provider」这条路，见下面（3）。**
 
 
+#### （2b）配置怎么到达前端：已有现成机制（2026-10-09 核对）
+
+**插件配置本身**走 Cordis 的 `Config` schema——函数插件导出 `Config` 后，
+入口签名变成 `apply(ctx, config)`（先例：`packages/acp/acp/src/index.ts:86` 的
+`export const Config` 与 `:97` 的 `apply(ctx, config)`；这是仓内现成的范例）。
+
+**但配置要送到浏览器那一半，走的是另一套**。客户端插件是「两半」结构
+（范例 `packages/client/ui-model-selection/`）：
+
+- **宿主那半**：`src/index.ts` 里的 `apply(): void {}` 是空的，作用只是让这个
+  包出现在宿主 `cordis.yml` / Loader 里。
+- **浏览器那半**：`exports["./client"]` 指向浏览器包，靠包清单里的
+  `dsh.client` 声明被发现（`inject` 列出客户端依赖，`platform: "web"`）。
+
+**客户端读配置的方式**：`ConfigForm<T>`，从 `ctx.configForms.get(entryId)` 取
+（`packages/client/ui-settings/src/client/config-form-types.ts:39`；
+取用入口 `config-form.ts:293`）。宿主插件在自己那半注册一个设置命名空间，
+浏览器那半通过这个表单读写。表单自带：
+
+- `getSnapshot()` / `subscribe()` 观察；`set()` / `mutate()` 写入；
+- `revision` 版本栅栏与宿主校验；
+- **`mode: 'host' | 'memory'`**（`:34`）——`'host'` 跟随宿主文档，
+  `'memory'` 只在**远端浏览器进程内**保留。
+
+**对本阶段的意义**：`hostId`/`hostTitle` 属于「这台机器是谁」，应当走
+`'host'` 模式，由宿主插件注册命名空间、客户端通过表单读。这比自己造一条
+配置通道更省事，而且版本栅栏与校验都是现成的。
+
+**⚠️ 但这和本阶段另做的一套按主机隔离的本地设置不是一回事**：
+后者对应的是纯界面偏好（现有代码刻意不往服务端回传，见
+`packages/dsh-client/src/client/display-preferences.ts:1-3`），仍应留在
+localStorage，只是要按主机分开槽位。两者分工：身份与共享配置走 `ConfigForm`，
+界面偏好走本地存储。
+
+---
+
 #### （3）把外部 agent 当作 provider 塞进全局目录 —— 可行，但切换有硬限制
 
 **塞进目录：可行，且界面不用改。** `LlmAdapter` 的 `listModels` 文档写明：
