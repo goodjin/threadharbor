@@ -43,6 +43,7 @@ export type TerminalCreateRequest = {
 
 export class AcpClient {
   private readonly pending = new Map<number, Pending>()
+  private readonly frameObservers = new Set<(frame: AcpFrame) => void>()
   private nextId = 1
 
   onNotification: (frame: AcpFrame) => void = () => {}
@@ -106,6 +107,7 @@ export class AcpClient {
     } catch {
       return // not a frame; agents write diagnostics to stdout too
     }
+    this.observe(frame)
 
     // A frame with an id and no method is a reply to one of our calls.
     if (frame.id !== undefined && typeof frame.id === 'number' && frame.method === undefined) {
@@ -128,6 +130,27 @@ export class AcpClient {
       return
     }
     if (frame.method !== undefined) this.onNotification(frame)
+  }
+
+  /** Register an observer of every inbound frame, replies included. */
+  onFrame(handler: (frame: AcpFrame) => void): void {
+    this.frameObservers.add(handler)
+  }
+
+  /**
+   * Tell the observers, each in isolation.
+   *
+   * An observer is a bystander: one that throws must not take the turn with it,
+   * so failures are swallowed here rather than left to escape into `receive`.
+   */
+  private observe(frame: AcpFrame): void {
+    for (const observer of this.frameObservers) {
+      try {
+        observer(frame)
+      } catch {
+        // deliberately ignored
+      }
+    }
   }
 
   /** Send one JSON-RPC response, either a result or an error. */

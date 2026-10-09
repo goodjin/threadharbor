@@ -173,4 +173,35 @@ describe('AcpClient handling agent-initiated requests', () => {
 
     expect(notifications).toEqual([])
   })
+
+  it('reports every inbound frame to a listener, replies included', async () => {
+    // Streaming needs to see text the moment it lands. An observer that saw
+    // only notifications would miss replies; one that saw nothing would make
+    // every turn look instant and empty.
+    const transport = fakeTransport()
+    const client = new AcpClient(transport, { id: 'grok' })
+    const seen: unknown[] = []
+    client.onFrame(frame => { seen.push(frame) })
+
+    void client.request('session/new', { cwd: '/tmp', mcpServers: [] }).catch(() => undefined)
+    transport.deliver(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { sessionId: 's1' } }))
+    transport.deliver(JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk' } } }))
+    await flush()
+
+    expect(seen).toHaveLength(2)
+  })
+
+  it('keeps reporting frames after one listener throws', async () => {
+    // A listener is an observer; one that throws must not take the turn with it.
+    const transport = fakeTransport()
+    const client = new AcpClient(transport, { id: 'grok' })
+    const seen: unknown[] = []
+    client.onFrame(() => { throw new Error('listener blew up') })
+    client.onFrame(frame => { seen.push(frame) })
+
+    transport.deliver(JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: {} }))
+    await flush()
+
+    expect(seen).toHaveLength(1)
+  })
 })
