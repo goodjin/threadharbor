@@ -64,6 +64,31 @@ export function projectTurn(
   options: { readonly turn: number; readonly dialect: AcpDialect },
 ): ProjectionEvent[] {
   const { dialect, turn } = options
+  return [
+    { type: 'turn/start', payload: { turn } },
+    { type: 'step/start', payload: { turn, step: 1 } },
+    ...contentEvents(accumulate(frames, dialect), { dialect, turn, step: 1 }),
+    { type: 'step/end', payload: { turn, step: 1 } },
+    { type: 'turn/end', payload: { turn } },
+  ]
+}
+
+/**
+ * The model-visible events of one step, without the boundaries around them.
+ *
+ * For a plugin that replaces the loop's `step`: the surrounding native loop still
+ * appends `step/start` before the call and `step/end` in its finally, so emitting
+ * boundaries here too would write each one twice into the session log.
+ */
+export function projectStepContent(
+  frames: readonly AcpFrame[],
+  options: { readonly turn: number; readonly step: number; readonly dialect: AcpDialect },
+): ProjectionEvent[] {
+  const { dialect, turn, step } = options
+  return contentEvents(accumulate(frames, dialect), { dialect, turn, step })
+}
+
+function accumulate(frames: readonly AcpFrame[], dialect: AcpDialect): Accumulator {
   const thought: string[] = []
   const text: string[] = []
   const tools = new Map<string, ToolCall>()
@@ -87,11 +112,16 @@ export function projectTurn(
     if (reported !== undefined) totalTokens = reported
   }
 
-  const acc: Accumulator = { thought, text, tools, totalTokens }
-  const events: ProjectionEvent[] = []
-  events.push({ type: 'turn/start', payload: { turn } })
-  events.push({ type: 'step/start', payload: { turn, step: 1 } })
+  return { thought, text, tools, totalTokens }
+}
 
+function contentEvents(
+  acc: Accumulator,
+  options: { readonly dialect: AcpDialect; readonly turn: number; readonly step: number },
+): ProjectionEvent[] {
+  const { dialect, turn, step } = options
+  const { thought, text, tools, totalTokens } = acc
+  const events: ProjectionEvent[] = []
   if (thought.length > 0) {
     events.push(assistantEvent(dialect, acc, [{ type: 'reasoning', text: thought.join('') }], turn))
   }
@@ -101,14 +131,14 @@ export function projectTurn(
   for (const tool of tools.values()) {
     events.push({
       type: 'tool/call',
-      payload: { turn, step: 1, callId: tool.callId, name: tool.name, arguments: JSON.stringify(tool.arguments) },
+      payload: { turn, step, callId: tool.callId, name: tool.name, arguments: JSON.stringify(tool.arguments) },
     })
     const isError = tool.status === 'failed'
     events.push({
       type: 'tool/result',
       payload: {
         turn,
-        step: 1,
+        step,
         message: {
           id: randomUUID(),
           role: 'tool',
@@ -121,9 +151,6 @@ export function projectTurn(
       },
     })
   }
-
-  events.push({ type: 'step/end', payload: { turn, step: 1 } })
-  events.push({ type: 'turn/end', payload: { turn } })
   return events
 }
 

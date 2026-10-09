@@ -109,6 +109,12 @@ importers:
 
   packages/dsh-grok-agent: {}
 
+  packages/dsh-preset-dispatch:
+    dependencies:
+      '@threadharbor/dsh-acp-agent':
+        specifier: workspace:^
+        version: link:../dsh-acp-agent
+
   packages/hostd:
     dependencies:
       '@agentclientprotocol/sdk':
