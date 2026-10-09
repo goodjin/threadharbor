@@ -49,6 +49,7 @@ DSH 的 agent preset 本身**就是一个组合**（一组插件行）：
           - id: acp-grok-binding
             name: '@threadharbor/dsh-preset-dispatch'
             config:
+              presetId: acp-grok   # 必填：这行得知道自己是哪个 preset 的
               agent: grok
               url: 'ws://127.0.0.1:2419'
               models:
@@ -282,3 +283,13 @@ dsh --profile web --patch ./my-presets.yml --port 3941 --no-open
 
 验证：类型检查零错误（对着 DSH 0.2.0-rc.2 真实类型）；333 个用例通过；在一个全新的
 DSH 配置下安装**不再需要版本放行**，真机加载无报错。渲染仍然没有验证——理由同前。
+
+## 两处配置层面的坑（2026-10-10 端到端复验时踩到）
+
+**一、示例里漏了 `presetId`。** 入口的配置要求它必填——注册表不会把 preset 放到上下文上，
+没有它这一行就不知道自己属于哪个 preset，会去接管所有会话。照着文档里原来的示例抄，
+会在启动时被配置校验挡下，报 `$.presetId missing required value`。上面的示例已补。
+
+**二、配置里没有 `args`。** 起子进程的 agent 只能给一个 `command`，没法带参数。
+要传参数只能自己包一个脚本。这条是从端到端复验里发现的：想用一个「握完手就在回合中途
+死掉」的假 agent 来验断连行为，发现没法把脚本路径传进去。

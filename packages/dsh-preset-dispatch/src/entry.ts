@@ -84,9 +84,8 @@ export type Config = {
 export function apply(ctx: unknown, config: Config): void {
   const host = ctx as {
     on(event: 'agent/created', handler: (payload: { agent: unknown }) => void): unknown
-    /** Optional: a row that injects it would refuse to mount without it. */
-    get?(key: 'approval'): { request(request: unknown): Promise<unknown> } | undefined
-    sessionProjections?: { stateOf(session: unknown, key: string): unknown }
+    /** Optional: injected services would refuse to mount without them. */
+    get?(key: 'approval' | 'sessionProjections'): unknown
     logger?: { info(message: string): void; warn(message: string): void }
   }
 
@@ -125,7 +124,10 @@ export function apply(ctx: unknown, config: Config): void {
   // Opportunistic, like the native tool layer: injecting it would mean the row
   // refuses to mount on a host that has no approval service, and taking every
   // session with it.
-  const approval = host.get?.('approval')
+  const found = host.get?.('approval')
+  const approval = (found === null || typeof found !== 'object'
+    ? undefined
+    : found as { request(request: unknown): Promise<unknown> })
   const ask = approval === undefined ? undefined : async (request: unknown): Promise<PermissionDecision> => {
     const described = describeRequest(request)
     const sessionId = sessionIdOfRequest(request)
@@ -198,9 +200,18 @@ function sessionIdOf(agent: { readonly id?: unknown; readonly session?: unknown 
   return typeof session?.id === 'string' ? session.id : undefined
 }
 
-function readProjection(host: { sessionProjections?: { stateOf(session: unknown, key: string): unknown } }): ((agent: { session?: unknown }) => string | undefined) | undefined {
-  const projections = host.sessionProjections
-  if (projections === undefined) return undefined
+/**
+ * The session projection service, if this host composes one.
+ *
+ * Read through `get` rather than by property access: on a cordis context an
+ * uninjected property throws on read, so reaching for it directly turns "this
+ * host has no projections" into "this row refuses to load". Absent is a normal
+ * composition, not a failure.
+ */
+function readProjection(host: { get?(key: 'sessionProjections'): unknown }): ((agent: { session?: unknown }) => string | undefined) | undefined {
+  const found = host.get?.('sessionProjections')
+  if (found === undefined || found === null || typeof found !== 'object') return undefined
+  const projections = found as { stateOf(session: unknown, key: string): unknown }
   return (agent: { session?: unknown }) => {
     const value = projections.stateOf(agent.session, 'agentPreset')
     const record = (typeof value === 'object' && value !== null ? value : {}) as { agentPreset?: unknown }
