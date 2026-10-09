@@ -109,6 +109,8 @@ importers:
 
   packages/dsh-grok-agent: {}
 
+  packages/dsh-host-federation: {}
+
   packages/dsh-preset-dispatch:
     dependencies:
       '@threadharbor/dsh-acp-agent':
