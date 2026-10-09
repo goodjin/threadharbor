@@ -578,6 +578,8 @@ ACP 连接（`grok agent serve` 进程 + secret + sessionId）按 sessionId 惰�
 | **grok** | `grok agent serve` + WebSocket + `server-key` | 已实测；阶段通知多需过滤；工具失败仍报 completed |
 | **codex** | `codex-acp` 子进程 stdio | ThreadHarbor 已支持，接入层需新写 |
 | **claude** | claude 的 ACP 适配器进程 | **ThreadHarbor 已支持**；接入层需新写 |
+| **CodeBuddy** | `codebuddy --acp` stdio，或 `--serve` 走 HTTP SSE | 已实测；**支持 HTTP 传输，多主机友好**；模型带 `credits` |
+| **Qoder** | `qoderclicn --acp`（隐藏开关） | 已实测；`session/new` 额外返回 `modes` / `configOptions` |
 
 **重要更正**：本项目**已经支持 claude code 的 ACP**，迁移时 claude 不是从零开始。此前误以为它不支持会话，来源是读错了测试桩——真实代码里 `sessionCapable` 对 claude 取的是「claude 的 ACP 适配器是否装在这台机器上」，装了就为真，与「支不支持会话」无关。
 
@@ -590,6 +592,49 @@ ACP 连接（`grok agent serve` 进程 + secret + sessionId）按 sessionId 惰�
 每个 agent 注册为一条 preset（`AgentPresetDefinition` = `id` + `name` + `plugins` 的 Cordis 组合）。
 
 **preset 按主机独立**：DSH 的 preset 注册表本就是每进程一份，远端 DSH 只注册自己实际装了/登录了的 agent。因此**未装 codex 的主机不会显示 codex preset**，天然满足需求。
+
+### 5.3b 第三方 agent 的 ACP 现状（2026-09-14 实测）
+
+对本机已安装的各方 agent 逐一实测。**判据是能否完成 ACP 握手，不是包体里有没有相似字符串。**
+
+| agent | 形态 | ACP | 传输 | 模型列表来源 |
+|---|---|---|---|---|
+| **grok** | CLI | ✅ 已验证 | WebSocket（`grok agent serve`） | `session/new` → `models` |
+| **codex** | CLI | ✅ ThreadHarbor 已支持 | stdio | — |
+| **claude** | CLI | ✅ ThreadHarbor 已支持 | stdio | — |
+| **CodeBuddy**（WorkBuddy） | Electron + CLI | ✅ **实测通过** | **stdio + streamable-http** | `session/new` → `models`（含 `credits`） |
+| **Qoder**（QwenWorkCN） | Electron + CLI | ✅ **实测通过** | stdio | `session/new` → `models` + `modes` + `configOptions` |
+| MiniMax Code | Electron | ❌ | — | 无 ACP 标记，且只有连接器工具 CLI，无 agent CLI |
+| Doubao / DoubaoWork | Chromium 桌面应用 | ❌ | — | 非 Electron 打包，无 ACP |
+| zcode | Electron | ❌ | — | 见 §5.4 |
+
+#### CodeBuddy（腾讯）— 推荐优先接入
+
+- CLI：`/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy`（别名 `cbc`）
+- `--acp`：以 stdio（ndJsonStream）进入 ACP 模式
+- `--acp-transport`：`stdio`（默认）或 **`streamable-http`**
+- `--serve` + `--port/--host/--auth`：起 HTTP 服务，**ACP 走 HTTP SSE**
+- 握手实测通过；`initialize` 报告能力含 `loadSession` / `delegateToolsSupport` / `multitaskSupport`
+- 会话中推送 `config_option_update`（与 ThreadHarbor 现有处理一致）
+- `session/new` 返回真实模型列表，每项带 `supportsImages` / `supportsReasoning` / **`credits`** / `maxInputTokens`
+- **对多主机最有价值**：支持 HTTP 传输，远端 DSH 可直连，不必依赖本机 stdio
+
+#### Qoder（阿里）— 可接入
+
+- CLI：`/Applications/QwenWorkCN.app/Contents/Resources/bin/qoderclicn`（v1.0.47）
+- `--acp` 是**隐藏开关**（help 里不显示，二进制里有 `"--acp","Starts the agent in ACP mode"`）
+- 握手实测通过
+- `session/new` 返回 `{ sessionId, modes, models, configOptions }`：
+  - `modes`：`default` / `acceptEdits` / `bypassPermissions` / `plan` → 对应 DSH 的审批模式
+  - `models`：如 `qmodel_38max`「Qwen3.8-Max（默认）…**0.50x Credit**」
+
+#### 关于「用量额度」
+
+CodeBuddy 在模型元数据里给 `credits` 字段，Qoder 直接在模型描述里写 Credit 倍率（`0.50x`）。**这两家把额度倍率做成了可编程读取的元数据**，比 zcode 那种藏在应用内的做法强得多。若关注额度，优先接这两家。
+
+#### 接入成本
+
+两者与 grok 的线路形状一致，**现有 ACP 接入层可直接复用**，各只需新增一个 provider（transport + projection）。CodeBuddy 需额外覆盖 HTTP 传输。
 
 ### 5.4 zcode（Z.ai / GLM）：目前无法接入
 

@@ -98,6 +98,17 @@ export function resolvePreset(
 }
 
 /**
+ * Which preset a session is on, as an id.
+ *
+ * Split out from `resolvePreset` so a caller that needs to know *which* preset
+ * matched — rather than what it can do — asks the same question the same way.
+ */
+export function presetIdOf(agent: AgentLike, presetOf?: PresetResolver): string | undefined {
+  const id = presetOf === undefined ? readHeader(agent) : presetOf(agent)
+  return id === '' ? undefined : id
+}
+
+/**
  * Which preset a session is *actually* on, right now.
  *
  * The header records the preset the session was **created** with. A blank
