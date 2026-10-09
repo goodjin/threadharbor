@@ -9,6 +9,8 @@
  * The broadcast channel is a port, so all of this runs without a browser.
  */
 
+import type { HostIdentity } from './identity.ts'
+
 /** One message on the channel. */
 export type Announcement = {
   readonly kind: 'hello' | 'heartbeat' | 'bye'
