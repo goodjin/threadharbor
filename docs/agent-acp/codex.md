@@ -1,6 +1,6 @@
 # codex 的 ACP 对接
 
-> 核对时间：2026-10-09（`codex-acp`，本项目固定 `@agentclientprotocol/codex-acp@1.6.2`）
+> 核对时间：2026-10-09 首测；2026-09-14 补充 `initialize`、set_model/set_mode、终端子协议三项实测
 > 状态：**本项目已实现并通过实测**。实现见 `packages/dsh-acp-agent/src/dialects/codex.ts`，回归夹具见 `packages/dsh-acp-agent/tests/fixtures/captured-frames.json`。
 
 ## 一句话结论
@@ -15,7 +15,7 @@ stdio 子进程，命令 `codex-acp`（Node 包 `@agentclientprotocol/codex-acp`
 
 ## 接口形状
 
-`initialize → session/new → session/prompt`，与另两家一致。
+`initialize → session/new → session/prompt`，与另两家一致。**不需要 `authenticate`**——尽管它声明了 `api-key` / `chat-gpt` 两个 authMethods。
 
 `session/new` 返回的字段比 grok 全：
 
@@ -69,6 +69,32 @@ rawOutput.exit_code           // 退出码
 
 它带的是 `{used, size}`，那是**上下文窗口占用**，不是 token 计数。别把它当用量读。
 
+## 选模型：`session/set_model` 实测报错
+
+**实测：`session/set_model` 返回 `-32603 Internal error`。**
+
+现有实机测试里这行是 `session/set_model(...).catch(() => {})`——**错误被静默吞掉，所以这条路从来没走通过**。
+
+真正生效的路子是**把 `modelId` 放进 `session/prompt`**：
+
+```
+session/prompt { sessionId, prompt: [...], modelId: '<选中的模型>' }
+```
+
+接 codex 时别写「先 set_model 再 prompt」，那样会静默失败、然后用错模型跑完整个回合。
+
+（`session/set_mode` 正常：不存在的 mode 会回 `Invalid params`。）
+
+## 会话能力：四家里声明得最全
+
+codex 的 `initialize` 声明了 `sessionCapabilities` 的**全部七项**：`resume` / `list` / `close` / `delete` / `fork` / `subagents` / `additionalDirectories`。
+
+对本项目直接相关的两个：**`fork`**（分叉会话）和 **`list`/`resume`**（枚举与恢复）。目前都没接。
+
+## 私有扩展
+
+codex 会主动发 `_auth/status_update` 通知。本项目客户端遇到不认识的 agent 方法会回 JSON-RPC 错误，对通知式调用无害，但值得知道它的存在。
+
 ## 权限请求
 
 标准阻塞式，回同一个 id 的 JSON-RPC 响应。用通知回会静默挂住（同 grok 那条实测）。
@@ -85,4 +111,6 @@ codex 的 `session/new` 里那五个 `configOptions`（含 `reasoning_effort`、
 
 **已验证**（`tests/live.spec.ts`）：建会话拿到非空模型列表、拿到回答、产生了工具调用、工具输出含探针串（即 `rawOutput.formatted_output` 这条路走通了）。
 
-**未验证**：`configOptions` 里的 `reasoning_effort` / `fast-mode` 能否通过 `session/set_config` 之类的方法设置；collab 模式的行为。
+**本轮新增实测**：`initialize` 的完整能力声明（见上）、`session/set_model` 报错、`session/set_mode` 的校验、**未观察到 `terminal/*` 调用**。
+
+**仍未验证**：`configOptions` 里的 `reasoning_effort` / `fast-mode` 能否设置；collab 模式的行为；工具失败时的 `status` 取值。

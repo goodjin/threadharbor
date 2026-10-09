@@ -1,6 +1,6 @@
 # grok 的 ACP 对接
 
-> 核对时间：2026-10-09（`grok agent serve`，grok 1.0.46）
+> 核对时间：2026-10-09 首测；2026-09-14 补充 `initialize` 能力声明实测
 > 状态：**本项目已实现并通过实测**。实现见 `packages/dsh-acp-agent/src/dialects/grok.ts`，回归夹具见 `packages/dsh-acp-agent/tests/fixtures/captured-frames.json`。
 
 ## 一句话结论
@@ -23,7 +23,7 @@ grok agent serve --bind 127.0.0.1:<port> --secret <secret>
 
 ## 接口形状
 
-标准流程与另外两家一致：
+标准流程与另外两家一致，**不需要 `authenticate`**（它声明了 `cached_token` / `grok.com` 两个 authMethods，但 `initialize` 后直接建会话即可）：
 
 ```
 initialize → session/new → session/prompt
@@ -85,6 +85,14 @@ grok 即使命令失败也报 `status: 'completed'`。本项目的处理是**忠
 
 **不提供终端服务时的症状**：agent 等一个永远不会出现的 terminal，回合无报错、无超时地挂住。
 
+## 会话能力与私有扩展
+
+`initialize` 声明 `sessionCapabilities` 的 `list` / `resume` / `close` 三项（**没有** `fork`、`delete`）、`loadSession: true`、`mcpCapabilities.http` / `sse`。注意 `promptCapabilities.image` 是 **false**。
+
+私有扩展在 `_meta` 上：`x.ai/fs_notify`、`x.ai/hooks`（含 `pre_tool_use`/`stop`/`subagent_stop` 阻塞事件）、`x.ai/capabilities.toolOverrides`。
+
+**本轮新增实测**：`initialize` 的完整能力声明、`authMethods`、`promptCapabilities.image` 为 false。
+
 ## 权限请求
 
 和其他家一样是阻塞式：**必须用 JSON-RPC 响应回同一个 id**。
@@ -105,4 +113,4 @@ grok 即使命令失败也报 `status: 'completed'`。本项目的处理是**忠
 
 **已验证**（`tests/live.spec.ts`，需 `THREADHARBOR_LIVE_ACP=1`）：建会话、拿到非空模型列表、拿到回答、工具名含 `run_terminal_command`、工具输出含探针串。
 
-**未验证**：失败命令的真实状态字段（已知不可靠）、多命令合并的具体边界。
+**仍未验证**：失败命令的真实状态字段（已知不可靠）、多命令合并的具体边界、终端子协议之外是否还有别的子协议、`session/load` 加载旧会话。

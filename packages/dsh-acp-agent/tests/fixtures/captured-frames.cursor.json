@@ -1,0 +1,141 @@
+{
+ "capturedAt": "2026-09-14",
+ "note": "frames captured from a live `cursor-agent-sea` (build 2026.10.01-e373342), logged-in. The probe asked the agent to run `echo CURSOR_ACP_OK` and answer with the permission request granted allow-once.",
+ "sessionNew": {
+  "sessionId": "<redacted>",
+  "models": {
+   "currentModelId": "default[]",
+   "availableModels": [
+    {
+     "modelId": "grok-4.7[context=256k,reasoning_effort=high,fast=true]",
+     "name": "grok-4.7"
+    },
+    {
+     "modelId": "claude-opus-5-5[context=300k,effort=medium,fast=false]",
+     "name": "claude-opus-5-5"
+    }
+   ]
+  },
+  "modes": {
+   "currentModeId": "agent",
+   "availableModes": [
+    {
+     "id": "agent",
+     "name": "Agent"
+    },
+    {
+     "id": "plan",
+     "name": "Plan"
+    },
+    {
+     "id": "ask",
+     "name": "Ask"
+    }
+   ]
+  }
+ },
+ "tool": [
+  {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "6cd9efa1-ecf5-49a1-9c5f-170ca54e02f7",
+    "update": {
+     "sessionUpdate": "tool_call",
+     "toolCallId": "call-d1ac5fe0-d1e4-4ac5-a61a-d75c7b8d7b61-0\nfc_2918cee4-fb35-9783-80d0-ede2af7abd7d_0",
+     "title": "`echo CURSOR_ACP_OK`",
+     "kind": "execute",
+     "status": "pending",
+     "rawInput": {
+      "command": "echo CURSOR_ACP_OK"
+     }
+    }
+   }
+  },
+  {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "6cd9efa1-ecf5-49a1-9c5f-170ca54e02f7",
+    "update": {
+     "sessionUpdate": "tool_call_update",
+     "toolCallId": "call-d1ac5fe0-d1e4-4ac5-a61a-d75c7b8d7b61-0\nfc_2918cee4-fb35-9783-80d0-ede2af7abd7d_0",
+     "status": "in_progress"
+    }
+   }
+  },
+  {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "6cd9efa1-ecf5-49a1-9c5f-170ca54e02f7",
+    "update": {
+     "sessionUpdate": "tool_call_update",
+     "toolCallId": "call-d1ac5fe0-d1e4-4ac5-a61a-d75c7b8d7b61-0\nfc_2918cee4-fb35-9783-80d0-ede2af7abd7d_0",
+     "status": "completed",
+     "rawOutput": {
+      "exitCode": 0,
+      "stdout": "CURSOR_ACP_OK\n",
+      "stderr": ""
+     }
+    }
+   }
+  }
+ ],
+ "permissionRequest": [
+  {
+   "jsonrpc": "2.0",
+   "id": 0,
+   "method": "session/request_permission",
+   "params": {
+    "toolCall": {
+     "toolCallId": "call-d1ac5fe0-d1e4-4ac5-a61a-d75c7b8d7b61-0\nfc_2918cee4-fb35-9783-80d0-ede2af7abd7d_0",
+     "title": "`echo CURSOR_ACP_OK`",
+     "kind": "execute",
+     "status": "pending",
+     "content": [
+      {
+       "type": "content",
+       "content": {
+        "type": "text",
+        "text": "Not in allowlist: echo"
+       }
+      }
+     ]
+    },
+    "options": [
+     {
+      "optionId": "allow-once",
+      "name": "Allow once",
+      "kind": "allow_once"
+     },
+     {
+      "optionId": "allow-always",
+      "name": "Allow always",
+      "kind": "allow_always"
+     },
+     {
+      "optionId": "reject-once",
+      "name": "Reject",
+      "kind": "reject_once"
+     }
+    ]
+   }
+  }
+ ],
+ "promptReply": [
+  {
+   "stopReason": "end_turn",
+   "note": "no usage block — cursor reports no tokens over ACP"
+  }
+ ],
+ "sessionList": {
+  "sessions": [
+   {
+    "sessionId": "<own-session-only>",
+    "cwd": "/tmp",
+    "note": "desktop app has 436 conversations in conversation-search.db; none appear here"
+   }
+  ]
+ }
+}

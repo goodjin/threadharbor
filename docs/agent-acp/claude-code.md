@@ -1,6 +1,6 @@
 # claude code 的 ACP 对接
 
-> 核对时间：2026-10-09（`claude-agent-acp@0.76.0`）
+> 核对时间：2026-10-09 首测；2026-09-14 补充 `initialize` 与终端子协议实测
 > 状态：**本项目已实现并通过实测**。实现见 `packages/dsh-acp-agent/src/dialects/claude.ts`，回归夹具见 `packages/dsh-acp-agent/tests/fixtures/captured-frames.json`。
 
 ## 一句话结论
@@ -15,7 +15,7 @@ stdio 子进程，命令 `claude-agent-acp`（Node 包 `@agentclientprotocol/cla
 
 ## 接口形状
 
-`initialize → session/new → session/prompt`。
+`initialize → session/new → session/prompt`。**不需要 `authenticate`**——实测它的 `authMethods` 是**空数组**，是四家里唯一不声明任何鉴权方式的。
 
 `session/new` 返回：
 
@@ -79,6 +79,12 @@ _meta.claudeCode.toolName = "Bash"                    ← 真正的工具名
 
 `usage_update` 带的是 `{used, size}`，是**上下文窗口占用**，别当 token 数读。
 
+## 会话能力
+
+`initialize` 声明了 `sessionCapabilities` 的 `resume` / `list` / `close` / `delete` / `fork` / `subagents` / `additionalDirectories`，另有 `mcpCapabilities.http` / `sse` 与 `auth.logout`。
+
+私有扩展：`_meta.claudeCode.promptQueueing: true`（表示支持提示队列）。
+
 ## 权限请求
 
 标准阻塞式，必须用 JSON-RPC 响应回同一个 id。用通知回会静默挂住（同 grok 那条实测）。
@@ -99,4 +105,6 @@ _meta.claudeCode.toolName = "Bash"                    ← 真正的工具名
 
 **已验证**（`tests/live.spec.ts`）：建会话、拿到回答、工具名含 `Bash`、工具输出含探针串；**权限请求被批准后回合继续完成**（批准后回答非空，这是关键——不回答会表现为回答为空）。
 
-**未验证**：回合停在只有 `toolResponse.stdout` 那一帧时的行为（见坑 3）；`effort` 这个 configOption 能否设置。
+**本轮新增实测**：`initialize` 的完整能力声明、`authMethods` 为空、**未观察到 `terminal/*` 调用**。
+
+**仍未验证**：回合停在只有 `toolResponse.stdout` 那一帧时的行为（见坑 3）；`effort` 这个 configOption 能否设置；工具失败时的 `status` 取值。

@@ -1,184 +1,209 @@
 # Cursor 的 ACP 对接
 
 > 核对时间：2026-09-14
-> 来源：官方文档 <https://cursor.com/docs/cli/acp.md> + 本机实机探测（`cursor-agent-sea`，构建 2026.10.01-e373342）
-> 状态：**官方支持，本项目尚未接入。** 握手与鉴权行为已实测；**模型列表来源和扩展方法的实际触发时机未实测**（需先完成登录）。
+> 来源：官方文档 <https://cursor.com/docs/cli/acp.md> + **本机实机探测**（`cursor-agent-sea` 构建 2026.10.01-e373342，已完成登录）
+> 状态：**官方支持，本项目尚未接入。** 握手、鉴权、建会话、工具调用、权限请求**均已实测**。
 
 ## 一句话结论
 
-Cursor 是四家里**唯一有官方 ACP 文档**的，接口定义清楚。但**它是唯一一家「握手之后还有一道硬门槛」的**：`initialize` 能过，但 `session/new` 直接返回「需要鉴权」，`authenticate` 又会**挂住等交互式登录**。不先完成 `agent login`，后面一步都走不了。
+Cursor 的帧形状**最接近 codex**：工具名在 `kind`、输出在 `rawOutput`。但它有两条别家没有的东西——**必须先 `authenticate` 才能建会话**，以及**权限请求的 id 是 0**。后者足以让「按 id 判断是否为请求」的代码漏掉它，然后挂死。
 
-## 一个必须先知道的坑：安装会覆盖本项目在用的 `agent`
+## 装机器时的两个坑
 
-Cursor 的安装脚本第 128 行会执行：
+**（1）安装会覆盖 `~/.local/bin/agent`。** 官方安装脚本第 128 行 `rm -f ~/.local/bin/agent`，而本项目的 grok agent 正通过这个链接提供（指向 `~/.grok/bin/agent`）。**接 Cursor 前必须先把可执行文件路径做成配置项**，不能依赖这个名字。
 
-```
-rm -f ~/.local/bin/agent ~/.local/bin/cursor-agent
-ln -s ~/.local/share/cursor-agent/versions/<版本>/cursor-agent ~/.local/bin/agent
-```
+**（2）二进制没有代码签名。** 安装包里的 `cursor-agent-sea` 完全未签名，macOS 会直接杀掉（退出码 137）。本地试跑要 `codesign --force --sign -` 补一个临时签名。官方正常安装不受影响，自建部署会踩到。
 
-**本项目的 grok agent 正是通过 `~/.local/bin/agent` 这个符号链接提供的**（它指向 `~/.grok/bin/agent`）。装 Cursor 的 agent 会把这个链接删掉，**grok 随即不可用**。
+（手动下载的平台目录是 `darwin/arm64`，不是 `mac/arm64`，后者 403。）
 
-本项目同时依赖 grok 和其他 agent，**接 Cursor 前必须先把可执行文件路径做成可配置项**，不要依赖 `~/.local/bin/agent` 这个名字。这是接入前的硬前置，不是可选项。
-
-## 怎么跑起来
-
-```
-agent acp
-```
-
-- 传输：stdio
-- 封装：JSON-RPC 2.0
-- 分帧：一行一个 JSON（换行分隔）
-
-日志走 stderr，不在协议里——和另外三家一样，客户端要能忽略 stderr 的噪声。
-
-**本机探测还发现两件装机器的事：**
-
-- 官方安装包（约 350MB）里的 `cursor-agent-sea` **完全没有代码签名**，macOS 会直接杀掉它（退出码 137）。本地试跑需要先 `codesign --force --sign -` 补一个临时签名。这不影响官方正常安装路径，但**自建部署时会踩到**。
-- 手动下载的平台目录是 `darwin/arm64`，不是 `mac/arm64`（后者 403）。
-
-## 完整接口定义
-
-### 流程（实测确认：鉴权是硬门槛）
+## 流程：多一道硬门槛
 
 ```
 1. initialize                        ← 能过
 2. authenticate  methodId:"cursor_login"   ← 不做这步，下一步直接失败
-3. session/new  或  session/load
-4. session/prompt
-5. 处理 session/update 通知（流式输出）
-6. 处理 session/request_permission 并返回决定
-7. 需要时 session/cancel
+3. session/new
+4. session/set_mode  （可选）
+5. session/prompt
 ```
 
-**实测的三个结果：**
+**实测未登录时的表现：**
 
-| 调用 | 未登录时的结果 |
+| 调用 | 结果 |
 |---|---|
-| `initialize` | ✅ 正常返回 |
-| `session/new` | ❌ `-32000 Authentication required`，提示先跑 `agent login` 再调 `authenticate` |
-| `authenticate {methodId:'cursor_login'}` | ⚠️ **不返回**——挂住等交互式登录 |
+| `initialize` | ✅ 正常 |
+| `session/new` | ❌ `-32000 Authentication required` |
+| `authenticate` | ⚠️ **不返回**，挂住等交互式登录 |
 | `session/list` | ❌ `-32000 Authentication required` |
 
-所以流程的实际前置是：**必须先在终端完成一次 `agent login`**，之后 `authenticate` 才能秒回。另外三家都是 `initialize` 完直接 `session/new`，**只有 Cursor 多这一道**。
+另外三家里 `initialize` 完直接 `session/new`；**只有 Cursor 必须在终端先完成一次 `agent login`**。登录后 `authenticate` 即刻返回 OK。
 
-### initialize 返回的实测内容
+### 鉴权方式
+
+```
+agent login                                        # 交互式，一次性
+agent --api-key "$CURSOR_API_KEY" acp
+agent --auth-token "$CURSOR_AUTH_TOKEN" acp
+```
+
+也可用环境变量 `CURSOR_API_KEY` / `CURSOR_AUTH_TOKEN`。凭据存在系统钥匙串，`~/.cursor/cli-config.json` 里只有编辑器与权限配置、无密钥——所以别指望从配置文件里读出来复用。
+
+### initialize 返回（实测）
 
 ```json
 { "protocolVersion": 1,
   "agentCapabilities": {
     "loadSession": true,
     "mcpCapabilities": { "http": true, "sse": true },
-    "promptCapabilities": { "audio": false, "embeddedContext": false, "image": true },
+    "promptCapabilities": { "image": true, "embeddedContext": false, "audio": false },
     "sessionCapabilities": { "list": {} } },
   "authMethods": [ { "id": "cursor_login", "name": "Cursor Login", ... } ] }
 ```
 
-注意 `loadSession: true` 和 `sessionCapabilities.list`——**Cursor 声称能列出和加载已有会话**，这正是下面「与桌面版的关系」那一节的关键。
-
-### 鉴权
-
-官方声明的 ACP 鉴权方法是 `cursor_login`。更实际的做法是启动前就带上凭据：
+### session/new 返回（实测）
 
 ```
-agent login
-agent --api-key "$CURSOR_API_KEY" acp
-agent --auth-token "$CURSOR_AUTH_TOKEN" acp
+{ sessionId,
+  models: { currentModelId, availableModels: [ { modelId, name }, … ] },
+  modes: { currentModeId: "agent", availableModes: [agent, plan, ask] },
+  configOptions: [ { id: "mode", … } ] }
 ```
 
-也可走环境变量 `CURSOR_API_KEY` / `CURSOR_AUTH_TOKEN`。根命令还支持 `-e`（端点）和 `-k`（TLS）。
+**模型列表就在 `models.availableModels`，字段名与 grok / codex 一致**（`modelId` / `name`）。实测 29 个，含 grok、claude、gpt、gemini 等多厂商——**注意 `modelId` 里带了参数后缀**，例如：
 
-### 模式
+```
+grok-4.7[context=256k,reasoning_effort=high,fast=true]
+claude-opus-5-5[context=300k,effort=medium,fast=false]
+```
 
-| 模式 | 含义 |
-|---|---|
-| `agent` | 完整工具权限 |
-| `plan` | 规划、只读 |
-| `ask` | 问答、只读 |
+即**同一个模型的不同配置是不同的 modelId**。界面展示时需把方括号部分剥掉，提交时原样带回。
 
-这三个可以直接映射到本项目的审批模式。
+## 工具帧（实测）
 
-### 权限请求
+| 阶段 | `status` | 携带字段 |
+|---|---|---|
+| `tool_call` | `pending` | `kind`、`rawInput`、`title` |
+| `tool_call_update` | `in_progress` | 只有 `toolCallId` |
+| `tool_call_update` | `completed` | `rawOutput` |
 
-`session/request_permission`，返回三种之一：
+实测值：
 
-- `allow-once`
-- `allow-always`
-- `reject-once`
+```
+title    = "`echo CURSOR_ACP_OK`"          ← 命令本身，不是工具名
+kind     = "execute"                        ← 唯一的身份标识
+rawInput = { "command": "echo CURSOR_ACP_OK" }
+rawOutput= { "exitCode": 0, "stdout": "CURSOR_ACP_OK\n", "stderr": "" }
+```
 
-**官方明确写着：不回应权限请求，工具执行会卡住。** 这不是推测——和 grok 那条实测的挂死是同一类问题，也印证了本项目设计里「权限桥接必做」这条。
+**三个要点：**
 
-### MCP
+1. **工具名只能取 `kind`**（`execute`），和 codex 一样。`title` 是命令原文，套上去等于把命令当工具名。
+2. **输出在 `rawOutput.stdout`**——结构像 codex 的 `rawOutput.formatted_output`，但**字段名不同**（`stdout` vs `formatted_output`、`exitCode` vs `exit_code`）。**不能直接复用 codex 的 dialect，要新写或加分支。**
+3. **失败判定看 `status === 'failed'`**，与投影层现有的一致。
 
-- 支持项目级 / 用户级 `.cursor/mcp.json`
-- **不支持** dashboard 上配置的团队级 MCP（ACP 模式下）
-- 从项目目录启动 `agent`，并批准要用的 server
+### 一个隐蔽的坑：toolCallId 里带换行符
 
-## 需要额外处理的：ACP 之外的自定义扩展方法
+实测值形如：
 
-Cursor 会发**标准 ACP 里没有**的自定义方法。这是接 Cursor 时最需要额外写代码的地方。
+```
+call-4d0f535c-5c13-44ee-aff2-849388a0b5ff-0\nfc_f219a4ef-c92d-9f5b-a3dc-e2fb1ab644e1_0
+```
 
-**阻塞式**（agent 等你回，回不回决定它走不走）：
+**中间是一个字面的换行符。** 按行分帧的传输层不受影响，但任何把这个 id 写进日志、单行协议、或按行解析的环节都会出错。存进 `tool/call` 的 `callId` 前要处理。
+
+## 权限请求（实测，也是最容易挂死的地方）
+
+**请求 id 是 `0`。**
+
+`if (frame.id)` 这种判断会把它当成「没有 id」的通知跳过，然后**回合永远不返回**——本项目实测挂满 180 秒无报错。代码里必须用 `typeof frame.id === 'number'`。
+
+请求帧形状：
+
+```
+params.options = [
+  { optionId: "allow-once",    name: "Allow once",    kind: "allow_once" },
+  { optionId: "allow-always",  name: "Allow always",  kind: "allow_always" },
+  { optionId: "reject-once",   name: "Reject",        kind: "reject_once" } ]
+params.toolCall = { toolCallId, title, kind, status, content }
+```
+
+两点要注意：
+
+- **`toolCall` 里没有 `name` 字段**，只有 `kind`。所以从权限请求里取工具名也要读 `kind`（本项目的 `claude` dialect 正是从 `toolCall.name` 取的，照抄会取空）。
+- `toolCall.content` 是**双层嵌套**的 `[{type:'content', content:{...}}]`，与 grok / claude 同。
+
+**回应形状**（实测有效，回完回合正常走完）：
+
+```
+{ "outcome": { "outcome": "selected", "optionId": "allow-once" } }
+```
+
+## token 用量：ACP 下完全没有
+
+实测 `session/prompt` 的响应只有 `{"stopReason": "end_turn"}`，**不带任何 usage**；更新帧的 `_meta` 里也没有。
+
+四家里只有 grok 通过更新帧报 token。**Cursor 在 ACP 模式下拿不到用量**，界面上的 token 统计对 Cursor 会是空的。
+
+## 噪声帧
+
+- `current_mode_update`
+- `available_commands_update`
+- `session_info_update`
+
+## 标准 ACP 之外的自定义扩展方法
+
+官方文档列出两组。**阻塞式的不实现会让 agent 停等**（本项目的客户端遇到未知方法会回 JSON-RPC 错误）：
+
+**阻塞式**：
 
 | 方法 | 用途 | 回什么 |
 |---|---|---|
 | `cursor/ask_question` | 多选提问 | `{outcome:{outcome:"answered", answers:[{questionId, selectedOptionIds}]}}`，或 `skipped` / `cancelled` |
 | `cursor/create_plan` | 请求批准计划 | `{outcome:{outcome:"accepted", planUri?}}`，或 `rejected` / `cancelled` |
 
-**通知式**（发了就发了，不回也没关系）：
+**通知式**（不回无妨）：`cursor/update_todos`、`cursor/task`、`cursor/generate_image`。
 
-| 方法 | 用途 |
-|---|---|
-| `cursor/update_todos` | 待办状态更新 |
-| `cursor/task` | 子 agent 完成 |
-| `cursor/generate_image` | 生成了图片 |
+其中 `cursor/update_todos` 值得单独接——DSH 会话界面本来就有 todo 展示。
 
-**对本项目的直接影响**：本项目的 ACP 客户端遇到不认识的方法会回 JSON-RPC 错误（`client cannot serve <method>`）。对通知式方法这没影响，但对**两个阻塞式方法，这意味着 agent 会停下来等一个永远不会来的回应**。
+> **未实测**：本次探测的提示词没有触发这两个扩展方法，实际触发时机与帧形状需在真实使用中补抓。
 
-所以接 Cursor 必须实现 `cursor/ask_question` 和 `cursor/create_plan`——否则多轮对话会在提问处停死。这两条本项目现在都没有。
+## 与桌面版的关系：ACP 看不到桌面版的对话
 
-其中 `cursor/update_todos` 值得单独接：DSH 的会话界面有 todo 展示，接上能白得一个 UI 能力。
+你问过这个问题，这里给结论。
 
-## 与桌面版的关系
+**结论：不能。** Cursor 的 ACP 与桌面版**共用同一套 worker、同一份存储，但 `session/list` 只列 ACP 自己建的会话。**
 
-**ACP 在 CLI 上，不在桌面版。** 本机实测：Cursor.app 3.24.9 全包检索，`session/new`、`session/prompt`、`agentclientprotocol`、`agent-client-protocol` 全部为 0。（`sessionUpdate` 有命中，但上下文是语音功能的 `sessionUpdateFrame()` / `speakGreeting`，与 ACP 无关。）
+实测：
 
-**CLI 和桌面版共用同一套 worker，CLI 侧没有独立会话库：**
+- 登录后调 `session/list`（带 cwd 和不带 cwd 都试了）→ **各只返回 1 个会话**，就是探测时刚建的那个（`cwd: /tmp`，时间戳是当时）
+- 桌面版的会话在 `conversation-search.db` 里有 **436 条**，另有 `state.vscdb` 的 `glass.agentConversationPanes.*` 键
+- **一条都没出现在 ACP 的列表里**
 
-- 桌面版 globalStorage 下有 `cursor-agent-worker` 进程目录
-- `~/.cursor/agent-cli-state.json` 按项目路径记录 workerId
-- `~/.cursor` 下**没有任何** chat / conversation / session 文件；会话正文在桌面版的存储里（`state.vscdb` 的 `glass.agentConversationPanes.*` 键，以及 `conversation-search.db`，436 条）
+结构上的证据是有的——两边共用 worker（桌面版 globalStorage 下有 `cursor-agent-worker` 进程目录；`~/.cursor/agent-cli-state.json` 按项目路径记录 workerId）、CLI 侧没有独立会话库（`~/.cursor` 下没有任何 chat / conversation / session 文件）。**但「共用底层」不等于「ACP 能枚举到桌面版的对话」**，实测否定了后者。
 
-**`session/load` 官方说是「恢复已有对话」，但能否加载桌面版建的会话未实测。** 初始化返回里明确声明了 `loadSession: true` 和 `sessionCapabilities.list`，**说明枚举和加载会话的能力是存在的**——但这两个方法在未登录时同样返回鉴权错误，所以必须先完成 `agent login` 才能验。
+所以接 Cursor 只能拿到**从 ACP 侧新建的**会话，看不到桌面版的历史。
 
-如果能通，Cursor 就是四家里「接进来直接看得到桌面版历史」的那一家——和 CodeBuddy（登录态与数据分离）正相反。**这是接 Cursor 之前最值得先验的一件事**，验法：登录后调 `session/list`，看列出来的会话与桌面版 `conversation-search.db`（436 条）里的 ID 是否对得上。
+## MCP 限制
+
+- 支持项目级 / 用户级 `.cursor/mcp.json`
+- **不支持** dashboard 上配置的团队级 MCP（ACP 模式下）
+- 从项目目录启动 `agent`，并批准要用的 server
 
 ## 接进本项目要改的地方
 
-本项目的扩展点集中在 preset 配置上，加一个 agent 需要：
+1. **新增 `dialects/cursor.ts`**：工具名取 `kind`；输出取 `rawOutput.stdout`；模型取 `models.availableModels`；token 恒为 `undefined`
+2. **在 `factory.ts` 的 `DIALECTS` 登记**
+3. **补 `authenticate` 步骤**——现有 `AcpClient` 流程里没有这一步，直接 `session/new` 会失败
+4. **确认客户端按 `typeof id === 'number'` 判断**（本项目已如此，Cursor 的 id=0 不会漏）
+5. **实现两个阻塞式扩展方法**
+6. **`toolCallId` 里的换行符**要处理，否则日志和单行协议会出问题
+7. **可执行文件路径做成配置项**，避开 `~/.local/bin/agent` 冲突
 
-1. **新增一个 dialect**（`dialects/cursor.ts`），实现工具名、输出、模型列表、token 的读取规则
-2. **在 `factory.ts` 的 `DIALECTS` 里登记**
-3. **实现两个阻塞式扩展方法**（否则会卡住）
-4. **把可执行文件路径做成配置项**（避开 `~/.local/bin/agent` 冲突）
-5. 确认 `session/new` 的模型列表从哪读——**官方文档没有列出** Cursor 的 `session/new` 返回模型列表，另外三家都是在 `session/new` 里给的
+其中第 3 条最容易被漏——现有三家都不需要它。
 
-第 5 点是接之前必须实测确认的。
+## 证据
 
-## 剩下没验的两件事
+**已实测**：initialize 返回、authenticate 成功、`session/new` 的完整返回（含 29 个模型）、`session/list` 的实际结果、完整工具调用三帧、权限请求的形状与回应、回合正常走完（`stopReason: end_turn`）、token 缺失。
 
-实机探测卡在登录态上，所以下面两项**没有实测数据，不要当结论用**：
+**抓到的原始帧已存为夹具**：`packages/dsh-acp-agent/tests/fixtures/captured-frames.cursor.json`，写 dialect 时直接照它写。
 
-1. **`session/new` 返回的模型列表从哪读。** 另外三家都是在 `session/new` 里给（`models.availableModels` 或 `configOptions[id=model]`）。官方文档**没有列出** Cursor 的 `session/new` 返回内容，这一项必须登录后抓真实帧才能写进 dialect。
-2. **两个阻塞式扩展方法的实际触发时机。** `cursor/ask_question` 和 `cursor/create_plan` 在什么情况下会发、发的频率如何，文档只给了类型定义。
-
-## 接入前的准备顺序
-
-1. 先把可执行文件路径做成配置项，**避开 `~/.local/bin/agent` 冲突**（见上）
-2. 终端里完成一次 `agent login`，确认 `authenticate` 能秒回
-3. 登录后重跑探测，**把真实的 `session/new` 返回和工具帧存进 `tests/fixtures/captured-frames.json`**
-4. 据此写 `dialects/cursor.ts`，实现两个阻塞式扩展方法
-5. 按 `live.spec.ts` 的标准验收
-
-第 3 步不能省——本文的其余部分都是从官方文档和探针推出来的，只有第 3 步之后的内容才是实测的。
+**未实测**：两个 `cursor/*` 扩展方法的实际触发；失败工具的 `status` 取值；`session/load` 加载旧会话的行为。
