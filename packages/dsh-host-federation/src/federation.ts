@@ -9,12 +9,6 @@
  * The broadcast channel is a port, so all of this runs without a browser.
  */
 
-/** Who this tab is. */
-export type HostIdentity = {
-  readonly hostId: string
-  readonly hostTitle: string
-}
-
 /** One message on the channel. */
 export type Announcement = {
   readonly kind: 'hello' | 'heartbeat' | 'bye'
