@@ -210,6 +210,39 @@ DSH **硬拦**：`AgentPresetRegistry.select()` 检查回合边界，会话已�
 >
 > 另：本机 codex-acp 是 `1.6.0-grok.3`（软链到 `~/github/codex-acp` 本地分叉），而 hostd 里 pin 的是 `1.6.2`。codex 的帧形状取自分叉版本，**阶段 2 落地前需在 pinned 版本上复验**。
 
+### 2.7b 2026-10-09 新增：ACP 回合复刻流式观感的完整契约
+
+（**核对时间 2026-10-09，参考源码 master `5badb15009`**）
+
+要满足 §7.2-(1) 的「恢复流式观感」，ACP 回合必须复刻下面这套，缺一样都会退化成
+「等半天整段出现」。证据在 `packages/core/agent-loop/src/assistant-stream.ts`、
+`packages/core/agent/src/runtime-types.ts:363`、`packages/llm/llm/src/types.ts:452`。
+
+| 项 | 事实 | 位置 |
+|---|---|---|
+| 事件 | `agent/assistant-stream`（emit 模式），载荷 `{ agent, frame }` | `runtime-types.ts:363` |
+| 帧种类 | `start` / `chunk` / `end` 三种 | `runtime-types.ts:127-161` |
+| attemptId | `` LlmAttemptId(`${sessionId}:${attempt}`) ``，attempt 为挂载期内会话内计数 | `assistant-stream.ts:45` |
+| revision | **整个 agent 生命周期内单调递增**，换流不归零 | `assistant-stream.ts:52,65,92` |
+| chunk.index | 本次尝试内从 0 起**稠密**递增 | `assistant-stream.ts:67` |
+| settle 顺序 | **先 `append()` 同步落盘拿 `seq`，再发 end 帧**带 `{kind:'committed', eventType, seq}`；落盘失败发 `{kind:'abandoned'}` 并抛出 | `assistant-stream.ts:78-97` |
+| StreamChunk | `block-start` / `text-delta` / `reasoning-delta` / `tool-call-delta` / `block-end` / `usage` / `finish` | `llm/src/types.ts:452-464` |
+
+**⚠️ 三处容易做错的地方：**
+
+1. **revision 不是每回合从 1 开始**，而是挂在 agent 上活过整个生命周期。
+   每回合新建计数器会导致界面把新回合当成替换流重画。
+2. **settle 的落盘必须早于结束帧**。反过来会让界面显示「结束」却查不到内容。
+3. **流式 ≠ 多写日志**。通道上增量、日志里**一条**最终 `assistant/message`，
+   两者靠同一个 attemptId 对上（注释明写：分片临时，循环在提交结束帧前
+   把一条最终消息按同一次流落盘）。
+
+**已知难点**：`push()` 内还挂了 accumulator 与 assembler（压缩与工具调用组装），
+自研复刻必须对齐它们的语义，否则跨分片的工具调用会组装错。
+**这一项单独排一轮做，不与其他改动混在一起。**
+
+---
+
 ### 2.7 2026-10-09 新增：流式与审批的两处机制更正
 
 **（1）「流式记录」不存在 —— §7.2-(1) 的措辞必须改。**
