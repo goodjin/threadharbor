@@ -22,6 +22,14 @@ export type AcpPresetConfig = {
   readonly mode?: string
   readonly cwd?: string
   /**
+   * The models this agent serves, as offered in the model picker.
+   *
+   * Declared rather than probed: probing needs the agent to be running, and the
+   * picker has to render before anyone has opened a session. An absent list
+   * means the agent offers nothing here yet.
+   */
+  readonly models?: readonly { readonly id: string; readonly name: string; readonly description?: string }[]
+  /**
    * Hosts this preset is offered on.
    *
    * Absent means everywhere — adding a constraint is opt-in. An empty list is
