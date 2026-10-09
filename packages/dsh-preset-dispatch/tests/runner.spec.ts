@@ -27,10 +27,19 @@ function fakeClient() {
       return {}
     },
     notify: () => {},
-    onTurnFrames: () => {},
+    onFrame: () => {},
   }
   return client
 }
+
+const agentMessageChunk = (text: string) => ({
+  method: 'session/update',
+  params: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } } },
+})
+const agentThoughtChunk = (text: string) => ({
+  method: 'session/update',
+  params: { update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text } } },
+})
 
 const DECISION: StepDecisionLike = {
   kind: 'enter',
@@ -60,16 +69,21 @@ describe('AcpTurnRunner', () => {
   it('returns only that turn’s frames, not everything seen so far', async () => {
     // Frames arrive while the prompt is still in flight, which is when they
     // really arrive.
-    let emit: (frames: unknown[]) => void = () => {}
+    let emit: (frame: unknown) => void = () => {}
     let round = 0
     const client: AcpClientPort = {
       request: async method => {
         if (method === 'session/new') return { sessionId: 's1' }
-        if (method === 'session/prompt') { emit([{ n: ++round }, { n: round }]); return { stopReason: 'end_turn' } }
+        if (method === 'session/prompt') {
+          const n = ++round
+          emit({ n })
+          emit({ n })
+          return { stopReason: 'end_turn' }
+        }
         return {}
       },
       notify: () => {},
-      onTurnFrames: handler => { emit = handler as (f: unknown[]) => void },
+      onFrame: handler => { emit = handler },
     }
     const runner = new AcpTurnRunner(client, { cwd: '/tmp' })
 
@@ -106,6 +120,63 @@ describe('AcpTurnRunner', () => {
       return {}
     }
     await expect(new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION)).rejects.toThrow(/agent binary missing/)
+  })
+
+  it('feeds text to the stream as frames arrive, not after the turn ends', async () => {
+    // The whole point of streaming: a delta reaching the UI while the agent is
+    // still working. Collecting frames and replaying them afterwards is exactly
+    // the "wait, then it all appears" behaviour this is meant to replace.
+    const deltas: string[] = []
+    let emit: (frame: unknown) => void = () => {}
+    const client: AcpClientPort = {
+      request: async method => {
+        if (method === 'session/new') return { sessionId: 's1' }
+        if (method === 'session/prompt') {
+          emit(agentMessageChunk('Hel'))
+          emit(agentMessageChunk('lo'))
+          return { stopReason: 'end_turn' }
+        }
+        return {}
+      },
+      notify: () => {},
+      onFrame: handler => { emit = handler as (f: unknown) => void },
+    }
+    const runner = new AcpTurnRunner(client, {
+      cwd: '/tmp',
+      openStream: () => ({ textDelta: text => deltas.push(text), reasoningDelta: () => {} }),
+    })
+
+    await runner.run(DECISION)
+    expect(deltas).toEqual(['Hel', 'lo'])
+  })
+
+  it('sends reasoning through its own channel, kept apart from the answer', async () => {
+    const text: string[] = []
+    const reasoning: string[] = []
+    let emit: (frame: unknown) => void = () => {}
+    const client: AcpClientPort = {
+      request: async method => {
+        if (method === 'session/new') return { sessionId: 's1' }
+        if (method === 'session/prompt') {
+          emit(agentThoughtChunk('pondering'))
+          emit(agentMessageChunk('answer'))
+          return { stopReason: 'end_turn' }
+        }
+        return {}
+      },
+      notify: () => {},
+      onFrame: handler => { emit = handler as (f: unknown) => void },
+    }
+    await new AcpTurnRunner(client, {
+      cwd: '/tmp',
+      openStream: () => ({
+        textDelta: t => text.push(t),
+        reasoningDelta: t => reasoning.push(t),
+      }),
+    }).run(DECISION)
+
+    expect(reasoning).toEqual(['pondering'])
+    expect(text).toEqual(['answer'])
   })
 
   it('opens the session once even if the first turn fails', async () => {

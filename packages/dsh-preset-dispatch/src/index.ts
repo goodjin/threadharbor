@@ -10,3 +10,5 @@ export type {
 } from './dispatch.ts'
 export { AcpTurnRunner } from './runner.ts'
 export type { AcpClientPort, RunnerOptions } from './runner.ts'
+export { AcpAssistantStream } from './stream.ts'
+export type { StreamOptions, StreamRecord, TurnStreamPort } from './stream.ts'
