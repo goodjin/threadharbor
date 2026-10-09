@@ -267,12 +267,20 @@ provider 路由、列出它真实的模型，目录和界面自动就多出这�
 
 **切换：有硬限制，且比设计文档设想的更严。**
 
-- 文档 §十 阶段 5 写「复用 `session.switch`」——**这个 remote 不存在**。
-  session-controller 的 remote 全表见 `packages/api/session-controller/src/index.ts`：
+- ⚠️ **澄清一处容易混淆的地方**：文档 §十 阶段 5 说的 `session.switch`
+  是 **ThreadHarbor 自有的协议方法**，确实存在且有测试
+  （`packages/dsh-gateway/src/index.ts:925`，测试 `gateway.spec.ts:3202/3253`，
+  协议枚举 `packages/protocol/src/index.ts:562`，客户端调用
+  `packages/dsh-client/src/client/store.ts:2204`）。**它不是 DSH 的 remote。**
+- **DSH 侧没有 `switch` 这个 remote。** session-controller 的 remote 全表见
+  `packages/api/session-controller/src/index.ts`：
   `list / search / create / selectModel / modelCatalog / openWorkspacePath /
   workspacePathApplications / rename / fork / prompt / attachment / updateQueue /
   cancel / page / projections`，没有 switch。
-- 实际存在的切换入口是 `agent-preset/select`
+  换句话说，阶段 6 下线 hostd 后，ThreadHarbor 那条切换路径的**后端会消失**，
+  必须按 DSH 的接缝重做——而唯一现成的入口就是下面这个被锁的 `select`。
+
+- DSH 侧实际存在的切换入口是 `agent-preset/select`
   （`packages/preset/agent-preset-registry/src/index.ts:347-362`），而它**在会话
   已经开始回合后会抛错**：
 
@@ -813,7 +821,7 @@ DSH 硬拦（§2.4），不可绕过。注意复核结论：锁是**永久**的�
 
 ### 阶段 5：中途切换 agent
 
-1. 复用 `session.switch`，支持跨 preset、跨主机
+1. 复用 ThreadHarbor 自有的 `session.switch`，支持跨 preset、跨主机
 2. 历史完整交接
 
 **验证**：在 grok 会话里切到 codex，历史完整保留；目标承担不了时报错而非截断。
