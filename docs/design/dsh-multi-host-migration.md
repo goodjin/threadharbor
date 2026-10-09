@@ -276,15 +276,80 @@ DSH 自己的代码也不读头。`session-controller` 读的是投影
 - **`mode: 'host' | 'memory'`**（`:34`）——`'host'` 跟随宿主文档，
   `'memory'` 只在**远端浏览器进程内**保留。
 
-**对本阶段的意义**：`hostId`/`hostTitle` 属于「这台机器是谁」，应当走
-`'host'` 模式，由宿主插件注册命名空间、客户端通过表单读。这比自己造一条
-配置通道更省事，而且版本栅栏与校验都是现成的。
+**⚠️ 但要分清两种「配置」**（取证补正，2026-10-09）：**组合行的 `config:` 到不了
+前端**。浏览器端的启动行只有 `{ id, inject, immediately }`，没有 config 字段
+（`packages/client/modules/src/client/manifest.ts:111-117`；创建 entry 时只传
+`{ name: id }`，`entries.ts:167-175`；启动循环只映射 `row.id`，`boot-client.ts:48-50`）。
+所以 `ConfigForm` 这条路属于**设置通道**，不是组合配置通道。
+
+三条能到前端的通道：
+
+1. **宿主那半收配置后，经 `webserver/index-inject` 事件注入每个标签页的启动
+   HTML**（事件声明 `packages/host/webserver/src/index.ts:26-34`；实例
+   `packages/client/ui-theme/src/index.ts:41-43`）。
+2. **settings 远程命名空间** `ctx.remote.settings`
+   （`packages/api/settings-controller/src/index.ts:86`），Volatile 字段双向同步
+   （例：`agentPresets` 的 `selectedDefault`，`agent-preset-registry/src/index.ts:56,75`）。
+   `ConfigForm` 就是它前端那一侧的形态。
+3. **构建期 `process.env.DSH_CLIENT_*`**——静态烧进 bundle，运行期不可变。
+
+**对本阶段的意义**：`hostId`/`hostTitle` 属于「这台机器是谁」，走**设置通道**
+（上面第 2 条）的 `'host'` 模式，由宿主插件注册命名空间、客户端通过表单读。
+版本栅栏与校验都是现成的，比自造一条通道省事。
 
 **⚠️ 但这和本阶段另做的一套按主机隔离的本地设置不是一回事**：
 后者对应的是纯界面偏好（现有代码刻意不往服务端回传，见
 `packages/dsh-client/src/client/display-preferences.ts:1-3`），仍应留在
 localStorage，只是要按主机分开槽位。两者分工：身份与共享配置走 `ConfigForm`，
 界面偏好走本地存储。
+
+---
+
+#### （2c）多主机：DSH 没有主机身份概念（取证，2026-10-09，master `5badb15009`）
+
+**结论：DSH 全仓库没有「我是哪台主机」的概念。** `hostId`/`hostTitle`/
+`machineId`/`machine-id` 零匹配。web 侧只有 `RemoteHostFacts { home, isLoopback }`
+（`packages/api/gateway/src/client/index.ts:119-124`，经 `ctx.remote.$host` 暴露），
+而 `home` 服务端取 **`os.homedir()`**（`packages/api/remotes/src/index.ts:3,42`），
+**是操作系统账户家目录，不是实例身份**——同机多 home 才不同、同 home 多端口不可区分。
+
+启动时能自报的只有：原始 argv（`packages/boot/cmdline/src/index.ts:86`）、
+五个 web 旗标（`bundle/web-app/src/startup.ts:25-39`：host/port/public-url/
+trusted-host/no-open，注意 `--host 0.0.0.0` 被显式拒绝，只支持 127.0.0.1）、
+OS 分配后的实际端口（`host/webserver/src/index.ts:141`）、`$DSH_HOME`、匿名 id。
+**没有任何机器级标识。** 最接近的是 per-`$DSH_HOME` 的匿名 UUID
+（`packages/identity/anonymous-user-id/src/index.ts:2-9`），注释明确不派生自主机名。
+
+**连接标识也不能用**：服务端每个事件代重新铸一个 `RemoteEventClientId`
+（`packages/api/gateway/src/index.ts:504-505`），客户端 `generation.id` 只是页面内
+自增计数（`client/connection/src/client/index.ts:212,288`）——重连即换、刷新归零。
+
+**但「项目」概念是现成的：Workspace 就是。** README 原话就是 project sidebars；
+`WorkspaceView { workspaceId, path, title, sessionIds, createdAt, updatedAt }`
+（`packages/api/workspace-controller/src/types.ts:14-24`），远程命名空间 `workspace`
+提供 create/list/rename/delete/排序/pin/archive（`src/index.ts:65,85-184`）。
+**聚合层的「项目」直接映射到 Workspace，不需要自造。**
+
+**preset 按主机过滤零改动**：registry 是扁平 Map，注册与查找 API 都无作用域参数
+（`agent-preset-registry/src/index.ts:81-101,177-198`），但每个进程一份，
+**跨主机天然隔离**，在聚合层按主机分组即可。
+
+**现成的缝**（不必造）：
+
+- 按主机分叉设置的持久化选择：`ctx.remote.$host.isLoopback ? 'host' : 'memory'`
+  （`packages/client/ui-settings/src/client/index.ts:39`）；`$host.home` 可当主机键
+  的一部分。
+- 跨主机连接信任：`--trusted-host` 旗标（`bundle/web-app/src/startup.ts:63`，
+  校验在 `client/connection/src/api-request-trust.ts:103`）。
+- 配置传到前端：见（2b）的三条通道。
+
+**必须自己造**：`hostId`/`hostTitle`（`home` 不够用——见上）；跨标签页/跨主机聚合
+（webserver 是单主机 BFF，**无注册发现机制**）；页面稳定标识。
+
+**版本敏感性**：行号以 master（`5badb15009`，0.2.1-alpha.1）为准。运行版
+0.2.0-rc.2 的 app.asar 只能做 strings 存在性探测（`RemoteEventHostInfo`、
+`workspaceRegistry`、`agentPresets`、`anonymous-user-id`、`webserver/index-inject`
+全部命中），**字段级差异只能从运行时 JS 推断，未能核对**。
 
 ---
 
