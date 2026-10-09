@@ -1,0 +1,105 @@
+/**
+ * External agents presented to the model selector as providers.
+ *
+ * DSH's model catalog is Host-generation-global by design, and the adapter
+ * contract explicitly blesses an adapter that only advertises models
+ * ("Adapters used there must advertise their available models"). So each
+ * external agent gets one provider route, and the existing UI — which already
+ * renders provider + model — gains those groups with no client change.
+ *
+ * The route these models belong to is also the routing key: a selection tells
+ * us which agent the session should be on, which is what makes "pick a model,
+ * switch agent" work.
+ */
+
+import { describe, expect, it } from 'vitest'
+import { catalogAdapter, presetForModel, providerRoute } from '../src/catalog.ts'
+import { grokDialect } from '@threadharbor/dsh-acp-agent'
+import type { PresetConfig } from '../src/registry.ts'
+
+const CONFIG: PresetConfig = {
+  presets: {
+    'acp-grok': { agent: 'grok', url: 'ws://127.0.0.1:2419', model: 'grok-4.7' },
+    'acp-claude': { agent: 'claude', command: 'claude-agent-acp' },
+  },
+}
+
+/** Answers with the models each agent reports for itself. */
+const modelsOf = (presetId: string) => presetId === 'acp-grok'
+  ? [{ id: 'grok-4.7', name: 'Grok 4.7' }, { id: 'grok-4.7-fast', name: 'Grok 4.7 Fast' }]
+  : [{ id: 'claude-opus-4', name: 'Claude Opus 4', description: 'strongest' }]
+
+describe('providerRoute', () => {
+  it('gives each agent a route of its own', () => {
+    expect(providerRoute('acp-grok')).not.toBe(providerRoute('acp-claude'))
+  })
+
+  it('builds a route that reads back as the same preset', () => {
+    // The route is the only thing tying a catalog entry back to an agent, so
+    // it has to survive a round trip through the id.
+    expect(providerRoute('acp-grok')).toContain('acp-grok')
+  })
+
+  it('is stable across calls', () => {
+    // A route that changed per call would make every lookup miss.
+    expect(providerRoute('acp-claude')).toBe(providerRoute('acp-claude'))
+  })
+})
+
+describe('catalogAdapter', () => {
+  const adapter = catalogAdapter(CONFIG, { modelsOf, dialectOf: () => grokDialect })
+
+  it('names the provider after the agent, for humans', () => {
+    expect(adapter.providerInfo(providerRoute('acp-grok')).name).toBe('Grok')
+  })
+
+  it('advertises the models that agent actually reports', async () => {
+    const models = await adapter.listModels(providerRoute('acp-claude'))
+    expect(models).toEqual([{
+      provider: providerRoute('acp-claude'),
+      id: 'claude-opus-4',
+      name: 'Claude Opus 4',
+      description: 'strongest',
+    }])
+  })
+
+  it('attributes each model to the route that owns it', async () => {
+    const models = await adapter.listModels(providerRoute('acp-grok'))
+    expect(models.every(m => m.provider === providerRoute('acp-grok'))).toBe(true)
+  })
+
+  it('reports nothing for a route it does not own', async () => {
+    // Returning another agent's models here would show them under the wrong
+    // provider, and selecting one would switch to an agent that cannot serve it.
+    expect(await adapter.listModels('deepseek')).toEqual([])
+  })
+
+  it('refuses to stream, loudly, naming the route that asked', () => {
+    // External turns are driven by the replaced step, never by a model request.
+    // Reaching this method means the takeover did not happen; staying quiet
+    // would let a session look healthy while doing nothing.
+    expect(() => adapter.stream({ provider: providerRoute('acp-grok'), model: 'grok-4.7' }))
+      .toThrow(/acp:acp-grok\/grok-4\.7.*takeover did not happen/s)
+  })
+})
+
+describe('presetForModel', () => {
+  const deps = { modelsOf, dialectOf: () => grokDialect }
+
+  it('maps a model back to the preset that serves it', () => {
+    expect(presetForModel(CONFIG, deps, providerRoute('acp-grok'), 'grok-4.7-fast')).toBe('acp-grok')
+  })
+
+  it('maps every model of an agent, not just the configured one', () => {
+    // Only the first model resolving would make the rest of the list unselectable.
+    expect(presetForModel(CONFIG, deps, providerRoute('acp-grok'), 'grok-4.7')).toBe('acp-grok')
+  })
+
+  it('returns nothing for a model the agent does not serve', () => {
+    expect(presetForModel(CONFIG, deps, providerRoute('acp-grok'), 'somebody-elses-model')).toBeUndefined()
+  })
+
+  it('returns nothing for a native provider', () => {
+    expect(presetForModel(CONFIG, deps, 'deepseek', 'deepseek-chat')).toBeUndefined()
+  })
+})
