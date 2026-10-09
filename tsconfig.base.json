@@ -24,7 +24,8 @@
       "@threadharbor/protocol": ["packages/protocol/src/index.ts"],
       "@threadharbor/hostd": ["packages/hostd/src/server.ts"],
       "@threadharbor/dsh-gateway": ["packages/dsh-gateway/src/index.ts"],
-      "@threadharbor/dsh-client": ["packages/dsh-client/src/index.ts"]
+      "@threadharbor/dsh-client": ["packages/dsh-client/src/index.ts"],
+      "@threadharbor/dsh-acp-agent": ["packages/dsh-acp-agent/src/index.ts"]
     }
   }
 }

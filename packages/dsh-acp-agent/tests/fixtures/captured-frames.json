@@ -865,5 +865,211 @@
         "_meta": {}
       }
     ]
+  },
+  "grok": {
+    "tool": [
+      {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+          "sessionId": "01a11edf-8c6f-77a0-9339-32b802c8ebd5",
+          "update": {
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call-d0f9391e-a336-4eed-bc3a-81344b79a72f-0",
+            "title": "run_terminal_command",
+            "rawInput": {
+              "command": "echo THREADHARBOR_TOOL_OK"
+            }
+          },
+          "_meta": {}
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+          "sessionId": "01a11edf-8c6f-77a0-9339-32b802c8ebd5",
+          "update": {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "call-d0f9391e-a336-4eed-bc3a-81344b79a72f-0",
+            "title": "Execute `echo THREADHARBOR_TOOL_OK`",
+            "kind": "execute",
+            "rawInput": {
+              "variant": "Bash",
+              "command": "echo THREADHARBOR_TOOL_OK"
+            },
+            "content": [
+              {
+                "type": "content",
+                "content": {
+                  "type": "text",
+                  "text": "Print THREADHARBOR_TOOL_OK marker"
+                }
+              }
+            ]
+          },
+          "_meta": {}
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+          "sessionId": "01a11edf-8c6f-77a0-9339-32b802c8ebd5",
+          "update": {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "call-d0f9391e-a336-4eed-bc3a-81344b79a72f-0",
+            "status": "in_progress",
+            "content": [
+              {
+                "type": "content",
+                "content": {
+                  "type": "text",
+                  "text": ""
+                }
+              }
+            ]
+          },
+          "_meta": {}
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+          "sessionId": "01a11edf-8c6f-77a0-9339-32b802c8ebd5",
+          "update": {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "call-d0f9391e-a336-4eed-bc3a-81344b79a72f-0",
+            "status": "in_progress",
+            "content": [
+              {
+                "type": "content",
+                "content": {
+                  "type": "text",
+                  "text": "THREADHARBOR_TOOL_OK\n"
+                }
+              }
+            ]
+          },
+          "_meta": {}
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+          "sessionId": "01a11edf-8c6f-77a0-9339-32b802c8ebd5",
+          "update": {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "call-d0f9391e-a336-4eed-bc3a-81344b79a72f-0",
+            "status": "completed",
+            "content": [
+              {
+                "type": "content",
+                "content": {
+                  "type": "text",
+                  "text": "THREADHARBOR_TOOL_OK\n"
+                }
+              }
+            ]
+          },
+          "_meta": {}
+        }
+      }
+    ],
+    "thought": [
+      {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+          "sessionId": "01a11edf-8c6f-77a0-9339-32b802c8ebd5",
+          "update": {
+            "sessionUpdate": "agent_thought_chunk",
+            "content": {
+              "type": "text",
+              "text": "I need to think."
+            }
+          },
+          "_meta": {}
+        }
+      }
+    ],
+    "message": [
+      {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+          "sessionId": "01a11edf-8c6f-77a0-9339-32b802c8ebd5",
+          "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {
+              "type": "text",
+              "text": "0.05"
+            }
+          },
+          "_meta": {}
+        }
+      }
+    ],
+    "messageWithTokens": [
+      {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+          "sessionId": "01a11edf-8c6f-77a0-9339-32b802c8ebd5",
+          "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {
+              "type": "text",
+              "text": "PONG"
+            }
+          },
+          "_meta": {
+            "totalTokens": 21576
+          }
+        }
+      }
+    ],
+    "noise": [
+      {
+        "jsonrpc": "2.0",
+        "method": "_x.ai/session/setup",
+        "params": {
+          "phase": "auth"
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "_x.ai/mcp/servers_updated",
+        "params": {
+          "mcpServers": []
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+          "sessionId": "01a11edf-8c6f-77a0-9339-32b802c8ebd5",
+          "update": {
+            "sessionUpdate": "available_commands_update",
+            "availableCommands": []
+          },
+          "_meta": {}
+        }
+      }
+    ],
+    "sessionNew": {
+      "sessionId": "01a11edf-8c6f-77a0-9339-32b802c8ebd5",
+      "models": {
+        "currentModelId": "grok-4.7",
+        "availableModels": [
+          {
+            "modelId": "grok-4.7",
+            "name": "Grok 4.7"
+          }
+        ]
+      }
+    }
   }
 }
