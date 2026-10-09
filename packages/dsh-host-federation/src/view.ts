@@ -34,6 +34,13 @@ export type HostView = {
   hosts(): readonly HostSnapshot[]
   foreignHosts(): readonly HostSnapshot[]
   rollUp(): RollUp
+  /**
+   * Say what this tab hosts.
+   *
+   * Called on start and whenever the host's sessions change — a conversation
+   * started here has to show up in the other tabs without a reload.
+   */
+  publishSessions(sessions?: readonly { projectId: string; sessionId: string; title: string }[]): void
   /** One heartbeat tick; driven by a timer in the page. */
   tick(): void
   /** Drop hosts that have gone quiet. */
@@ -67,6 +74,9 @@ export function startHostView(form: IdentityForm, bus: FederationBus, source: Se
       ...(source.onChange === undefined ? {} : { onChange: source.onChange }),
     })
     created.start()
+    // Announced up front: a tab that only said hello would leave its own row
+    // empty in every other tab, and nothing is going to come and ask.
+    created.publishSessions(source.listSessions?.(identity.hostId) ?? [])
     return created
   }
 
@@ -75,6 +85,9 @@ export function startHostView(form: IdentityForm, bus: FederationBus, source: Se
     hosts: () => federation.hosts(),
     foreignHosts: () => federation.foreignHosts(),
     rollUp: () => federation.rollUp(),
+    publishSessions: sessions => {
+      federation.publishSessions(sessions ?? source.listSessions?.(identity.hostId) ?? [])
+    },
     tick: () => { federation.emitHeartbeat() },
     expire: at => { federation.expire(at) },
     dispose: () => {

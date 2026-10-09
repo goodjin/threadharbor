@@ -142,7 +142,9 @@ describe('HostFederation roll-up', () => {
     const bus = fakeBus()
     const fed = new HostFederation(ME, bus, {
       staleMs: 1_000,
-      listSessions: hostId => sessionsOf(hostId),
+      // Only answers for this tab's own host: a tab cannot read another host's
+      // workspaces, so a foreign host's sessions come from what it publishes.
+      listSessions: () => sessionsOf('alpha'),
     })
     fed.start()
     return { bus, fed }
@@ -151,6 +153,7 @@ describe('HostFederation roll-up', () => {
   it('groups sessions under the host they came from', () => {
     const { fed } = withSessions()
     fed.receive({ kind: 'hello', ...THEM, at: 0 })
+    fed.receive({ kind: 'sessions', ...THEM, at: 0, sessions: sessionsOf('beta') })
     const roll = fed.rollUp()
     expect(roll.hosts.map(h => ({ hostId: h.hostId, sessions: h.sessions.map(s => s.sessionId) })))
       .toEqual([
@@ -162,6 +165,7 @@ describe('HostFederation roll-up', () => {
   it('groups projects under the host, then sessions under the project', () => {
     const { fed } = withSessions()
     fed.receive({ kind: 'hello', ...THEM, at: 0 })
+    fed.receive({ kind: 'sessions', ...THEM, at: 0, sessions: sessionsOf('beta') })
     const beta = fed.rollUp().hosts.find(h => h.hostId === 'beta')!
     expect(beta.projects.map(p => p.projectId)).toEqual(['p1'])
     expect(beta.projects[0]!.sessions.map(s => s.sessionId)).toEqual(['s2'])
@@ -171,6 +175,7 @@ describe('HostFederation roll-up', () => {
     // Otherwise the roll-up keeps advertising sessions that no longer exist.
     const { fed } = withSessions()
     fed.receive({ kind: 'hello', ...THEM, at: 0 })
+    fed.receive({ kind: 'sessions', ...THEM, at: 0, sessions: sessionsOf('beta') })
     fed.expire(1_001)
     expect(fed.rollUp().hosts.map(h => h.hostId)).toEqual(['alpha'])
   })

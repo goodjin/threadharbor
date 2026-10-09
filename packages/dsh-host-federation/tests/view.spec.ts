@@ -71,7 +71,9 @@ describe('startHostView', () => {
   it('announces itself when it starts', () => {
     const { bus, posted } = recordingChannel()
     const view = startHostView(form({ hostId: 'alpha' }), bus, sources())
-    expect(posted).toEqual([{ kind: 'hello', hostId: 'alpha' }])
+    // The start announces presence and then what it hosts; a tab that only said
+    // hello would leave its row empty everywhere else.
+    expect(posted).toEqual([{ kind: 'hello', hostId: 'alpha' }, { kind: 'sessions', hostId: 'alpha' }])
     view.dispose()
   })
 
@@ -84,7 +86,8 @@ describe('startHostView', () => {
 
     settings.set({ hostId: 'renamed' })
 
-    expect(posted.map(p => `${p.kind}:${p.hostId}`)).toEqual(['hello:alpha', 'bye:alpha', 'hello:renamed'])
+    expect(posted.map(p => `${p.kind}:${p.hostId}`))
+      .toEqual(['hello:alpha', 'sessions:alpha', 'bye:alpha', 'hello:renamed', 'sessions:renamed'])
     expect(view.identity().hostId).toBe('renamed')
     view.dispose()
   })
@@ -97,7 +100,8 @@ describe('startHostView', () => {
 
     settings.set({ hostTitle: 'New name' })
 
-    expect(posted.map(p => p.kind)).toEqual(['hello'])
+    // Same machine, same id: only the title moved, so nothing is re-announced.
+    expect(posted.map(p => p.kind)).toEqual(['hello', 'sessions'])
     expect(view.identity().hostTitle).toBe('New name')
     view.dispose()
   })
@@ -106,7 +110,7 @@ describe('startHostView', () => {
     const { bus, posted } = recordingChannel()
     const view = startHostView(form({ hostId: 'alpha' }), bus, sources())
     view.dispose()
-    expect(posted.map(p => p.kind)).toEqual(['hello', 'bye'])
+    expect(posted.map(p => p.kind)).toEqual(['hello', 'sessions', 'bye'])
   })
 
   it('stops heartbeating after disposal', () => {
@@ -135,6 +139,37 @@ describe('startHostView', () => {
     view.expire(1_001)
     expect(view.foreignHosts()).toEqual([])
     view.dispose()
+  })
+
+  it('publishes what it hosts when it starts', () => {
+    // A tab that only said hello would leave its row empty until something else
+    // asked, and nothing is going to ask.
+    const { bus, posted } = recordingChannel()
+    const source = { ...sources(), listSessions: () => [{ projectId: 'w1', sessionId: 's1', title: '本机的会话' }] }
+    const view = startHostView(form({ hostId: 'alpha' }), bus, source)
+    const published = posted.filter(p => p.kind === 'sessions')
+    expect(published).toHaveLength(1)
+    view.dispose()
+  })
+
+  it('republishes when the host says its sessions changed', () => {
+    const { bus, posted } = recordingChannel()
+    const view = startHostView(form({ hostId: 'alpha' }), bus, sources())
+    const before = posted.filter(p => p.kind === 'sessions').length
+
+    view.publishSessions([{ projectId: 'w1', sessionId: 's1', title: '新会话' }])
+    expect(posted.filter(p => p.kind === 'sessions')).toHaveLength(before + 1)
+    view.dispose()
+  })
+
+  it('does not publish after disposal', () => {
+    const { bus, posted } = recordingChannel()
+    const view = startHostView(form({ hostId: 'alpha' }), bus, sources())
+    view.dispose()
+    const after = posted.length
+
+    view.publishSessions([{ projectId: 'w1', sessionId: 's1', title: 'x' }])
+    expect(posted).toHaveLength(after)
   })
 
   it('survives a settings form that reports a snapshot it cannot read', () => {
