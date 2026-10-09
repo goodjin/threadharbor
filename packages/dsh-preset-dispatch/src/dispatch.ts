@@ -26,7 +26,7 @@ export type SessionHeaderLike = {
 
 /** What this module needs from a live agent. */
 export type AgentLike = {
-  readonly session: { readonly header: SessionHeaderLike }
+  readonly session?: { readonly header?: SessionHeaderLike } | undefined
 }
 
 /** One step's worth of work, as the native loop hands it over. */
@@ -63,8 +63,13 @@ export type AcpPresetBinding = {
   readonly run: (decision: StepDecisionLike) => Promise<AcpStepResult>
 }
 
-/** What the patched step writes into the session log. */
-export type ContentEvent = { readonly type: string; readonly payload: Record<string, unknown> }
+/**
+ * What the patched step writes into the session log.
+ *
+ * Shaped as the projection already emits it, so the content events need no
+ * re-shaping on the way out.
+ */
+export type ContentEvent = { readonly type: string; readonly payload: unknown }
 
 export type AcpDispatchOptions = {
   /** Turns what a turn produced into the events the session log should carry. */
@@ -87,7 +92,10 @@ export function resolvePreset(
   // Flat on the header. Reading `header.meta.agentPreset` — as the design
   // document originally had it — yields undefined forever, so dispatch silently
   // falls back to the native agent with no error anywhere.
-  const id = agent.session.header.agentPreset
+  // Tolerate an agent whose shape this does not recognise: "not ours" is the
+  // safe reading, and throwing would take down a session we were only meant
+  // to leave alone.
+  const id = agent.session?.header?.agentPreset
   if (id === undefined || id === '') return undefined
   return presets.get(id)
 }
