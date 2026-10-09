@@ -14,8 +14,8 @@ import type { HostIdentity } from './identity.ts'
 /** One message on the channel. */
 export type Announcement = {
   readonly kind: 'hello' | 'heartbeat' | 'bye'
-  readonly hostId: unknown
-  readonly hostTitle: unknown
+  readonly hostId: string
+  readonly hostTitle: string
   readonly at: number
 }
 
@@ -58,11 +58,11 @@ export type FederationOptions = {
   /** A host silent for this long is treated as gone. */
   readonly staleMs: number
   /** Ask a host for its sessions; absent means it contributes none. */
-  readonly listSessions?(hostId: string): readonly HostSession[]
+  listSessions?(hostId: string): readonly HostSession[]
   /** Injectable clock, so the expiry window can be tested without waiting. */
-  readonly now?(): number
+  now?(): number
   /** Called when the set of hosts changes, so a view can re-render. */
-  readonly onChange?(): void
+  onChange?(): void
 }
 
 export class HostFederation {

@@ -1,4 +1,5 @@
 import { chmod, link, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
@@ -79,14 +80,12 @@ describe('stable/test release channels', () => {
     expect(await readFile(linked, 'utf8')).toBe('before\n')
   })
 
-  it('keeps each channel override self-contained because DSH replaces config objects', async () => {
-    for (const channel of ['stable', 'test']) {
-      const patch = await readFile(join(process.cwd(), 'deploy', 'channels', `${channel}.patch.yml`), 'utf8')
-      for (const required of [
-        'maxRequestBytes', 'hostdRequestTimeoutMs', 'pollIntervalMs', 'maxTranscriptEntriesPerSession',
-        'sshKnownHostsPath', 'sshConnectTimeoutMs', 'sshInstallTimeoutMs', 'hostdRemotePort', 'deploymentChannel',
-      ]) expect(patch).toContain(`${required}:`)
-    }
+  it('leaves no channel override behind for the removed hostd gateway', () => {
+    // Those files existed only to configure the gateway's per-channel hostd
+    // port and SSH trust database. The release script builds each channel's
+    // home from its own defaults, so with the gateway gone there is nothing
+    // left for a channel patch to override.
+    expect(existsSync(join(process.cwd(), 'deploy', 'channels'))).toBe(false)
   })
 
   it('creates an immutable manifest and detects any artifact change', async () => {

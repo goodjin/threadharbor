@@ -11,10 +11,11 @@
 
 import { describe, expect, it } from 'vitest'
 import { HostFederation } from '../src/federation.ts'
-import type { FederationBus, HostIdentity } from '../src/federation.ts'
+import type { FederationBus } from '../src/federation.ts'
+import type { HostIdentity } from '../src/identity.ts'
 
-const ME: HostIdentity = { hostId: 'alpha', hostTitle: 'Alpha box' }
-const THEM: HostIdentity = { hostId: 'beta', hostTitle: 'Beta box' }
+const ME: HostIdentity = { hostId: 'alpha', hostTitle: 'Alpha box', derived: false }
+const THEM: HostIdentity = { hostId: 'beta', hostTitle: 'Beta box', derived: false }
 
 /** A bus with a manual clock, standing in for a same-origin channel. */
 function fakeBus() {

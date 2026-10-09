@@ -15,7 +15,6 @@ describe('remote Web bundle', () => {
     expect(manifest.dsh?.bundle?.patch).toBe('./cordis.patch.yml')
     expect(manifest.dependencies).toEqual({
       '@threadharbor/dsh-client': 'workspace:^',
-      '@threadharbor/dsh-gateway': 'workspace:^',
     })
 
     // ui-sidebar is fully replaced by the ThreadHarbor sidebar. ui-conversation
@@ -29,7 +28,17 @@ describe('remote Web bundle', () => {
     for (const runtimeOwner of ['agent-loop', 'workspace', 'cordis-host-runner']) {
       expect(patch).not.toContain(`- id: ${runtimeOwner}\n  disabled: true`)
     }
-    expect(patch).toContain("- id: threadharbor-gateway\n      name: '@threadharbor/dsh-gateway'")
     expect(patch).toContain("- id: threadharbor-client\n      name: '@threadharbor/dsh-client'")
+
+    // Phase 6 removed the hostd gateway. Agents run as in-process ACP plugins
+    // on the machine serving the page, so there is no remote host to proxy to
+    // and nothing for a host plugin to register. Both halves of that are
+    // asserted so the old wiring cannot quietly come back.
+    expect(patch).not.toContain('threadharbor-gateway')
+    // Configuration, not the word: the file explains in a comment why the
+    // gateway is gone, and a comment is not wiring.
+    for (const hostdSetting of ['hostdRequestTimeoutMs', 'hostdRemotePort', 'sshKnownHostsPath']) {
+      expect(patch).not.toContain(hostdSetting)
+    }
   })
 })

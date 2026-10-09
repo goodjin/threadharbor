@@ -44,8 +44,7 @@
     }
   },
   "dependencies": {
-    "@threadharbor/dsh-client": "workspace:^",
-    "@threadharbor/dsh-gateway": "workspace:^"
+    "@threadharbor/dsh-client": "workspace:^"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1"

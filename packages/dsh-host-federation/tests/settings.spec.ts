@@ -21,7 +21,8 @@ function fakeStorage(initial: Record<string, string> = {}) {
   return { storage, map }
 }
 
-const DEFAULTS = Object.freeze({ theme: 'dark' as const, columns: 2 })
+/** Widened on purpose: a frozen literal would pin the shape to these values. */
+const DEFAULTS: { theme: string; columns: number } = Object.freeze({ theme: 'dark', columns: 2 })
 
 describe('hostScopedSettings', () => {
   it('starts from the defaults for a host with nothing stored', () => {

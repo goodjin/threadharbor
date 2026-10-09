@@ -11,9 +11,6 @@ importers:
       '@threadharbor/dsh-client':
         specifier: workspace:^
         version: link:packages/dsh-client
-      '@threadharbor/dsh-gateway':
-        specifier: workspace:^
-        version: link:packages/dsh-gateway
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1
@@ -76,37 +73,6 @@ importers:
         specifier: ^18.2.0
         version: 18.3.1
 
-  packages/dsh-gateway:
-    dependencies:
-      '@deepseek-ai/schemastery':
-        specifier: ^3.18.1
-        version: 3.18.1
-      '@threadharbor/hostd':
-        specifier: workspace:^
-        version: link:../hostd
-      '@threadharbor/protocol':
-        specifier: workspace:^
-        version: link:../protocol
-      ws:
-        specifier: ^8.18.0
-        version: 8.21.3
-      zod:
-        specifier: ^4.4.3
-        version: 4.4.3
-    devDependencies:
-      '@deepseek-ai/cordis':
-        specifier: ^4.0.1
-        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
-      '@deepseek-ai/dsh-host-webserver':
-        specifier: '>=0.1.1-rc.2 <0.2'
-        version: 0.1.1-rc.2(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.1-rc.2(@deepseek-ai/cordis@4.0.1))
-      '@deepseek-ai/dsh-storage':
-        specifier: '>=0.1.1-rc.2 <0.2'
-        version: 0.1.1-rc.2(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.1-rc.2(@deepseek-ai/cordis@4.0.1))
-      '@deepseek-ai/dsh-storage-domain':
-        specifier: '>=0.1.1-rc.2 <0.2'
-        version: 0.1.1-rc.2(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.1-rc.2(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-storage@0.1.1-rc.2(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.1-rc.2(@deepseek-ai/cordis@4.0.1)))
-
   packages/dsh-grok-agent: {}
 
   packages/dsh-host-federation: {}
@@ -117,36 +83,9 @@ importers:
         specifier: workspace:^
         version: link:../dsh-acp-agent
 
-  packages/hostd:
-    dependencies:
-      '@agentclientprotocol/sdk':
-        specifier: 0.25.1
-        version: 0.25.1(zod@4.4.3)
-      '@threadharbor/protocol':
-        specifier: workspace:^
-        version: link:../protocol
-      commander:
-        specifier: ^15.0.0
-        version: 15.0.0
-      smol-toml:
-        specifier: ^1.7.1
-        version: 1.8.0
-      ws:
-        specifier: ^8.18.0
-        version: 8.21.3
-    devDependencies:
-      '@types/ws':
-        specifier: ^8.18.1
-        version: 8.18.1
-
   packages/protocol: {}
 
 packages:
-
-  '@agentclientprotocol/sdk@0.25.1':
-    resolution: {integrity: sha512-jx2rF3bdpGwZ75Q/meyEDLLbYmbtxk82Uh9hDCdxDvcEedBnNSF5hZAnL/kJR5VNz56JqwOmqnAqasC84MwwkQ==}
-    peerDependencies:
-      zod: ^3.25.0 || ^4.0.0
 
   '@asamuzakjp/css-color@6.0.7':
     resolution: {integrity: sha512-vC/bk1Lz7Tn/EfU9/apOTBk80/8dyGyWMowPoV1tJ52muDGsDqt2HPT2klrFUiY60MQmQv9q8yIht15JnBgDGw==}
@@ -1404,10 +1343,6 @@ packages:
   comma-separated-tokens@2.0.3:
     resolution: {integrity: sha512-Fu4hJdvzeylCfQPp9SGWidpzrMs7tTrlu6Vb8XGaRGck8QSNZJJp538Wrb60Lax4fPwR64ViY468OIUTbRlGZg==}
 
-  commander@15.0.0:
-    resolution: {integrity: sha512-z67u4ZhzCL/Tydu1lJARtEZYWbWaN7oYLHbsuzocr6y4N6WZAagG3RQ4FW61V1/0+jImpj293XfrcYnd1qxtPg==}
-    engines: {node: '>=22.12.0'}
-
   commander@8.3.0:
     resolution: {integrity: sha512-OkTL9umf+He2DZkUq8f8J9of7yL6RJKI24dVITBmNfZBmri9zYZQrKkuXiKhyfPSu8tUhnVBB1iKXevvnlR4Ww==}
     engines: {node: '>= 12'}
@@ -1919,10 +1854,6 @@ packages:
   siginfo@2.0.0:
     resolution: {integrity: sha512-ybx0WO1/8bSBLEWXZvEd7gMW3Sn3JFlW3TvX1nREbDLRNQNaeNN8WK0meBwPdAaOI7TtRRRJn/Es1zhrrCHu7g==}
 
-  smol-toml@1.8.0:
-    resolution: {integrity: sha512-kCZr2V3ch9i00x8zXRhjUNVcjG9ijES5dDudkXvUVCT5QlJNQWElSJdZqyPemffHoLNUYwOcou0Fy+ojN0uHSQ==}
-    engines: {node: '>= 18'}
-
   source-map-js@1.2.1:
     resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}
     engines: {node: '>=0.10.0'}
@@ -2212,10 +2143,6 @@ packages:
     resolution: {integrity: sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==}
 
 snapshots:
-
-  '@agentclientprotocol/sdk@0.25.1(zod@4.4.3)':
-    dependencies:
-      zod: 4.4.3
 
   '@asamuzakjp/css-color@6.0.7':
     dependencies:
@@ -3339,8 +3266,6 @@ snapshots:
 
   comma-separated-tokens@2.0.3: {}
 
-  commander@15.0.0: {}
-
   commander@8.3.0: {}
 
   css-tree@3.2.1:
@@ -4078,8 +4003,6 @@ snapshots:
       '@types/hast': 3.0.5
 
   siginfo@2.0.0: {}
-
-  smol-toml@1.8.0: {}
 
   source-map-js@1.2.1: {}
 

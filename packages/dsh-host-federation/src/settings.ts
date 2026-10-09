@@ -28,6 +28,12 @@ const PREFIX = 'dsh.host-settings.'
  * The host id goes into the key with a separator, so `alpha` cannot read
  * `alpha-2`'s slot — which a bare concatenation would let it do.
  */
+/**
+ * Settings scoped to one host.
+ *
+ * `defaults` fixes the shape of the settings; a frozen literal would pin the
+ * shape to its own values, so callers holding one pass it with a widened type.
+ */
 export function hostScopedSettings<T extends object>(
   hostId: string,
   storage: SettingStorage,
@@ -60,7 +66,7 @@ export function hostScopedSettings<T extends object>(
     },
     reset: () => {
       storage.removeItem(key)
-      for (const listener of listeners) listeners.forEach(l => l({ ...defaults }))
+      for (const listener of listeners) listener({ ...defaults })
     },
     subscribe: listener => {
       listeners.add(listener)

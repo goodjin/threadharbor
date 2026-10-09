@@ -7,7 +7,6 @@
   },
   "include": ["src"],
   "references": [
-    { "path": "packages/dsh-gateway" },
     { "path": "packages/dsh-client" }
   ]
 }
