@@ -50,7 +50,7 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
       client.terminals = new TerminalService()
       client.onPermissionRequest = async request => await deps.answerPermission(request)
 
-      const runner = new AcpTurnRunner(adapt(client), options)
+      const runner = new AcpTurnRunner(adaptClient(client), options)
       return { run: async decision => await runner.run(decision) }
     },
   }
@@ -63,7 +63,7 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
  * reaches it as it lands, which is what lets text reach the UI while the agent
  * is still working.
  */
-function adapt(client: AcpClient): AcpClientPort {
+export function adaptClient(client: AcpClient): AcpClientPort {
   return {
     request: (method, params) => client.request(method, params),
     notify: (method, params) => { client.notify(method, params) },
