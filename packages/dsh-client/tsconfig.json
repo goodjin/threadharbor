@@ -5,5 +5,5 @@
     "outDir": "lib/types"
   },
   "include": ["src"],
-  "references": [{ "path": "../protocol" }]
+  "references": []
 }

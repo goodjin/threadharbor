@@ -21,7 +21,6 @@
     "baseUrl": ".",
     "ignoreDeprecations": "5.0",
     "paths": {
-      "@threadharbor/protocol": ["packages/protocol/src/index.ts"],
       "@threadharbor/dsh-client": ["packages/dsh-client/src/index.ts"],
       "@threadharbor/dsh-acp-agent": ["packages/dsh-acp-agent/src/index.ts"]
     }

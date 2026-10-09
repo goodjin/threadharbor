@@ -17,13 +17,14 @@ describe('remote Web bundle', () => {
       '@threadharbor/dsh-client': 'workspace:^',
     })
 
-    // ui-sidebar is fully replaced by the ThreadHarbor sidebar. ui-conversation
-    // must stay enabled since dsh 0.1.5: the stock chat, goal, trajectory,
-    // deliverables and workflow-run panels consume its `uiConversation` service
-    // and never activate when it is disabled — the conversation surface is
-    // overridden at the slot level, not by disabling the package.
+    // The stock sidebar stays enabled. It used to be disabled, because the
+    // hostd-backed sidebar replaced it; with hostd gone the ACP sessions are
+    // ordinary DSH sessions, and the stock surface is the correct one for them.
+    // ui-conversation must stay enabled since dsh 0.1.5: the stock chat, goal,
+    // trajectory, deliverables and workflow-run panels consume its
+    // `uiConversation` service and never activate when it is disabled.
     const patch = readFileSync(resolve(root, manifest.dsh!.bundle!.patch!), 'utf8')
-    expect(patch).toContain('- id: ui-sidebar\n  disabled: true')
+    expect(patch).not.toContain('- id: ui-sidebar\n  disabled: true')
     expect(patch).not.toContain('- id: ui-conversation\n  disabled: true')
     for (const runtimeOwner of ['agent-loop', 'workspace', 'cordis-host-runner']) {
       expect(patch).not.toContain(`- id: ${runtimeOwner}\n  disabled: true`)

@@ -1,7 +1,6 @@
 {
   "files": [],
   "references": [
-    { "path": "packages/protocol" },
     { "path": "packages/dsh-client" },
     { "path": "packages/dsh-acp-agent" },
     { "path": "packages/dsh-grok-agent" },

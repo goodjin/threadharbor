@@ -49,10 +49,6 @@ importers:
   packages/dsh-acp-agent: {}
 
   packages/dsh-client:
-    dependencies:
-      '@threadharbor/protocol':
-        specifier: workspace:^
-        version: link:../protocol
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1
@@ -82,8 +78,6 @@ importers:
       '@threadharbor/dsh-acp-agent':
         specifier: workspace:^
         version: link:../dsh-acp-agent
-
-  packages/protocol: {}
 
 packages:
 

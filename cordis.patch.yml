@@ -8,8 +8,11 @@
 # ACP plugins on the machine serving the page, so there is no remote host to
 # proxy to and no per-host port to configure. The ACP and preset plugins below
 # replace both, and they run in-process.
-- id: ui-sidebar
-  disabled: true
+#
+# ui-sidebar is deliberately NOT disabled any more. It used to be, because the
+# hostd-backed sidebar replaced it; now that the ACP sessions are ordinary DSH
+# sessions, the stock sidebar is the correct surface, and the roll-up plugin only
+# adds the view across hosts beside it.
 
 - insert:
     - id: threadharbor-client
