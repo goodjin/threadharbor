@@ -341,6 +341,9 @@ const EMPTY_STATE: RemoteAgentState = {
   unreadCounts: {},
 }
 
+/** Shared empty result for `getSessionTranscript` so callers never allocate. */
+const EMPTY_SESSION_TRANSCRIPT: readonly RemoteTranscriptEntry[] = []
+
 // The browser must outlive the Gateway's 45s hostd bound plus projection persistence.
 // Recovery polling remains active after this outer guard fires.
 const CONTROL_REQUEST_TIMEOUT_MS = 75_000
@@ -893,6 +896,17 @@ export class RemoteAgentStore {
   private redeliveryBusy = false
   /** Backoff timer driving redelivery retries while hostd is unreachable. */
   private redeliveryTimer: number | undefined
+  /**
+   * Per-session transcript buckets. One append batch touches exactly one
+   * session's bucket, so the O(n) merge + sort the old single-array design
+   * paid on every frame (all sessions' entries re-sorted per push) is gone:
+   * a bucket is append-ordered and stays sorted because gateway seqs arrive
+   * monotonically per session. The flat `state.transcript` view is assembled
+   * lazily for the few consumers that still walk it.
+   */
+  private transcriptBuckets = new Map<string, RemoteTranscriptEntry[]>()
+  /** Cached flat view; invalidated (set `undefined`) whenever a bucket changes. */
+  private transcriptFlatCache: RemoteTranscriptEntry[] | undefined
 
   /** Emit one trace line for a promptProgress phase transition so devtools
    *  shows the user-visible latency breakdown. Suppressed in test runs. */
@@ -1026,16 +1040,29 @@ export class RemoteAgentStore {
   ): void {
     if (entries.length === 0) return
     const current = this.snapshot.state
-    const existingIds = new Set(current.transcript.map(entry => entry.transcriptId))
+    const bucket = this.transcriptBuckets.get(sessionId) ?? []
+    const existingIds = new Set(bucket.map(entry => entry.transcriptId))
     const freshEntries = entries.filter(entry => !existingIds.has(entry.transcriptId))
     if (freshEntries.length === 0) return
-    const nextTranscript = [...current.transcript, ...freshEntries]
-      .sort((left, right) => left.sessionId.localeCompare(right.sessionId) || left.seq - right.seq)
+    // Fast path: an append batch whose every entry extends the bucket's tail
+    // (live streaming, forward catchup) is already in seq order. The bucket
+    // is append-ordered and seq-ascending by construction, so a non-append
+    // batch (out-of-order page, re-sent row) falls back to merge+sort.
+    const tailSeq = bucket.length === 0 ? -1 : bucket[bucket.length - 1]?.seq ?? -1
+    let merged: RemoteTranscriptEntry[]
+    if (freshEntries.every(entry => entry.seq > tailSeq)) {
+      merged = bucket.concat(freshEntries)
+    } else {
+      merged = bucket.concat(freshEntries)
+        .sort((left, right) => left.seq - right.seq || left.transcriptId.localeCompare(right.transcriptId))
+    }
+    this.transcriptBuckets.set(sessionId, merged)
+    this.invalidateTranscriptFlat()
     const countUnread = options?.countUnread === true && sessionId !== this.snapshot.currentSessionId
     const unread = current.unreadCounts[sessionId] ?? 0
     const nextState = {
       ...current,
-      transcript: nextTranscript,
+      transcript: this.flatTranscript(),
       unreadCounts: countUnread
         ? { ...current.unreadCounts, [sessionId]: unread + freshEntries.length }
         : current.unreadCounts,
@@ -1055,6 +1082,37 @@ export class RemoteAgentStore {
     // push, and the HTTP catchup all converge on the same cache row without
     // extra coordination.
     this.writeCache(sessionId, freshEntries)
+  }
+
+  /**
+   * Assemble the flat `transcript` view (sessions ascending, then seq) from
+   * the per-session buckets. Cached until the next bucket mutation, so the
+   * O(n) assembly runs once per batch instead of once per consumer read.
+   */
+  private flatTranscript(): RemoteTranscriptEntry[] {
+    if (this.transcriptFlatCache !== undefined) return this.transcriptFlatCache
+    const flat: RemoteTranscriptEntry[] = []
+    for (const bucket of this.transcriptBuckets.values()) {
+      for (const entry of bucket) flat.push(entry)
+    }
+    flat.sort((left, right) =>
+      left.sessionId.localeCompare(right.sessionId) || left.seq - right.seq)
+    this.transcriptFlatCache = flat
+    return flat
+  }
+
+  /** Drop the cached flat `transcript` view; the next read re-assembles it. */
+  private invalidateTranscriptFlat(): void {
+    this.transcriptFlatCache = undefined
+  }
+
+  /**
+   * One session's bucket (append-ordered, seq-ascending). The conversation
+   * surface reads only the current session's rows, so streaming a frame in
+   * session A never touches session B's array.
+   */
+  getSessionTranscript(sessionId: ReturnType<typeof RemoteSessionId>): readonly RemoteTranscriptEntry[] {
+    return this.transcriptBuckets.get(sessionId) ?? EMPTY_SESSION_TRANSCRIPT
   }
 
   /** Best-effort cache write. Never throws — the cache layer itself swallows
@@ -2129,6 +2187,51 @@ export class RemoteAgentStore {
     })
   }
 
+  /**
+   * Continue this conversation on another Agent.
+   *
+   * Resolves with the id of the new session. The old one is left exactly as it
+   * was, so a switch that turns out to be wrong costs nothing to undo — the
+   * user just goes back to it.
+   *
+   * @param sessionId - conversation to carry over.
+   * @param backend - Agent to continue it on.
+   */
+  async switchAgent(
+    sessionId: ReturnType<typeof RemoteSessionId>,
+    backend: RemoteAgentBackend,
+  ): Promise<ReturnType<typeof RemoteSessionId>> {
+    const parsed = jsonObject(await this.call('session.switch', { sessionId, backend }), 'session.switch')
+    const created = RemoteSessionId(stringField(parsed, 'sessionId'))
+    await this.reload(created)
+    return created
+  }
+
+  /**
+   * Ask an Agent what models it offers.
+   *
+   * This may start that Agent on the remote the first time it is asked, so it is
+   * only called for an Agent the user has actually opened — never for every
+   * installed Agent at once. Resolves with an empty list rather than throwing
+   * when the Agent is unavailable, so one unreachable Agent cannot empty the
+   * whole picker.
+   *
+   * @param projectId - project whose host (and working directory) to ask on.
+   * @param backend - Agent to ask.
+   */
+  async loadCatalog(
+    projectId: ReturnType<typeof RemoteProjectId>,
+    backend: RemoteAgentBackend,
+  ): Promise<readonly RemoteSessionConfigOption[]> {
+    try {
+      const result = jsonObject(await this.call('session.catalog', { projectId, backend }), 'session.catalog')
+      return parseConfigOptions(result['configOptions']) ?? []
+    } catch (error) {
+      process.stderr.write(`threadharbor-client: catalog probe for ${backend} failed: ${String(error)}\n`)
+      return []
+    }
+  }
+
   /** Answer one backend-native permission request.
    * @param sessionId - session that emitted the request.
    * @param requestId - backend-native request id.
@@ -2165,7 +2268,7 @@ export class RemoteAgentStore {
   private runAutoApprove(): void {
     if (this.disposed) return
     const { state } = this.snapshot
-    const scan = scanAutoApprovals(state.sessions, state.transcript, (session) => {
+    const scan = scanAutoApprovals(state.sessions, (candidate) => this.getSessionTranscript(candidate.sessionId), (session) => {
       const hostId = state.projects.find(project => project.projectId === session.projectId)?.hostId
       return this.autoApproveResolver?.(session, hostId)
     })
@@ -2336,19 +2439,51 @@ export class RemoteAgentStore {
     sessionId: ReturnType<typeof RemoteSessionId>,
     work: number,
   ): Promise<void> {
-    while (!this.disposed && work === this.transcriptWork && this.snapshot.currentSessionId === sessionId) {
-      const oldest = this.snapshot.state.transcript
-        .filter(entry => entry.sessionId === sessionId)
-        .at(0)?.seq
-      if (oldest === undefined || oldest <= 0) return
-      const page = await this.readTranscriptPage({
-        sessionId, beforeSeq: oldest, limit: REMOTE_TRANSCRIPT_PAGE_SIZE,
-      })
-      if (page === undefined || this.disposed || work !== this.transcriptWork) return
-      if (page.entries.length === 0) return
-      this.applyTranscriptEntries(sessionId, page.entries)
-      if (!page.hasMore) return
+    // Backfill pages pull older history (beforeSeq). The cursor for each page
+    // derives from the bucket's current oldest seq, so pages overlap heavily;
+    // launch up to CONCURRENCY at once and let the bucket's merge+sort absorb
+    // them landing in any order. This turns the serial N×RTT backfill into
+    // roughly N/CONCURRENCY × RTT.
+    const CONCURRENCY = 4
+    const inFlight: Promise<void>[] = []
+    let hasMore = true
+    let nextCursor: number | undefined
+    const launch = (beforeSeq: number): void => {
+      nextCursor = beforeSeq - 1
+      const task = this.readTranscriptPage({ sessionId, beforeSeq, limit: REMOTE_TRANSCRIPT_PAGE_SIZE })
+        .then(page => {
+          if (page === undefined || this.disposed || work !== this.transcriptWork) return
+          if (page.entries.length === 0) { hasMore = false; return }
+          this.applyTranscriptEntries(sessionId, page.entries)
+          if (!page.hasMore) hasMore = false
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          const index = inFlight.indexOf(task)
+          if (index >= 0) inFlight.splice(index, 1)
+        })
+      inFlight.push(task)
     }
+    while (!this.disposed && work === this.transcriptWork && this.snapshot.currentSessionId === sessionId) {
+      const oldest = this.bucketFirstSeq(sessionId)
+      if (oldest === undefined || oldest <= 0) break
+      if (nextCursor === undefined) nextCursor = oldest
+      while (hasMore && inFlight.length < CONCURRENCY && !this.disposed && nextCursor > 0) {
+        launch(nextCursor)
+      }
+      if (inFlight.length === 0) break
+      // Wait for at least one page to land before the next sweep.
+      // eslint-disable-next-line no-await-in-loop
+      await Promise.race(inFlight)
+    }
+    if (inFlight.length > 0) await Promise.all(inFlight).catch(() => undefined)
+  }
+
+  /** Lowest seq present in one session's bucket, or undefined when it has none. */
+  private bucketFirstSeq(sessionId: ReturnType<typeof RemoteSessionId>): number | undefined {
+    const bucket = this.transcriptBuckets.get(sessionId)
+    if (bucket === undefined || bucket.length === 0) return undefined
+    return bucket[0]?.seq
   }
 
   private queueBackgroundTranscripts(): void {
@@ -2421,9 +2556,40 @@ export class RemoteAgentStore {
       return session.sessionId === this.snapshot.currentSessionId
         || this.snapshot.promptProgress?.sessionId === session.sessionId
     })
+    // A catalog reload is the one moment the gateway can wholesale replace
+    // a session's rows (archive/restore, a reopened hold with a shifted
+    // journal). Reconcile buckets to the authoritative projection first, so
+    // the state assembled below always carries fresh rows.
+    const listed = new Set<string>(projection.sessions.map(session => session.sessionId))
+    let bucketsChanged = false
+    const projectionBySession = new Map<string, RemoteTranscriptEntry[]>()
+    for (const entry of projection.transcript) {
+      const rows = projectionBySession.get(entry.sessionId)
+      if (rows === undefined) projectionBySession.set(entry.sessionId, [entry])
+      else rows.push(entry)
+    }
+    for (const [rawId, rows] of projectionBySession) {
+      const sessionId = RemoteSessionId(rawId)
+      const sorted = [...rows].sort((left, right) => left.seq - right.seq)
+      const current = this.transcriptBuckets.get(sessionId)
+      if (current === undefined || current.length !== sorted.length
+        || current.some((entry, index) => entry !== sorted[index])) {
+        this.transcriptBuckets.set(sessionId, sorted)
+        bucketsChanged = true
+      }
+    }
+    for (const sessionId of [...this.transcriptBuckets.keys()]) {
+      if (listed.has(sessionId)) continue
+      // Preserve rows for in-flight sessions (see `inFlight` above): the
+      // projection may not list a session whose turn is still live.
+      if (inFlight.some(session => session.sessionId === sessionId)) continue
+      this.transcriptBuckets.delete(sessionId)
+      bucketsChanged = true
+    }
+    if (bucketsChanged) this.invalidateTranscriptFlat()
     const state = {
       ...projection,
-      transcript: this.snapshot.state.transcript,
+      transcript: this.flatTranscript(),
       // Prepend in-flight sessions so a session the server has not yet
       // committed (rare, but possible if `session.start` and the resulting
       // catalog reload race) still shows up at the top of the project list

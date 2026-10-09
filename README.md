@@ -63,7 +63,7 @@ cordis.patch.yml       安装到 DSH Web profile 的标准 bundle patch
 reference/             被 Git 忽略的 DeepSeek Harness 参考源码
 ```
 
-设计说明见 [docs/architecture.zh.md](docs/architecture.zh.md)，其他 Web 插件的实现调研见 [docs/dsh-web-plugin-research.zh.md](docs/dsh-web-plugin-research.zh.md)，AgentHarbor/SessionPort 对比见 [docs/landscape.zh.md](docs/landscape.zh.md)。
+设计说明见 [docs/architecture.zh.md](docs/architecture.zh.md)，其他 Web 插件的实现调研见 [docs/dsh-web-plugin-research.zh.md](docs/dsh-web-plugin-research.zh.md)，AgentHarbor/SessionPort 对比见 [docs/landscape.zh.md](docs/landscape.zh.md)。手机端（Android）接入方案尚未实现，见 [docs/mobile-client.zh.md](docs/mobile-client.zh.md)。
 
 ## 开发检查
 

@@ -8,6 +8,7 @@
 /.pnpm-store/
 /.sessions/
 /.worktrees/
+/.superpowers/
 /undefined/
 /scripts/dsh-wrapper.sh
 *.log

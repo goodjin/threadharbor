@@ -743,4 +743,88 @@ describe('RemoteAgentHostd session control', () => {
     // the agents do.
     expect(await waitForPidExit(backendPid)).toBe(true)
   })
+  it('hands a new session the conversation it was given, and says it was moved rather than lost', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'threadharbor-hostd-seed-start-'))
+    roots.push(root)
+    const project = await mkdtemp(join(tmpdir(), 'threadharbor-hostd-project-'))
+    const promptLog = join(root, 'prompts.jsonl')
+    const previousPromptLog = process.env['FAKE_ACP_PROMPT_LOG']
+    process.env['FAKE_ACP_PROMPT_LOG'] = promptLog
+    const hostd = new RemoteAgentHostd(hostdOptions(root, {
+      codexArgs: [fakeAgent, 'codex', pidFile(root, 'codex')],
+    }))
+    await hostd.start()
+    try {
+      // A brand-new session has no prior Agent state to recover, so the only
+      // route the conversation has is the seed — if start ignored it, the model
+      // would answer as if nothing had ever been said.
+      const started = await hostd.dispatch(request('session.start', {
+        sessionId: 'moved-session',
+        backend: 'codex',
+        cwd: project,
+        context: { transcript: '用户：先把登录页改完\n\n助手：已经改完了。', clip: false },
+      })) as unknown as { contextSource: string; nativeSessionId: string }
+      expect(started.contextSource).toBe('reconstructed')
+
+      await new Promise(resolveWait => setTimeout(resolveWait, 400))
+      const asked = readFileSync(promptLog, 'utf8')
+      expect(asked).toContain('先把登录页改完')
+      expect(asked).toContain('已经改完了')
+      // It must not claim its own memory was lost: the user moved the
+      // conversation on purpose and the model should keep going, not apologise.
+      expect(asked).toContain('转移')
+      expect(asked).not.toContain('无法恢复')
+    } finally {
+      await hostd.close()
+      await killBackends(root)
+      if (previousPromptLog === undefined) delete process.env['FAKE_ACP_PROMPT_LOG']
+      else process.env['FAKE_ACP_PROMPT_LOG'] = previousPromptLog
+    }
+  })
+
+  it('passes an unclipped conversation to a new session when the caller asks it to', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'threadharbor-hostd-seed-clip-'))
+    roots.push(root)
+    const project = await mkdtemp(join(tmpdir(), 'threadharbor-hostd-project-'))
+    const promptLog = join(root, 'prompts.jsonl')
+    const previousPromptLog = process.env['FAKE_ACP_PROMPT_LOG']
+    process.env['FAKE_ACP_PROMPT_LOG'] = promptLog
+    const hostd = new RemoteAgentHostd(hostdOptions(root, {
+      codexArgs: [fakeAgent, 'codex', pidFile(root, 'codex')],
+    }))
+    await hostd.start()
+    try {
+      // A conversation well past the 80k seed budget, opened with a marker at the
+      // very front. If hostd clipped, the marker — the oldest turn, the one a
+      // user cannot read anywhere else — would be gone from what the Agent got.
+      const marker = 'EARLIEST-TURN-KEEP-ME'
+      const long = `${marker}${'长'.repeat(90_000)}`
+      await hostd.dispatch(request('session.start', {
+        sessionId: 'whole-session',
+        backend: 'codex',
+        cwd: project,
+        context: { transcript: long, clip: false },
+      }))
+      await new Promise(resolveWait => setTimeout(resolveWait, 400))
+      expect(readFileSync(promptLog, 'utf8')).toContain(marker)
+
+      // The same text without `clip: false` is the degraded-reopen case, and
+      // there the clip is deliberate: the oldest end is what goes.
+      await hostd.dispatch(request('session.start', {
+        sessionId: 'clipped-session',
+        backend: 'codex',
+        cwd: project,
+        context: { transcript: long },
+      }))
+      await new Promise(resolveWait => setTimeout(resolveWait, 400))
+      const all = readFileSync(promptLog, 'utf8')
+      const secondHalf = all.slice(all.indexOf(marker) + marker.length)
+      expect(secondHalf).not.toContain(marker)
+    } finally {
+      await hostd.close()
+      await killBackends(root)
+      if (previousPromptLog === undefined) delete process.env['FAKE_ACP_PROMPT_LOG']
+      else process.env['FAKE_ACP_PROMPT_LOG'] = previousPromptLog
+    }
+  })
 })

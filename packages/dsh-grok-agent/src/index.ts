@@ -1,0 +1,6 @@
+export { GrokAcpClient } from './acp-client.ts'
+export type { AcpFrame, AcpSession } from './acp-client.ts'
+export { projectTurn, projectUserMessage } from './projection.ts'
+export type { ProjectionEvent } from './projection.ts'
+export { GrokAcpAgent, GrokInbox } from './grok-acp-agent.ts'
+export type { GrokAgentOptions, GrokAgentStarted } from './grok-acp-agent.ts'

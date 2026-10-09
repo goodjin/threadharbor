@@ -297,6 +297,21 @@ export interface RemoteSessionView {
    *  later `config_option_update` / `current_mode_update` frames. Absent until
    *  the backend has announced them; the composer falls back to static choices. */
   readonly configOptions?: readonly RemoteSessionConfigOption[]
+  /**
+   * A session that exists only to ask an Agent what it offers.
+   *
+   * An Agent publishes its model list at `session/new` and pushes changes to
+   * whoever is listening, so reading another Agent's models means opening a
+   * throwaway conversation with it and leaving it open. That is a real session
+   * on the remote, and this flag is what keeps it from being mistaken for one:
+   * it is hidden from every browser projection, never appears in a project, and
+   * is reclaimed once the user stops looking. It carries no transcript — nothing
+   * is ever sent to it.
+   */
+  readonly probe?: boolean
+  /** When this probe session was last asked for its catalog; drives reclaiming
+   *  the Agent connection once the user has moved on. */
+  readonly probeUsedAt?: string
   /** Backend → user requests (permission prompts, AskUserQuestion elicitations)
    *  the gateway has projected but nobody has answered yet. While any is
    *  outstanding the turn stays `waiting-permission` even when later frames
@@ -480,6 +495,20 @@ export interface RemoteSessionContextSeed {
   readonly transcript: string
   /** True when the transcript was cut down to fit the context budget. */
   readonly truncated?: boolean
+  /**
+   * Set `false` to hand the transcript over whole.
+   *
+   * The default clips the oldest end to the seed budget, which is what a
+   * *degraded* reopen wants: the Agent already lost its own memory, so the text
+   * is a best-effort stand-in and the budget is the scarce resource. An
+   * explicit agent switch is a different promise — the user is moving the
+   * conversation to a different Agent, and silently dropping the early turns
+   * would lose exactly the part they cannot read anywhere else. There the
+   * caller sends everything and lets the target Agent be the one to refuse a
+   * context it cannot hold, so the failure is honest and lands on their own
+   * model choice rather than hidden in a clip.
+   */
+  readonly clip?: boolean
 }
 
 /** Bounded directory entry returned by hostd. */
@@ -530,6 +559,8 @@ export type RemoteGatewayMethod =
   | 'project.unhide'
   | 'project.delete'
   | 'session.start'
+  | 'session.switch'
+  | 'session.catalog'
   | 'session.attach'
   | 'session.restart'
   | 'session.rename'

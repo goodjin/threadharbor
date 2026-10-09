@@ -1,11 +1,11 @@
 /** Active remote transcript, permissions, prompt, and cancel controls. */
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
 import {
   Button, DisclosureRow, IconAgentPresetOutline16, IconCheckOutline16,
   IconChevronDownOutline14, IconChevronRightOutline14, IconCodeOutline16, IconCopyOutline16,
-  IconDataOutline16, IconEditOutline16, IconEnhanceOutline16, IconFolderClose16,
+  IconDataOutline16, IconEditOutline16, IconFolderClose16,
   IconGlobeOutline14, IconLinkOutline16, IconListPenOutline16, IconRefreshOutline16,
   IconSearchOutline16, IconSendOutline16, IconSkillOutline16, IconStopFill16, IconThinkOutline16,
   IconTrashOutline16, MarkdownText, MessageText, StateDot, writeClipboard,
@@ -30,8 +30,9 @@ import {
   conversationPresentation,
   isNearScrollBottom, parseChoicePrompt, parsePlanItems, pendingPermissionEntry,
   permissionRequestId, preferredProjectBackend, shouldPinPendingPermission,
-  toolDisclosurePresentation, toolGlyphKind,
-  type ChoicePrompt, type ConversationStage, type RemoteTranscriptNode, type ToolGlyphKind,
+  toolDisclosurePresentation, toolGlyphKind, transcriptBuildCarry,
+  type ChoicePrompt, type ConversationStage, type NodeBuildCarry,
+  type RemoteTranscriptNode, type ToolGlyphKind,
 } from './conversation-model.ts'
 import css from './RemoteSurface.module.css'
 import {
@@ -42,7 +43,12 @@ import {
 } from './display-preferences.ts'
 import { TranscriptGapBanner } from './transcript-gap-banner.tsx'
 import { ConversationStatsLine } from './conversation-stats-line.tsx'
+import { AgentModelPicker, type PickerAgent, type PickerModel } from './agent-model-picker.tsx'
 import { readComposerDrafts, withComposerDraft, writeComposerDrafts, type ComposerDrafts } from './composer-drafts.ts'
+import { useTranscriptWindow, VIRTUALIZE_TRANSCRIPT_THRESHOLD, type TranscriptWindow } from './transcript-window.ts'
+
+/** Shared empty result so the "no session selected" path never allocates. */
+const EMPTY_SESSION_ENTRIES: readonly RemoteTranscriptEntry[] = []
 
 /** Props injected by the conversation slot registration. */
 export interface RemoteConversationInjected {
@@ -345,7 +351,7 @@ function SessionIdChip({ sessionId }: { sessionId: string }) {
   )
 }
 
-function TranscriptRow({ node, active, onPermission, onResend, resendDisabled = false, permissionPending = false, permissionAnswered = false }: {
+function TranscriptRowInner({ node, active, onPermission, onResend, resendDisabled = false, permissionPending = false, permissionAnswered = false }: {
   node: RemoteTranscriptNode
   active: boolean
   onPermission: (requestId: string, outcome: JsonValue) => void
@@ -419,6 +425,25 @@ function TranscriptRow({ node, active, onPermission, onResend, resendDisabled = 
     )
   }
   return <div className={css.statusRow}>{entry.text}</div>
+}
+
+/**
+ * Memoized transcript row. Streaming text arrives as a brand-new merged
+ * string object each frame, so the growing row re-renders while every
+ * settled row keeps its previous element and React skips it entirely.
+ *
+ * Created lazily so the module evaluates under the artifact smoke test's
+ * bare `require` shim (which returns `{}` for `react`); the factory only
+ * calls `memo` once a real component tree is being built.
+ */
+type TranscriptRowProps = Parameters<typeof TranscriptRowInner>[0]
+let transcriptRowComponent: ((props: TranscriptRowProps) => ReactNode) | undefined
+function TranscriptRow(props: TranscriptRowProps): ReactNode {
+  if (transcriptRowComponent === undefined) {
+    transcriptRowComponent = memo(TranscriptRowInner)
+  }
+  const Row = transcriptRowComponent
+  return <Row {...props} />
 }
 
 function ConversationActivity({ stage, action }: {
@@ -1334,7 +1359,7 @@ function resolveSessionPreferences(
   return normalizeSessionPreferences(backend, fromSession ?? fromHost ?? defaultSessionPreferences(backend))
 }
 
-function SessionControls({ backend, preferences, disabled, onChange, configOptions, onConfigure }: {
+function SessionControls({ backend, preferences, disabled, onChange, configOptions, onConfigure, modelControl }: {
   backend: RemoteAgentBackend
   preferences: SessionPreferences
   disabled?: boolean
@@ -1342,47 +1367,51 @@ function SessionControls({ backend, preferences, disabled, onChange, configOptio
   /** Settings the running agent announced; when present they replace the static specs. */
   configOptions?: readonly RemoteSessionConfigOption[] | undefined
   onConfigure?: (configId: string, value: string) => void
+  /** The Agent + model picker, rendered in place of the model select. */
+  modelControl: ReactNode
 }) {
   if (configOptions !== undefined && configOptions.length > 0 && onConfigure !== undefined) {
     return (
-      <div className={css.sessionControls} aria-label={`${backend} 会话选项`}>
-        <span className={css.sessionControlsIcon} title="会话选项（由远程 Agent 提供）"><IconEnhanceOutline16 /></span>
-        {configOptions.map(option => (
-          <label key={option.id} className={css.sessionControl} title={option.description ?? option.name}>
-            <span>{configOptionLabel(option)}</span>
-            <select
-              value={option.currentValue}
-              disabled={disabled}
-              onChange={(event) => { onConfigure(option.id, event.target.value) }}
-            >
-              {option.options.map(choice => (
-                <option key={choice.value} value={choice.value} title={choice.description}>
-                  {configChoiceLabel(option, choice.value, choice.name)}
-                </option>
-              ))}
-            </select>
-          </label>
-        ))}
+      <div className={css.composerToolbar} aria-label={`${backend} 会话选项`}>
+        {configOptions.map(option => option.id === 'model'
+          ? modelControl
+          : (
+            <label key={option.id} className={css.sessionControl} title={option.description ?? option.name}>
+              <span>{configOptionLabel(option)}</span>
+              <select
+                value={option.currentValue}
+                disabled={disabled}
+                onChange={(event) => { onConfigure(option.id, event.target.value) }}
+              >
+                {option.options.map(choice => (
+                  <option key={choice.value} value={choice.value} title={choice.description}>
+                    {configChoiceLabel(option, choice.value, choice.name)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ))}
       </div>
     )
   }
   const specs = SESSION_OPTION_SPECS[backend]
   if (specs.length === 0) return null
   return (
-    <div className={css.sessionControls} aria-label={`${backend} 会话选项`}>
-      <span className={css.sessionControlsIcon} title="会话选项"><IconEnhanceOutline16 /></span>
-      {specs.map(spec => (
-        <label key={spec.key} className={css.sessionControl} title={spec.title}>
-          <span>{spec.label}</span>
-          <select
-            value={preferences[spec.key]}
-            disabled={disabled}
-            onChange={(event) => { onChange({ ...preferences, [spec.key]: event.target.value }) }}
-          >
-            {spec.options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
-          </select>
-        </label>
-      ))}
+    <div className={css.composerToolbar} aria-label={`${backend} 会话选项`}>
+      {specs.map(spec => spec.key === 'model'
+        ? modelControl
+        : (
+          <label key={spec.key} className={css.sessionControl} title={spec.title}>
+            <span>{spec.label}</span>
+            <select
+              value={preferences[spec.key]}
+              disabled={disabled}
+              onChange={(event) => { onChange({ ...preferences, [spec.key]: event.target.value }) }}
+            >
+              {spec.options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select>
+          </label>
+        ))}
     </div>
   )
 }
@@ -2298,11 +2327,20 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
   }
   const sessionProject = snapshot.state.projects.find(candidate => candidate.projectId === session?.projectId)
   const sessionHost = snapshot.state.hosts.find(candidate => candidate.hostId === sessionProject?.hostId)
-  const sessionEntries = useMemo(
-    () => snapshot.state.transcript.filter(entry => entry.sessionId === session?.sessionId),
-    [snapshot.state.transcript, session?.sessionId],
-  )
-  const transcript = useMemo(() => buildTranscriptNodes(sessionEntries), [sessionEntries])
+  // The store keeps one bucket per session; reading the current session's
+  // bucket directly avoids walking every session's entries on each frame.
+  // The node list is carried across renders so a streamed delta only rebuilds
+  // the tail row; the settled prefix keeps its React element identity and the
+  // row memo skips it.
+  const nodeCarryRef = useRef<NodeBuildCarry>()
+  const sessionEntries = session === undefined
+    ? EMPTY_SESSION_ENTRIES
+    : store.getSessionTranscript(session.sessionId)
+  const transcript = useMemo(() => {
+    const result = buildTranscriptNodes(sessionEntries, nodeCarryRef.current)
+    nodeCarryRef.current = transcriptBuildCarry(result)
+    return result
+  }, [sessionEntries])
   const activityClock = useActivityClock(
     snapshot.promptProgress !== undefined
     || session?.turnState === 'running'
@@ -2362,8 +2400,32 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
       : `${lastNode.id}:${lastNode.entry.text.length}`
   const followSignature = `${nodeSignature}:${stage?.kind ?? 'none'}:${pinPendingPermission ? pendingPermission?.transcriptId ?? 'pin' : 'none'}`
   const pendingRestoreRef = useRef<TranscriptScrollMemory | undefined>(undefined)
+  const windowRef = useRef<TranscriptWindow>()
+  // Dynamic window: only transcript rows near the viewport mount; row heights
+  // are measured lazily. `anchorTo: 'end'` keeps a follow-bottom reader pinned
+  // while rows append, so the old ResizeObserver scroll-to-bottom below only
+  // needs to drive the non-virtualized (short) list.
+  const windowed = useTranscriptWindow({
+    getScrollElement: () => scrollRef.current,
+    count: transcript.length,
+    getItemKey: (index: number) => transcript[index]?.id ?? `row:${index}`,
+    estimateSize: (index: number): number => {
+      const node = transcript[index]
+      if (node === undefined) return 120
+      if (node.kind === 'tool') return 160
+      const text = node.entry.text
+      if (text === '') return 90
+      // ~40px per rendered text line at the transcript column's 760px measure.
+      return Math.min(600, 72 + Math.ceil(text.length / 48) * 24)
+    },
+  })
+  windowRef.current = windowed
   const scrollToBottom = (element: HTMLDivElement): void => {
-    element.scrollTop = element.scrollHeight
+    if (windowed.virtualized) {
+      windowed.scrollToBottom()
+    } else {
+      element.scrollTop = element.scrollHeight
+    }
     observedTopRef.current = element.scrollTop
     followBottomRef.current = true
     setShowJumpToLatest(false)
@@ -2387,14 +2449,13 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
     }
     if (pendingRestoreRef.current !== undefined) {
       const memory = pendingRestoreRef.current
+      // The virtualized list reports the full list height through the spacer,
+      // so `scrollHeight` and the virtualizer agree on what "bottom" is.
       const floor = Math.max(0, element.scrollHeight - element.clientHeight)
       const ready = memory.followBottom || floor >= memory.scrollTop
       if (ready) {
         if (memory.followBottom) {
-          element.scrollTop = element.scrollHeight
-          observedTopRef.current = element.scrollTop
-          followBottomRef.current = true
-          setShowJumpToLatest(false)
+          scrollToBottom(element)
         } else {
           element.scrollTop = memory.scrollTop
           observedTopRef.current = element.scrollTop
@@ -2417,12 +2478,16 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
     const column = transcriptColumnRef.current
     const element = scrollRef.current
     if (column === null || element === null || typeof ResizeObserver === 'undefined') return
+    // The virtualized list manages its own follow-bottom pinning (see
+    // `anchorTo: 'end'` in transcript-window.ts); this observer only drives the
+    // short, non-virtualized list where rows resize as markdown streams in.
+    if (windowed.virtualized) return
     const observer = new ResizeObserver(() => {
       if (followBottomRef.current) scrollToBottom(element)
     })
     observer.observe(column)
     return () => { observer.disconnect() }
-  }, [session?.sessionId])
+  }, [session?.sessionId, windowed.virtualized])
   useEffect(() => () => {
     if (persistTimerRef.current !== undefined) {
       window.clearTimeout(persistTimerRef.current)
@@ -2616,6 +2681,53 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
       .catch(() => undefined)
       .finally(() => { setSessionAction(current => current === action ? undefined : current) })
   }
+
+  /** Models the running Agent has already published — no probe needed for these. */
+  const currentAgentModels = useMemo<readonly PickerModel[]>(() => {
+    const advertised = sessionConfigOptions?.find(option => option.id === 'model')
+    if (advertised !== undefined) {
+      return advertised.options.map(choice => ({
+        value: choice.value,
+        name: choice.name,
+        description: choice.description,
+      }))
+    }
+    const spec = SESSION_OPTION_SPECS[session.backend].find(candidate => candidate.key === 'model')
+    return spec?.options.map(option => ({ value: option.value, name: option.label })) ?? []
+  }, [session.backend, sessionConfigOptions])
+
+  /** Every Agent on this host, and whether it is actually usable. */
+  const hostAgents = useMemo<readonly PickerAgent[]>(() => (sessionHost?.inventory?.backends ?? []).map(entry => ({
+    backend: entry.backend,
+    ready: isRemoteBackendSessionReady(entry),
+    ...(isRemoteBackendSessionReady(entry) ? {} : { detail: entry.detail ?? (entry.installed ? '未登录' : '未安装') }),
+  })), [sessionHost])
+
+  /**
+   * Read another Agent's models.
+   *
+   * Only reached when the user opens that Agent in the picker, because the call
+   * can start that Agent on the remote. Resolving empty is a real answer ("it
+   * published nothing"), and an unreachable Agent resolves empty too rather than
+   * throwing, so one broken Agent cannot empty the whole menu.
+   */
+  const loadAgentModels = useCallback(async (backend: RemoteAgentBackend): Promise<readonly PickerModel[]> => {
+    if (sessionProject === undefined) return []
+    const options = await store.loadCatalog(sessionProject.projectId, backend)
+    const model = options.find(option => option.id === 'model')
+    if (model === undefined) return []
+    return model.options.map(choice => ({ value: choice.value, name: choice.name, description: choice.description }))
+  }, [sessionProject, store])
+
+  /** Continue this conversation on another Agent, carrying the history over. */
+  const switchAgent = (backend: RemoteAgentBackend): void => {
+    if (sessionAction !== undefined || backend === session.backend) return
+    const action = `switch:${session.sessionId}:${backend}`
+    setSessionAction(action)
+    void store.switchAgent(session.sessionId, backend)
+      .catch(() => undefined)
+      .finally(() => { setSessionAction(current => current === action ? undefined : current) })
+  }
   /** A choice card stays clickable only while it is the request the Agent is
    *  waiting on and this browser has not answered it yet. Everything else
    *  (earlier requests, one already submitted, a turn that moved on) is a
@@ -2771,24 +2883,40 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
             }, 200)
           }}
         >
-          <div ref={transcriptColumnRef} className={css.transcriptColumn}>
+          <div
+            ref={transcriptColumnRef}
+            className={css.transcriptColumn}
+            style={windowed.virtualized ? { position: 'relative', height: `${windowed.totalSize}px` } : undefined}
+          >
             {session.droppedThrough !== undefined && session.droppedThrough >= 0
               ? <TranscriptGapBanner session={session} />
               : null}
-            {transcript.map((node, index) => (
-              <TranscriptRow
-                key={node.id}
-                node={node}
-                active={index === transcript.length - 1 && session.turnState === 'running'}
-                permissionPending={node.kind === 'entry' && permissionRequestId(node.entry) !== undefined
-                  && sessionAction === `permission:${session.sessionId}:${permissionRequestId(node.entry)}`}
-                permissionAnswered={node.kind === 'entry' && node.entry.role === 'permission'
-                  && isPermissionAnswered(node.entry)}
-                resendDisabled={actions?.canResend !== true || sessionAction !== undefined}
-                onPermission={submitPermission}
-                onResend={resend}
-              />
-            ))}
+            {windowed.rows.map((row) => {
+              const node = transcript[row.index]
+              if (node === undefined) return null
+              return (
+                <div
+                  key={row.key}
+                  ref={windowed.measureRef}
+                  data-index={row.index}
+                  style={windowed.virtualized
+                    ? { position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${row.start}px)` }
+                    : undefined}
+                >
+                  <TranscriptRow
+                    node={node}
+                    active={row.index === transcript.length - 1 && session.turnState === 'running'}
+                    permissionPending={node.kind === 'entry' && permissionRequestId(node.entry) !== undefined
+                      && sessionAction === `permission:${session.sessionId}:${permissionRequestId(node.entry)}`}
+                    permissionAnswered={node.kind === 'entry' && node.entry.role === 'permission'
+                      && isPermissionAnswered(node.entry)}
+                    resendDisabled={actions?.canResend !== true || sessionAction !== undefined}
+                    onPermission={submitPermission}
+                    onResend={resend}
+                  />
+                </div>
+              )
+            })}
             {snapshot.queuedPrompt !== undefined && snapshot.queuedPrompt.sessionId === session.sessionId && (
               <article className={`${css.userTurn} ${css.queuedTurn}`} aria-label="排队中的消息">
                 <div className={`${css.userBubble} ${css.queuedBubble}`}>
@@ -2868,16 +2996,6 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
       <div className={css.composerDock}>
         <div className={css.composer}>
           {snapshot.error !== undefined && <div className={css.composerError}>{snapshot.error}</div>}
-          {preferences !== undefined && session.parentSessionId === undefined && (
-            <SessionControls
-              backend={session.backend}
-              preferences={preferences}
-              disabled={actions?.canChangePreferences !== true || sessionAction !== undefined}
-              onChange={setPreferences}
-              configOptions={session.configOptions}
-              onConfigure={configure}
-            />
-          )}
           <textarea
             aria-label="发送给远程 Agent"
             value={draft}
@@ -2892,7 +3010,29 @@ export function RemoteConversation({ store }: RemoteConversationProps) {
             }}
           />
           <div className={css.composerActions}>
-            <span>{session.parentSessionId === undefined ? `${session.backend} · Enter 发送，Shift+Enter 换行` : '子会话由远端 Agent 管理'}</span>
+            {preferences !== undefined && session.parentSessionId === undefined && (
+              <SessionControls
+                backend={session.backend}
+                preferences={preferences}
+                disabled={actions?.canChangePreferences !== true || sessionAction !== undefined}
+                onChange={setPreferences}
+                configOptions={session.configOptions}
+                onConfigure={configure}
+                modelControl={
+                  <AgentModelPicker
+                    currentBackend={session.backend}
+                    currentModel={preferences.model}
+                    currentModels={currentAgentModels}
+                    agents={hostAgents}
+                    loadModels={loadAgentModels}
+                    onSwitchAgent={switchAgent}
+                    onSelectModel={(value) => { configure('model', value) }}
+                    disabled={actions?.canChangePreferences !== true || sessionAction !== undefined}
+                  />
+                }
+              />
+            )}
+            <span className={css.composerHint}>{session.parentSessionId === undefined ? `${session.backend} · Enter 发送，Shift+Enter 换行` : '子会话由远端 Agent 管理'}</span>
             {actions?.canStop === true && (
               <Button size="sm" variant="toolbar" icon={<IconStopFill16 />} disabled={sessionAction !== undefined} onClick={stop}>{sessionAction === `stop:${session.sessionId}` ? '停止中…' : '停止'}</Button>
             )}

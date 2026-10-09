@@ -476,8 +476,10 @@ export function isNearScrollBottom(metrics: ScrollMetrics, threshold = 48): bool
  */
 export function mergeTranscriptEntries(
   entries: readonly RemoteTranscriptEntry[],
+  carryTail?: RemoteTranscriptEntry,
 ): readonly RemoteTranscriptEntry[] {
   const merged: RemoteTranscriptEntry[] = []
+  if (carryTail !== undefined) merged.push(carryTail)
   for (const entry of entries) {
     const previous = merged.at(-1)
     if (entry.role === 'assistant'
@@ -509,11 +511,37 @@ export type RemoteTranscriptNode =
  * Assemble the flat remote projection into stable visual nodes.
  * The gateway deliberately preserves backend-native frames; this browser layer only
  * correlates consecutive tool rows and streamed assistant deltas for presentation.
+ *
+ * Incremental form: when the previous pass left a carry and the new batch is a
+ * pure append, the settled node prefix is reused verbatim and only the tail
+ * (the streaming row) is rebuilt — React's row memo then skips every settled
+ * row. The merged assistant string still grows O(n²) per turn because each
+ * delta re-concatenates the accumulated text; that is bounded by the gateway's
+ * per-session transcript cap and is not worth a rope at this scale.
  */
 export function buildTranscriptNodes(
   entries: readonly RemoteTranscriptEntry[],
+  carry?: NodeBuildCarry,
 ): readonly RemoteTranscriptNode[] {
-  const merged = mergeTranscriptEntries(entries)
+  const tail = carry?.mergedTail
+  if (carry !== undefined && tail !== undefined && entries.length > 0) {
+    const previous = entries[0]
+    // Append-only streaming: extend the last merged row and rebuild only the
+    // tail node. Everything before it is untouched.
+    if (previous !== undefined && tail.role === 'assistant' && previous.role === 'assistant' && tail.kind === previous.kind) {
+      const mergedTail: RemoteTranscriptEntry = { ...tail, text: tail.text + previous.text }
+      const rest = entries.length === 1 ? [] : entries.slice(1)
+      const tailNode: RemoteTranscriptNode = { kind: 'entry', id: mergedTail.transcriptId, entry: mergedTail }
+      const prefix = carry.nodes.slice(0, -1)
+      if (rest.length === 0) return [...prefix, tailNode]
+      // A non-streaming row followed the deltas: rebuild from the new tail.
+      return buildFromMerged(mergeTranscriptEntries(rest, mergedTail))
+    }
+  }
+  return buildFromMerged(mergeTranscriptEntries(entries, tail))
+}
+
+function buildFromMerged(merged: readonly RemoteTranscriptEntry[]): readonly RemoteTranscriptNode[] {
   const nodes: RemoteTranscriptNode[] = []
   for (let index = 0; index < merged.length; index += 1) {
     const entry = merged[index]
@@ -539,6 +567,38 @@ export function buildTranscriptNodes(
     })
   }
   return nodes
+}
+
+/**
+ * What the previous `buildTranscriptNodes` call left at the boundary: the last
+ * merged entry (so the next append can extend it in place) and the last node
+ * (so settled nodes can be reused). Reset whenever the visible session
+ * changes.
+ */
+export interface NodeBuildCarry {
+  /** Last entry of the previous merge pass, or `undefined` when the transcript was empty. */
+  readonly mergedTail?: RemoteTranscriptEntry | undefined
+  /** Nodes produced by the previous build pass, so the settled prefix can be reused. */
+  readonly nodes: readonly RemoteTranscriptNode[]
+}
+
+/**
+ * Derive the carry for the next `buildTranscriptNodes` pass from the entries
+ * it just consumed and the nodes it produced. The conversation surface holds
+ * this between renders so a streamed delta only rebuilds the tail row.
+ */
+export function transcriptBuildCarry(
+  nodes: readonly RemoteTranscriptNode[],
+): NodeBuildCarry {
+  const tail = nodes.at(-1)
+  return {
+    mergedTail: tail === undefined
+      ? undefined
+      : tail.kind === 'tool'
+        ? tail.entries.at(-1)
+        : tail.entry,
+    nodes,
+  }
 }
 
 /** Whether the composer should answer permission grants without a click.

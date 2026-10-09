@@ -32,6 +32,7 @@ import {
   remoteAgentBackend,
   stringField,
   type JsonValue,
+  type RemoteAgentBackend,
   type RemoteAgentState,
   type RemoteControlRequest,
   type RemoteControlResponse,
@@ -45,6 +46,8 @@ import {
   type RemoteProjectView,
   type RemoteSessionAttachResult,
   type RemoteChannelState,
+  type RemoteSessionConfigOption,
+  type RemoteSessionContextSeed,
   type RemoteSessionStartStage,
   type RemoteSessionView,
   type RemoteSshConfig,
@@ -55,6 +58,7 @@ import {
 import { elicitationFreeTextField, projectNativeFrame, retainsNativeFrame } from './projection.ts'
 import { frameUsageReading, isRoundTerminalFrame, mergeUsage } from './run-usage.ts'
 import { applyConfigFrame, configSwitchRequest, withSwitchedValue } from './session-config.ts'
+import { probeIsExpired } from './catalog-probe.ts'
 import { remoteAgentDomainSpec, remoteAgentLegacyDomainSpec, type RemoteAgentCatalogState } from './spec.ts'
 import { TranscriptStore } from './transcript-store.ts'
 import { SshManager, type SshDeploymentProgress } from './ssh-manager.ts'
@@ -918,6 +922,18 @@ export class RemoteAgentGateway extends Service {
       }
       case 'session.start':
         return await this.startSessionAndWait(request.params) as unknown as JsonValue
+      case 'session.switch': {
+        // Not serialized on the source session: the whole point is to leave it
+        // alone, and queueing behind its turn state would stall a switch made
+        // from a busy conversation.
+        const switched = await this.switchAgent(request.params)
+        await switched.completion
+        return { sessionId: switched.sessionId, sourceSessionId: switched.sourceSessionId } as unknown as JsonValue
+      }
+      case 'session.catalog':
+        // Never queued on a session: a probe has none yet, and the point is to
+        // answer while the menu is still open.
+        return await this.probeCatalog(request.params) as unknown as JsonValue
       case 'session.attach':
         return await this.enqueueSession(stringField(request.params, 'sessionId'), () => this.attachSession(request.params, { recreateMissing: true })) as unknown as JsonValue
       case 'session.restart':
@@ -1691,6 +1707,11 @@ export class RemoteAgentGateway extends Service {
       turnState: 'idle',
       createdAt: now,
       updatedAt: now,
+      // A probe is a real session on the remote that must never read as one in
+      // the product, so the flag is set here — on the row itself — rather than
+      // remembered beside it. Everything downstream (visibility, reclaim) then
+      // keys off the same field the browser could see.
+      ...(params['probe'] === true ? { probe: true, probeUsedAt: now } : {}),
     }
     await tables.sessions.put(sessionId, session)
     await this.mutateGlobal((state) => ({ ...state, sessionIds: [...state.sessionIds, sessionId] }))
@@ -1700,6 +1721,10 @@ export class RemoteAgentGateway extends Service {
     const firstMessage = text !== undefined && clientId !== undefined && requestId !== undefined
       ? { clientId, requestId, text } as PendingFirstMessage
       : undefined
+    // A conversation handed to a brand-new session. Only `session.switch` sends
+    // this; a plain create has nothing to carry, and the degraded-reopen path
+    // builds its own seed after the resume has already failed.
+    const contextSeed = this.optionalContextSeed(params['context'])
     if (firstMessage !== undefined) {
       await this.appendTranscript(sessionId, {
         transcriptId: RemoteTranscriptId(`user:${sessionId}:${firstMessage.clientId}:${firstMessage.requestId}`),
@@ -1714,7 +1739,9 @@ export class RemoteAgentGateway extends Service {
     // before the remote hold exists. The hostd call runs after we return.
     const announced = this.withTranscriptHead(session)
     this.broadcastSessionView(announced)
-    const completion = this.completeStart(host, session, parent?.binding?.nativeSessionId, firstMessage)
+    const completion = this.completeStart(
+      host, session, parent?.binding?.nativeSessionId, firstMessage, contextSeed,
+    )
     // completion always settles: failure is already reflected in the catalog
     // (lost/failed row + session.progress) so a detached caller that fast
     // returned must not leave an unhandled rejection behind.
@@ -1727,6 +1754,161 @@ export class RemoteAgentGateway extends Service {
   /** In-flight session.start completions keyed by session id, so callers
    *  (especially tests) can block until the remote hold is up or has failed. */
   private readonly inflightStarts = new Map<ReturnType<typeof RemoteSessionId>, Promise<void>>()
+
+  /**
+   * Continue this conversation on a different Agent.
+   *
+   * An Agent cannot be swapped inside a live session — its backend is fixed for
+   * the whole life of that native handle, and both this gateway and hostd enforce
+   * that — so switching means a new session. What makes it a *switch* rather
+   * than a blank start is the conversation: this flattens the source transcript
+   * and hands it to the new Agent as its first turn, which is the only route a
+   * different Agent has (its own memory died with the old handle).
+   *
+   * The whole conversation goes over, unclipped. Clipping is the right call when
+   * an Agent has lost a session it should have been able to reopen, but here the
+   * user is choosing to move and the early turns are the part they cannot read
+   * anywhere else. If the target Agent cannot hold it, its own refusal is what
+   * surfaces — which lands on the user's model choice, where they can act on it,
+   * rather than a silent clip they would only discover by noticing something
+   * missing.
+   *
+   * The source session is left untouched: it is still there if the switch is the
+   * wrong call, and a failed switch costs nothing.
+   */
+  private async switchAgent(params: Record<string, JsonValue>): Promise<{
+    readonly sessionId: ReturnType<typeof RemoteSessionId>
+    readonly sourceSessionId: ReturnType<typeof RemoteSessionId>
+    readonly completion: Promise<void>
+  }> {
+    const source = this.requireSession(RemoteSessionId(stringField(params, 'sessionId')))
+    if (source.parentSessionId !== undefined) {
+      throw new Error('只有主会话可以切换 Agent；子会话由远端 Agent 自己管理')
+    }
+    const backend = remoteAgentBackend(params['backend'])
+    if (backend === source.backend) return { sessionId: source.sessionId, sourceSessionId: source.sessionId, completion: Promise.resolve() }
+    const seed = await this.conversationText(source.sessionId, { clip: false })
+    const started = await this.startSession({
+      projectId: source.projectId,
+      backend,
+      title: `切换自 ${source.backend} · ${source.title}`,
+      ...(seed === undefined ? {} : { context: { transcript: seed.text, clip: false } }),
+    } as Record<string, JsonValue>)
+    process.stderr.write(
+      `threadharbor-gateway: switched agent for session=${source.sessionId} `
+      + `${source.backend} -> ${backend} chars=${seed?.text.length ?? 0}\n`,
+    )
+    return { ...started, sourceSessionId: source.sessionId }
+  }
+
+  /**
+   * What models does another Agent offer?
+   *
+   * There is no protocol call for this. An Agent announces its models once, at
+   * `session/new`, and pushes a `config_option_update` to whoever is listening
+   * when that list changes — so the only way to read a *different* Agent's
+   * catalog is to be holding a session with it. That is what a probe is: a real,
+   * hidden session whose only job is to stay connected and keep its published
+   * catalog current.
+   *
+   * One probe per Agent per host, reused. Creating a second would double the
+   * remote's footprint for the same answer, and reusing is also what makes the
+   * list live: updates the Agent pushes land on the probe that is already open,
+   * so the menu reflects a changed catalog without asking again.
+   *
+   * Cost is deliberately not spread around. Probing an Agent that is not already
+   * running starts it, so this is only called for an Agent the user has actually
+   * opened in the menu — never speculatively for every installed Agent.
+   */
+  private async probeCatalog(params: Record<string, JsonValue>): Promise<{
+    readonly backend: RemoteAgentBackend
+    readonly configOptions: readonly RemoteSessionConfigOption[]
+    readonly channelState: RemoteChannelState
+  }> {
+    const backend = remoteAgentBackend(params['backend'])
+    const project = this.requireProject(RemoteProjectId(stringField(params, 'projectId')))
+    await this.reclaimIdleProbes()
+    const existing = this.findProbe(project.projectId, backend)
+    if (existing !== undefined) {
+      return await this.touchProbe(existing, backend)
+    }
+    const started = await this.startSession({
+      projectId: project.projectId,
+      backend,
+      title: 'catalog-probe',
+      probe: true,
+    } as Record<string, JsonValue>)
+    await started.completion
+    const probe = this.requireSession(started.sessionId)
+    return await this.touchProbe(probe, backend)
+  }
+
+  /** A live probe for this Agent on this project, if one is already open. */
+  private findProbe(
+    projectId: ReturnType<typeof RemoteProjectId>,
+    backend: RemoteAgentBackend,
+  ): RemoteSessionView | undefined {
+    for (const id of this.requireGlobal().get().sessionIds) {
+      const session = this.requireTables().sessions.get(id)
+      if (session === undefined || session.probe !== true) continue
+      if (session.projectId !== projectId || session.backend !== backend) continue
+      return session
+    }
+    return undefined
+  }
+
+  /**
+   * Stamp a probe as just-used and read its catalog.
+   *
+   * The timestamp is the whole reclaim mechanism: it is written on every lookup,
+   * so "the user stopped looking" is observable without a timer per probe.
+   */
+  private async touchProbe(
+    probe: RemoteSessionView,
+    backend: RemoteAgentBackend,
+  ): Promise<{ backend: RemoteAgentBackend; configOptions: readonly RemoteSessionConfigOption[]; channelState: RemoteChannelState }> {
+    const tables = this.requireTables()
+    const stamped: RemoteSessionView = { ...probe, probeUsedAt: new Date().toISOString() }
+    await tables.sessions.put(probe.sessionId, stamped)
+    return {
+      backend,
+      configOptions: stamped.configOptions ?? [],
+      channelState: stamped.channelState,
+    }
+  }
+
+  /**
+   * Close probes nobody has looked at for a while.
+   *
+   * An idle probe is holding an Agent process open on the remote for a menu the
+   * user has already walked away from. Sweeping on lookup rather than on a timer
+   * keeps this free of scheduling machinery, and it is harmless that reclaiming
+   * only happens on the next catalog read: a probe that is never looked at again
+   * is released by the next probe or switch, and a gateway restart reclaims them
+   * all anyway since nothing is bound.
+   */
+  private async reclaimIdleProbes(): Promise<void> {
+    const tables = this.requireTables()
+    const state = this.requireGlobal()
+    const now = Date.now()
+    const expired: RemoteSessionView[] = []
+    for (const id of state.get().sessionIds) {
+      const session = tables.sessions.get(id)
+      if (session?.probe !== true) continue
+      const usedAt = session.probeUsedAt === undefined ? session.updatedAt : session.probeUsedAt
+      if (probeIsExpired(usedAt, now)) expired.push(session)
+    }
+    if (expired.length === 0) return
+    const releases = await this.deleteSessionRecords(expired.map(session => session.sessionId))
+    await this.releaseHostdHolds(releases)
+    await this.mutateGlobal((live) => ({
+      ...live,
+      sessionIds: live.sessionIds.filter(id => !expired.some(session => session.sessionId === id)),
+    }))
+    process.stderr.write(
+      `threadharbor-gateway: reclaimed ${expired.length} idle catalog probe(s)\n`,
+    )
+  }
 
   /** Resolve a freshly created session row by talking to hostd.
    * Runs detached so the caller is not blocked on remote hold startup. The
@@ -1743,6 +1925,7 @@ export class RemoteAgentGateway extends Service {
     initial: RemoteSessionView,
     parentNativeSessionId: string | undefined,
     firstMessage: PendingFirstMessage | undefined,
+    contextSeed: RemoteSessionContextSeed | undefined,
   ): Promise<void> {
     const tables = this.requireTables()
     const sessionId = initial.sessionId
@@ -1758,6 +1941,15 @@ export class RemoteAgentGateway extends Service {
         backend: initial.backend,
         cwd: this.requireProject(initial.projectId).cwd,
         ...(parentNativeSessionId === undefined ? {} : { parentNativeSessionId }),
+        ...(contextSeed === undefined ? {} : {
+          // Rebuilt as a plain literal: the RPC payload is JsonValue, and the
+          // seed type has no index signature to satisfy it on its own.
+          context: {
+            transcript: contextSeed.transcript,
+            clip: contextSeed.clip !== false,
+            ...(contextSeed.truncated === true ? { truncated: true } : {}),
+          },
+        }),
       }, undefined, (stage, message) => {
         // hostd stage ids are a subset of RemoteSessionStartStage.
         progress(stage as RemoteSessionStartStage, message)
@@ -1984,8 +2176,29 @@ export class RemoteAgentGateway extends Service {
    *  the model nothing it needs to continue. Tool calls are kept as one line
    *  each, so the model can see what was done without re-reading every result.
    */
+  /**
+   * Read a `context` seed off a request body.
+   *
+   * Shape only: the text arrives from our own `switchAgent`, never from the
+   * browser, so a malformed value is ignored rather than fatal — the session
+   * still starts, it just starts without the conversation, which is a visible
+   * outcome rather than a silent one.
+   */
+  private optionalContextSeed(value: JsonValue | undefined): RemoteSessionContextSeed | undefined {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+    const record = value as Record<string, JsonValue>
+    const transcript = record['transcript']
+    if (typeof transcript !== 'string' || transcript.trim() === '') return undefined
+    return {
+      transcript,
+      clip: record['clip'] !== false,
+      ...(record['truncated'] === true ? { truncated: true } : {}),
+    }
+  }
+
   private async conversationText(
     sessionId: RemoteSessionId,
+    options: { readonly clip?: boolean } = {},
   ): Promise<{ text: string; truncated: boolean } | undefined> {
     const entries = this.transcriptStore?.session(sessionId) ?? []
     const lines: string[] = []
@@ -2003,7 +2216,10 @@ export class RemoteAgentGateway extends Service {
     if (lines.length === 0) return undefined
     let text = lines.join('\n\n')
     let truncated = false
-    if (text.length > CONTEXT_SEED_MAX_CHARS) {
+    // An explicit agent switch reads the whole conversation (clip: false). Every
+    // other caller is a degraded reopen, where the budget is the scarce resource
+    // and clipping is the kinder failure.
+    if (options.clip !== false && text.length > CONTEXT_SEED_MAX_CHARS) {
       // Keep the tail: the recent turns are what "continue" means.
       text = text.slice(text.length - CONTEXT_SEED_MAX_CHARS)
       truncated = true
@@ -2187,6 +2403,10 @@ export class RemoteAgentGateway extends Service {
   }
 
   private sessionIsVisible(session: RemoteSessionView): boolean {
+    // A catalog probe is machinery, not a conversation. It must never show up as
+    // something the user started, even though the remote really is holding an
+    // Agent session open for it.
+    if (session.probe === true) return false
     if (session.archivedAt !== undefined) return false
     const project = this.requireTables().projects.get(session.projectId)
     if (project === undefined || project.hiddenAt !== undefined) return false

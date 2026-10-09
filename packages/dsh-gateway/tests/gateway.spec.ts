@@ -3180,4 +3180,128 @@ describe('RemoteAgentGateway', () => {
       await ctx.fiber.dispose()
     }
   })
+  it('continues a conversation on another Agent with its history handed over whole', async () => {
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '已经把登录页改完了' } } } },
+      { jsonrpc: '2.0', method: '_x.ai/session/prompt_complete', params: { stopReason: 'end_turn' } },
+    ]
+    const { ctx, gateway, calls } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:5601' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'r-1', text: '先把登录页改完',
+      }))
+      await vi.waitFor(async () => {
+        const settled = await gateway.dispatch(request('transcript.read', { sessionId: session.sessionId })) as unknown as { entries: Array<{ text: string }> }
+        expect(settled.entries.map(row => row.text).join('|')).toContain('已经把登录页改完了')
+      }, { timeout: 2000, interval: 10 })
+
+      const switched = await gateway.dispatch(request('session.switch', {
+        sessionId: session.sessionId, backend: 'grok',
+      })) as unknown as { sessionId: string; sourceSessionId: string }
+
+      // A switch continues the conversation, so it lands on a *new* session and
+      // names the one it came from — the old session must survive untouched.
+      expect(switched.sessionId).not.toBe(session.sessionId)
+      expect(switched.sourceSessionId).toBe(session.sessionId)
+      const after = await gateway.dispatch(request('state', {})) as unknown as { sessions: Array<{ sessionId: string; backend: string; title: string; probe?: boolean }> }
+      expect(after.sessions.some(row => row.sessionId === session.sessionId && row.backend === 'codex')).toBe(true)
+      const created = after.sessions.find(row => row.sessionId === switched.sessionId)
+      expect(created?.backend).toBe('grok')
+      expect(created?.title).toContain('codex')
+
+      // The new Agent has no memory of this conversation, so the text of it is
+      // the only thing that carries over — and it must arrive unclipped.
+      const start = calls.find(call => call.request.method === 'session.start'
+        && call.request.params['sessionId'] === switched.sessionId)
+      const context = start?.request.params['context'] as Record<string, JsonValue> | undefined
+      expect(typeof context?.['transcript']).toBe('string')
+      expect(context?.['clip']).toBe(false)
+      const transcript = String(context?.['transcript'])
+      expect(transcript).toContain('先把登录页改完')
+      expect(transcript).toContain('已经把登录页改完了')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps the whole conversation on a switch even past the reopen clip budget', async () => {
+    // The degraded-reopen path clips at 80k and says so; a switch must not. The
+    // only way to know is a conversation longer than that budget.
+    const longAnswer = '长'.repeat(90_000)
+    const events: JsonValue[] = [
+      { jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: longAnswer } } } },
+      { jsonrpc: '2.0', method: '_x.ai/session/prompt_complete', params: { stopReason: 'end_turn' } },
+    ]
+    const { ctx, gateway, calls } = await harness(events)
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:5602' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const session = await gateway.dispatch(request('session.start', { projectId: project.projectId, title: 'work', backend: 'codex' })) as unknown as { sessionId: string }
+      await waitForSessionBinding(gateway, session.sessionId)
+      await gateway.dispatch(request('session.prompt', {
+        sessionId: session.sessionId, clientId: 'browser', requestId: 'r-1', text: '继续',
+      }))
+      await vi.waitFor(async () => {
+        const settled = await gateway.dispatch(request('transcript.read', { sessionId: session.sessionId })) as unknown as { entries: Array<{ text: string }> }
+        expect(settled.entries.map(row => row.text).join('')).toContain(longAnswer.slice(0, 200))
+      }, { timeout: 4000, interval: 10 })
+
+      const switched = await gateway.dispatch(request('session.switch', {
+        sessionId: session.sessionId, backend: 'grok',
+      })) as unknown as { sessionId: string }
+      const start = calls.find(call => call.request.method === 'session.start'
+        && call.request.params['sessionId'] === switched.sessionId)
+      const context = start?.request.params['context'] as Record<string, JsonValue> | undefined
+      // Dropping the opening turns would lose exactly the part the user cannot
+      // read anywhere else, so the whole thing goes.
+      expect(String(context?.['transcript']).length).toBeGreaterThan(80_000)
+      expect(context?.['truncated']).toBeUndefined()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('answers a catalog question without the probe ever looking like a session', async () => {
+    const { ctx, gateway, calls } = await harness([])
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:5603' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      const catalog = await gateway.dispatch(request('session.catalog', { projectId: project.projectId, backend: 'grok' })) as unknown as { backend: string; configOptions: unknown[] }
+
+      expect(catalog.backend).toBe('grok')
+      expect(Array.isArray(catalog.configOptions)).toBe(true)
+      // The probe really is a session on the remote — that is the only way to
+      // read an Agent's catalog — so the only thing that keeps it out of the
+      // product is that it is never projected.
+      expect(calls.some(call => call.request.method === 'session.start')).toBe(true)
+      const state = await gateway.dispatch(request('state', {})) as unknown as { sessions: Array<{ sessionId: string }> }
+      expect(state.sessions).toHaveLength(0)
+
+      // Asking again reuses the open probe instead of opening a second one.
+      await gateway.dispatch(request('session.catalog', { projectId: project.projectId, backend: 'grok' }))
+      expect(calls.filter(call => call.request.method === 'session.start')).toHaveLength(1)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('reuses one probe per Agent instead of opening a second', async () => {
+    const { ctx, gateway, calls } = await harness([])
+    try {
+      const host = await gateway.dispatch(request('host.add', { title: 'host', endpoint: 'http://127.0.0.1:5604' })) as unknown as { hostId: string }
+      const project = await gateway.dispatch(request('project.create', { hostId: host.hostId, title: 'repo', cwd: '/repo' })) as unknown as { projectId: string }
+      // Two Agents, asked twice each: four catalog reads, two remote sessions.
+      for (let round = 0; round < 2; round += 1) {
+        await gateway.dispatch(request('session.catalog', { projectId: project.projectId, backend: 'grok' }))
+        await gateway.dispatch(request('session.catalog', { projectId: project.projectId, backend: 'dsh' }))
+      }
+      expect(calls.filter(call => call.request.method === 'session.start')).toHaveLength(2)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
 })

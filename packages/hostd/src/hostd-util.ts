@@ -94,15 +94,24 @@ export interface SessionContextSeed {
   readonly truncated: boolean
 }
 
-/** Read the optional context seed off an attach request, bounded and validated.
+/** Read the optional context seed off an attach or start request, bounded and validated.
  *  Malformed input is ignored rather than fatal: the seed is a courtesy, and a
- *  bad one must not be the reason an attach fails. */
+ *  bad one must not be the reason an attach fails.
+ *
+ *  `clip: false` passes the transcript through whole. The clip exists for a
+ *  degraded reopen, where the Agent has already lost its memory and the seed is
+ *  a stand-in; a deliberate agent switch is not that case, and the caller
+ *  there has already decided that losing the early turns is worse than letting
+ *  the target Agent refuse. */
 export function optionalSessionContext(params: Record<string, JsonValue>): SessionContextSeed | undefined {
   const raw = params['context']
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
   const record = raw as Record<string, JsonValue>
   const transcript = record['transcript']
   if (typeof transcript !== 'string' || transcript.trim() === '') return undefined
+  if (record['clip'] === false) {
+    return { transcript, truncated: record['truncated'] === true }
+  }
   // Keep the newest end of the conversation: the most recent turns are what the
   // model needs to continue, and the opening "hello" is the least useful part.
   const clipped = transcript.length > CONTEXT_SEED_MAX_CHARS

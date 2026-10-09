@@ -45,7 +45,11 @@ describe('permission autopilot', () => {
       session({ sessionId: 'manual', latestTranscriptSeq: 1 }),
     ]
     const transcript = [permission('bg', 4, 7), permission('manual', 1, 8)]
-    const scan = scanAutoApprovals(sessions, transcript, () => ({ approvalChoice: 'ask' }))
+    const scan = scanAutoApprovals(
+      sessions,
+      (candidate) => transcript.filter(entry => entry.sessionId === candidate.sessionId),
+      () => ({ approvalChoice: 'ask' }),
+    )
     expect(scan.answers).toEqual([{
       sessionId: 'bg', requestId: '7', optionId: 'allow', key: permissionActionKey('bg', '7'),
     }])
@@ -55,17 +59,30 @@ describe('permission autopilot', () => {
   it('answers the request the gateway says is open, not the last permission row', () => {
     const sessions = [session({ sessionId: 'bg', latestTranscriptSeq: 6, configOptions: BYPASS, pendingRequestIds: ['7'] })]
     const answeredEarlier = permission('bg', 6, 9)
-    const scan = scanAutoApprovals(sessions, [permission('bg', 4, 7), answeredEarlier], () => undefined)
+    const scan = scanAutoApprovals(
+      sessions,
+      (candidate) => [permission('bg', 4, 7), answeredEarlier]
+        .filter(entry => entry.sessionId === candidate.sessionId),
+      () => undefined,
+    )
     expect(scan.answers.map(answer => answer.requestId)).toEqual(['7'])
   })
 
   it('waits for the transcript to catch up instead of answering a stale card', () => {
     const sessions = [session({ sessionId: 'bg', latestTranscriptSeq: 9, configOptions: BYPASS })]
     // The only local permission card is an older request (seq 4 < latest 9).
-    const scan = scanAutoApprovals(sessions, [permission('bg', 4, 7)], () => undefined)
+    const scan = scanAutoApprovals(
+      sessions,
+      (candidate) => [permission('bg', 4, 7)].filter(entry => entry.sessionId === candidate.sessionId),
+      () => undefined,
+    )
     expect(scan.answers).toEqual([])
     expect(scan.needsTranscript).toEqual(['bg'])
-    const empty = scanAutoApprovals([session({ sessionId: 'bg', configOptions: BYPASS })], [], () => undefined)
+    const empty = scanAutoApprovals(
+      [session({ sessionId: 'bg', configOptions: BYPASS })],
+      () => [],
+      () => undefined,
+    )
     expect(empty.answers).toEqual([])
     expect(empty.needsTranscript).toEqual(['bg'])
   })
@@ -75,9 +92,10 @@ describe('permission autopilot', () => {
       ...permission('bg', 2, 3),
       nativeFrame: { jsonrpc: '2.0', id: 3, method: 'elicitation/create', params: { message: 'pick one' } },
     }
+    const transcript = [question, permission('done', 5, 9)]
     const scan = scanAutoApprovals(
       [session({ sessionId: 'bg', latestTranscriptSeq: 2 }), session({ sessionId: 'done', turnState: 'idle' })],
-      [question, permission('done', 5, 9)],
+      (candidate) => transcript.filter(entry => entry.sessionId === candidate.sessionId),
       () => ({ approvalChoice: 'auto' }),
     )
     expect(scan.answers).toEqual([])

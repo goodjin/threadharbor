@@ -1,8 +1,9 @@
 # ThreadHarbor is an out-of-tree DeepSeek Harness plugin. It keeps the stock
 # Web runtime and layout, then replaces only the two product-owned surfaces.
+# NOTE: ui-conversation must stay enabled since dsh 0.1.5: the stock chat,
+# goal, trajectory, deliverables and workflow-run panels consume its
+# uiConversation service and never activate when it is disabled.
 - id: ui-sidebar
-  disabled: true
-- id: ui-conversation
   disabled: true
 
 - insert:

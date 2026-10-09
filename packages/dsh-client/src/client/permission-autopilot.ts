@@ -54,12 +54,13 @@ export function sessionAutoApproves(
  *  grant it is configured to answer automatically. Runs over the whole catalog
  *  so a session the user is not looking at never waits for a click.
  *  @param sessions - catalog rows (all sessions, any turn state).
- *  @param transcript - in-memory transcript across sessions.
+ *  @param transcriptFor - per-session transcript lookup; the store answers from
+ *    each session's bucket so the scan never walks other sessions' rows.
  *  @param resolve - preference lookup; `undefined` limits the decision to backend-advertised modes.
  */
 export function scanAutoApprovals(
   sessions: readonly RemoteSessionView[],
-  transcript: readonly RemoteTranscriptEntry[],
+  transcriptFor: (session: RemoteSessionView) => readonly RemoteTranscriptEntry[],
   resolve: (session: RemoteSessionView) => AutoApprovePreferences | undefined,
 ): AutoApprovalScan {
   const answers: AutoApproval[] = []
@@ -67,7 +68,7 @@ export function scanAutoApprovals(
   for (const session of sessions) {
     if (session.turnState !== 'waiting-permission') continue
     if (!sessionAutoApproves(session, resolve(session))) continue
-    const entries = transcript.filter(entry => entry.sessionId === session.sessionId)
+    const entries = transcriptFor(session)
     const localLast = entries.reduce((max, entry) => Math.max(max, entry.seq), -1)
     // Never answer from a stale transcript: the last permission card we hold
     // could be an earlier, already-answered request. Wait until the local

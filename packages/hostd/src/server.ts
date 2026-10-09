@@ -616,11 +616,20 @@ export class RemoteAgentHostd {
     // stage stays so callers still see the same three steps.
     trace('session.start', { stage: 'initializeAgent', sessionId: record.sessionId })
     onProgress?.('bind-session', record.sessionId, '正在创建原生会话')
-    const ready = await this.bindNativeSession(record, {
-      ...(spec.parentNativeSessionId === undefined ? {} : { parentNativeSessionId: spec.parentNativeSessionId }),
-    })
-    trace('session.start', { stage: 'bindNativeSession', sessionId: record.sessionId })
-    return await this.snapshotHold(ready.record)
+    // A conversation handed over on start belongs to this brand-new native
+    // session: there is nothing to resume, so the seed applies directly instead
+    // of waiting for a reopen to fail first. `bindNativeSession` consumes it.
+    const seed = optionalSessionContext(params)
+    this.pendingContextSeed = seed === undefined ? undefined : { sessionId: record.sessionId, ...seed }
+    try {
+      const ready = await this.bindNativeSession(record, {
+        ...(spec.parentNativeSessionId === undefined ? {} : { parentNativeSessionId: spec.parentNativeSessionId }),
+      })
+      trace('session.start', { stage: 'bindNativeSession', sessionId: record.sessionId })
+      return await this.snapshotHold(ready.record)
+    } finally {
+      if (this.pendingContextSeed?.sessionId === record.sessionId) this.pendingContextSeed = undefined
+    }
   }
 
   private async attachSession(params: Record<string, JsonValue>): Promise<RemoteSessionAttachResult> {
@@ -1031,12 +1040,17 @@ export class RemoteAgentHostd {
         ...(options.parentNativeSessionId === undefined ? {} : { sessionId: options.parentNativeSessionId }),
         cwd: record.cwd, mcpServers: [],
       })
-      // A reopen whose old binding is already gone cannot resume, so this is the
-      // second chance to put the conversation back rather than start blank.
-      const seed = options.loadExisting === true ? this.takeContextSeed(record.sessionId) : undefined
+      // Two callers hand over a conversation here. A reopen whose old binding is
+      // already gone cannot resume, so this is the second chance to put the
+      // conversation back rather than start blank. And a start that was *given* a
+      // conversation (an agent switch) has nothing to resume at all — the seed is
+      // its only route, so take it either way. A fork is excluded: the Agent
+      // already inherited the parent's own memory there, and re-reading the same
+      // turns as prose on top of it would only muddy it.
+      const seed = options.parentNativeSessionId === undefined ? this.takeContextSeed(record.sessionId) : undefined
       if (seed !== undefined) {
         contextSource = 'reconstructed'
-        await this.seedContext(record, nativeSessionId, seed)
+        await this.seedContext(record, nativeSessionId, seed, { moved: options.loadExisting !== true })
         trace('session.contextReconstructed', {
           sessionId: record.sessionId, backend: record.backend,
           chars: seed.transcript.length, truncated: seed.truncated, ok: true,
@@ -1074,14 +1088,29 @@ export class RemoteAgentHostd {
     record: HostdSessionRecord,
     nativeSessionId: string,
     seed: SessionContextSeed,
+    options: { readonly moved?: boolean } = {},
   ): Promise<void> {
     const bridge = this.requireBridge(record)
     bridge.setNativeSession(record.holdId, nativeSessionId)
+    // Say which of the two things happened. A lost reopen and a deliberate move
+    // look identical to the model — same text, same empty memory — but they call
+    // for different behaviour: one is told its own record is gone, the other is
+    // told the conversation was carried over on purpose and is expected to keep
+    // going rather than to apologise for the gap.
+    const preamble = options.moved === true
+      ? [
+        '用户把这段对话从另一个 Agent 转移到了你这里。',
+        '下面是转移之前完整的对话记录，你的 Agent 本身并没有参与过它。',
+        '请先读完它再继续，把里面的内容当成之前已经讨论过的事实，而不是新的问题，也不要复述或道歉。',
+      ]
+      : [
+        '这是一次重开：你的 Agent 会话记录无法恢复，所以下面是重开之前这段对话的文字记录。',
+        '请先读完它再继续，把里面的内容当成之前已经讨论过的事实，而不是新的问题。',
+      ]
     const notice = [
-      '这是一次重开：你的 Agent 会话记录无法恢复，所以下面是重开之前这段对话的文字记录。',
-      '请先读完它再继续，把里面的内容当成之前已经讨论过的事实，而不是新的问题。',
+      ...preamble,
       seed.truncated
-        ? `（记录过长，只保留了最近的部分，最早的内容已经不在了。）`
+        ? '（记录过长，只保留了最近的部分，最早的内容已经不在了。）'
         : '',
       '',
       '--- 以下是之前的对话记录 ---',
