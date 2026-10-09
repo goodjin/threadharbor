@@ -20,7 +20,7 @@ import type { ContentEvent } from './dispatch.ts'
 import { makeSessionFactory } from './factory.ts'
 import type { FactoryDeps } from './factory.ts'
 import { registerCatalog } from './catalog-registration.ts'
-import { buildPresetTable } from './registry.ts'
+import { buildPresetTable, sessionsRegistry } from './registry.ts'
 import type { AcpPresetConfig, PresetConfig } from './registry.ts'
 import type { AcpDialect } from '@threadharbor/dsh-acp-agent'
 
@@ -66,7 +66,7 @@ export function attachAcpDispatch(
   options: AttachOptions,
 ): void {
   const factory = makeSessionFactory(config, options)
-  const table = buildPresetTable(config, factory)
+  const table = buildPresetTable(config, factory, sessionsRegistry())
 
   // What makes the external agent's models appear in DSH's own model picker:
   // the catalog is global to this Host generation and already read by it.

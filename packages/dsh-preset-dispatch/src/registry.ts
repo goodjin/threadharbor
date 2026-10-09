@@ -43,6 +43,13 @@ export type PresetConfig = { readonly presets: Readonly<Record<string, AcpPreset
 /** What one session needs from an opened agent. */
 export type AcpSession = {
   run: AcpPresetBinding['run']
+  /**
+   * Drop this external conversation.
+   *
+   * Needed because restarting has to actually let go: a cached client keeps
+   * the old connection, and the next turn would reuse the agent that is hung.
+   */
+  close(): void
 }
 
 /** How an agent is reached; separate so tests can stand in for spawning. */
@@ -66,9 +73,17 @@ export type AcpSessionFactory = {
  * One agent is opened per session on first use and reused after — opening is
  * the expensive part, and a DSH session runs many turns.
  */
+export type SessionRegistry = Map<string, Map<string, AcpSession>>
+
+/** A fresh place to keep open conversations, for restart to clear. */
+export function sessionsRegistry(): SessionRegistry {
+  return new Map<string, Map<string, AcpSession>>()
+}
+
 export function buildPresetTable(
   config: PresetConfig,
   factory: AcpSessionFactory,
+  sessions: SessionRegistry,
 ): Map<string, AcpPresetBinding> {
   const table = new Map<string, AcpPresetBinding>()
   for (const [presetId, preset] of Object.entries(config.presets)) {
@@ -83,6 +98,7 @@ export function buildPresetTable(
     // up in the other's history. The keys are session ids, and a session that
     // is gone drops its entry with it.
     const opened = new Map<string, AcpSession>()
+    sessions.set(presetId, opened)
     table.set(presetId, {
       dialect,
       run: async (decision, turn) => {
@@ -100,4 +116,20 @@ export function buildPresetTable(
     })
   }
   return table
+}
+
+/** The open conversations per preset, so a restart can find and drop them. */
+export function openSessionsOf(
+  sessions: ReadonlyMap<string, Map<string, AcpSession>>,
+  presetId: string,
+): ReadonlyMap<string, AcpSession> {
+  return sessions.get(presetId) ?? new Map<string, AcpSession>()
+}
+
+/** Forget every conversation for a preset, after they have been closed. */
+export function forgetSessions(
+  sessions: Map<string, Map<string, AcpSession>>,
+  presetId: string,
+): void {
+  sessions.set(presetId, new Map<string, AcpSession>())
 }

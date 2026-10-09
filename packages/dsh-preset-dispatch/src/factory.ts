@@ -59,7 +59,13 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
       client.onPermissionRequest = async request => await deps.answerPermission(request)
 
       const runner = new AcpTurnRunner(adaptClient(client), options)
-      return { run: async (decision, turn) => await runner.run(decision, turn) }
+      return {
+        run: async (decision, turn) => await runner.run(decision, turn),
+        // Drops the connection itself, not just the runner's bookkeeping: a
+        // runner that forgets its session id would otherwise hand back the
+        // same conversation.
+        close: () => { client.close() },
+      }
     },
   }
 }

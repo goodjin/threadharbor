@@ -19,9 +19,12 @@
 import { presetIdOf } from './dispatch.ts'
 import type { AgentLike, PresetResolver } from './dispatch.ts'
 import type { PermissionDecision, PermissionRequest } from '@threadharbor/dsh-acp-agent'
-import { buildPresetTable } from './registry.ts'
+import { buildPresetTable, forgetSessions, openSessionsOf, sessionsRegistry } from './registry.ts'
 import type { AcpPresetConfig, PresetConfig } from './registry.ts'
 import { makeSessionFactory } from './factory.ts'
+import { makeAgentControls } from './control.ts'
+import { controlsOf } from './control-registry.ts'
+import type { AgentControl } from './control.ts'
 import type { AcpPresetBinding } from './dispatch.ts'
 import type { AcpDialect } from '@threadharbor/dsh-acp-agent'
 
@@ -91,7 +94,17 @@ export function applyAcpPlugin(
   // would hand them to a dialect that does not exist; better to leave them on
   // the native agent, where they still work.
   if (dialect === undefined) return
-  const table = buildPresetTable(presets, factory)
+  const sessions = sessionsRegistry()
+  const table = buildPresetTable(presets, factory, sessions)
+  // Probe and restart for this row's agent. Held on the context so the client
+  // side can reach it by preset id, and so it is reachable at all: a control
+  // nothing can call is the same as no control.
+  controlsOf(ctx).set(presetId, makeAgentControls(
+    presets,
+    factory,
+    id => openSessionsOf(sessions, id),
+    id => { forgetSessions(sessions, id) },
+  ).get(presetId) as AgentControl)
 
   ctx.on('agent/created', payload => {
     try {

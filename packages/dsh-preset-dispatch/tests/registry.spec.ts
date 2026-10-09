@@ -6,8 +6,11 @@
  * completely alone.
  */
 
-import { describe, expect, it } from 'vitest'
-import { buildPresetTable } from '../src/registry.ts'
+import { beforeEach, describe, expect, it } from 'vitest'
+
+let closed = 0
+beforeEach(() => { closed = 0 })
+import { buildPresetTable, sessionsRegistry } from '../src/registry.ts'
 import type { AcpSessionFactory } from '../src/registry.ts'
 import type { AcpDialect } from '@threadharbor/dsh-acp-agent'
 
@@ -29,14 +32,14 @@ function fakeFactory(): AcpSessionFactory & { built: string[] } {
     dialectFor: presetId => stubDialect(presetId),
     open: presetId => {
       built.push(presetId)
-      return { run: async () => ({ frames: [], end: { kind: 'completed' } }) }
+      return { run: async () => ({ frames: [], end: { kind: 'completed' } }), close: () => { closed += 1 } }
     },
   }
 }
 
 describe('buildPresetTable', () => {
   it('includes exactly the configured ACP presets', () => {
-    const table = buildPresetTable(CONFIG, fakeFactory())
+    const table = buildPresetTable(CONFIG, fakeFactory(), sessionsRegistry())
     expect([...table.keys()].sort()).toEqual(['acp-claude', 'acp-grok'])
   })
 
@@ -45,16 +48,16 @@ describe('buildPresetTable', () => {
     // The check is on the agent, not on the preset being listed.
     const factory: AcpSessionFactory = {
       dialectFor: (presetId, config) => config.agent === 'native' ? undefined : stubDialect(presetId),
-      open: () => ({ run: async () => ({ frames: [], end: { kind: 'completed' } }) }),
+      open: () => ({ run: async () => ({ frames: [], end: { kind: 'completed' } }), close: () => { closed += 1 } }),
     }
-    const table = buildPresetTable({ presets: { dsh: { agent: 'native' }, 'acp-grok': CONFIG.presets['acp-grok'] } }, factory)
+    const table = buildPresetTable({ presets: { dsh: { agent: 'native' }, 'acp-grok': CONFIG.presets['acp-grok'] } }, factory, sessionsRegistry())
     expect(table.has('dsh')).toBe(false)
     expect(table.has('acp-grok')).toBe(true)
   })
 
   it('opens one agent per session, not one per turn', async () => {
     const factory = fakeFactory()
-    const table = buildPresetTable(CONFIG, factory)
+    const table = buildPresetTable(CONFIG, factory, sessionsRegistry())
     const binding = table.get('acp-grok')!
     const decision = { kind: 'enter' as const, messages: [] }
 
@@ -66,7 +69,7 @@ describe('buildPresetTable', () => {
 
   it('gives each preset its own agent', async () => {
     const factory = fakeFactory()
-    const table = buildPresetTable(CONFIG, factory)
+    const table = buildPresetTable(CONFIG, factory, sessionsRegistry())
     await table.get('acp-grok')!.run({ kind: 'enter', messages: [] }, { sessionId: 's1', produce: () => [], write: () => 1 })
     await table.get('acp-claude')!.run({ kind: 'enter', messages: [] }, { sessionId: 's1', produce: () => [], write: () => 1 })
 
@@ -81,11 +84,11 @@ describe('buildPresetTable', () => {
       dialectFor: () => stubDialect('x'),
       open: (presetId, options) => {
         opened.push({ presetId, ...(options.modelId === undefined ? {} : { modelId: options.modelId }), ...(options.modeId === undefined ? {} : { modeId: options.modeId }) })
-        return { run: async () => ({ frames: [], end: { kind: 'completed' } }) }
+        return { run: async () => ({ frames: [], end: { kind: 'completed' } }), close: () => { closed += 1 } }
       },
     }
 
-    const table = buildPresetTable(CONFIG, factory)
+    const table = buildPresetTable(CONFIG, factory, sessionsRegistry())
     await table.get('acp-grok')!.run({ kind: 'enter', messages: [] }, { sessionId: 's1', produce: () => [], write: () => 1 })
     await table.get('acp-claude')!.run({ kind: 'enter', messages: [] }, { sessionId: 's1', produce: () => [], write: () => 1 })
     expect(opened).toContainEqual({ presetId: 'acp-grok', modelId: 'grok-4.7' })
@@ -93,7 +96,7 @@ describe('buildPresetTable', () => {
   })
 
   it('ignores a preset whose configuration names no agent', () => {
-    const table = buildPresetTable({ presets: { broken: {} } } as never, fakeFactory())
+    const table = buildPresetTable({ presets: { broken: {} } } as never, fakeFactory(), sessionsRegistry())
     expect(table.size).toBe(0)
   })
 })
