@@ -249,7 +249,54 @@ DSH 自己的代码也不读头。`session-controller` 读的是投影
 
 要改「某会话实际走哪个模型」，则走 `agent/request` 瀑布——这条是按会话的，明确可行。
 
-**⚠️ 这条需要在动工阶段 3 之前决定走哪条路。**「按会话换列表」与「全局换列表」
+**已决（2026-10-09）：走「agent 当 provider」这条路，见下面（3）。**
+
+
+#### （3）把外部 agent 当作 provider 塞进全局目录 —— 可行，但切换有硬限制
+
+**塞进目录：可行，且界面不用改。** `LlmAdapter` 的 `listModels` 文档写明：
+「Adapters used there must advertise their available models; the base empty catalog
+offers no GUI selection」（`packages/llm/llm/src/index.ts:240-248`）。也就是说
+**只负责展示、不真正跑推理的适配器是官方认可的用法**。为每个外部 agent 注册一条
+provider 路由、列出它真实的模型，目录和界面自动就多出这几组，UI 形态与原生一致。
+
+**⚠️ 但 `LlmAdapter` 有抽象方法 `stream`（`:290`）必须实现。** 外部 agent 的回合
+根本不走 `stream`（由改写后的 step 接管），所以这个方法**永远不该被调用**。
+一旦被调用，说明接管没生效——那时**必须响亮报错**，不能假装跑通。
+这正好是一个自报状态的入口。
+
+**切换：有硬限制，且比设计文档设想的更严。**
+
+- 文档 §十 阶段 5 写「复用 `session.switch`」——**这个 remote 不存在**。
+  session-controller 的 remote 全表见 `packages/api/session-controller/src/index.ts`：
+  `list / search / create / selectModel / modelCatalog / openWorkspacePath /
+  workspacePathApplications / rename / fork / prompt / attachment / updateQueue /
+  cancel / page / projections`，没有 switch。
+- 实际存在的切换入口是 `agent-preset/select`
+  （`packages/preset/agent-preset-registry/src/index.ts:347-362`），而它**在会话
+  已经开始回合后会抛错**：
+
+  ```
+  agent-preset/locked — 'This session has already started'
+  ```
+
+  判据是 `turnBoundary.openTurnStartSeq !== null || boundary.lastTurn > 0`。
+
+**因此：**
+
+| 场景 | 能否自动切换 | 走哪条路 |
+|---|---|---|
+| 新会话（尚无回合） | ✅ 可以 | `create` 带上 preset，或空白会话上 `agent-preset/select` |
+| 同一 agent 内换模型 | ✅ 可以，不切 | `selectModel`（按会话，且是全局目录里的同一组） |
+| 已有回合的会话换 agent | ❌ 内置被锁 | 只能 `fork` 成新会话（`fork` 复制事件前缀到**新**会话），或自行实现切换 |
+
+**这与 §十 阶段 5「报错而非静默截断」的要求是一致的**：锁住时明确报
+「这个会话已经开始过，不能直接换 agent」，并提供「另存为新会话」这条路，
+而不是把历史悄悄截断。
+
+---
+
+**原始备注：**「按会话换列表」与「全局换列表」
 的用户可感知后果完全不同：前者 ACP 会话只看到各家的模型、别的会话不受影响；
 后者所有会话的模型列表都变。
 
