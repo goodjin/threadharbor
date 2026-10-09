@@ -43,25 +43,32 @@ export type StepEndReason =
   | { readonly kind: 'aborted'; readonly reason: unknown }
   | { readonly kind: 'error'; readonly error: { readonly message: string; readonly code: string } }
 
+/** What one external turn produced: the frames it sent, and how it ended. */
+export type AcpStepResult = {
+  /** ACP frames from this turn alone, for projection. */
+  readonly frames: readonly unknown[]
+  readonly end: StepEndReason
+}
+
 /** How to drive one session's external agent. */
 export type AcpPresetBinding = {
   readonly dialect: AcpDialect
   /**
-   * Runs one turn and returns what the session log should record.
+   * Runs one turn and returns what it produced.
    *
    * The replacement step owns this call, including its failures: anything thrown
    * here reaches the loop's own error handling, which closes the turn as an
    * error rather than leaving it open.
    */
-  readonly run: (decision: StepDecisionLike) => Promise<StepEndReason>
+  readonly run: (decision: StepDecisionLike) => Promise<AcpStepResult>
 }
 
 /** What the patched step writes into the session log. */
 export type ContentEvent = { readonly type: string; readonly payload: Record<string, unknown> }
 
 export type AcpDispatchOptions = {
-  /** Turns a step decision into the events the session log should carry. */
-  readonly produce: (decision: StepDecisionLike) => readonly ContentEvent[]
+  /** Turns what a turn produced into the events the session log should carry. */
+  readonly produce: (result: AcpStepResult) => readonly ContentEvent[]
   /** Append those events, in order. */
   readonly append: (event: ContentEvent) => void
 }
@@ -139,8 +146,11 @@ export function installAcpDispatch(
     if (active.has(this)) return original.call(this, decision)
     active.add(this)
     try {
-      for (const event of options.produce(decision)) options.append(event)
-      return await binding.run(decision)
+      // Run first: the content events describe what the turn produced, so
+      // producing them beforehand would write the previous turn's remainder.
+      const result = await binding.run(decision)
+      for (const event of options.produce(result)) options.append(event)
+      return result.end
     } finally {
       active.delete(this)
     }

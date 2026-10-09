@@ -36,7 +36,7 @@ function protoStepOf(agent: object): unknown {
 function binding(run?: AcpPresetBinding['run']): AcpPresetBinding {
   return {
     dialect: { id: 'acp' } as AcpPresetBinding['dialect'],
-    run: run ?? (async () => ({ kind: 'completed' })),
+    run: run ?? (async () => ({ frames: [], end: { kind: 'completed' } })),
   }
 }
 
@@ -93,7 +93,7 @@ describe('installAcpDispatch', () => {
     const ran: StepDecisionLike[] = []
     installAcpDispatch(
       agent,
-      new Map([['acp-grok', binding(async decision => { ran.push(decision); return { kind: 'completed' } })]]),
+      new Map([['acp-grok', binding(async decision => { ran.push(decision); return { frames: [], end: { kind: 'completed' } } })]]),
       { produce: () => [], append: () => {} },
     )
 
@@ -103,6 +103,25 @@ describe('installAcpDispatch', () => {
     expect(ran).toEqual([DECISION])
     // The native step never ran.
     expect(agent.calls).toEqual([])
+  })
+
+  it('produces content only after the turn has run, since events describe its result', async () => {
+    // Content events describe what the external agent did. Producing them before
+    // the run would write whatever the previous turn left behind — usually
+    // nothing at all.
+    const agent = new FakeAgent('acp-grok')
+    const order: string[] = []
+    installAcpDispatch(
+      agent,
+      new Map([['acp-grok', binding(async () => { order.push('run'); return { frames: [], end: { kind: 'completed' } } })]]),
+      {
+        produce: () => { order.push('produce'); return [{ type: 'assistant/message', payload: {} }] },
+        append: () => { order.push('append') },
+      },
+    )
+
+    await (agent as unknown as { step(d: StepDecisionLike): Promise<unknown> }).step(DECISION)
+    expect(order).toEqual(['run', 'produce', 'append'])
   })
 
   it('writes the produced content events in order', async () => {
@@ -125,7 +144,7 @@ describe('installAcpDispatch', () => {
     let runs = 0
     installAcpDispatch(
       agent,
-      new Map([['acp-grok', binding(async () => { runs += 1; return { kind: 'completed' } })]]),
+      new Map([['acp-grok', binding(async () => { runs += 1; return { frames: [], end: { kind: 'completed' } } })]]),
       { produce: () => [], append: () => {} },
     )
     const host = agent as unknown as { step(d: StepDecisionLike): Promise<unknown> }
