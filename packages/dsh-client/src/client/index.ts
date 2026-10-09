@@ -41,50 +41,24 @@ const PANEL_LABEL = '各主机'
 export { RollUpPanel } from './RollUpPanel.tsx'
 
 /**
- * Put the roll-up in DSH's sidebar.
+ * The roll-up is not mounted yet, and this is a deliberate state.
  *
- * The panel is registered inside the sidebar slot rather than in place of it, so
- * a deployment that composes no sidebar loses this view and nothing else. The
- * federation starts here, once per tab, and is shared by the panel and anything
- * else that wants to read the roll-up.
+ * The panel was registered here once and threw on every load: the federation
+ * needs a host-settings source, a session source, a clock and a way to report
+ * errors, and this entry supplied two of the four. The cast that let it compile
+ * hid exactly that, which is why it went unnoticed until a full audit.
+ *
+ * The library underneath is finished and tested — identity, grouping, the
+ * renderer and its lifecycle. What is missing is the assembly: a settings source
+ * that reads real configuration instead of a hardcoded placeholder, and a
+ * session source fed from DSH's own store. Until both exist there is nothing
+ * honest to register, and a panel that throws is worse than no panel.
+ *
+ * Reinstating it means deleting this comment and calling the federation with all
+ * four members, with no cast between them.
  */
 export function apply(ctx: ClientContext): void {
-  const federation = applyHostFederation(
-    { settings: readSettings(), storage: browserStorage() } as never,
-    { heartbeatMs: 5_000, staleMs: 30_000 },
-  )
-  // Said out loud on purpose: on a machine whose cross-tab channel is blocked
-  // this panel is simply empty, and "nothing appears" is otherwise
-  // indistinguishable from "the plugin was never installed".
-  if (federation.foreignHosts().length === 0) {
-    ctx.logger?.info?.('[threadharbor] roll-up mounted; no other host has answered yet')
-  }
-  const face = { federation }
-
-  // The sidebar entry and the body share one panel id: the sidebar draws the
-  // button, and selecting it is what mounts the body in the main area.
-  ctx.slots.inject('sidebar.panellist', () => ctx.slots.register(
-    {
-      name: 'sidebar.panellist',
-      id: PANEL_ID,
-      order: 100,
-      label: () => PANEL_LABEL,
-    },
-    // Written as createElement: this entry is a `.ts` file, and renaming it
-    // would move the built artifact's path for no gain.
-    (props: { size?: number }) => createElement(RollUpIcon, props),
-  ))
-
-  ctx.slots.inject('main', () => ctx.slots.register(
-    { name: 'main', key: PANEL_ID, inject: () => face },
-    (props: object) => createElement(RollUpPanel, { federation, ...props }),
-  ))
-
-  ctx.effect(() => () => {
-    // A heartbeat left running after unload would keep announcing a host nobody
-    // is listening for.
-    federation.dispose()
-  }, 'threadharbor: roll-up')
+  ctx.logger?.info?.('[threadharbor] client loaded; cross-host roll-up not mounted yet')
 }
 
 /** The glyph the sidebar draws. Self-contained so the panel needs no icon set. */

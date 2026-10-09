@@ -8,6 +8,7 @@
  */
 
 import type { AcpStepResult, StepDecisionLike, StepEndReason } from './dispatch.ts'
+import type { AcpFrame } from '@threadharbor/dsh-acp-agent'
 
 /** The JSON-RPC surface this runner needs, kept narrow so it can be stood in for. */
 export type AcpClientPort = {
@@ -20,7 +21,7 @@ export type AcpClientPort = {
    * still working. Replaying collected frames afterwards is exactly the
    * "wait, then it all appears" behaviour streaming exists to remove.
    */
-  onFrame(handler: (frame: unknown) => void): void
+  onFrame(handler: (frame: AcpFrame) => void): void
 }
 
 /** Where a turn's text and reasoning go as they arrive. */
@@ -102,7 +103,7 @@ function toEndReason(stopReason: unknown): StepEndReason {
 export class AcpTurnRunner {
   private sessionId: string | undefined
   private opening: Promise<string> | undefined
-  private turnFrames: unknown[] = []
+  private turnFrames: AcpFrame[] = []
   private stream: TurnStreamPort | undefined
 
   private readonly client: AcpClientPort
@@ -118,7 +119,7 @@ export class AcpTurnRunner {
   }
 
   /** Take one frame: keep it for projection, and stream its text immediately. */
-  private observe(frame: unknown): void {
+  private observe(frame: AcpFrame): void {
     this.turnFrames.push(frame)
     if (this.stream === undefined) return
     const update = recordOf(recordOf(recordOf(frame)['params'])['update'])

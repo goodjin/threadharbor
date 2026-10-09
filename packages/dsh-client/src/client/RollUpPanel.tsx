@@ -32,7 +32,7 @@ export function RollUpPanel({ federation, onSelect }: RollUpPanelProps): ReactNo
     const container = host.current
     if (container === null) return undefined
     let mounted: RollUpMount | undefined
-    mounted = mountRollUp(container, () => rollUpView(federation.rollUp() as never), {
+    mounted = mountRollUp(container, () => rollUpView(federation.rollUp()), {
       ...(onSelect === undefined ? {} : { onSelect }),
     })
     mounted.render()

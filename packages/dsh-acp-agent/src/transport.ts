@@ -13,6 +13,15 @@ export interface AcpTransport {
   send(line: string): void
   /** Register the handler for frames arriving from the agent. */
   onLine(handler: (line: string) => void): void
+  /**
+   * Register the handler for the connection dying under us.
+   *
+   * Without this the client cannot tell "the agent is quiet" from "the agent is
+   * gone", and every request in flight waits forever: a refused handshake, a
+   * dropped socket and a killed child process all look identical from the
+   * frame stream, which is silent in every one of those cases.
+   */
+  onDeath(handler: (reason: string) => void): void
   close(): void
 }
 
@@ -48,6 +57,14 @@ export type StdioTransportOptions = {
 export class StdioAcpTransport implements AcpTransport {
   private readonly child: ReturnType<typeof spawn>
   private handler: (line: string) => void = () => {}
+  private death: (reason: string) => void = () => {}
+  /**
+   * The agent's last words, kept so a death can say something useful.
+   *
+   * Diagnostics are otherwise only forwarded when a caller asked for them, and
+   * the caller that most needs them is the one that gets no answer at all.
+   */
+  private readonly stderrTail: string[] = []
 
   private readonly options: StdioTransportOptions
 
@@ -73,11 +90,27 @@ export class StdioAcpTransport implements AcpTransport {
     stdout.on('data', lineSplitter(line => this.handler(line)))
     stderr.setEncoding('utf8')
     stderr.on('data', chunk => {
-      if (this.options.onDiagnostic === undefined) return
       for (const line of chunk.split('\n')) {
-        if (line.trim().length > 0) this.options.onDiagnostic(line.trim())
+        const trimmed = line.trim()
+        if (trimmed.length === 0) continue
+        this.stderrTail.push(trimmed)
+        // Bounded: a chatty agent must not turn a crash into a memory leak.
+        if (this.stderrTail.length > 20) this.stderrTail.shift()
+        this.options.onDiagnostic?.(trimmed)
       }
     })
+    this.child.on('error', error => {
+      this.death(`acp agent ${this.options.command} could not run: ${error.message}`)
+    })
+    this.child.on('exit', (code, signal) => {
+      const said = this.stderrTail.slice(-3).join(' / ')
+      this.death(`acp agent ${this.options.command} exited (code=${code ?? 'none'} signal=${signal ?? 'none'})`
+        + (said.length === 0 ? '' : `: ${said}`))
+    })
+  }
+
+  onDeath(handler: (reason: string) => void): void {
+    this.death = handler
   }
 
   send(line: string): void {
@@ -100,6 +133,8 @@ export type SocketLike = {
   onMessage(handler: (line: string) => void): void
   /** Called once the socket is ready to carry frames. */
   onOpen(handler: () => void): void
+  /** Called once the socket is gone, with whatever reason it gave. */
+  onDeath(handler: (reason: string) => void): void
 }
 
 export type WebSocketTransportOptions = {
@@ -124,6 +159,7 @@ export function grokWebSocketUrl(bind: string, secret: string): string {
 /** ACP over a WebSocket, which is how grok is reached. */
 export class WebSocketAcpTransport implements AcpTransport {
   private handler: (line: string) => void = () => {}
+  private death: (reason: string) => void = () => {}
   private readonly socket: SocketLike
   private ready = false
   private readonly pending: string[] = []
@@ -152,6 +188,11 @@ export class WebSocketAcpTransport implements AcpTransport {
     this.socket.onMessage(line => this.handler(line))
   }
 
+  onDeath(handler: (reason: string) => void): void {
+    this.death = handler
+    this.socket.onDeath(reason => this.death(reason))
+  }
+
   close(): void {
     this.socket.close()
   }
@@ -166,8 +207,13 @@ function openBrowserWebSocket(url: string): SocketLike {
     onOpen: handler => { socket.onopen = () => handler() },
     onMessage: handler => {
       socket.onmessage = event => handler(String(event.data))
-      socket.onerror = () => handler('')
-      socket.onclose = () => handler('')
+    },
+    // A refused handshake and a dropped socket both used to arrive here as an
+    // empty frame, which parsed to nothing and was dropped in silence: the turn
+    // then waited forever on a connection that was already gone.
+    onDeath: handler => {
+      socket.onerror = () => handler('acp agent connection errored')
+      socket.onclose = event => handler(`acp agent connection closed${event.reason === '' ? '' : `: ${event.reason}`}`)
     },
   }
 }

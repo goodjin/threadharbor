@@ -87,7 +87,7 @@ export function attachAcpDispatch(
         // Turn and step numbers are zero here on purpose: the surrounding
         // native loop owns both, and the replaced step supplies content only.
         // They are corrected where the events are written.
-        projectStepContent(result.frames as never[], { turn: 0, step: 0, dialect: binding.dialect }),
+        projectStepContent(result.frames, { turn: 0, step: 0, dialect: binding.dialect }),
       append: event => { options.write?.(agent, [event]) },
     })
   })

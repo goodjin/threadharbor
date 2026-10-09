@@ -76,6 +76,10 @@ export class AcpClient {
     this.transport = transport
     this.dialect = dialect
     this.transport.onLine(line => this.receive(line))
+    // The connection dying is the one event the frame stream cannot report:
+    // there is no frame for it. Without this, every request in flight waits
+    // for an answer from an agent that is no longer running.
+    this.transport.onDeath(reason => this.failAll(new Error(reason)))
   }
 
   /** Send a request and resolve when the agent answers it. */

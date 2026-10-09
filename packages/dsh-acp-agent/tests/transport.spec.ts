@@ -19,6 +19,7 @@ function fakeSocket() {
     open: false,
     listener: undefined as ((line: string) => void) | undefined,
     opener: undefined as (() => void) | undefined,
+    dier: undefined as ((reason: string) => void) | undefined,
   }
   return {
     state,
@@ -36,7 +37,9 @@ function fakeSocket() {
     close() { state.closed = true },
     onMessage(handler: (line: string) => void) { state.listener = handler },
     onOpen(handler: () => void) { state.opener = handler },
+    onDeath(handler: (reason: string) => void) { state.dier = handler },
     deliver(line: string) { state.listener?.(line) },
+    die(reason: string) { state.dier?.(reason) },
   }
 }
 

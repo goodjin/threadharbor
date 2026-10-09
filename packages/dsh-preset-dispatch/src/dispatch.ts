@@ -16,7 +16,7 @@
  * So this module states the minimum it reads, and the caller adapts.
  */
 
-import type { AcpDialect } from '@threadharbor/dsh-acp-agent'
+import type { AcpDialect, AcpFrame } from '@threadharbor/dsh-acp-agent'
 
 /** The header fields this module reads to decide whether to take over. */
 export type SessionHeaderLike = {
@@ -46,7 +46,7 @@ export type StepEndReason =
 /** What one external turn produced: the frames it sent, and how it ended. */
 export type AcpStepResult = {
   /** ACP frames from this turn alone, for projection. */
-  readonly frames: readonly unknown[]
+  readonly frames: readonly AcpFrame[]
   readonly end: StepEndReason
 }
 

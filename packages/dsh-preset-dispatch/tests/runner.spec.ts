@@ -7,6 +7,7 @@
  * setup cost the agent already paid.
  */
 
+import type { AcpFrame } from '@threadharbor/dsh-acp-agent'
 import { describe, expect, it } from 'vitest'
 import { AcpTurnRunner } from '../src/runner.ts'
 import type { AcpClientPort } from '../src/runner.ts'
@@ -69,15 +70,15 @@ describe('AcpTurnRunner', () => {
   it('returns only that turn’s frames, not everything seen so far', async () => {
     // Frames arrive while the prompt is still in flight, which is when they
     // really arrive.
-    let emit: (frame: unknown) => void = () => {}
+    let emit: (frame: AcpFrame) => void = () => {}
     let round = 0
     const client: AcpClientPort = {
       request: async method => {
         if (method === 'session/new') return { sessionId: 's1' }
         if (method === 'session/prompt') {
           const n = ++round
-          emit({ n })
-          emit({ n })
+          emit({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 's1', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `run ${n}` } } } })
+          emit({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 's1', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `run ${n}` } } } })
           return { stopReason: 'end_turn' }
         }
         return {}
@@ -88,9 +89,14 @@ describe('AcpTurnRunner', () => {
     const runner = new AcpTurnRunner(client, { cwd: '/tmp' })
 
     expect((await runner.run(DECISION)).frames).toHaveLength(2)
-    // The second turn must not carry the first turn's frames along.
+    // The second turn must not carry the first turn's frames along: a stale
+    // frame replayed into a new turn reads as the agent answering something it
+    // was never asked.
     const second = await runner.run(DECISION)
-    expect(second.frames).toEqual([{ n: 2 }, { n: 2 }])
+    expect(second.frames).toHaveLength(2)
+    for (const frame of second.frames) {
+      expect(JSON.stringify(frame.params)).toContain('run 2')
+    }
   })
 
   it('reports a turn the agent ended normally as completed', async () => {
@@ -127,7 +133,7 @@ describe('AcpTurnRunner', () => {
     // still working. Collecting frames and replaying them afterwards is exactly
     // the "wait, then it all appears" behaviour this is meant to replace.
     const deltas: string[] = []
-    let emit: (frame: unknown) => void = () => {}
+    let emit: (frame: AcpFrame) => void = () => {}
     const client: AcpClientPort = {
       request: async method => {
         if (method === 'session/new') return { sessionId: 's1' }
@@ -153,7 +159,7 @@ describe('AcpTurnRunner', () => {
   it('sends reasoning through its own channel, kept apart from the answer', async () => {
     const text: string[] = []
     const reasoning: string[] = []
-    let emit: (frame: unknown) => void = () => {}
+    let emit: (frame: AcpFrame) => void = () => {}
     const client: AcpClientPort = {
       request: async method => {
         if (method === 'session/new') return { sessionId: 's1' }

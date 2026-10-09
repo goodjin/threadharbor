@@ -50,7 +50,7 @@ export type RollUpSurface = {
  */
 export function mountRollUpSurface(ports: RollUpSurfacePorts, container?: HTMLElement): RollUpSurface {
   let disposed = false
-  const read = ports.read ?? (() => rollUpView(ports.federation.rollUp() as never))
+  const read = ports.read ?? (() => rollUpView(ports.federation.rollUp()))
 
   ports.federation.publishSessions()
 

@@ -16,6 +16,7 @@ function fakeTransport(): AcpTransport & { push(frame: unknown): void } {
   let deliver: (line: string) => void = () => {}
   return {
     onLine: (handler: (line: string) => void) => { deliver = handler },
+    onDeath: () => {},
     send: () => {},
     close: () => {},
     push: (frame: unknown) => { deliver(JSON.stringify(frame)) },

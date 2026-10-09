@@ -14,14 +14,17 @@ import type { AcpTransport } from '../src/transport.ts'
 import { TerminalService } from '../src/terminals.ts'
 
 /** A transport that records what was written, and can push frames in. */
-function fakeTransport(): AcpTransport & { readonly sent: string[]; deliver: (line: string) => void } {
+function fakeTransport(): AcpTransport & { readonly sent: string[]; deliver: (line: string) => void; die: (reason: string) => void } {
   const sent: string[] = []
   let handler: (line: string) => void = () => {}
+  let death: (reason: string) => void = () => {}
   return {
     sent,
     send: (line: string) => { sent.push(line) },
     onLine: (next: (line: string) => void) => { handler = next },
+    onDeath: (next: (reason: string) => void) => { death = next },
     close: () => {},
+    die: (reason: string) => { death(reason) },
     deliver: (line: string) => handler(line),
   }
 }
@@ -203,5 +206,25 @@ describe('AcpClient handling agent-initiated requests', () => {
     await flush()
 
     expect(seen).toHaveLength(1)
+  })
+})
+
+describe('a connection that dies', () => {
+  it('fails the request that was waiting, instead of waiting forever', async () => {
+    const transport = fakeTransport()
+    const client = new AcpClient(transport, { id: 'claude' })
+    const pending = client.request('session/prompt', { sessionId: 's', prompt: 'hi' })
+    // The agent never answers. Without the death signal this promise never
+    // settles, and the turn spins with nothing on screen to explain why.
+    transport.die('acp agent connection closed')
+    await expect(pending).rejects.toThrow(/connection closed/)
+  })
+
+  it('says why, rather than only that it ended', async () => {
+    const transport = fakeTransport()
+    const client = new AcpClient(transport, { id: 'grok' })
+    const pending = client.request('session/prompt', { sessionId: 's' })
+    transport.die('acp agent exited (code=137 signal=null): killed')
+    await expect(pending).rejects.toThrow(/code=137/)
   })
 })

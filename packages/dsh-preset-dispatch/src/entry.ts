@@ -168,7 +168,7 @@ export function apply(ctx: unknown, config: Config): void {
         // Turn and step numbers are zero here on purpose: the surrounding native
         // loop owns both, and the replaced step supplies content only. They are
         // corrected where the events are written.
-        produce: result => projectStepContent(result.frames as never[], { turn: 0, step: 0, dialect }),
+        produce: result => projectStepContent(result.frames, { turn: 0, step: 0, dialect }),
         append: event => { write([event]) },
       } as Parameters<typeof installAcpDispatch>[2])
       if (!installed) host.logger?.warn(`acp takeover: ${line} could not be installed`)
@@ -189,7 +189,7 @@ export function apply(ctx: unknown, config: Config): void {
 function appendOf(agent: { readonly session?: unknown }): ((type: string, payload: unknown, intent?: unknown) => { seq: number }) | undefined {
   const session = agent.session as { append?: unknown } | undefined
   if (typeof session?.append !== 'function') return undefined
-  return session.append.bind(session) as never
+  return session.append.bind(session)
 }
 
 function sessionIdOf(agent: { readonly id?: unknown; readonly session?: unknown }): string | undefined {
