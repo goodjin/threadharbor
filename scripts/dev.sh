@@ -109,8 +109,12 @@ stop_pid() { # $1 pid file, $2 port
 
 # ---- web --------------------------------------------------------------------
 web_start() {
+  # The per-channel patch files went away with the hostd deployment (phase 6).
+  # The plugin is composed by the profile now, so a patch is optional: use one
+  # if it is there, and otherwise start on the profile's own composition.
   local patch="$root/deploy/channels/$channel.patch.yml"
-  [[ -f "$patch" ]] || die "channel patch not found: $patch (channel=$channel)"
+  local patch_arg=()
+  if [[ -f "$patch" ]]; then patch_arg=(--patch "$patch"); fi
   mkdir -p "$(dirname "$web_log")" "$(dirname "$web_pid")"
   guard_orphan "$web_pid" "$web_port"
   if pid_alive "$web_pid"; then
@@ -120,7 +124,7 @@ web_start() {
   info "starting web (channel=$channel port=$web_port home=$dsh_home)"
   (
     cd "$root"
-    env DSH_HOME="$dsh_home" nohup "$dsh_bin" --profile web --patch "$patch" --port "$web_port" \
+    env DSH_HOME="$dsh_home" nohup "$dsh_bin" --profile web "${patch_arg[@]}" --port "$web_port" \
       >>"$web_log" 2>&1 < /dev/null &
     echo $! >"$web_pid"
   )

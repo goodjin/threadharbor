@@ -400,14 +400,16 @@ export async function startChannel(channel, options) {
   }
   configureProfile(home, pluginTarget(channel, options))
   const target = pluginTarget(channel, options)
+  // The per-channel patch files went away with the hostd deployment (phase 6).
+  // The profile composes the plugin itself, so a patch is optional now.
   const patch = join(target, 'deploy', 'channels', `${channel}.patch.yml`)
-  if (!existsSync(patch)) fail(`channel patch is missing: ${patch}`)
+  const patchArg = existsSync(patch) ? ['--patch', patch] : []
   const runtime = join(home, 'threadharbor-runtime')
   mkdirSync(runtime, { recursive: true, mode: 0o700 })
   const logPath = join(runtime, 'web.log')
   const log = openSync(logPath, 'a', 0o600)
   const dsh = resolveDshCommand(options)
-  const child = spawn(dsh, ['--profile', 'web', '--patch', patch, '--no-open', '--port', String(config.port)], {
+  const child = spawn(dsh, ['--profile', 'web', ...patchArg, '--no-open', '--port', String(config.port)], {
     cwd: target,
     env: { ...process.env, DSH_HOME: home },
     detached: true,
