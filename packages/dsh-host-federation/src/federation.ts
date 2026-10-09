@@ -91,8 +91,8 @@ export class HostFederation {
     this.announce('hello')
   }
 
-  /** Say goodbye, so other pages drop this host at once. */
-  stop(): void {
+  /** Say goodbye, so other pages drop this host at once. Releases this host. */
+  dispose(): void {
     if (!this.running) return
     this.running = false
     this.announce('bye')

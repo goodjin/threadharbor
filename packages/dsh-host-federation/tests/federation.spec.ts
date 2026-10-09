@@ -125,7 +125,7 @@ describe('HostFederation presence', () => {
   it('stops announcing after it stops', () => {
     const { fed, bus } = setup()
     fed.start()
-    fed.stop()
+    fed.dispose()
     fed.emitHeartbeat()
     // Nothing of ours should be left on the channel for others to see.
     expect(fed.hosts().map(h => h.hostId)).toEqual(['alpha'])
