@@ -7,6 +7,7 @@ export type {
   SessionHeaderLike,
   StepDecisionLike,
   StepEndReason,
+  PresetResolver,
 } from './dispatch.ts'
 export { AcpTurnRunner } from './runner.ts'
 export type { AcpClientPort, RunnerOptions, TurnStreamPort } from './runner.ts'

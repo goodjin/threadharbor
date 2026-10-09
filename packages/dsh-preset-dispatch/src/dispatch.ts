@@ -72,6 +72,8 @@ export type AcpPresetBinding = {
 export type ContentEvent = { readonly type: string; readonly payload: unknown }
 
 export type AcpDispatchOptions = {
+  /** Which preset this session is actually on. Defaults to the session header. */
+  readonly presetOf?: PresetResolver
   /** Turns what a turn produced into the events the session log should carry. */
   readonly produce: (result: AcpStepResult) => readonly ContentEvent[]
   /** Append those events, in order. */
@@ -88,16 +90,36 @@ export type AcpDispatchOptions = {
 export function resolvePreset(
   agent: AgentLike,
   presets: ReadonlyMap<string, AcpPresetBinding>,
+  presetOf?: PresetResolver,
 ): AcpPresetBinding | undefined {
-  // Flat on the header. Reading `header.meta.agentPreset` — as the design
-  // document originally had it — yields undefined forever, so dispatch silently
-  // falls back to the native agent with no error anywhere.
-  // Tolerate an agent whose shape this does not recognise: "not ours" is the
-  // safe reading, and throwing would take down a session we were only meant
-  // to leave alone.
-  const id = agent.session?.header?.agentPreset
+  const id = presetOf === undefined ? readHeader(agent) : presetOf(agent)
   if (id === undefined || id === '') return undefined
   return presets.get(id)
+}
+
+/**
+ * Which preset a session is *actually* on, right now.
+ *
+ * The header records the preset the session was **created** with. A blank
+ * session can change preset afterwards, and the header keeps the old value — so
+ * reading it can take over a session that has already moved on, or run a native
+ * session as though it were ACP. DSH's own code reads the projection
+ * (`ctx.sessionProjections.stateOf(session, 'agentPreset')`) for this reason;
+ * supply that here when it is available.
+ */
+export type PresetResolver = (agent: AgentLike) => string | undefined
+
+/**
+ * Flat on the header. Reading `header.meta.agentPreset` — as the design document
+ * originally had it — yields undefined forever, so dispatch silently falls back
+ * to the native agent with no error anywhere.
+ *
+ * Tolerates an agent whose shape this does not recognise: "not ours" is the
+ * safe reading, and throwing would take down a session we were only meant to
+ * leave alone.
+ */
+function readHeader(agent: AgentLike): string | undefined {
+  return agent.session?.header?.agentPreset
 }
 
 /** Read a `step` implementation off an instance or its prototype chain. */
@@ -135,7 +157,7 @@ export function installAcpDispatch(
   presets: ReadonlyMap<string, AcpPresetBinding>,
   options: AcpDispatchOptions,
 ): boolean {
-  const binding = resolvePreset(agent, presets)
+  const binding = resolvePreset(agent, presets, options.presetOf)
   if (binding === undefined) return false
 
   const original = readStep(agent)

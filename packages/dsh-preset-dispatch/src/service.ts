@@ -35,19 +35,31 @@ export type AttachOptions = FactoryDeps & {
    * events belong here.
    */
   write?(agent: unknown, events: readonly ContentEvent[]): void
+  /**
+   * Which preset a session is actually on, right now.
+   *
+   * Supply the live projection. The header only records the preset a session
+   * was *created* with, and a blank session can change preset afterwards.
+   */
+  presetOf?(agent: AgentLike): string | undefined
 }
 
-export function attachAcpDispatch(ctx: ContextLike, config: PresetConfig, options: AttachOptions): void {
+export function attachAcpDispatch(
+  ctx: ContextLike,
+  config: PresetConfig,
+  options: AttachOptions,
+): void {
   const factory = makeSessionFactory(config, options)
   const table = buildPresetTable(config, factory)
 
   ctx.on('agent/created', payload => {
     const agent = payload.agent
-    const binding = resolvePreset(agent as AgentLike, table)
+    const binding = resolvePreset(agent as AgentLike, table, options.presetOf)
     // Not ours: leave this session exactly as it was.
     if (binding === undefined) return
 
     installAcpDispatch(agent as AgentLike & object, table, {
+      ...(options.presetOf === undefined ? {} : { presetOf: options.presetOf }),
       produce: result =>
         // Turn and step numbers are zero here on purpose: the surrounding
         // native loop owns both, and the replaced step supplies content only.

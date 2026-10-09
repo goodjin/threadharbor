@@ -74,6 +74,27 @@ describe('attachAcpDispatch', () => {
     expect(Object.hasOwn(agent.agent, 'step')).toBe(false)
   })
 
+  it('follows the live preset, not the value the session was created with', () => {
+    // A blank session can change preset after it was created. The header keeps
+    // the original value, so trusting it would take over a session that has
+    // already moved on — or run a native session as if it were ACP.
+    const host = fakeContext()
+    attachAcpDispatch(host.ctx, CONFIG, { ...deps, presetOf: () => 'dsh' })
+    const stale = agentWith('acp-grok')
+
+    host.fire(stale)
+    expect(Object.hasOwn(stale.agent, 'step')).toBe(false)
+  })
+
+  it('takes over a session whose header is stale but whose live preset is ours', () => {
+    const host = fakeContext()
+    attachAcpDispatch(host.ctx, CONFIG, { ...deps, presetOf: () => 'acp-grok' })
+    const stale = agentWith('dsh')
+
+    host.fire(stale)
+    expect(Object.hasOwn(stale.agent, 'step')).toBe(true)
+  })
+
   it('reports an agent it cannot patch rather than letting the turn hang', () => {
     const host = fakeContext()
     attachAcpDispatch(host.ctx, CONFIG, deps)

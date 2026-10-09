@@ -210,6 +210,50 @@ DSH **硬拦**：`AgentPresetRegistry.select()` 检查回合边界，会话已�
 >
 > 另：本机 codex-acp 是 `1.6.0-grok.3`（软链到 `~/github/codex-acp` 本地分叉），而 hostd 里 pin 的是 `1.6.2`。codex 的帧形状取自分叉版本，**阶段 2 落地前需在 pinned 版本上复验**。
 
+### 2.8 2026-10-09 新增：两条会推翻原设计的事实
+
+（**核对时间 2026-10-09，参考源码 master `5badb15009`，并与在跑的 0.2.0-rc.2 逐条对过**）
+
+#### （1）会话头里的 preset 是**创建时的值**，会过期
+
+`session.header.agentPreset`（`packages/core/session/src/types.ts:130`）记的是会话**建立时**
+用的 preset。空白会话可以在之后换 preset（`agent-preset-registry` 的 `select` 会追加一条
+`agent-preset/selected`），此时**头里的值不再反映当前实际在跑的是哪个 agent**。
+
+DSH 自己的代码也不读头。`session-controller` 读的是投影
+`ctx.sessionProjections.stateOf(session, 'agentPreset')`
+（`packages/preset/agent-preset-registry/src/session.ts:34-44`，该文件开头的注释解释了
+为什么必须读投影；消费方先例 `session-controller/src/agent.ts:360-362`）。
+
+**对本次迁移的影响**：分流器不能只读头。读头在「会话建立后再换 preset」时会接管错的对象——
+按旧 preset 去接一个已经换成别的 agent 的会话，或者更糟，对一个原生会话做 ACP 处理。
+
+#### （2）模型目录是**按 Host 代次全局共享**的，没有按会话改的缝
+
+`@Remote('modelCatalog')` → `buildModelCatalog`（`session-controller/src/index.ts:313-319`）
+读的是 `ctx.llm.listProviders()` / `listModels()`，即**已注册适配器的全集**。
+源码注释写得很直白：「shared by every Session selector」「for Host-generation selectors」。
+
+**没有按会话换这份列表的缝。** 已检索 session-controller、ui-model-selection 与 llm 注册表
+未找到。（此为「检索后未找到」的推断，非直接证据。）
+
+按会话存的只有**选中项**：`selectModel`（`session-controller/src/index.ts:289-292`）
+→ `installModelSelection`，由 agent 作用域的 `agent/request` 瀑布在发请求时套用
+（`agent/src/model-selection.ts:81-132`）。
+
+**对本次迁移的影响**：§十 阶段 3 的「输入框模型选择器在 ACP 会话下改读各家模型列表」
+按现在的设计**做不到**。要改这份列表，只有两条路，都是全局或客户端侧的：
+
+1. **客户端侧**替换 `ui-model-selection` 贡献的那两处（`/model` 弹层 + 输入框座位）；
+2. **全局侧**注册一个适配器，或替换 session-controller 那一行。
+
+要改「某会话实际走哪个模型」，则走 `agent/request` 瀑布——这条是按会话的，明确可行。
+
+**⚠️ 这条需要在动工阶段 3 之前决定走哪条路。**「按会话换列表」与「全局换列表」
+的用户可感知后果完全不同：前者 ACP 会话只看到各家的模型、别的会话不受影响；
+后者所有会话的模型列表都变。
+
+---
 ### 2.7b 2026-10-09 新增：ACP 回合复刻流式观感的完整契约
 
 （**核对时间 2026-10-09，参考源码 master `5badb15009`**）
