@@ -21,6 +21,7 @@ import type { AgentLike, PresetResolver } from './dispatch.ts'
 import { buildPresetTable } from './registry.ts'
 import type { AcpPresetConfig, PresetConfig } from './registry.ts'
 import { makeSessionFactory } from './factory.ts'
+import type { AcpPresetBinding } from './dispatch.ts'
 import type { AcpDialect } from '@threadharbor/dsh-acp-agent'
 
 /** The part of a Cordis context this entry touches. */
@@ -35,7 +36,14 @@ export type AcpPluginDeps = {
    *
    * Handed the dialect that was resolved, so the caller need not re-derive it.
    */
-  install(agent: AgentLike, presetId: string, dialect: AcpDialect, binding: unknown): void
+  install(agent: AgentLike, presetId: string, dialect: AcpDialect, table: ReadonlyMap<string, AcpPresetBinding>): void
+  /**
+   * Say what went wrong on a session this row claimed.
+   *
+   * Optional because most callers only care that a session was or was not taken
+   * over — but a row that cannot report is a row that fails quietly.
+   */
+  report?(message: string): void
   /**
    * Which preset a session is on right now.
    *
@@ -78,8 +86,11 @@ export function applyAcpPlugin(
       const binding = table.get(presetId)
       if (binding === undefined) return
       deps.install(agent, presetId, dialect, table)
-    } catch {
-      // Left alone: whatever this session is, it keeps a working step.
+    } catch (error) {
+      // Left alone: whatever this session is, it keeps a working step. Said out
+      // loud, though — a takeover that loads, matches, announces itself and then
+      // throws here is indistinguishable from working, from the outside.
+      deps.report?.(`acp takeover failed: ${String(error)}`)
     }
   })
 }

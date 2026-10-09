@@ -42,6 +42,34 @@ describe('applyAcpPlugin', () => {
     expect(patched).toHaveLength(1)
   })
 
+  it('falls back to the session header before the projection is written', () => {
+    // The projection is the truth about which preset a session is on now, but it
+    // is only written once the preset has been selected — and `agent/created`
+    // fires before that write lands. A resolver that returns nothing at that
+    // moment would leave every session on a real host unclaimed, silently.
+    const context = ctx()
+    const patched: unknown[] = []
+    applyAcpPlugin(context, 'acp-grok', CONFIG, {
+      install: agent => { patched.push(agent) },
+      presetOf: () => undefined,
+    })
+    context.created(session('acp-grok'))
+    expect(patched).toHaveLength(1)
+  })
+
+  it('trusts the projection over a header left by an earlier preset', () => {
+    // The header records the preset a session was created with and never
+    // changes afterwards, so once a session has moved it is the wrong answer.
+    const context = ctx()
+    const patched: unknown[] = []
+    applyAcpPlugin(context, 'acp-grok', CONFIG, {
+      install: agent => { patched.push(agent) },
+      presetOf: () => 'standard',
+    })
+    context.created(session('acp-grok'))
+    expect(patched).toHaveLength(0)
+  })
+
   it('leaves a session on another preset alone', () => {
     const context = ctx()
     const patched: unknown[] = []

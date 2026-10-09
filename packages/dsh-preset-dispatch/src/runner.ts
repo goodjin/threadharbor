@@ -37,7 +37,19 @@ export type RunnerOptions = {
   /** Applied once, before the first turn; claude needs `default` to ask at all. */
   readonly modeId?: string
   readonly modelId?: string
+  /**
+   * How long to wait for the agent to open a session before giving up.
+   *
+   * An agent that accepts a connection and then says nothing — wrong secret,
+   * wrong path, an agent that is up but wedged — would otherwise hold the
+   * session open forever with nothing on screen and no way to tell that is what
+   * is happening. Give up loudly instead.
+   */
+  readonly openTimeoutMs?: number
 }
+
+/** Long enough for a cold process to start, short enough to not strand a turn. */
+const DEFAULT_OPEN_TIMEOUT_MS = 60_000
 
 type UserText = { readonly role?: unknown; readonly content?: unknown }
 
@@ -147,7 +159,12 @@ export class AcpTurnRunner {
   /** Open once, and remember — including when the first attempt failed. */
   private open(): Promise<string> {
     if (this.sessionId !== undefined) return Promise.resolve(this.sessionId)
-    this.opening ??= this.doOpen().then(
+    const ms = this.options.openTimeoutMs ?? DEFAULT_OPEN_TIMEOUT_MS
+    this.opening ??= withDeadline(
+      this.doOpen(),
+      ms,
+      `acp agent did not answer within ${String(ms)}ms`,
+    ).then(
       sessionId => { this.sessionId = sessionId; this.opening = undefined; return sessionId },
       error => { this.opening = undefined; throw error },
     )
@@ -172,4 +189,20 @@ export class AcpTurnRunner {
     }
     return reply.sessionId
   }
+}
+
+/**
+ * Fail a handshake that never finishes.
+ *
+ * The timer is cleared on whichever side wins, so a turn that finished normally
+ * does not leave a pending rejection behind to surface in an unrelated place.
+ */
+function withDeadline<T>(work: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => { reject(new Error(message)) }, ms)
+    work.then(
+      value => { clearTimeout(timer); resolve(value) },
+      error => { clearTimeout(timer); reject(error) },
+    )
+  })
 }

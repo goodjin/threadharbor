@@ -24,8 +24,12 @@
 
 import Schema from '@deepseek-ai/schemastery'
 import { applyAcpPlugin } from './plugin.ts'
+import { installAcpDispatch } from './dispatch.ts'
+import { makeContentWriter } from './content-writer.ts'
 import type { AcpPresetConfig } from './registry.ts'
+import type { AcpPresetBinding, AgentLike, ContentEvent } from './dispatch.ts'
 import type { AcpDialect } from '@threadharbor/dsh-acp-agent'
+import { projectStepContent } from '@threadharbor/dsh-acp-agent'
 
 export const name = 'threadharbor-acp'
 
@@ -109,10 +113,34 @@ export function apply(ctx: unknown, config: Config): void {
 
   applyAcpPlugin(host, config.presetId, preset, {
     ...(readProjection(host) === undefined ? {} : { presetOf: readProjection(host) }),
-    install: (agent, presetId, dialect) => {
+    report: message => {
+      host.logger?.warn(message)
+      process.stderr.write(`[threadharbor] ${message}\n`)
+    },
+    install: (agent, presetId, dialect, table) => {
       const line = `acp takeover: session=${String(sessionIdOf(agent) ?? '?')} preset=${presetId} dialect=${dialect.id}`
       host.logger?.info(line)
       process.stderr.write(`[threadharbor] ${line}\n`)
+
+      // Replace the session's step so the external agent drives the turn. This is
+      // the whole point of the row: reporting a takeover without doing it leaves
+      // a session that loads, matches, announces itself, and then answers with
+      // nothing — the quietest failure there is.
+      const append = appendOf(agent)
+      if (append === undefined) {
+        host.logger?.warn(`acp takeover: ${line} has no session log to write to; leaving it native`)
+        return
+      }
+      const write = makeContentWriter((type, payload, intent) => append(type, payload, intent))
+      const installed = installAcpDispatch(agent as AgentLike & object, table, {
+        ...(readProjection(host) === undefined ? {} : { presetOf: readProjection(host) }),
+        // Turn and step numbers are zero here on purpose: the surrounding native
+        // loop owns both, and the replaced step supplies content only. They are
+        // corrected where the events are written.
+        produce: result => projectStepContent(result.frames as never[], { turn: 0, step: 0, dialect }),
+        append: event => { write([event]) },
+      } as Parameters<typeof installAcpDispatch>[2])
+      if (!installed) host.logger?.warn(`acp takeover: ${line} could not be installed`)
     },
   })
 }
@@ -126,6 +154,13 @@ export function apply(ctx: unknown, config: Config): void {
  * DSH reads the projection for exactly this reason.
  */
 /** The session id, from wherever this agent shape happens to carry it. */
+/** The session log's append, if this agent has one. */
+function appendOf(agent: { readonly session?: unknown }): ((type: string, payload: unknown, intent?: unknown) => { seq: number }) | undefined {
+  const session = agent.session as { append?: unknown } | undefined
+  if (typeof session?.append !== 'function') return undefined
+  return session.append.bind(session) as never
+}
+
 function sessionIdOf(agent: { readonly id?: unknown; readonly session?: unknown }): string | undefined {
   if (typeof agent.id === 'string') return agent.id
   const session = agent.session as { readonly id?: unknown } | undefined

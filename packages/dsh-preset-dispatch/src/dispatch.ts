@@ -92,8 +92,11 @@ export function resolvePreset(
   presets: ReadonlyMap<string, AcpPresetBinding>,
   presetOf?: PresetResolver,
 ): AcpPresetBinding | undefined {
-  const id = presetOf === undefined ? readHeader(agent) : presetOf(agent)
-  if (id === undefined || id === '') return undefined
+  // Same question, same answer as `presetIdOf`. Two spellings of "which preset is
+  // this session on" that can disagree is how a row matches a session and then
+  // declines to take it over.
+  const id = presetIdOf(agent, presetOf)
+  if (id === undefined) return undefined
   return presets.get(id)
 }
 
@@ -104,7 +107,14 @@ export function resolvePreset(
  * matched — rather than what it can do — asks the same question the same way.
  */
 export function presetIdOf(agent: AgentLike, presetOf?: PresetResolver): string | undefined {
-  const id = presetOf === undefined ? readHeader(agent) : presetOf(agent)
+  // Projection first, header second — and the header is not the stale fallback
+  // it looks like. The projection is written when a preset is selected, which
+  // happens *after* `agent/created` fires for the sessions it recomposes. At that
+  // moment the header is the current answer, not a stale one: the session is
+  // being mounted precisely because this preset was selected for it. A resolver
+  // alone would therefore claim nothing on a real host and fail silently.
+  const fromProjection = presetOf?.(agent)
+  const id = fromProjection === undefined || fromProjection === '' ? readHeader(agent) : fromProjection
   return id === '' ? undefined : id
 }
 

@@ -195,3 +195,16 @@ describe('AcpTurnRunner', () => {
     expect(attempts).toBe(2)
   })
 })
+
+describe('AcpTurnRunner handshake', () => {
+  it('gives up on an agent that never answers', async () => {
+    // An external agent that accepts the connection and then says nothing would
+    // otherwise hold the session open forever with nothing on screen. The turn
+    // has to come back with an answer, even if that answer is a failure.
+    const runner = new AcpTurnRunner(
+      { request: () => new Promise(() => {}), notify: () => {}, onFrame: () => {} },
+      { cwd: '/tmp', openTimeoutMs: 20 },
+    )
+    await expect(runner.run({ kind: 'enter', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] })).rejects.toThrow(/within 20ms/)
+  })
+})
