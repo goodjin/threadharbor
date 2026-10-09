@@ -58,8 +58,8 @@ describe('buildPresetTable', () => {
     const binding = table.get('acp-grok')!
     const decision = { kind: 'enter' as const, messages: [] }
 
-    await binding.run(decision)
-    await binding.run(decision)
+    await binding.run(decision, { sessionId: 's1', produce: r => [], write: () => 1 })
+    await binding.run(decision, { sessionId: 's1', produce: r => [], write: () => 1 })
 
     expect(factory.built).toEqual(['acp-grok'])
   })
@@ -67,8 +67,8 @@ describe('buildPresetTable', () => {
   it('gives each preset its own agent', async () => {
     const factory = fakeFactory()
     const table = buildPresetTable(CONFIG, factory)
-    await table.get('acp-grok')!.run({ kind: 'enter', messages: [] })
-    await table.get('acp-claude')!.run({ kind: 'enter', messages: [] })
+    await table.get('acp-grok')!.run({ kind: 'enter', messages: [] }, { sessionId: 's1', produce: () => [], write: () => 1 })
+    await table.get('acp-claude')!.run({ kind: 'enter', messages: [] }, { sessionId: 's1', produce: () => [], write: () => 1 })
 
     expect(factory.built).toEqual(['acp-grok', 'acp-claude'])
   })
@@ -86,8 +86,8 @@ describe('buildPresetTable', () => {
     }
 
     const table = buildPresetTable(CONFIG, factory)
-    await table.get('acp-grok')!.run({ kind: 'enter', messages: [] })
-    await table.get('acp-claude')!.run({ kind: 'enter', messages: [] })
+    await table.get('acp-grok')!.run({ kind: 'enter', messages: [] }, { sessionId: 's1', produce: () => [], write: () => 1 })
+    await table.get('acp-claude')!.run({ kind: 'enter', messages: [] }, { sessionId: 's1', produce: () => [], write: () => 1 })
     expect(opened).toContainEqual({ presetId: 'acp-grok', modelId: 'grok-4.7' })
     expect(opened).toContainEqual({ presetId: 'acp-claude', modeId: 'default' })
   })

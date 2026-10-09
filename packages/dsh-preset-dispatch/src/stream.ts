@@ -19,10 +19,9 @@
  *     required, so the packed runs are built rather than omitted.
  */
 
-/** One packed run of deltas, as the durable message embeds it. */
-export type StreamRecord =
-  | { readonly type: 'text-chunks'; readonly time0: number; readonly index: number; readonly dt: readonly number[]; readonly texts: readonly string[] }
-  | { readonly type: 'reasoning-chunks'; readonly time0: number; readonly index: number; readonly dt: readonly number[]; readonly texts: readonly string[] }
+/** Re-exported from the protocol package, where the message shape lives. */
+export type { StreamRecord } from '@threadharbor/dsh-acp-agent'
+import type { StreamRecord } from '@threadharbor/dsh-acp-agent'
 
 type MutableRun = {
   type: 'text-chunks' | 'reasoning-chunks'

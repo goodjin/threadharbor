@@ -28,7 +28,15 @@ export type SessionAppend = (
   intent?: { surfaceOp?: string; sourceEventSeqs?: readonly number[] },
 ) => { readonly seq: number }
 
-export type ContentWriter = (events: readonly ContentEvent[]) => void
+/**
+ * Append the events, in order; returns the assistant message's sequence number.
+ *
+ * The number comes back because the live stream's closing frame points at it —
+ * that frame is how the UI knows the text it watched arrive is now findable in
+ * the transcript. Returning it is what lets the turn settle its stream without
+ * reaching back into the session afterwards.
+ */
+export type ContentWriter = (events: readonly ContentEvent[]) => number | undefined
 
 /** Tool result, and the call it answers, as they are numbered. */
 type PairKey = `${number}:${string}`
@@ -49,7 +57,8 @@ export function makeContentWriter(append: SessionAppend, onOrphan?: (callId: str
   // in a later turn must not pick up an earlier turn's sequence number.
   const answers = new Map<PairKey, number>()
 
-  return events => {
+  return (events): number | undefined => {
+    let written: number | undefined
     for (const event of events) {
       if (event.type === CALL) {
         const { seq } = append(CALL, event.payload)
@@ -68,11 +77,12 @@ export function makeContentWriter(append: SessionAppend, onOrphan?: (callId: str
         continue
       }
       if (event.type === MESSAGE) {
-        append(MESSAGE, event.payload, { surfaceOp: 'append' })
+        written = append(MESSAGE, event.payload, { surfaceOp: 'append' }).seq
       }
       // Anything else is not ours to write: a guessed shape corrupts the
       // transcript in a way nothing downstream can detect.
     }
+    return written
   }
 }
 

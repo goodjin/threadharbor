@@ -36,7 +36,7 @@ export type AttachOptions = FactoryDeps & {
    * The native loop owns the turn and step boundaries, so only the content
    * events belong here.
    */
-  write?(agent: unknown, events: readonly ContentEvent[]): void
+  write?(agent: unknown, events: readonly ContentEvent[]): number | undefined
   /**
    * Which preset a session is actually on, right now.
    *
@@ -88,7 +88,7 @@ export function attachAcpDispatch(
         // native loop owns both, and the replaced step supplies content only.
         // They are corrected where the events are written.
         projectStepContent(result.frames, { turn: 0, step: 0, dialect: binding.dialect }),
-      append: event => { options.write?.(agent, [event]) },
+      write: events => options.write?.(agent, events),
     })
   })
 }

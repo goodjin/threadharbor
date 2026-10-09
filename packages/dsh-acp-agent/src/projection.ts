@@ -11,6 +11,17 @@ import { randomUUID } from 'node:crypto'
 import type { AcpFrame } from './acp-client.ts'
 import type { AcpDialect, ToolCall } from './dialects/types.ts'
 
+/**
+ * One packed run of deltas, as the durable message embeds it.
+ *
+ * Lives here rather than with the stream writer: it is part of the message
+ * shape on the wire, and the projection that writes that shape must not have to
+ * depend on the package that streams it.
+ */
+export type StreamRecord =
+  | { readonly type: 'text-chunks'; readonly time0: number; readonly index: number; readonly dt: readonly number[]; readonly texts: readonly string[] }
+  | { readonly type: 'reasoning-chunks'; readonly time0: number; readonly index: number; readonly dt: readonly number[]; readonly texts: readonly string[] }
+
 /** The DSH event names this projection writes. */
 export type ProjectionEvent = { readonly type: string; readonly payload: unknown }
 
@@ -19,6 +30,8 @@ type Accumulator = {
   text: readonly string[]
   readonly tools: Map<string, ToolCall>
   totalTokens?: number | undefined
+  /** The compacted live stream, filled in when the turn ran with streaming on. */
+  stream?: readonly StreamRecord[]
 }
 
 function recordOf(value: unknown): Record<string, unknown> {
@@ -47,7 +60,7 @@ function assistantEvent(
         content,
         source: { provider: `acp-${dialect.id}`, model: dialect.id },
       },
-      stream: [],
+      stream: acc.stream ?? [],
       usage: acc.totalTokens === undefined ? undefined : { inputTokens: 0, outputTokens: acc.totalTokens },
     },
   }
@@ -82,10 +95,27 @@ export function projectTurn(
  */
 export function projectStepContent(
   frames: readonly AcpFrame[],
-  options: { readonly turn: number; readonly step: number; readonly dialect: AcpDialect },
+  options: {
+    readonly turn: number
+    readonly step: number
+    readonly dialect: AcpDialect
+    /**
+     * The compacted live stream, when the turn ran with streaming on.
+     *
+     * Without it the durable message carries `stream: []`: the user watches the
+     * text arrive, reloads, and finds it gone. That is the whole transcript
+     * disagreeing with what was just on screen.
+     */
+    readonly stream?: readonly StreamRecord[]
+  },
 ): ProjectionEvent[] {
   const { dialect, turn, step } = options
-  return contentEvents(accumulate(frames, dialect), { dialect, turn, step })
+  return contentEvents(accumulate(frames, dialect), {
+    dialect,
+    turn,
+    step,
+    ...(options.stream === undefined ? {} : { stream: options.stream }),
+  })
 }
 
 function accumulate(frames: readonly AcpFrame[], dialect: AcpDialect): Accumulator {
@@ -117,9 +147,15 @@ function accumulate(frames: readonly AcpFrame[], dialect: AcpDialect): Accumulat
 
 function contentEvents(
   acc: Accumulator,
-  options: { readonly dialect: AcpDialect; readonly turn: number; readonly step: number },
+  options: {
+    readonly dialect: AcpDialect
+    readonly turn: number
+    readonly step: number
+    readonly stream?: readonly StreamRecord[]
+  },
 ): ProjectionEvent[] {
   const { dialect, turn, step } = options
+  if (options.stream !== undefined) acc.stream = options.stream
   const { thought, text, tools, totalTokens } = acc
   const events: ProjectionEvent[] = []
   if (thought.length > 0) {

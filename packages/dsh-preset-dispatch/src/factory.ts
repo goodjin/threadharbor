@@ -59,7 +59,7 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
       client.onPermissionRequest = async request => await deps.answerPermission(request)
 
       const runner = new AcpTurnRunner(adaptClient(client), options)
-      return { run: async decision => await runner.run(decision) }
+      return { run: async (decision, turn) => await runner.run(decision, turn) }
     },
   }
 }

@@ -41,8 +41,6 @@ const ROOTS = [
  * just the bug it is meant to describe, given a longer life.
  */
 const KNOWN_UNWIRED: Readonly<Record<string, string>> = {
-  'packages/dsh-preset-dispatch/src/stream.ts':
-    'ACP 回合流式观感。开关（openStream）只在测试里给过，真实入口从不构造它。待接。',
   'packages/dsh-preset-dispatch/src/catalog.ts':
     '模型目录适配器。注册在 service.ts 里，而真机加载的是 entry.ts。待接。',
   'packages/dsh-preset-dispatch/src/catalog-registration.ts':
@@ -153,7 +151,9 @@ describe('代码真机上到不到', () => {
 describe('配置项配了有没有人读', () => {
   it('入口配置里每个字段都被生产代码读过', () => {
     const entry = readFileSync('packages/dsh-preset-dispatch/src/entry.ts', 'utf8')
-    const schema = entry.slice(entry.indexOf('export const Config'))
+    const start = entry.indexOf('export const Config')
+    const end = entry.indexOf('\n})', start)
+    const schema = entry.slice(start, end === -1 ? undefined : end)
     const fields = [...schema.matchAll(/^ {2}(\w+):/gm)].map(match => match[1])
 
     const consumers = ['entry.ts', 'plugin.ts', 'registry.ts', 'factory.ts', 'service.ts']

@@ -42,6 +42,15 @@ const agentThoughtChunk = (text: string) => ({
   params: { update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text } } },
 })
 
+/** A turn context; streaming is supplied per turn, like the real caller does. */
+const TURN = (stream: Record<string, unknown>) => ({
+  sessionId: 's1',
+  produce: (r: { frames: readonly unknown[]; end: unknown }) => [{ type: 'assistant/message', payload: { frames: r.frames.length } }],
+  write: () => 1,
+  openStream: () => ({ start: () => {}, records: () => [], abandon: () => {}, settle: () => {},
+    ...stream } as never),
+})
+
 const DECISION: StepDecisionLike = {
   kind: 'enter',
   messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
@@ -52,8 +61,8 @@ describe('AcpTurnRunner', () => {
     const client = fakeClient()
     const runner = new AcpTurnRunner(client, { cwd: '/tmp' })
 
-    await runner.run(DECISION)
-    await runner.run(DECISION)
+    await runner.run(DECISION, { sessionId: 's1', produce: () => [], write: () => 1 })
+    await runner.run(DECISION, { sessionId: 's1', produce: () => [], write: () => 1 })
 
     const news = client.calls.filter(call => call.method === 'session/new')
     expect(news).toHaveLength(1)
@@ -61,7 +70,7 @@ describe('AcpTurnRunner', () => {
 
   it('sends the user’s text as the prompt', async () => {
     const client = fakeClient()
-    await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION)
+    await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, { sessionId: 's1', produce: () => [], write: () => 1 })
 
     const prompt = client.calls.find(call => call.method === 'session/prompt')
     expect((prompt!.params as { prompt: { text: string }[] }).prompt[0]!.text).toBe('hello')
@@ -88,11 +97,11 @@ describe('AcpTurnRunner', () => {
     }
     const runner = new AcpTurnRunner(client, { cwd: '/tmp' })
 
-    expect((await runner.run(DECISION)).frames).toHaveLength(2)
+    expect((await runner.run(DECISION, { sessionId: 's1', produce: () => [], write: () => 1 })).frames).toHaveLength(2)
     // The second turn must not carry the first turn's frames along: a stale
     // frame replayed into a new turn reads as the agent answering something it
     // was never asked.
-    const second = await runner.run(DECISION)
+    const second = await runner.run(DECISION, { sessionId: 's1', produce: () => [], write: () => 1 })
     expect(second.frames).toHaveLength(2)
     for (const frame of second.frames) {
       expect(JSON.stringify(frame.params)).toContain('run 2')
@@ -101,7 +110,7 @@ describe('AcpTurnRunner', () => {
 
   it('reports a turn the agent ended normally as completed', async () => {
     const runner = new AcpTurnRunner(fakeClient(), { cwd: '/tmp' })
-    await expect(runner.run(DECISION)).resolves.toMatchObject({ end: { kind: 'completed' } })
+    await expect(runner.run(DECISION, { sessionId: 's1', produce: () => [], write: () => 1 })).resolves.toMatchObject({ end: { kind: 'completed' } })
   })
 
   it('reports an agent that stopped for its own reasons as blocked, not completed', async () => {
@@ -112,7 +121,7 @@ describe('AcpTurnRunner', () => {
       if (method === 'session/new') return { sessionId: 's1' }
       return {}
     }
-    const result = await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION)
+    const result = await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, { sessionId: 's1', produce: () => [], write: () => 1 })
     expect(result.end.kind).not.toBe('completed')
   })
 
@@ -125,7 +134,7 @@ describe('AcpTurnRunner', () => {
       if (method === 'session/new') throw new Error('agent binary missing')
       return {}
     }
-    await expect(new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION)).rejects.toThrow(/agent binary missing/)
+    await expect(new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, { sessionId: 's1', produce: () => [], write: () => 1 })).rejects.toThrow(/agent binary missing/)
   })
 
   it('feeds text to the stream as frames arrive, not after the turn ends', async () => {
@@ -149,10 +158,9 @@ describe('AcpTurnRunner', () => {
     }
     const runner = new AcpTurnRunner(client, {
       cwd: '/tmp',
-      openStream: () => ({ textDelta: text => deltas.push(text), reasoningDelta: () => {} }),
     })
 
-    await runner.run(DECISION)
+    await runner.run(DECISION, TURN({ textDelta: (t: string) => deltas.push(t), reasoningDelta: () => {} }))
     expect(deltas).toEqual(['Hel', 'lo'])
   })
 
@@ -175,11 +183,7 @@ describe('AcpTurnRunner', () => {
     }
     await new AcpTurnRunner(client, {
       cwd: '/tmp',
-      openStream: () => ({
-        textDelta: t => text.push(t),
-        reasoningDelta: t => reasoning.push(t),
-      }),
-    }).run(DECISION)
+    }).run(DECISION, TURN({ textDelta: (t: string) => text.push(t), reasoningDelta: (t: string) => reasoning.push(t) }))
 
     expect(reasoning).toEqual(['pondering'])
     expect(text).toEqual(['answer'])
@@ -195,8 +199,8 @@ describe('AcpTurnRunner', () => {
       return {}
     }
     const runner = new AcpTurnRunner(client, { cwd: '/tmp' })
-    await expect(runner.run(DECISION)).rejects.toThrow(/turn blew up/)
-    await expect(runner.run(DECISION)).rejects.toThrow(/turn blew up/)
+    await expect(runner.run(DECISION, { sessionId: 's1', produce: () => [], write: () => 1 })).rejects.toThrow(/turn blew up/)
+    await expect(runner.run(DECISION, { sessionId: 's1', produce: () => [], write: () => 1 })).rejects.toThrow(/turn blew up/)
     expect(client.calls.filter(call => call.method === 'session/new')).toHaveLength(1)
     expect(attempts).toBe(2)
   })
@@ -211,6 +215,7 @@ describe('AcpTurnRunner handshake', () => {
       { request: () => new Promise(() => {}), notify: () => {}, onFrame: () => {} },
       { cwd: '/tmp', openTimeoutMs: 20 },
     )
-    await expect(runner.run({ kind: 'enter', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] })).rejects.toThrow(/within 20ms/)
+    await expect(runner.run({ kind: 'enter', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] },
+      { sessionId: 's1', produce: () => [], write: () => 1 })).rejects.toThrow(/within 20ms/)
   })
 })

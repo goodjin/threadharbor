@@ -31,6 +31,8 @@ import type { AcpPresetBinding, AgentLike, ContentEvent } from './dispatch.ts'
 import type { PermissionDecision } from '@threadharbor/dsh-acp-agent'
 import type { AcpDialect } from '@threadharbor/dsh-acp-agent'
 import { projectStepContent } from '@threadharbor/dsh-acp-agent'
+import { AcpAssistantStream } from './stream.ts'
+import type { TurnStreamHandle } from './dispatch.ts'
 
 export const name = 'threadharbor-acp'
 
@@ -165,14 +167,23 @@ export function apply(ctx: unknown, config: Config): void {
         return
       }
       const write = makeContentWriter((type, payload, intent) => append(type, payload, intent))
+      const projection = readProjection(host)
       const installed = installAcpDispatch(agent as AgentLike & object, table, {
-        ...(readProjection(host) === undefined ? {} : { presetOf: readProjection(host) }),
+        ...(projection === undefined ? {} : { presetOf: projection }),
         // Turn and step numbers are zero here on purpose: the surrounding native
         // loop owns both, and the replaced step supplies content only. They are
         // corrected where the events are written.
-        produce: result => projectStepContent(result.frames, { turn: 0, step: 0, dialect }),
-        append: event => { write([event]) },
-      } as Parameters<typeof installAcpDispatch>[2])
+        produce: result =>
+          projectStepContent(result.frames, {
+            turn: 0,
+            step: 0,
+            dialect,
+            ...(result.stream === undefined ? {} : { stream: result.stream }),
+          }),
+        write,
+        openStream: agent => () =>
+          openAssistantStream(agent, dialect.id, message => host.logger?.warn(message)),
+      })
       if (!installed) host.logger?.warn(`acp takeover: ${line} could not be installed`)
     },
   })
@@ -245,4 +256,57 @@ function describeRequest(request: unknown): { toolName: string; callId?: string;
   const reason = typeof raw.reason === 'string' ? raw.reason
     : raw.rawInput === undefined ? undefined : JSON.stringify(raw.rawInput).slice(0, 200)
   return { toolName, ...(callId === undefined ? {} : { callId }), ...(reason === undefined ? {} : { reason }) }
+}
+
+/**
+ * Per-agent counters for the live stream.
+ *
+ * Held per agent rather than per preset because the two numbers must keep
+ * climbing for the whole life of one conversation: the UI uses them to order
+ * frames and to discard anything stale, so two sessions sharing a counter is
+ * one session's text appearing in the other's window.
+ */
+const streamCounters = new WeakMap<object, { attempt: number; revision: number }>()
+
+function countersFor(agent: object): { attempt: number; revision: number } {
+  const found = streamCounters.get(agent)
+  if (found !== undefined) return found
+  const fresh = { attempt: 0, revision: 0 }
+  streamCounters.set(agent, fresh)
+  return fresh
+}
+
+/**
+ * Open a turn's live stream on the live agent, if it can emit one.
+ *
+ * The native loop does the same thing: it reaches its own dispatcher and emits
+ * `agent/assistant-stream` (see the reference loop's own `ReactLoopAgent`). If
+ * that seam is not reachable, the turn still runs and still writes its message —
+ * it just does not stream — and it says so, because a stream that silently
+ * never appears looks identical to an agent that never answered.
+ */
+function openAssistantStream(
+  agent: AgentLike,
+  dialectId: string,
+  warn: (message: string) => void,
+): TurnStreamHandle | undefined {
+  const holder = agent as unknown as {
+    dispatch?: { emit?: (event: string, payload: unknown) => unknown }
+    id?: unknown
+  }
+  const emit = holder.dispatch?.emit?.bind(holder.dispatch)
+  const sessionId = sessionIdOf(agent)
+  if (emit === undefined || sessionId === undefined) {
+    warn(`acp ${dialectId}: this agent has no stream channel; the answer will appear all at once`)
+    return undefined
+  }
+  const counters = countersFor(agent as unknown as object)
+  return new AcpAssistantStream({
+    sessionId,
+    attempt: ++counters.attempt,
+    nextRevision: () => ++counters.revision,
+    turn: 0,
+    step: 0,
+    emit: frame => { emit('agent/assistant-stream', { frame }) },
+  })
 }

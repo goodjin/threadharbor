@@ -76,16 +76,26 @@ export function buildPresetTable(
     const dialect = factory.dialectFor(presetId, preset)
     // Not an agent we drive: leave whatever that preset is entirely alone.
     if (dialect === undefined) continue
-    let opened: AcpSession | undefined
+    // One external conversation per DSH session, not per preset.
+    //
+    // Sharing one across sessions is the original bug: two conversations in the
+    // same preset land in the same external session, so each one's answer shows
+    // up in the other's history. The keys are session ids, and a session that
+    // is gone drops its entry with it.
+    const opened = new Map<string, AcpSession>()
     table.set(presetId, {
       dialect,
-      run: async decision => {
-        opened ??= factory.open(presetId, {
-          cwd: preset.cwd ?? process.cwd(),
-          ...(preset.model === undefined ? {} : { modelId: preset.model }),
-          ...(preset.mode === undefined ? {} : { modeId: preset.mode }),
-        })
-        return opened.run(decision)
+      run: async (decision, turn) => {
+        let session = opened.get(turn.sessionId)
+        if (session === undefined) {
+          session = factory.open(presetId, {
+            cwd: preset.cwd ?? process.cwd(),
+            ...(preset.model === undefined ? {} : { modelId: preset.model }),
+            ...(preset.mode === undefined ? {} : { modeId: preset.mode }),
+          })
+          opened.set(turn.sessionId, session)
+        }
+        return session.run(decision, turn)
       },
     })
   }

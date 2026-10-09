@@ -36,7 +36,11 @@ function protoStepOf(agent: object): unknown {
 function binding(run?: AcpPresetBinding['run']): AcpPresetBinding {
   return {
     dialect: { id: 'acp' } as AcpPresetBinding['dialect'],
-    run: run ?? (async () => ({ frames: [], end: { kind: 'completed' } })),
+    run: run ?? (async (_decision, turn) => {
+      const result = { frames: [], end: { kind: 'completed' as const } }
+      turn.write(turn.produce(result))
+      return result
+    }),
   }
 }
 
@@ -61,14 +65,14 @@ describe('installAcpDispatch', () => {
   it('takes over a session whose preset names an external agent', async () => {
     const agent = new FakeAgent('acp-grok')
     const before = protoStepOf(agent)
-    expect(installAcpDispatch(agent, new Map([['acp-grok', binding()]]), { produce: () => [], append: () => {} })).toBe(true)
+    expect(installAcpDispatch(agent, new Map([['acp-grok', binding()]]), { produce: () => [], write: () => undefined })).toBe(true)
     expect(protoStepOf(agent)).toBe(before)
   })
 
   it('does not touch a native session at all', async () => {
     const agent = new FakeAgent('dsh')
     const before = protoStepOf(agent)
-    expect(installAcpDispatch(agent, new Map([['acp-grok', binding()]]), { produce: () => [], append: () => {} })).toBe(false)
+    expect(installAcpDispatch(agent, new Map([['acp-grok', binding()]]), { produce: () => [], write: () => undefined })).toBe(false)
     // Same function reference: the native path is not merely bypassed, it is
     // untouched, so there is nothing to regress.
     expect(protoStepOf(agent)).toBe(before)
@@ -80,7 +84,7 @@ describe('installAcpDispatch', () => {
     const taken = new FakeAgent('acp-grok')
     const native = new FakeAgent('dsh')
     const nativeStepBefore = protoStepOf(native)
-    installAcpDispatch(taken, new Map([['acp-grok', binding()]]), { produce: () => [], append: () => {} })
+    installAcpDispatch(taken, new Map([['acp-grok', binding()]]), { produce: () => [], write: () => undefined })
     expect(protoStepOf(native)).toBe(nativeStepBefore)
     // No own property: the native session still reaches the prototype method,
     // untouched. (Looking up `native.step` would find it through the chain.)
@@ -94,7 +98,7 @@ describe('installAcpDispatch', () => {
     installAcpDispatch(
       agent,
       new Map([['acp-grok', binding(async decision => { ran.push(decision); return { frames: [], end: { kind: 'completed' } } })]]),
-      { produce: () => [], append: () => {} },
+      { produce: () => [], write: () => undefined },
     )
 
     // Called the way the loop calls it: as a method, so `this` is the agent.
@@ -113,15 +117,22 @@ describe('installAcpDispatch', () => {
     const order: string[] = []
     installAcpDispatch(
       agent,
-      new Map([['acp-grok', binding(async () => { order.push('run'); return { frames: [], end: { kind: 'completed' } } })]]),
+      new Map([['acp-grok', binding(async (_decision, turn) => {
+        order.push('run')
+        const result = { frames: [], end: { kind: 'completed' as const } }
+        turn.write(turn.produce(result))
+        return result
+      })]]),
       {
         produce: () => { order.push('produce'); return [{ type: 'assistant/message', payload: {} }] },
-        append: () => { order.push('append') },
+        write: () => { order.push('write'); return 1 },
       },
     )
 
     await (agent as unknown as { step(d: StepDecisionLike): Promise<unknown> }).step(DECISION)
-    expect(order).toEqual(['run', 'produce', 'append'])
+    // The turn owns its write: content is produced after the run, and written
+    // after that. The closing stream frame depends on this order.
+    expect(order).toEqual(['run', 'produce', 'write'])
   })
 
   it('writes the produced content events in order', async () => {
@@ -132,7 +143,7 @@ describe('installAcpDispatch', () => {
         { type: 'tool/call', payload: { callId: 'c1' } },
         { type: 'tool/result', payload: { callId: 'c1' } },
       ],
-      append: event => { written.push(event.type) },
+      write: events => { written.push(...events.map(event => event.type)); return 1 },
     })
 
     await (agent as unknown as { step(d: StepDecisionLike): Promise<unknown> }).step(DECISION)
@@ -145,7 +156,7 @@ describe('installAcpDispatch', () => {
     installAcpDispatch(
       agent,
       new Map([['acp-grok', binding(async () => { runs += 1; return { frames: [], end: { kind: 'completed' } } })]]),
-      { produce: () => [], append: () => {} },
+      { produce: () => [], write: () => undefined },
     )
     const host = agent as unknown as { step(d: StepDecisionLike): Promise<unknown> }
     await host.step(DECISION)
@@ -159,12 +170,12 @@ describe('installAcpDispatch', () => {
     expect(() => installAcpDispatch(
       agent,
       new Map([['acp-grok', binding()]]),
-      { produce: () => [], append: () => {} },
+      { produce: () => [], write: () => undefined },
     )).toThrow(/no step/i)
   })
 
   it('treats an empty preset as no preset', () => {
     const agent = new FakeAgent('')
-    expect(installAcpDispatch(agent, new Map([['', binding()]]), { produce: () => [], append: () => {} })).toBe(false)
+    expect(installAcpDispatch(agent, new Map([['', binding()]]), { produce: () => [], write: () => undefined })).toBe(false)
   })
 })

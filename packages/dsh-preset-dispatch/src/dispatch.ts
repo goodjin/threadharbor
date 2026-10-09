@@ -17,6 +17,8 @@
  */
 
 import type { AcpDialect, AcpFrame } from '@threadharbor/dsh-acp-agent'
+import type { StreamRecord } from './stream.ts'
+import type { ContentWriter } from './content-writer.ts'
 
 /** The header fields this module reads to decide whether to take over. */
 export type SessionHeaderLike = {
@@ -47,6 +49,14 @@ export type StepEndReason =
 export type AcpStepResult = {
   /** ACP frames from this turn alone, for projection. */
   readonly frames: readonly AcpFrame[]
+  /**
+   * The compacted stream, when the turn ran with streaming on.
+   *
+   * The durable message embeds it, so the text a user watched arrive is still
+   * there after a reload. Without this the live stream and the transcript are
+   * two different versions of the same turn.
+   */
+  readonly stream?: readonly StreamRecord[]
   readonly end: StepEndReason
 }
 
@@ -60,7 +70,41 @@ export type AcpPresetBinding = {
    * here reaches the loop's own error handling, which closes the turn as an
    * error rather than leaving it open.
    */
-  readonly run: (decision: StepDecisionLike) => Promise<AcpStepResult>
+  readonly run: (decision: StepDecisionLike, turn: TurnContext) => Promise<AcpStepResult>
+}
+
+/** The live stream this turn writes into, if streaming is on. */
+export type TurnStreamHandle = {
+  start(): void
+  textDelta(text: string): void
+  reasoningDelta(text: string): void
+  /** The compacted stream for the durable message. */
+  records(): readonly StreamRecord[]
+  /**
+   * Announce the end, pointing at the durable write's sequence number.
+   *
+   * Call this only once that write has happened: the closing frame carries the
+   * number, and it is how the UI knows the text it watched arrive is now
+   * findable. If nothing was written, abandon instead.
+   */
+  settle(eventType: 'assistant/message' | 'assistant/attempt', commit: () => number): void
+  abandon(): void
+}
+
+/**
+ * What one turn needs from the session it belongs to.
+ *
+ * Passed per turn rather than held, because the writer belongs to a session
+ * while the external agent is opened per preset. Passing them together is what
+ * lets the turn own its stream's whole life without two sessions sharing one.
+ */
+export type TurnContext = {
+  /** This DSH session's id; the external conversation is keyed by it. */
+  readonly sessionId: string
+  readonly produce: (result: AcpStepResult) => readonly ContentEvent[]
+  /** Append the events; returns the message's sequence number. */
+  readonly write: ContentWriter
+  readonly openStream?: () => TurnStreamHandle | undefined
 }
 
 /**
@@ -76,8 +120,10 @@ export type AcpDispatchOptions = {
   readonly presetOf?: PresetResolver
   /** Turns what a turn produced into the events the session log should carry. */
   readonly produce: (result: AcpStepResult) => readonly ContentEvent[]
-  /** Append those events, in order. */
-  readonly append: (event: ContentEvent) => void
+  /** Append those events, in order; returns the message's sequence number. */
+  readonly write: ContentWriter
+  /** Open this agent's live stream for a turn, if it can stream. */
+  readonly openStream?: (agent: AgentLike) => () => TurnStreamHandle | undefined
 }
 
 /**
@@ -199,12 +245,27 @@ export function installAcpDispatch(
     try {
       // Run first: the content events describe what the turn produced, so
       // producing them beforehand would write the previous turn's remainder.
-      const result = await binding.run(decision)
-      for (const event of options.produce(result)) options.append(event)
+      // The turn owns its own writing, including the stream's closing frame:
+      // that frame has to follow the durable append, and the append belongs
+      // to this session while the stream belongs to the turn. Splitting them
+      // across two places is what left streaming unwired for so long.
+      const result = await binding.run(decision, {
+        sessionId: sessionIdOf(this) ?? '',
+        produce: options.produce,
+        write: options.write,
+        ...(options.openStream === undefined ? {} : { openStream: options.openStream(this) }),
+      })
       return result.end
     } finally {
       active.delete(this)
     }
   })
   return true
+}
+
+/** This agent's session id, which the external conversation is keyed by. */
+function sessionIdOf(agent: { readonly id?: unknown; readonly session?: unknown }): string | undefined {
+  if (typeof agent.id === 'string') return agent.id
+  const session = agent.session as { readonly id?: unknown } | undefined
+  return typeof session?.id === 'string' ? session.id : undefined
 }

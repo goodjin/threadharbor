@@ -7,7 +7,7 @@
  * setup the agent already paid.
  */
 
-import type { AcpStepResult, StepDecisionLike, StepEndReason } from './dispatch.ts'
+import type { AcpStepResult, StepDecisionLike, StepEndReason, TurnContext } from './dispatch.ts'
 import type { AcpFrame } from '@threadharbor/dsh-acp-agent'
 
 /** The JSON-RPC surface this runner needs, kept narrow so it can be stood in for. */
@@ -102,6 +102,7 @@ function toEndReason(stopReason: unknown): StepEndReason {
 
 export class AcpTurnRunner {
   private sessionId: string | undefined
+  private dshSessionId: string | undefined
   private opening: Promise<string> | undefined
   private turnFrames: AcpFrame[] = []
   private stream: TurnStreamPort | undefined
@@ -121,14 +122,21 @@ export class AcpTurnRunner {
   /** Take one frame: keep it for projection, and stream its text immediately. */
   private observe(frame: AcpFrame): void {
     this.turnFrames.push(frame)
-    if (this.stream === undefined) return
+    const stream = this.stream
+    if (stream === undefined) return
+    // Held locally so nothing can clear it while this frame is being pushed.
+    this.pushToStream(frame, stream)
+  }
+
+  /** Feed one frame's text to the live stream. */
+  private pushToStream(frame: AcpFrame, stream: NonNullable<typeof this.stream>): void {
     const update = recordOf(recordOf(recordOf(frame)['params'])['update'])
     const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
     if (kind !== 'agent_message_chunk' && kind !== 'agent_thought_chunk') return
     const text = textOf(update['content'])
     if (text.length === 0) return
-    if (kind === 'agent_thought_chunk') this.stream.reasoningDelta(text)
-    else this.stream.textDelta(text)
+    if (kind === 'agent_thought_chunk') stream.reasoningDelta(text)
+    else stream.textDelta(text)
   }
 
   /**
@@ -139,10 +147,21 @@ export class AcpTurnRunner {
    * something empty instead would show the user an agent that merely had nothing
    * to say.
    */
-  async run(decision: StepDecisionLike): Promise<AcpStepResult> {
-    const sessionId = await this.open()
+  /**
+   * Run one turn, and own everything its answer produces.
+   *
+   * The write lives here rather than in the caller on purpose: the stream's
+   * closing frame can only be emitted after the durable message exists, and it
+   * has to carry that message's sequence number. Split across two places, the
+   * two can be reordered, and the result is a frame pointing at a message that
+   * was never written.
+   */
+  async run(decision: StepDecisionLike, turn: TurnContext): Promise<AcpStepResult> {
+    const sessionId = await this.open(turn.sessionId)
     this.turnFrames = []
-    this.stream = this.options.openStream?.()
+    const stream = turn.openStream?.()
+    this.stream = stream
+    stream?.start()
 
     const text = promptText(decision.messages)
     const params: Record<string, unknown> = {
@@ -150,15 +169,65 @@ export class AcpTurnRunner {
       prompt: [{ type: 'text', text }],
     }
     if (this.options.modelId !== undefined) params['modelId'] = this.options.modelId
-    const reply = await this.client.request('session/prompt', params)
+
+    let reply: unknown
+    let failure: unknown
+    try {
+      reply = await this.client.request('session/prompt', params)
+    } catch (error: unknown) {
+      // Remember it, settle what was streamed, then rethrow: the caller owns the
+      // error handling, and a turn that failed must not leave a stream hanging.
+      failure = error
+    }
     const stopReason = (reply as { stopReason?: unknown } | null)?.stopReason
 
     this.stream = undefined
-    return { frames: [...this.turnFrames], end: toEndReason(stopReason) }
+
+    if (failure !== undefined) {
+      // The turn produced nothing worth keeping; close the stream without
+      // claiming a commit that will not happen.
+      stream?.abandon()
+      throw failure
+    }
+
+    const result: AcpStepResult = {
+      frames: [...this.turnFrames],
+      end: toEndReason(stopReason),
+      ...(stream === undefined ? {} : { stream: stream.records() }),
+    }
+    // Produce after the run, write after that, and only then announce the end:
+    // the closing frame carries the message's sequence number, and pointing at
+    // a message that is not written yet shows the user text that then vanishes.
+    const seq = turn.write(turn.produce(result))
+    if (stream === undefined) return result
+    if (seq === undefined) stream.abandon()
+    else stream.settle('assistant/message', () => seq)
+    return result
   }
 
-  /** Open once, and remember — including when the first attempt failed. */
-  private open(): Promise<string> {
+  /**
+   * Open once per DSH session, and remember — including when the first attempt
+   * failed.
+   *
+   * Keyed by the session that asked, so two conversations in the same preset do
+   * not end up sharing one external conversation.
+   */
+  private open(dshSessionId: string): Promise<string> {
+    if (this.dshSessionId !== undefined && this.dshSessionId !== dshSessionId) {
+      // A different session asking: its own external conversation.
+      return this.freshOpen(dshSessionId)
+    }
+    this.dshSessionId = dshSessionId
+    return this.openingNow()
+  }
+
+  private async freshOpen(dshSessionId: string): Promise<string> {
+    this.dshSessionId = dshSessionId
+    this.sessionId = undefined
+    return this.openingNow()
+  }
+
+  private openingNow(): Promise<string> {
     if (this.sessionId !== undefined) return Promise.resolve(this.sessionId)
     const ms = this.options.openTimeoutMs ?? DEFAULT_OPEN_TIMEOUT_MS
     this.opening ??= withDeadline(
