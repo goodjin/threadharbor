@@ -1,5 +1,13 @@
 # 手机端访问方案（Android）
 
+> **⚠️ 本文部分内容已过时（2026-10-10 核对）。**
+> 多主机迁移已完成：hostd 与 gateway 下线，agent 以 DSH 原生 ACP 插件的形式
+> **跑在提供页面那台机器的进程内**，不再有远程主机、不再有 SSH 部署、不再有
+> 由 gateway 持有的 SSH 隧道。下面凡提到 hostd / gateway hold / 远程会话的段落，
+> 描述的是迁移前的架构。现状见
+> [`design/dsh-multi-host-migration.md`](./design/dsh-multi-host-migration.md)
+> 与该文档 §2.7c 的取证结论。
+
 本文讨论如何让手机访问 ThreadHarbor 已有的远程会话能力。结论先行：**ThreadHarbor 已经能在远程主机上持续执行 Codex、Grok 与 DSH 会话，缺的只是"手机怎么接进来"和"手机上的界面"**；但接入之前有一个必须先补的鉴权缺口。
 
 参考项目 `ds-harness-remote` 的源码放在 `reference/ds-harness-remote/`（Git 忽略，仅供开发时核对；用 `npm run reference:checkout-mobile` 更新）。本文不引入它作为运行时依赖。

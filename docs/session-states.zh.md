@@ -1,5 +1,13 @@
 # 会话状态机盘点
 
+> **⚠️ 本文部分内容已过时（2026-10-10 核对）。**
+> 多主机迁移已完成：hostd 与 gateway 下线，agent 以 DSH 原生 ACP 插件的形式
+> **跑在提供页面那台机器的进程内**，不再有远程主机、不再有 SSH 部署、不再有
+> 由 gateway 持有的 SSH 隧道。下面凡提到 hostd / gateway hold / 远程会话的段落，
+> 描述的是迁移前的架构。现状见
+> [`design/dsh-multi-host-migration.md`](./design/dsh-multi-host-migration.md)
+> 与该文档 §2.7c 的取证结论。
+
 核对时间：2026-09-29（依据当日工作区源码逐点核对，非凭印象）
 
 ## 0. 速览
