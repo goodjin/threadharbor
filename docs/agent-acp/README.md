@@ -8,7 +8,6 @@
 | **codex** | ✅ 已实现，已实测 | stdio | [codex.md](./codex.md) |
 | **claude code** | ✅ 已实现，已实测 | stdio | [claude-code.md](./claude-code.md) |
 | **Cursor** | 📄 官方支持，未接入 | stdio | [cursor.md](./cursor.md) |
-
 已实现的三个共用的代码在 `packages/dsh-acp-agent/`：传输、客户端、投影、审批桥接是共用的，**每个 agent 只提供一个 dialect**。
 
 ## 三家的字段差异对照
@@ -30,7 +29,7 @@
 
 1. **权限请求必须用 JSON-RPC 响应回同一个 id。** 用通知回会被静默接受，回合永不返回。实测挂满 240 秒，无错误、无超时、无后续帧。
 2. **`usage_update` 不是 token 数。** 它带的是上下文窗口占用 `{used, size}`。真实用量在别处。
-3. **握手通过 ≠ 能用。** codex/claude/grok 的 `initialize` 和 `session/new` 都不需要登录；Cursor 更极端——本机实测握手一路绿灯，真发提示词返回「未授权」。
+3. **握手通过 ≠ 能用。** codex/claude/grok 的 `initialize` 和 `session/new` 都不需要登录；**Cursor 握手后还有一道硬门槛**——`session/new` 直接报「需要鉴权」，`authenticate` 会挂住等交互式登录。四家里只有它这样。
 4. **终端子协议要五个方法全实现。** 只实现 `terminal/create` 看起来是「半能用」：回合结束，但工具结果是一句抱怨。
 
 ## 验收门

@@ -1103,3 +1103,18 @@ hostd 时代的「远程主机」假设——而那正是阶段 6 要拿掉的�
 3. **不要重写已验证部分**。`packages/dsh-grok-agent` 有真实帧回归测试，直接复用。
 4. **每阶段做完先验证再进下一阶段**，别攒着一起验。
 5. **hostd 在阶段 6 之前不要删**。
+
+#### 各 agent 的 ACP 对接文档
+
+已拆成独立文档，放在 `docs/agent-acp/`：
+
+| Agent | 状态 | 文档 |
+|---|---|---|
+| grok | ✅ 已实现并实测 | [grok.md](../agent-acp/grok.md) |
+| codex | ✅ 已实现并实测 | [codex.md](../agent-acp/codex.md) |
+| claude code | ✅ 已实现并实测 | [claude-code.md](../agent-acp/claude-code.md) |
+| Cursor | 📄 官方支持，未接入 | [cursor.md](../agent-acp/cursor.md) |
+
+三家已实现的差异对照表、以及接新 agent 要改的地方，在 [README.md](../agent-acp/README.md) 里。
+
+**接 Cursor 前必读的两条**：它的安装脚本会覆盖 `~/.local/bin/agent`（本项目 grok 正在用的链接）；且它是唯一握手后还有鉴权硬门槛的一家。

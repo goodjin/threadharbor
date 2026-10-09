@@ -49,6 +49,10 @@ importers:
   packages/dsh-acp-agent: {}
 
   packages/dsh-client:
+    dependencies:
+      '@threadharbor/dsh-host-federation':
+        specifier: workspace:^
+        version: link:../dsh-host-federation
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1

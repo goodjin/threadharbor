@@ -1,12 +1,12 @@
 # Cursor 的 ACP 对接
 
 > 核对时间：2026-09-14
-> 来源：官方文档 <https://cursor.com/docs/cli/acp.md>（本文的接口定义以它为准）+ 本机实测
-> 状态：**官方支持，本项目尚未接入。** 帧形状未做实机验证（原因见文末「为什么没跑实测」）。
+> 来源：官方文档 <https://cursor.com/docs/cli/acp.md> + 本机实机探测（`cursor-agent-sea`，构建 2026.10.01-e373342）
+> 状态：**官方支持，本项目尚未接入。** 握手与鉴权行为已实测；**模型列表来源和扩展方法的实际触发时机未实测**（需先完成登录）。
 
 ## 一句话结论
 
-Cursor 是四家里**唯一有官方 ACP 文档**的，接口定义清楚，可以照着写。但本项目**还没接**，且实测卡在登录态上——`initialize` / `session/new` 能过，真发提示词返回未授权。
+Cursor 是四家里**唯一有官方 ACP 文档**的，接口定义清楚。但**它是唯一一家「握手之后还有一道硬门槛」的**：`initialize` 能过，但 `session/new` 直接返回「需要鉴权」，`authenticate` 又会**挂住等交互式登录**。不先完成 `agent login`，后面一步都走不了。
 
 ## 一个必须先知道的坑：安装会覆盖本项目在用的 `agent`
 
@@ -33,13 +33,18 @@ agent acp
 
 日志走 stderr，不在协议里——和另外三家一样，客户端要能忽略 stderr 的噪声。
 
+**本机探测还发现两件装机器的事：**
+
+- 官方安装包（约 350MB）里的 `cursor-agent-sea` **完全没有代码签名**，macOS 会直接杀掉它（退出码 137）。本地试跑需要先 `codesign --force --sign -` 补一个临时签名。这不影响官方正常安装路径，但**自建部署时会踩到**。
+- 手动下载的平台目录是 `darwin/arm64`，不是 `mac/arm64`（后者 403）。
+
 ## 完整接口定义
 
-### 流程
+### 流程（实测确认：鉴权是硬门槛）
 
 ```
-1. initialize
-2. authenticate           （methodId: "cursor_login"）
+1. initialize                        ← 能过
+2. authenticate  methodId:"cursor_login"   ← 不做这步，下一步直接失败
 3. session/new  或  session/load
 4. session/prompt
 5. 处理 session/update 通知（流式输出）
@@ -47,9 +52,34 @@ agent acp
 7. 需要时 session/cancel
 ```
 
+**实测的三个结果：**
+
+| 调用 | 未登录时的结果 |
+|---|---|
+| `initialize` | ✅ 正常返回 |
+| `session/new` | ❌ `-32000 Authentication required`，提示先跑 `agent login` 再调 `authenticate` |
+| `authenticate {methodId:'cursor_login'}` | ⚠️ **不返回**——挂住等交互式登录 |
+| `session/list` | ❌ `-32000 Authentication required` |
+
+所以流程的实际前置是：**必须先在终端完成一次 `agent login`**，之后 `authenticate` 才能秒回。另外三家都是 `initialize` 完直接 `session/new`，**只有 Cursor 多这一道**。
+
+### initialize 返回的实测内容
+
+```json
+{ "protocolVersion": 1,
+  "agentCapabilities": {
+    "loadSession": true,
+    "mcpCapabilities": { "http": true, "sse": true },
+    "promptCapabilities": { "audio": false, "embeddedContext": false, "image": true },
+    "sessionCapabilities": { "list": {} } },
+  "authMethods": [ { "id": "cursor_login", "name": "Cursor Login", ... } ] }
+```
+
+注意 `loadSession: true` 和 `sessionCapabilities.list`——**Cursor 声称能列出和加载已有会话**，这正是下面「与桌面版的关系」那一节的关键。
+
 ### 鉴权
 
-官方声明的 ACP 鉴权方法是 `cursor_login`。但**更实际的做法是启动前就带上凭据**：
+官方声明的 ACP 鉴权方法是 `cursor_login`。更实际的做法是启动前就带上凭据：
 
 ```
 agent login
@@ -120,7 +150,9 @@ Cursor 会发**标准 ACP 里没有**的自定义方法。这是接 Cursor 时�
 - `~/.cursor/agent-cli-state.json` 按项目路径记录 workerId
 - `~/.cursor` 下**没有任何** chat / conversation / session 文件；会话正文在桌面版的存储里（`state.vscdb` 的 `glass.agentConversationPanes.*` 键，以及 `conversation-search.db`，436 条）
 
-**`session/load` 官方说是「恢复已有对话」，但能否加载桌面版建的会话未实测。** 如果能，Cursor 就是四家里「接进来直接看得到桌面版历史」的那一家——和 CodeBuddy（登录态与数据分离）正相反。这是接之前值得先验的一件事。
+**`session/load` 官方说是「恢复已有对话」，但能否加载桌面版建的会话未实测。** 初始化返回里明确声明了 `loadSession: true` 和 `sessionCapabilities.list`，**说明枚举和加载会话的能力是存在的**——但这两个方法在未登录时同样返回鉴权错误，所以必须先完成 `agent login` 才能验。
+
+如果能通，Cursor 就是四家里「接进来直接看得到桌面版历史」的那一家——和 CodeBuddy（登录态与数据分离）正相反。**这是接 Cursor 之前最值得先验的一件事**，验法：登录后调 `session/list`，看列出来的会话与桌面版 `conversation-search.db`（436 条）里的 ID 是否对得上。
 
 ## 接进本项目要改的地方
 
@@ -134,13 +166,19 @@ Cursor 会发**标准 ACP 里没有**的自定义方法。这是接 Cursor 时�
 
 第 5 点是接之前必须实测确认的。
 
-## 为什么没跑实测
+## 剩下没验的两件事
 
-`agent acp` 的二进制需要下载（约 350MB 的 SEA 包）。本机探测时：
+实机探测卡在登录态上，所以下面两项**没有实测数据，不要当结论用**：
 
-- 官方安装脚本会覆盖本项目在用的 `~/.local/bin/agent`（见上），不能直接跑
-- 改为手工下载解压到临时目录，但下载在核对时间内未完成（拉到约 95MB）
+1. **`session/new` 返回的模型列表从哪读。** 另外三家都是在 `session/new` 里给（`models.availableModels` 或 `configOptions[id=model]`）。官方文档**没有列出** Cursor 的 `session/new` 返回内容，这一项必须登录后抓真实帧才能写进 dialect。
+2. **两个阻塞式扩展方法的实际触发时机。** `cursor/ask_question` 和 `cursor/create_plan` 在什么情况下会发、发的频率如何，文档只给了类型定义。
 
-**所以本文的接口定义来自官方文档，帧形状未经实机验证。** 官方文档里有可直接运行的最小 Node 客户端示例，接入时以它为起点跑通，再抓真实帧补这份文档。
+## 接入前的准备顺序
 
-**不要把本文当成实测结论用**——尤其「模型列表来源」和「扩展方法的实际触发时机」两处，文档没写、必须实测。
+1. 先把可执行文件路径做成配置项，**避开 `~/.local/bin/agent` 冲突**（见上）
+2. 终端里完成一次 `agent login`，确认 `authenticate` 能秒回
+3. 登录后重跑探测，**把真实的 `session/new` 返回和工具帧存进 `tests/fixtures/captured-frames.json`**
+4. 据此写 `dialects/cursor.ts`，实现两个阻塞式扩展方法
+5. 按 `live.spec.ts` 的标准验收
+
+第 3 步不能省——本文的其余部分都是从官方文档和探针推出来的，只有第 3 步之后的内容才是实测的。

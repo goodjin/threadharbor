@@ -32,6 +32,8 @@ export type HostSession = {
   readonly projectId: string
   readonly sessionId: string
   readonly title: string
+  /** The project's own name, when the host knows it. */
+  readonly projectTitle?: string
 }
 
 export type HostSnapshot = {
@@ -44,6 +46,14 @@ export type HostSnapshot = {
 
 export type ProjectGroup = {
   readonly projectId: string
+  /**
+   * The project's name, taken from whichever session first carried it.
+   *
+   * Sessions cross the channel one at a time and only some of them know the
+   * name, so the first one that does supplies it — better one project's worth of
+   * rows reading "Web" and the rest reading its id.
+   */
+  readonly projectTitle?: string
   readonly sessions: readonly HostSession[]
 }
 
@@ -304,5 +314,11 @@ function groupByProject(sessions: readonly HostSession[]): ProjectGroup[] {
   }
   return [...byProject.entries()]
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([projectId, items]) => ({ projectId, sessions: items }))
+    .map(([projectId, items]) => ({
+      projectId,
+      ...(items.find(item => item.projectTitle !== undefined)?.projectTitle === undefined
+        ? {}
+        : { projectTitle: items.find(item => item.projectTitle !== undefined)!.projectTitle }),
+      sessions: items,
+    }))
 }
