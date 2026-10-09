@@ -17,14 +17,49 @@
  */
 
 import { describe, expect, it } from 'vitest'
+import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { AcpClient } from '../src/client.ts'
-import { StdioAcpTransport } from '../src/transport.ts'
+import { TerminalService } from '../src/terminals.ts'
+import { StdioAcpTransport, WebSocketAcpTransport, grokWebSocketUrl } from '../src/transport.ts'
 import { projectTurn } from '../src/projection.ts'
 import { bridgePermissions } from '../src/approval.ts'
 import { claudeDialect } from '../src/dialects/claude.ts'
 import { codexDialect } from '../src/dialects/codex.ts'
+import { grokDialect } from '../src/dialects/grok.ts'
 import type { AcpDialect } from '../src/dialects/types.ts'
+import type { AcpTransport } from '../src/transport.ts'
 import type { AcpFrame, AcpSession } from '../src/acp-client.ts'
+
+/**
+ * Wait for `grok agent serve` to accept its secret.
+ *
+ * A real handshake, not "the port is open": a port check cannot tell a keyed
+ * serve from any other listener, which is exactly how a secret mismatch used to
+ * slip through until a session failed much later.
+ */
+async function waitForGrokServe(port: number, secret: string, timeoutMs = 20_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let lastError = 'never connected'
+  while (Date.now() < deadline) {
+    const reachable = await new Promise<boolean>(resolve => {
+      const probe = new WebSocket(grokWebSocketUrl(`127.0.0.1:${port}`, secret))
+      const finish = (result: boolean) => {
+        probe.onmessage = null
+        probe.onerror = null
+        probe.onclose = null
+        try { probe.close() } catch { /* already closing */ }
+        resolve(result)
+      }
+      probe.onopen = () => finish(true)
+      probe.onerror = () => finish(false)
+      probe.onclose = () => finish(false)
+    })
+    if (reachable) return
+    await new Promise(resolveWait => setTimeout(resolveWait, 300))
+  }
+  throw new Error(`grok agent serve never became reachable: ${lastError}`)
+}
 
 const LIVE = process.env['THREADHARBOR_LIVE_ACP'] === '1'
 const CWD = process.cwd()
@@ -57,7 +92,22 @@ async function runLiveAgent(
     cwd: CWD,
     onDiagnostic: () => {}, // agents are chatty on stderr; it is not protocol
   })
+  return runLiveAgentOver(transport, dialect, options)
+}
+
+/**
+ * One live round over any transport.
+ *
+ * Transport and field-shape are the only things that differ between agents, so
+ * this is where the turn is actually driven.
+ */
+async function runLiveAgentOver(
+  transport: AcpTransport,
+  dialect: AcpDialect,
+  options: { readonly modeId?: string; readonly prompt?: string } = {},
+): Promise<LiveResult> {
   const client = new AcpClient(transport, dialect)
+  if (dialect.id === 'grok') client.terminals = new TerminalService()
 
   const frames: AcpFrame[] = []
   let permissionsAnswered = 0
@@ -158,5 +208,30 @@ describe.skipIf(!LIVE)('live ACP agents through the shared layer', () => {
     // and the agent went on to finish its turn. An unanswered request shows up
     // here as an empty answer.
     expect(result.answer.length).toBeGreaterThan(0)
+  }, 240_000)
+
+  it('grok: opens a session over the WebSocket transport and projects its tool call', async () => {
+    const port = 24_400 + Math.floor(Math.random() * 400)
+    const secret = randomUUID()
+    const serve = spawn(
+      'grok',
+      ['agent', 'serve', '--bind', `127.0.0.1:${port}`, '--secret', secret],
+      { cwd: CWD, stdio: 'ignore' },
+    )
+    try {
+      await waitForGrokServe(port, secret)
+      const result = await runLiveAgentOver(
+        new WebSocketAcpTransport({ url: grokWebSocketUrl(`127.0.0.1:${port}`, secret) }),
+        grokDialect,
+      )
+      expect(result.session.sessionId).toBeTruthy()
+      expect(result.session.models.length).toBeGreaterThan(0)
+      expect(result.answer.length).toBeGreaterThan(0)
+      expect(result.toolNames).toContain('run_terminal_command')
+      // grok nests its output one level deeper than codex or claude.
+      expect(result.toolOutputs.join('')).toContain('ACP_LIVE_OK')
+    } finally {
+      serve.kill('SIGTERM')
+    }
   }, 240_000)
 })

@@ -10,6 +10,7 @@
 import type { AcpFrame, AcpSession } from './acp-client.ts'
 import type { AcpDialect } from './dialects/types.ts'
 import type { AcpTransport } from './transport.ts'
+import { TerminalService } from './terminals.ts'
 
 type Pending = {
   resolve: (value: unknown) => void
@@ -33,12 +34,30 @@ export type PermissionDecision =
   | { readonly outcome: 'allow' }
   | { readonly outcome: 'reject' }
 
+/** A terminal an agent asked us to run a command in. */
+export type TerminalCreateRequest = {
+  readonly sessionId?: string
+  readonly command: string
+  readonly cwd?: string
+}
+
 export class AcpClient {
   private readonly pending = new Map<number, Pending>()
   private nextId = 1
 
   onNotification: (frame: AcpFrame) => void = () => {}
   onPermissionRequest: (request: PermissionRequest) => Promise<PermissionDecision> = async () => ({ outcome: 'reject' })
+
+  /**
+   * Serves the terminal sub-protocol, when this client offers it.
+   *
+   * Some agents — grok among them — ask the client to run shell commands rather
+   * than running them themselves, and then poll for the result. Left
+   * unanswered, that is a stalled turn with no error and no timeout. Left unset,
+   * every terminal call is answered with a JSON-RPC error so the agent can
+   * report the failure rather than wait forever.
+   */
+  terminals: TerminalService | undefined = undefined
 
   constructor(private readonly transport: AcpTransport, private readonly dialect: { readonly id: string }) {
     this.transport.onLine(line => this.receive(line))
@@ -99,11 +118,68 @@ export class AcpClient {
     }
 
     // An agent-initiated request. It carries an id the answer must echo.
-    if (frame.method === 'session/request_permission') {
-      void this.answerPermission(frame)
+    // Getting this wrong in either direction strands the turn: answer a
+    // permission request with a notification and it hangs silently; fail to
+    // answer a `terminal/create` and it hangs the same way.
+    if (typeof frame.id === 'number' && frame.method !== undefined) {
+      if (frame.method === 'session/request_permission') void this.answerPermission(frame)
+      else if (frame.method.startsWith('terminal/')) void this.answerTerminal(frame)
+      else this.respond(frame.id, undefined, `client cannot serve ${frame.method}`)
       return
     }
     if (frame.method !== undefined) this.onNotification(frame)
+  }
+
+  /** Send one JSON-RPC response, either a result or an error. */
+  private respond(id: number, result: unknown, errorMessage?: string): void {
+    this.transport.send(JSON.stringify(
+      errorMessage === undefined
+        ? { jsonrpc: '2.0', id, result }
+        : { jsonrpc: '2.0', id, error: { code: -32601, message: errorMessage } },
+    ))
+  }
+
+  /**
+   * Serve one `terminal/*` call.
+   *
+   * All five are handled together on purpose: serving `terminal/create` but not
+   * `terminal/wait_for_exit` looks like it worked — the turn finishes — while
+   * the tool result is a complaint that a later call could not be served.
+   */
+  private async answerTerminal(frame: AcpFrame): Promise<void> {
+    // The caller narrowed the id to a number; passing it keeps that narrowing
+    // from being lost at the call boundary.
+    const id = frame.id as number
+    if (this.terminals === undefined) {
+      this.respond(id, undefined, 'this client does not offer terminals')
+      return
+    }
+    const params = (frame.params ?? {}) as { terminalId?: unknown; sessionId?: unknown; command?: unknown; cwd?: unknown }
+    const terminalId = typeof params.terminalId === 'string' ? params.terminalId : ''
+    try {
+      const result = await (async () => {
+        switch (frame.method) {
+          case 'terminal/create':
+            return this.terminals!.create({
+              command: typeof params.command === 'string' ? params.command : '',
+              ...(typeof params.cwd === 'string' ? { cwd: params.cwd } : {}),
+            })
+          case 'terminal/wait_for_exit':
+            return this.terminals!.waitForExit(terminalId)
+          case 'terminal/output':
+            return this.terminals!.output(terminalId)
+          case 'terminal/kill':
+            return this.terminals!.kill(terminalId)
+          case 'terminal/release':
+            return this.terminals!.release(terminalId)
+          default:
+            throw new Error(`unsupported terminal call ${String(frame.method)}`)
+        }
+      })()
+      this.respond(id, result, undefined)
+    } catch (error) {
+      this.respond(id, undefined, error instanceof Error ? error.message : String(error))
+    }
   }
 
   /**

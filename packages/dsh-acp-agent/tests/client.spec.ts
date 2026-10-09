@@ -11,6 +11,7 @@
 import { describe, expect, it } from 'vitest'
 import { AcpClient } from '../src/client.ts'
 import type { AcpTransport } from '../src/transport.ts'
+import { TerminalService } from '../src/terminals.ts'
 
 /** A transport that records what was written, and can push frames in. */
 function fakeTransport(): AcpTransport & { readonly sent: string[]; deliver: (line: string) => void } {
@@ -23,6 +24,17 @@ function fakeTransport(): AcpTransport & { readonly sent: string[]; deliver: (li
     close: () => {},
     deliver: (line: string) => handler(line),
   }
+}
+
+/**
+ * Let queued microtasks run.
+ *
+ * Answering an agent-initiated request now crosses an async boundary (a spawn
+ * plus a service call), so a single `await Promise.resolve()` is not enough to
+ * observe the reply. This waits longer rather than relaxing the assertions.
+ */
+async function flush(): Promise<void> {
+  for (let tick = 0; tick < 12; tick++) await Promise.resolve()
 }
 
 /** The exact permission request claude-agent-acp@0.76.0 emitted (2026-10-09). */
@@ -46,7 +58,7 @@ describe('AcpClient permission requests', () => {
     const client = new AcpClient(transport, { id: 'claude' })
     client.onPermissionRequest = async () => ({ outcome: 'allow' })
     transport.deliver(PERMISSION_REQUEST)
-    await Promise.resolve()
+    await flush()
 
     expect(transport.sent).toHaveLength(1)
     const answer = JSON.parse(transport.sent[0]!) as Record<string, unknown>
@@ -59,7 +71,7 @@ describe('AcpClient permission requests', () => {
     const client = new AcpClient(transport, { id: 'claude' })
     client.onPermissionRequest = async () => ({ outcome: 'allow' })
     transport.deliver(PERMISSION_REQUEST)
-    await Promise.resolve()
+    await flush()
 
     const answer = JSON.parse(transport.sent[0]!) as { result: { outcome: { optionId: string } } }
     expect(answer.result.outcome.optionId).toBe('allow-once')
@@ -74,8 +86,91 @@ describe('AcpClient permission requests', () => {
       return { outcome: 'reject' }
     }
     transport.deliver(PERMISSION_REQUEST)
-    await Promise.resolve()
+    await flush()
 
     expect(asked?.toolName).toBe('Bash')
+  })
+})
+/**
+ * The frame grok sent while a turn was in flight (captured 2026-10-09).
+ *
+ * grok delegates its shell work *to the client*: it sends `terminal/create` as a
+ * JSON-RPC **request** carrying an id, and waits for the output. A client that
+ * only understands responses and permission requests treats this as a
+ * notification, nobody answers, and the turn never ends — the same silent hang
+ * as answering a permission request with a notification, pointing the other way.
+ */
+const TERMINAL_CREATE = JSON.stringify({
+  jsonrpc: '2.0',
+  id: 0,
+  method: 'terminal/create',
+  params: {
+    sessionId: '01a11f40-825a-7712-a947-766e2fe5df10',
+    command: "/bin/bash -lc 'echo ACP_LIVE_OK'",
+    cwd: '/Users/good/github/threadharbor',
+  },
+})
+
+describe('AcpClient handling agent-initiated requests', () => {
+  it('runs the command and answers with its output, echoing the request id', async () => {
+    const transport = fakeTransport()
+    const client = new AcpClient(transport, { id: 'grok' })
+    const ran: string[] = []
+    client.terminals = new TerminalService({
+      spawn: spec => {
+        ran.push(spec.command)
+        return { output: () => 'ACP_LIVE_OK\n', exited: Promise.resolve(0), kill: () => {} }
+      },
+    })
+    transport.deliver(TERMINAL_CREATE)
+    await flush()
+
+    expect(ran).toEqual(["/bin/bash -lc 'echo ACP_LIVE_OK'"])
+    const answer = JSON.parse(transport.sent[0]!) as Record<string, unknown>
+    expect(answer['id']).toBe(0)
+    expect(answer['method']).toBeUndefined()
+    // Only a terminal id: ACP's CreateTerminalResponse names no output field.
+    expect(answer['result']).toEqual({ terminalId: 'term-1' })
+  })
+
+  it('answers with a JSON-RPC error instead of staying silent when nothing can run it', async () => {
+    // Silence here is what strands the turn. An error at least lets the agent
+    // report that it could not run the command.
+    const transport = fakeTransport()
+    const client = new AcpClient(transport, { id: 'grok' })
+    transport.deliver(TERMINAL_CREATE)
+    await flush()
+
+    expect(transport.sent).toHaveLength(1)
+    const answer = JSON.parse(transport.sent[0]!) as { id: number; error?: unknown }
+    expect(answer.id).toBe(0)
+    expect(answer.error).toBeDefined()
+  })
+
+  it('still answers when the command handler itself throws', async () => {
+    const transport = fakeTransport()
+    const client = new AcpClient(transport, { id: 'grok' })
+    client.terminals = new TerminalService({
+      spawn: () => { throw new Error('no shell available') },
+    })
+    transport.deliver(TERMINAL_CREATE)
+    await flush()
+
+    expect(transport.sent).toHaveLength(1)
+    expect(JSON.parse(transport.sent[0]!)['id']).toBe(0)
+  })
+
+  it('does not confuse an agent-initiated request with a notification', async () => {
+    const transport = fakeTransport()
+    const client = new AcpClient(transport, { id: 'grok' })
+    const notifications: unknown[] = []
+    client.onNotification = frame => { notifications.push(frame) }
+    client.terminals = new TerminalService({
+      spawn: () => ({ output: () => '', exited: Promise.resolve(0), kill: () => {} }),
+    })
+    transport.deliver(TERMINAL_CREATE)
+    await flush()
+
+    expect(notifications).toEqual([])
   })
 })
