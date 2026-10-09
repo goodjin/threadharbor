@@ -53,7 +53,10 @@ export class AcpAssistantStream {
   private index = 0
   private ended = false
 
-  constructor(private readonly options: StreamOptions) {
+  private readonly options: StreamOptions
+
+  constructor(options: StreamOptions) {
+    this.options = options
     this.attemptId = `${options.sessionId}:${options.attempt}`
   }
 

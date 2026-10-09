@@ -73,6 +73,9 @@ importers:
 
   packages/dsh-preset-dispatch:
     dependencies:
+      '@deepseek-ai/schemastery':
+        specifier: ^3.18.1
+        version: 3.18.1
       '@threadharbor/dsh-acp-agent':
         specifier: workspace:^
         version: link:../dsh-acp-agent

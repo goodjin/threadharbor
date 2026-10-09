@@ -93,7 +93,12 @@ export class AcpTurnRunner {
   private turnFrames: unknown[] = []
   private stream: TurnStreamPort | undefined
 
-  constructor(private readonly client: AcpClientPort, private readonly options: RunnerOptions) {
+  private readonly client: AcpClientPort
+  private readonly options: RunnerOptions
+
+  constructor(client: AcpClientPort, options: RunnerOptions) {
+    this.client = client
+    this.options = options
     // Registered once, here, rather than at the start of each turn: a frame
     // arriving between turns must not be dropped, and a handler installed
     // mid-turn misses whatever arrived before it.

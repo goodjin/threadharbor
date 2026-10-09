@@ -90,7 +90,11 @@ export class TerminalService {
   private readonly terminals = new Map<string, Entry>()
   private nextId = 1
 
-  constructor(private readonly options: { readonly spawn?: (spec: TerminalSpec) => SpawnedCommand } = {}) {}
+  private readonly options: { readonly spawn?: (spec: TerminalSpec) => SpawnedCommand }
+
+  constructor(options: { readonly spawn?: (spec: TerminalSpec) => SpawnedCommand } = {}) {
+    this.options = options
+  }
 
   /**
    * Start a command, as `terminal/create` expects.

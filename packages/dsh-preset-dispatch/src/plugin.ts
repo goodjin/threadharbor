@@ -44,7 +44,7 @@ export type AcpPluginDeps = {
    * as though it were ours. DSH reads the projection; supply that when it is
    * available and the header only as a fallback.
    */
-  presetOf?: PresetResolver
+  presetOf?: PresetResolver | undefined
 }
 
 /**

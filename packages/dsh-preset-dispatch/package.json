@@ -3,9 +3,10 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./src/entry.ts",
+  "types": "./src/entry.ts",
   "dependencies": {
-    "@threadharbor/dsh-acp-agent": "workspace:^"
+    "@threadharbor/dsh-acp-agent": "workspace:^",
+    "@deepseek-ai/schemastery": "^3.18.1"
   }
 }

@@ -49,7 +49,10 @@ export class StdioAcpTransport implements AcpTransport {
   private readonly child: ReturnType<typeof spawn>
   private handler: (line: string) => void = () => {}
 
-  constructor(private readonly options: StdioTransportOptions) {
+  private readonly options: StdioTransportOptions
+
+  constructor(options: StdioTransportOptions) {
+    this.options = options
     // Spawned here rather than in a field initializer: with class fields, the
     // initializers run before the constructor assigns `this.options`, so a
     // field initializer would dereference an undefined options.

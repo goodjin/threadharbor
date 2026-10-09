@@ -60,7 +60,12 @@ export class AcpClient {
    */
   terminals: TerminalService | undefined = undefined
 
-  constructor(private readonly transport: AcpTransport, private readonly dialect: { readonly id: string }) {
+  private readonly transport: AcpTransport
+  private readonly dialect: { readonly id: string }
+
+  constructor(transport: AcpTransport, dialect: { readonly id: string }) {
+    this.transport = transport
+    this.dialect = dialect
     this.transport.onLine(line => this.receive(line))
   }
 

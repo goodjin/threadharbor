@@ -617,6 +617,7 @@ ACP 连接（`grok agent serve` 进程 + secret + sessionId）按 sessionId 惰�
 | **claude** | 独立 CLI | ✅ ThreadHarbor 已支持 | stdio | — |
 | **CodeBuddy** | WorkBuddy 内置 | ✅ **实测通过** | **stdio + streamable-http** | `session/new` → `models`（含 `credits`） |
 | **Qoder** | QwenWorkCN 内置 | ✅ **实测通过** | stdio | `session/new` → `models` + `modes` + `configOptions` |
+| **Cursor** | 独立 CLI（`agent acp`） | ✅ 官方支持 | stdio | 官方文档未列 `session/new` 的模型列表 |
 | WorkBuddy | 桌面壳 | ❌ 自身无 | — | — |
 | QwenWorkCN | 桌面壳 | ❌ 自身无 | — | — |
 | MiniMax Code | Electron 桌面 | ❌ | — | 无 ACP 标记，只有连接器工具 CLI |
@@ -642,6 +643,60 @@ ACP 连接（`grok agent serve` 进程 + secret + sessionId）按 sessionId 惰�
 - `session/new` 返回 `{ sessionId, modes, models, configOptions }`：
   - `modes`：`default` / `acceptEdits` / `bypassPermissions` / `plan` → 对应 DSH 的审批模式
   - `models`：如 `qmodel_38max`「Qwen3.8-Max（默认）… **0.50x Credit**」
+
+#### Cursor — CLI 有官方 ACP，桌面版没有
+
+**（1）桌面版无 ACP。** Cursor.app 3.24.9 全包检索，`session/new`、`session/prompt`、`agentclientprotocol`、`agent-client-protocol` 全部为 0。（`sessionUpdate` 有命中，但上下文是语音功能的 `sessionUpdateFrame()` / `speakGreeting` / `playbackDrains`，与 ACP 无关。）
+
+**（2）CLI 有官方 ACP。** 见 <https://cursor.com/docs/cli/acp.md>：`agent acp`，stdio + JSON-RPC 2.0 + 换行分隔。流程与 grok 一致：`initialize` → `authenticate` → `session/new`（或 `session/load`）→ `session/prompt`，期间处理 `session/update`，权限走 `session/request_permission`。
+
+**（3）与桌面版的关系：同一套 worker，但没有独立会话库。**
+
+| | 证据 |
+|---|---|
+| 同一套 worker | 桌面版 globalStorage 下有 `cursor-agent-worker` 进程目录（152MB/204 项）；`~/.cursor/agent-cli-state.json` 按项目路径记录 workerId |
+| 无独立会话库 | `~/.cursor` 下**没有**任何 chat/conversation/session 文件；会话正文在桌面版 globalStorage（`state.vscdb` 的 `glass.agentConversationPanes.*` 键 + `conversation-search.db`，436 条） |
+
+`session/load` 官方说明是「恢复已有对话」。**CLI 能否直接加载桌面版建的会话，尚未实测**——需要先装 `agent` 再验，不做无根据断言。若能，则 Cursor 是「接进来就能看到桌面版历史」的一家，与 CodeBuddy（登录态与数据都分离）情况相反。
+
+**（4）接入 Cursor 时的四个要点**
+
+- **鉴权**：`cursor_login` 方法，或启动前 `agent login`、传 `--api-key` / `CURSOR_API_KEY`、`--auth-token` / `CURSOR_AUTH_TOKEN`。
+- **权限请求是阻塞的**：`session/request_permission` 必须回 `allow-once` / `allow-always` / `reject-once`，**不回则工具执行卡住**。这正面印证了 §7.2-(2)「权限桥接必做」不是纸上顾虑。
+- **模式**：`agent` / `plan` / `ask`，对应 DSH 的审批模式，需要映射。
+- **有 ACP 之外的自定义扩展方法**，投影层必须容忍未知方法：
+  - 阻塞式：`cursor/ask_question`（多选提问）、`cursor/create_plan`（计划审批）——不回则 agent 停等
+  - 通知式：`cursor/update_todos`、`cursor/task`（子 agent）、`cursor/generate_image`
+- **MCP 限制**：ACP 模式下支持项目级 `.cursor/mcp.json`，但**不支持** dashboard 里配置的团队级 MCP。
+
+#### WorkBuddy 与 CodeBuddy 的关系（2026-09-14 实测）
+
+结论：**同一套会话引擎，但不是同一套系统。** 接 CodeBuddy **读不到** WorkBuddy 已有内容，且 **CLI 目前未登录**。
+
+**（1）会话格式相同** — 两边写出的记录结构一致：`message` / `file-history-snapshot` / `cwd` / `providerData` / `parentId`。WorkBuddy 另有 `function_call` / `function_call_result` / `reasoning` / `ai-title`。WorkBuddy 的助手记录里 `providerData` 含 `model: "glm-5.2"`、`requestModelId: "auto"`，与 CodeBuddy 的 `providerData` 是同一套结构。
+
+**（2）但数据与登录态是分开的**
+
+| | WorkBuddy | CodeBuddy CLI |
+|---|---|---|
+| 项目/会话目录 | `~/.workbuddy/projects/`（16 个项目） | `~/.codebuddy/projects/`（实测只有测试产生的） |
+| 存储 | 另有 `~/.workbuddy/workbuddy.db` 等 | 不碰 WorkBuddy 的库 |
+| 凭据 | `~/.workbuddy/credentials`、`keyblob` | `local_storage` 里只有 `.info`，**无凭据** |
+| 会话可见性 | — | `codebuddy ps` 返回「无活跃会话」 |
+
+**（3）CodeBuddy CLI 未登录**
+
+握手（`initialize` / `session/new`）不需要登录，所以**握手通过并不代表能用**。实际发提示词返回 `stopReason: refusal`，错误写明「Authentication required. Please use /login command」。**WorkBuddy 的登录态没有传给内置的 CodeBuddy CLI。**
+
+**（4）由此产生的前置条件**
+
+接入 CodeBuddy 之前必须先解决登录，否则只能握手、不能真正对话：
+
+- 走 CodeBuddy 自己的登录流程（`~/.codebuddy` 与 WorkBuddy 凭据互不相通）
+- 或独立安装 CodeBuddy 后单独登录
+- 登录态存放在哪里、能否在多主机场景下复用，**尚未验证**
+
+**这条会直接影响排期**：ACP 可用 ≠ 可用，必须把「拿到可用登录态」算进工作量。
 
 #### 落地风险：不要依赖应用包内的路径
 
