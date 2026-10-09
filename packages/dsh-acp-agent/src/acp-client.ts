@@ -24,7 +24,7 @@ export type AcpSession = {
   readonly sessionId: string
   readonly models: readonly AcpModel[]
   /** The agent's permission mode, when it reports one (claude does, codex does not). */
-  readonly modeId?: string
+  readonly modeId?: string | undefined
 }
 
 export type { AcpDialect }
