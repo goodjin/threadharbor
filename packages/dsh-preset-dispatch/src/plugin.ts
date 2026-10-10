@@ -16,7 +16,7 @@
  * listens for and the shape it needs, and the caller adapts.
  */
 
-import { presetIdOf } from './dispatch.ts'
+import { holdsAcpDispatch, presetIdOf } from './dispatch.ts'
 import type { AgentLike, PresetResolver } from './dispatch.ts'
 import type { PermissionDecision, PermissionRequest } from '@threadharbor/dsh-acp-agent'
 import { buildPresetTable, openSessionsOf, sessionsRegistry } from './registry.ts'
@@ -31,6 +31,16 @@ import type { AcpDialect, AcpTransport } from '@threadharbor/dsh-acp-agent'
 /** The part of a Cordis context this entry touches. */
 export type AcpPluginContext = {
   on(event: 'agent/created', handler: (payload: { agent: unknown }) => void): unknown
+  /**
+   * The session event stream. A preset chosen after the agent exists — the
+   * interface's preset selector on a blank session — only rebinds the agent's
+   * scope and appends `agent-preset/selected`; `agent/created` never fires
+   * again, so this event is the only signal a takeover can pick up.
+   */
+  on(event: 'session/event', handler: (
+    session: unknown,
+    event: { readonly type: unknown; readonly data: unknown },
+  ) => void): unknown
   /**
    * The Workspace registry's stop request for one session's work — dispatched
    * when a session is archived with its activity still running, among other
@@ -168,6 +178,7 @@ export function applyAcpPlugin(
       if (presetIdOf(agent, deps.presetOf) !== presetId) return
       const binding = table.get(presetId)
       if (binding === undefined) return
+      if (holdsAcpDispatch(agent, binding)) return
       deps.install(agent, presetId, dialect, table)
     } catch (error) {
       // Left alone: whatever this session is, it keeps a working step. Said out
@@ -176,4 +187,63 @@ export function applyAcpPlugin(
       deps.report?.(`acp takeover failed: ${String(error)}`)
     }
   })
+
+  // A preset chosen after the agent exists never fires `agent/created` again:
+  // the interface's selector rebinds the agent's scope to the new composition
+  // and appends `agent-preset/selected`, and the turn sent right after that
+  // would otherwise run the native agent with no error anywhere. The scope
+  // filter delivers exactly the sessions this preset now drives, so the event
+  // is both the signal and the filter.
+  ctx.on('session/event', (session, event) => {
+    try {
+      if (event.type !== 'agent-preset/selected') return
+      const data = event.data
+      if (typeof data !== 'object' || data === null || !('agentPreset' in data)) return
+      if ((data as { agentPreset: unknown }).agentPreset !== presetId) return
+      const binding = table.get(presetId)
+      const sessionId = sessionIdentifier(session)
+      if (binding === undefined || sessionId === undefined) return
+      const registry = ctx.get?.('agents')
+      if (typeof registry !== 'object' || registry === null
+        || typeof (registry as { get?: unknown }).get !== 'function') {
+        // `select` resolves the agent before it can append the event, so a host
+        // that could select at all always has the registry here. Silence would
+        // make a takeover that never happens look exactly like one that did.
+        deps.report?.(`acp ${presetId}: preset selected for session ${sessionId} but this host exposes no agents registry — the takeover cannot reach the live agent`)
+        return
+      }
+      const agent = liveAgentOf(registry, sessionId)
+      // A cold session has no live agent, which is normal.
+      if (agent === undefined) return
+      if (holdsAcpDispatch(agent, binding)) return
+      deps.install(agent, presetId, dialect, table)
+    } catch (error) {
+      // Same contract as the `agent/created` path: this session keeps its
+      // working step, and what happened is said out loud instead.
+      deps.report?.(`acp takeover failed: ${String(error)}`)
+    }
+  })
+}
+
+/** The session id off the event's session argument, if it carries one. */
+function sessionIdentifier(session: unknown): string | undefined {
+  if (typeof session !== 'object' || session === null) return undefined
+  const id = (session as { id?: unknown }).id
+  return typeof id === 'string' && id !== '' ? id : undefined
+}
+
+/**
+ * The live agent for a session, through the registry the host exposes by name.
+ *
+ * The caller has already checked the registry's structure; a missing entry is a
+ * cold session, which is a normal state and stays quiet.
+ */
+function liveAgentOf(registry: object, sessionId: string): AgentLike | undefined {
+  const get = (registry as { get?: unknown }).get
+  if (typeof get !== 'function') return undefined
+  const found = (get as (candidate: string) => unknown).call(registry, sessionId)
+  // The registry answers whatever it answers; anything object-shaped is an
+  // agent this module can read (`AgentLike` takes everything optionally).
+  if (typeof found !== 'object' || found === null) return undefined
+  return found as AgentLike
 }

@@ -14,28 +14,38 @@
 import { describe, expect, it, vi } from 'vitest'
 import { applyAcpPlugin, type AcpPluginContext } from '../src/plugin.ts'
 import type { AcpTransport } from '@threadharbor/dsh-acp-agent'
+import { installAcpDispatch } from '../src/dispatch.ts'
 import type { AcpPresetBinding } from '../src/dispatch.ts'
 
 /** A context carrying only what this entry touches. */
 function ctx(): AcpPluginContext & {
   created(agent: unknown): void
   stopped(sessionId: string): void
-  handlers: Map<string, ((payload: never) => void)[]>
+  selected(sessionId: string, preset: string): void
+  handlers: Map<string, ((...payload: never[]) => void)[]>
 } {
-  const handlers = new Map<string, ((payload: never) => void)[]>()
-  const record = (event: string, handler: (payload: never) => void): void => {
+  const handlers = new Map<string, ((...payload: never[]) => void)[]>()
+  const record = (event: string, handler: (...payload: never[]) => void): void => {
     const list = handlers.get(event) ?? []
     list.push(handler)
     handlers.set(event, list)
   }
   return {
     handlers,
-    on: ((event: string, handler: (payload: never) => void) => { record(event, handler) }) as AcpPluginContext['on'],
+    on: ((event: string, handler: (...payload: never[]) => void) => { record(event, handler) }) as AcpPluginContext['on'],
     created: (agent) => {
       for (const handler of handlers.get('agent/created') ?? []) handler({ agent } as never)
     },
     stopped: (sessionId) => {
       for (const handler of handlers.get('workspace/session-stop') ?? []) handler({ sessionId } as never)
+    },
+    selected: (sessionId, preset) => {
+      for (const handler of handlers.get('session/event') ?? []) {
+        handler(
+          { id: sessionId } as never,
+          { type: 'agent-preset/selected', data: { agentPreset: preset } } as never,
+        )
+      }
     },
   }
 }
@@ -187,6 +197,104 @@ describe('applyAcpPlugin', () => {
   })
 })
 
+describe('预设是建会话之后才选上的（界面的选择器路径）', () => {
+  // The interface's preset selector runs on a session whose agent already
+  // exists: selecting rebinds that agent to the new composition and appends
+  // `agent-preset/selected`, and nothing fires `agent/created` again. The row
+  // must pick the takeover up from the event, or the turn right after a
+  // selection runs the native agent — with no error anywhere.
+
+  /** The row wired to a host whose live agents are `live`. */
+  function rowWith(live: Map<string, unknown>): {
+    context: ReturnType<typeof ctx>
+    patched: unknown[]
+    said: string[]
+  } {
+    const context = ctx()
+    const wired = {
+      ...context,
+      get: (key: string) => key === 'agents' ? { get: (id: string) => live.get(id) } : undefined,
+    } as AcpPluginContext & ReturnType<typeof ctx>
+    const patched: unknown[] = []
+    const said: string[] = []
+    applyAcpPlugin(wired, 'acp-grok', CONFIG, {
+      install: agent => { patched.push(agent) },
+      report: message => { said.push(message) },
+    })
+    return { context, patched, said }
+  }
+
+  it('接管选择事件指向的这个会话的活 agent', () => {
+    const agent = { session: { header: { agentPreset: 'standard' } } }
+    const { context, patched } = rowWith(new Map([['s1', agent]]))
+    context.selected('s1', 'acp-grok')
+    expect(patched).toEqual([agent])
+  })
+
+  it('选的是别的 preset 时不动', () => {
+    const agent = { session: { header: { agentPreset: 'standard' } } }
+    const { context, patched } = rowWith(new Map([['s1', agent]]))
+    context.selected('s1', 'acp-claude')
+    expect(patched).toEqual([])
+  })
+
+  it('会话还没有活 agent 时安静放过（冷会话的正常状态）', () => {
+    const { context, patched } = rowWith(new Map())
+    expect(() => context.selected('s1', 'acp-grok')).not.toThrow()
+    expect(patched).toEqual([])
+  })
+
+  it('宿主没有 agents 注册表时说一声，而不是假装接管了', () => {
+    // The selector's select call resolves the agent first, so at event time the
+    // agent is live on any host that can select at all. A structurally missing
+    // registry is therefore never the normal case — quiet here is how a takeover
+    // that never happens looks exactly like one that did.
+    const context = ctx()
+    const said: string[] = []
+    applyAcpPlugin(context, 'acp-grok', CONFIG, {
+      install: () => {},
+      report: message => { said.push(message) },
+    })
+    context.selected('s1', 'acp-grok')
+    expect(said).toHaveLength(1)
+    expect(said[0]).toContain('agents')
+  })
+
+  it('同一个 preset 已持有这个 agent 时不重复安装', () => {
+    // Selecting the same preset twice re-announces it twice. The second event
+    // must not stack a second wrapper (or log a second takeover): the row asks
+    // the dispatcher whether this binding already holds the agent.
+    const agent = { session: { header: { agentPreset: 'standard' } }, step: async () => null }
+    const context = ctx()
+    const wired = {
+      ...context,
+      get: (key: string) => key === 'agents'
+        ? { get: (id: string) => (id === 's1' ? agent : undefined) }
+        : undefined,
+    } as AcpPluginContext & ReturnType<typeof ctx>
+    let installs = 0
+    applyAcpPlugin(wired, 'acp-grok', CONFIG, {
+      install: (a, _presetId, _dialect, table) => {
+        installs += 1
+        installAcpDispatch(a, table, { produce: () => [], write: () => undefined, presetOf: () => 'acp-grok' })
+      },
+    })
+    context.selected('s1', 'acp-grok')
+    context.selected('s1', 'acp-grok')
+    expect(installs).toBe(1)
+  })
+
+  it('选择事件与本行无关时，别的行的事件照常放行', () => {
+    // The bus is shared: events for other presets reach this listener too, and
+    // must be dropped by type/data, not by throwing.
+    const agent = { session: { header: { agentPreset: 'standard' } } }
+    const { context, patched } = rowWith(new Map([['s1', agent]]))
+    expect(() => context.selected('s1', 'standard')).not.toThrow()
+    expect(() => context.selected('s1', 'acp-grok')).not.toThrow()
+    expect(patched).toEqual([agent])
+  })
+})
+
 /** A transport a test can kill, counting how many connections were opened. */
 function transportCounter(): { transport: () => AcpTransport & { die(reason: string): void; receive(frame: string): void }; count: () => number; closes: () => number } {
   let made = 0
@@ -288,7 +396,8 @@ describe('会话停下来的善后', () => {
       install: () => {},
       transport: transportCounter().transport,
     })
-    expect([...context.handlers.keys()].sort()).toEqual(['agent/created', 'workspace/session-stop'])
+    expect([...context.handlers.keys()].sort())
+      .toEqual(['agent/created', 'session/event', 'workspace/session-stop'])
   })
 })
 

@@ -116,6 +116,26 @@ export function catalogAdapter(config: PresetConfig, deps: CatalogDeps): Catalog
       }))
     },
 
+    // The catalog resolves every advertised model once at build time, and the
+    // runtime also resolves ids that never went through the catalog (a session
+    // stamped with one before the list changed). An adapter that omits this
+    // method takes its whole provider group out of the picker as a failure, so
+    // undeclared ids get the runtime's own default answer — identity metadata —
+    // rather than a throw.
+    resolveModel: async (provider: string, model: string): Promise<CatalogModel> => {
+      const presetId = presetOfRoute(provider)
+      const declared = presetId === undefined
+        ? undefined
+        : deps.modelsOf(presetId).find(candidate => candidate.id === model)
+      if (declared === undefined) return { provider, id: model, name: model }
+      return {
+        provider,
+        id: declared.id,
+        name: declared.name,
+        ...(declared.description === undefined ? {} : { description: declared.description }),
+      }
+    },
+
     // An async generator rather than a synchronous throw: the switch hook is
     // async, and the generator's rejection surfaces to the loop as the turn's
     // error — loud, and never a silently empty answer.
@@ -149,6 +169,13 @@ export function catalogAdapter(config: PresetConfig, deps: CatalogDeps): Catalog
 export type CatalogAdapterLike = {
   providerInfo(provider: string): { id: string; name: string }
   listModels(provider: string): Promise<readonly CatalogModel[]>
+  /**
+   * The runtime resolves exact model metadata through this — once per advertised
+   * model while the catalog builds, and for any model id a session carries. An
+   * adapter that omits it has every route it owns reported as a catalog
+   * failure, which the picker then silently drops.
+   */
+  resolveModel(provider: string, model: string, signal?: AbortSignal): Promise<CatalogModel>
   stream(options: { provider: string; model: string; sessionId?: unknown; messages?: readonly unknown[] }): AsyncIterable<never>
   /**
    * The runtime asks every registered adapter for this, without checking that

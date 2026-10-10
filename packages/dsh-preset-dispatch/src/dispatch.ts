@@ -228,14 +228,24 @@ function writeStep(
   Object.defineProperty(agent, 'step', { value: step, writable: true, configurable: true, enumerable: false })
 }
 
+/** Which agent is held by which binding, for the re-announce check and the caller's log silence. */
+const held = new WeakMap<object, AcpPresetBinding>()
+
 /**
- * Replace one agent's `step` when its preset names an external agent.
+ * Install `step` as an own property, shadowing the prototype's for this agent alone.
  *
  * Patches the **instance**, not the prototype: the class is shared by every
  * session, so a prototype patch would change native sessions too. The original
  * is kept and called for anything this plugin does not claim.
  *
- * @returns whether the agent was taken over.
+ * A preset can also be chosen *after* the agent exists — the interface's preset
+ * selector on a blank session rebinds the agent without firing `agent/created`
+ * again — so the installed step re-reads the preset on every turn and hands the
+ * turn back to the native step once the session no longer names this row.
+ *
+ * @returns whether the agent was taken over by this binding; `false` also when
+ * this exact binding already holds the agent (a preset selected twice
+ * re-announces itself — re-wrapping would stack a second takeover).
  */
 export function installAcpDispatch(
   agent: AgentLike,
@@ -244,6 +254,7 @@ export function installAcpDispatch(
 ): boolean {
   const binding = resolvePreset(agent, presets, options.presetOf)
   if (binding === undefined) return false
+  if (holdsAcpDispatch(agent, binding)) return false
 
   const original = readStep(agent)
   if (original === undefined) {
@@ -259,6 +270,12 @@ export function installAcpDispatch(
     // Guard against re-entry: another plugin patching the loop must not be able
     // to make this call itself.
     if (active.has(this)) return original.call(this, decision)
+    // Re-read the preset per turn (see the install comment): the registry's
+    // rebind fires no event this module could observe, so a binding captured at
+    // install time would keep driving a session that has since left — or, on a
+    // host without a projection, hold the stale answer forever.
+    const current = resolvePreset(this, presets, options.presetOf)
+    if (current === undefined) return original.call(this, decision)
     active.add(this)
     try {
       // Run first: the content events describe what the turn produced, so
@@ -267,7 +284,7 @@ export function installAcpDispatch(
       // that frame has to follow the durable append, and the append belongs
       // to this session while the stream belongs to the turn. Splitting them
       // across two places is what left streaming unwired for so long.
-      const result = await binding.run(decision, {
+      const result = await current.run(decision, {
         sessionId: sessionIdOf(this) ?? '',
         produce: options.produce,
         write: options.write,
@@ -278,7 +295,20 @@ export function installAcpDispatch(
       active.delete(this)
     }
   })
+  held.set(agent, binding)
   return true
+}
+
+/**
+ * Whether this exact binding already replaced the agent's step.
+ *
+ * The scope rebind that moves a blank session between presets fires no
+ * `agent/created`, so the only way the same binding sees the same agent twice
+ * is a preset selected twice — and each of those repeats the takeover log and
+ * stacks a wrapper unless the holder is checked first.
+ */
+export function holdsAcpDispatch(agent: AgentLike, binding: AcpPresetBinding): boolean {
+  return held.get(agent) === binding
 }
 
 /** This agent's session id, which the external conversation is keyed by. */

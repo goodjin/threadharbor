@@ -178,4 +178,58 @@ describe('installAcpDispatch', () => {
     const agent = new FakeAgent('')
     expect(installAcpDispatch(agent, new Map([['', binding()]]), { produce: () => [], write: () => undefined })).toBe(false)
   })
+
+  it('does not re-wrap an agent this binding already holds', () => {
+    // The same preset can be selected twice on a blank session; the second
+    // select re-announces the preset and must not stack a second wrapper (and
+    // must not log a second takeover for the same install).
+    const agent = new FakeAgent('acp-grok')
+    const table = new Map([['acp-grok', binding()]])
+    const options = { produce: () => [], write: () => undefined }
+    expect(installAcpDispatch(agent, table, options)).toBe(true)
+    const own = (agent as unknown as Record<string, unknown>)['step']
+    expect(installAcpDispatch(agent, table, options)).toBe(false)
+    expect((agent as unknown as Record<string, unknown>)['step']).toBe(own)
+  })
+
+  it('lets the session go when the preset has moved away since the install', async () => {
+    // A blank session can change preset after this install. The registry only
+    // rebinds the agent's scope then — no `agent/created` fires again — so a
+    // step captured once would keep driving the session under the old agent.
+    // The step therefore re-reads the preset on every turn.
+    const agent = new FakeAgent('acp-grok')
+    let current: string | undefined = 'acp-grok'
+    const ran: StepDecisionLike[] = []
+    installAcpDispatch(
+      agent,
+      new Map([['acp-grok', binding(async decision => { ran.push(decision); return { frames: [], end: { kind: 'completed' } } })]]),
+      { produce: () => [], write: () => undefined, presetOf: () => current },
+    )
+    const host = agent as unknown as { step(d: StepDecisionLike): Promise<unknown> }
+    await host.step(DECISION)
+    expect(ran).toEqual([DECISION])
+
+    current = 'standard'
+    await host.step(DECISION)
+    // The external agent did not run again; the native step did.
+    expect(ran).toEqual([DECISION])
+    expect(agent.calls).toEqual([DECISION])
+  })
+
+  it('keeps driving the session while the preset still names this row', async () => {
+    // The per-turn re-read must not degrade the standing case: a session created
+    // on this preset keeps taking every turn from the external agent.
+    const agent = new FakeAgent('acp-grok')
+    let runs = 0
+    installAcpDispatch(
+      agent,
+      new Map([['acp-grok', binding(async () => { runs += 1; return { frames: [], end: { kind: 'completed' } } })]]),
+      { produce: () => [], write: () => undefined },
+    )
+    const host = agent as unknown as { step(d: StepDecisionLike): Promise<unknown> }
+    await host.step(DECISION)
+    await host.step(DECISION)
+    expect(runs).toBe(2)
+    expect(agent.calls).toEqual([])
+  })
 })

@@ -109,6 +109,15 @@ export function apply(ctx: unknown, config: Config): void {
     /** Same bus, different event: the row also hears archive-time stop requests. */
     on(event: 'workspace/session-stop', handler: (payload: { sessionId: unknown }) => void): unknown
     /**
+     * Same bus: the interface's preset selector lands here, never in
+     * `agent/created` — the agent already exists when a blank session picks a
+     * preset, so this is how the takeover reaches it.
+     */
+    on(event: 'session/event', handler: (
+      session: unknown,
+      event: { readonly type: unknown; readonly data: unknown },
+    ) => void): unknown
+    /**
      * Optional: injected services would refuse to mount without them.
      *
      * Any service name: `approval` and `sessionProjections` here, and the

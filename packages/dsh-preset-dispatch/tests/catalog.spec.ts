@@ -80,6 +80,30 @@ describe('catalogAdapter', () => {
     expect(await adapter.listModels('deepseek')).toEqual([])
   })
 
+  it('answers the exact-model lookup the host makes, with the declared metadata', async () => {
+    // The catalog resolves every advertised model once at build time; a missing
+    // `resolveModel` turns the whole group into a catalog failure and the picker
+    // silently drops it.
+    expect(await adapter.resolveModel(providerRoute('acp-claude'), 'claude-opus-4')).toEqual({
+      provider: providerRoute('acp-claude'),
+      id: 'claude-opus-4',
+      name: 'Claude Opus 4',
+      description: 'strongest',
+    })
+  })
+
+  it('answers an undeclared model id without throwing', async () => {
+    // The host also resolves model ids that never went through the catalog
+    // (a session stamped with one before the list changed, for instance). The
+    // runtime's own default answer is identity metadata; ours must keep that
+    // contract instead of failing the lookup.
+    expect(await adapter.resolveModel(providerRoute('acp-grok'), 'unlisted-model')).toEqual({
+      provider: providerRoute('acp-grok'),
+      id: 'unlisted-model',
+      name: 'unlisted-model',
+    })
+  })
+
   it('refuses to stream, loudly, naming the route that asked', async () => {
     // External turns are driven by the replaced step, never by a model request.
     // Reaching this method means the takeover did not happen; staying quiet
