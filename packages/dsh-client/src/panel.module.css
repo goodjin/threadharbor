@@ -1,0 +1,247 @@
+/*
+ * The 各主机 panel's skin.
+ *
+ * Built only from DSH's own design tokens (--dsw-*): the panel sits inside
+ * DSH's shell, so hard-coded colors would disagree with whatever theme the
+ * shell is in. Class names are CSS modules; the one plain-DOM subtree (the
+ * roll-up, rendered by dsh-host-federation without React) is styled through
+ * :global() rules scoped under the panel root, keyed by the data attributes
+ * that renderer already emits.
+ */
+
+.root {
+  font-family: var(--dsw-font-family);
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 20px 24px 32px;
+  max-width: 720px;
+  margin: 0 auto;
+  overflow: auto;
+  height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.note {
+  margin: 0;
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+}
+
+.card {
+  border: 1px solid var(--dsw-alias-settings-card-stroke);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-settings-card-fill);
+  overflow: hidden;
+}
+
+.agentRow {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 16px;
+}
+
+.agentRow + .agentRow {
+  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+
+.agentHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agentName {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.agentId {
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.action {
+  appearance: none;
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+
+.action:hover {
+  border-color: var(--dsw-alias-border-l4);
+}
+
+.actionPrimary {
+  composes: action;
+  background: var(--dsw-alias-brand-primary);
+  border-color: var(--dsw-alias-brand-primary);
+  color: var(--dsw-alias-label-primary-inverted);
+}
+
+.stateLine {
+  margin: 0;
+  font-size: 12px;
+  color: var(--dsw-alias-label-caption);
+}
+
+.stateOk {
+  composes: stateLine;
+  color: var(--dsw-static-green-500);
+}
+
+.stateWarn {
+  composes: stateLine;
+  color: var(--dsw-alias-state-warn-label);
+}
+
+.stateBad {
+  composes: stateLine;
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.identityLine {
+  margin: 0;
+  font-size: 12px;
+  color: var(--dsw-alias-label-caption);
+}
+
+.identityForm {
+  display: grid;
+  grid-template-columns: minmax(160px, 220px) minmax(160px, 220px) auto;
+  gap: 10px;
+  align-items: end;
+  padding: 12px 16px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-caption);
+}
+
+.input {
+  font: inherit;
+  font-size: 13px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-sm);
+  padding: 5px 10px;
+  outline: none;
+  min-width: 0;
+}
+
+.input:focus-visible {
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+.notices {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/*
+ * The roll-up subtree is plain DOM from dsh-host-federation; these rules reach
+ * it by the data attributes it already carries, so the renderer stays free of
+ * styling while the panel keeps one coherent look.
+ */
+.rollupHost {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.rollupHost :global([data-rollup]) > p:global([data-empty]) {
+  margin: 0;
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+}
+
+.rollupHost :global([data-host-section]) {
+  margin: 0;
+  padding: 12px 16px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rollupHost :global([data-host-section]) h3:global([data-self]) {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rollupHost :global([data-host-section]) p:global([data-host-empty]) {
+  margin: 0;
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+}
+
+.rollupHost :global([data-project-block]) {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rollupHost :global([data-project-block]) h4:global([data-project]) {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-caption);
+}
+
+.rollupHost :global([data-project-block]) button:global([data-session]) {
+  appearance: none;
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-sm);
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+.rollupHost :global([data-project-block]) button:global([data-session]):hover {
+  border-color: var(--dsw-alias-border-l4);
+}

@@ -83,8 +83,8 @@ describe('buildPresetTable', () => {
     const binding = table.get('acp-grok')!
     const decision = { kind: 'enter' as const, messages: [] }
 
-    await binding.run(decision, { sessionId: 's1', produce: r => [], write: () => 1 })
-    await binding.run(decision, { sessionId: 's1', produce: r => [], write: () => 1 })
+    await binding.run(decision, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: r => [], write: () => 1 })
+    await binding.run(decision, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: r => [], write: () => 1 })
 
     expect(factory.built).toEqual(['acp-grok'])
   })
@@ -92,8 +92,8 @@ describe('buildPresetTable', () => {
   it('gives each preset its own agent', async () => {
     const factory = killableFactory()
     const table = buildPresetTable(CONFIG, factory, sessionsRegistry())
-    await table.get('acp-grok')!.run({ kind: 'enter', messages: [] }, { sessionId: 's1', produce: () => [], write: () => 1 })
-    await table.get('acp-claude')!.run({ kind: 'enter', messages: [] }, { sessionId: 's1', produce: () => [], write: () => 1 })
+    await table.get('acp-grok')!.run({ kind: 'enter', messages: [] }, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
+    await table.get('acp-claude')!.run({ kind: 'enter', messages: [] }, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
 
     expect(factory.built).toEqual(['acp-grok', 'acp-claude'])
   })
@@ -111,8 +111,8 @@ describe('buildPresetTable', () => {
     }
 
     const table = buildPresetTable(CONFIG, factory, sessionsRegistry())
-    await table.get('acp-grok')!.run({ kind: 'enter', messages: [] }, { sessionId: 's1', produce: () => [], write: () => 1 })
-    await table.get('acp-claude')!.run({ kind: 'enter', messages: [] }, { sessionId: 's1', produce: () => [], write: () => 1 })
+    await table.get('acp-grok')!.run({ kind: 'enter', messages: [] }, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
+    await table.get('acp-claude')!.run({ kind: 'enter', messages: [] }, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
     expect(opened).toContainEqual({ presetId: 'acp-grok', modelId: 'grok-4.7' })
     expect(opened).toContainEqual({ presetId: 'acp-claude', modeId: 'default' })
   })
@@ -125,7 +125,7 @@ describe('buildPresetTable', () => {
 
 describe('连接死亡后的自愈', () => {
   const decision = { kind: 'enter' as const, messages: [] }
-  const turnOf = (sessionId: string) => ({ sessionId, produce: () => [], write: () => 1 })
+  const turnOf = (sessionId: string) => ({ sessionId, position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
 
   it('连接死了就丢掉那条会话，下一回合开的是新连接，并如实上报', async () => {
     // The whole point of the self-heal: the registry used to hand the same dead

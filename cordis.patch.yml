@@ -17,3 +17,126 @@
 - insert:
     - id: threadharbor-client
       name: '@threadharbor/dsh-client'
+    - id: acp-codex
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: acp-codex
+        name: Codex
+        order: 20
+        plugins:
+          - id: acp-codex-binding
+            name: '@threadharbor/dsh-preset-dispatch'
+            config:
+              presetId: acp-codex
+              agent: codex
+              command: /Users/good/.local/bin/codex-acp
+              cwd: /Users/good/Documents/deepseek-harness
+              # mode 留空 = 该构建的默认 agent（"Approve for me"）。
+              # 清单 = 2026-10-10 真机探针（对该命令做一次真实
+              # initialize + session/new）读到的 models.availableModels，
+              # 一字不差。
+              models:
+                - id: gpt-6-astra[low]
+                  name: GPT-6-Astra (low)
+                  description: Frontier intelligence for the most demanding work. Fast responses with lighter reasoning
+                - id: gpt-6-astra[medium]
+                  name: GPT-6-Astra (medium)
+                  description: Frontier intelligence for the most demanding work. Balances speed and reasoning depth for everyday tasks
+                - id: gpt-6-astra[high]
+                  name: GPT-6-Astra (high)
+                  description: Frontier intelligence for the most demanding work. Greater reasoning depth for complex problems
+                - id: gpt-6-astra[xhigh]
+                  name: GPT-6-Astra (xhigh)
+                  description: Frontier intelligence for the most demanding work. Extra high reasoning depth for complex problems
+                - id: gpt-6-astra[max]
+                  name: GPT-6-Astra (max)
+                  description: Frontier intelligence for the most demanding work. Maximum reasoning depth for the hardest problems
+                - id: gpt-6-astra[ultra]
+                  name: GPT-6-Astra (ultra)
+                  description: Frontier intelligence for the most demanding work. Maximum reasoning with automatic task delegation
+                - id: gpt-5.6-sol[low]
+                  name: GPT-5.6-Sol (low)
+                  description: Older generation workhorse model. Fast responses with lighter reasoning
+                - id: gpt-5.6-sol[medium]
+                  name: GPT-5.6-Sol (medium)
+                  description: Older generation workhorse model. Balances speed and reasoning depth for everyday tasks
+                - id: gpt-5.6-sol[high]
+                  name: GPT-5.6-Sol (high)
+                  description: Older generation workhorse model. Greater reasoning depth for complex problems
+                - id: gpt-5.6-sol[xhigh]
+                  name: GPT-5.6-Sol (xhigh)
+                  description: Older generation workhorse model. Extra high reasoning depth for complex problems
+                - id: gpt-5.6-sol[max]
+                  name: GPT-5.6-Sol (max)
+                  description: Older generation workhorse model. Maximum reasoning depth for the hardest problems
+                - id: gpt-5.6-sol[ultra]
+                  name: GPT-5.6-Sol (ultra)
+                  description: Older generation workhorse model. Maximum reasoning with automatic task delegation
+                - id: gpt-5.6-terra[low]
+                  name: GPT-5.6-Terra (low)
+                  description: Older balanced model for straightforward work. Fast responses with lighter reasoning
+                - id: gpt-5.6-terra[medium]
+                  name: GPT-5.6-Terra (medium)
+                  description: Older balanced model for straightforward work. Balances speed and reasoning depth for everyday tasks
+                - id: gpt-5.6-terra[high]
+                  name: GPT-5.6-Terra (high)
+                  description: Older balanced model for straightforward work. Greater reasoning depth for complex problems
+                - id: gpt-5.6-terra[xhigh]
+                  name: GPT-5.6-Terra (xhigh)
+                  description: Older balanced model for straightforward work. Extra high reasoning depth for complex problems
+                - id: gpt-5.6-terra[max]
+                  name: GPT-5.6-Terra (max)
+                  description: Older balanced model for straightforward work. Maximum reasoning depth for the hardest problems
+                - id: gpt-5.6-terra[ultra]
+                  name: GPT-5.6-Terra (ultra)
+                  description: Older balanced model for straightforward work. Maximum reasoning with automatic task delegation
+                - id: gpt-5.6-luna[low]
+                  name: GPT-5.6-Luna (low)
+                  description: Older fast and efficient model. Fast responses with lighter reasoning
+                - id: gpt-5.6-luna[medium]
+                  name: GPT-5.6-Luna (medium)
+                  description: Older fast and efficient model. Balances speed and reasoning depth for everyday tasks
+                - id: gpt-5.6-luna[high]
+                  name: GPT-5.6-Luna (high)
+                  description: Older fast and efficient model. Greater reasoning depth for complex problems
+                - id: gpt-5.6-luna[xhigh]
+                  name: GPT-5.6-Luna (xhigh)
+                  description: Older fast and efficient model. Extra high reasoning depth for complex problems
+                - id: gpt-5.6-luna[max]
+                  name: GPT-5.6-Luna (max)
+                  description: Older fast and efficient model. Maximum reasoning depth for the hardest problems
+    - id: acp-claude
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: acp-claude
+        name: Claude
+        order: 30
+        plugins:
+          - id: acp-claude-binding
+            name: '@threadharbor/dsh-preset-dispatch'
+            config:
+              presetId: acp-claude
+              agent: claude
+              command: /Users/good/.local/bin/claude-agent-acp
+              cwd: /Users/good/Documents/deepseek-harness
+              # claude 默认 bypassPermissions，不显式写 default 它永远不问。
+              mode: default
+              # 清单 = 2026-10-10 真机探针（对该命令做一次真实
+              # initialize + session/new）读到的 model 配置项 options，
+              # 一字不差。
+              models:
+                - id: default
+                  name: Default (recommended)
+                  description: iquest-q1[1m]
+                - id: opus
+                  name: iquest-q1
+                  description: Custom Opus model
+                - id: fable
+                  name: iquest-q1
+                  description: Custom Fable model
+                - id: sonnet
+                  name: iquest-q1
+                  description: Custom Sonnet model
+                - id: haiku
+                  name: iquest-q1
+                  description: Custom Haiku model

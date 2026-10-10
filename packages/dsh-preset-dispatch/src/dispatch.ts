@@ -73,6 +73,23 @@ export type AcpPresetBinding = {
   readonly run: (decision: StepDecisionLike, turn: TurnContext) => Promise<AcpStepResult>
 }
 
+/** Where in the loop the current step sits, as the loop itself numbers it. */
+export type StepPosition = {
+  readonly turn: number
+  readonly step: number
+}
+
+/**
+ * What one turn decided about the session's chosen model.
+ *
+ * Mirrors `decideSelection`; carried as a port result so the dispatch stays
+ * mechanical and the row — which owns the preset's model list — decides.
+ */
+export type TurnModelDecision =
+  | { readonly kind: 'none' }
+  | { readonly kind: 'own'; readonly modelId: string }
+  | { readonly kind: 'refuse'; readonly reason: string }
+
 /** The live stream this turn writes into, if streaming is on. */
 export type TurnStreamHandle = {
   start(): void
@@ -84,7 +101,7 @@ export type TurnStreamHandle = {
    * Announce the end, pointing at the durable write's sequence number.
    *
    * Call this only once that write has happened: the closing frame carries the
-   * number, and it is how the UI knows the text it watched arrive is now
+   * number, and it is how the UI knows the text it watchedarrive is now
    * findable. If nothing was written, abandon instead.
    */
   settle(eventType: 'assistant/message' | 'assistant/attempt', commit: () => number): void
@@ -101,9 +118,18 @@ export type TurnStreamHandle = {
 export type TurnContext = {
   /** This DSH session's id; the external conversation is keyed by it. */
   readonly sessionId: string
+  /**
+   * Where the loop numbers this step. Every event the turn writes carries these
+   * numbers — the conversation view groups content under the step that declared
+   * them, so content numbered differently from the boundaries is dropped on the
+   * floor.
+   */
+  readonly position: StepPosition
   readonly produce: (result: AcpStepResult) => readonly ContentEvent[]
   /** Append the events; returns the message's sequence number. */
   readonly write: ContentWriter
+  /** The model this turn asked for, when the session's own selection named one. */
+  readonly modelId?: string
   readonly openStream?: () => TurnStreamHandle | undefined
 }
 
@@ -118,12 +144,30 @@ export type ContentEvent = { readonly type: string; readonly payload: unknown }
 export type AcpDispatchOptions = {
   /** Which preset this session is actually on. Defaults to the session header. */
   readonly presetOf?: PresetResolver
+  /**
+   * Where the loop numbers the step it is about to run.
+   *
+   * Read per turn, before anything is written. The loop announces the position
+   * on its `agent/pre-step` waterfall and appends the boundaries itself, so this
+   * is the only source the replaced step has; without it the content would be
+   * written under numbers that match no step, and the view would drop it.
+   */
+  readonly positionOf: (agent: AgentLike) => StepPosition | undefined
   /** Turns what a turn produced into the events the session log should carry. */
-  readonly produce: (result: AcpStepResult) => readonly ContentEvent[]
+  readonly produce: (result: AcpStepResult, position: StepPosition) => readonly ContentEvent[]
   /** Append those events, in order; returns the message's sequence number. */
   readonly write: ContentWriter
+  /**
+   * What this turn does about the session's chosen model, decided per turn.
+   *
+   * The replaced step never fires a model request, so the picker's choice would
+   * otherwise sit unused while the preset's agent answers anyway. A refusal
+   * throws, ending the turn as a named error; an own model rides the turn as
+   * its `modelId`.
+   */
+  readonly turnModel?: (agent: AgentLike) => TurnModelDecision
   /** Open this agent's live stream for a turn, if it can stream. */
-  readonly openStream?: (agent: AgentLike) => () => TurnStreamHandle | undefined
+  readonly openStream?: (agent: AgentLike, position: StepPosition) => () => TurnStreamHandle | undefined
 }
 
 /**
@@ -276,19 +320,38 @@ export function installAcpDispatch(
     // host without a projection, hold the stale answer forever.
     const current = resolvePreset(this, presets, options.presetOf)
     if (current === undefined) return original.call(this, decision)
+    // The loop states where it numbers this step on `agent/pre-step`, before it
+    // appends the boundaries. Content written under any other numbers is
+    // grouped under a step the view never saw start, and dropped — so without a
+    // position the turn refuses rather than writes content nothing will show.
+    const position = options.positionOf(this)
+    if (position === undefined) {
+      throw new Error('acp dispatch: the loop reported no position for this step; refusing to write content the view could not place')
+    }
     active.add(this)
     try {
-      // Run first: the content events describe what the turn produced, so
-      // producing them beforehand would write the previous turn's remainder.
-      // The turn owns its own writing, including the stream's closing frame:
-      // that frame has to follow the durable append, and the append belongs
-      // to this session while the stream belongs to the turn. Splitting them
-      // across two places is what left streaming unwired for so long.
+      // The user's claimed messages go on the log before the turn runs, the way
+      // the native step commits them — they are the turn's input, and a refusal
+      // below must still leave the question on the record.
+      options.write(userEvents(decision))
+      // The picker's choice never becomes a model request here, so the row
+      // decides per turn what the session actually asked for.
+      const model = options.turnModel?.(this) ?? { kind: 'none' }
+      if (model.kind === 'refuse') throw new Error(model.reason)
+      // Run after the input is committed: the content events describe what the
+      // turn produced, so producing them beforehand would write the previous
+      // turn's remainder. The turn owns its own writing, including the stream's
+      // closing frame: that frame has to follow the durable append, and the
+      // append belongs to this session while the stream belongs to the turn.
+      // Splitting them across two places is what left streaming unwired for so
+      // long.
       const result = await current.run(decision, {
         sessionId: sessionIdOf(this) ?? '',
-        produce: options.produce,
+        position,
+        produce: result => options.produce(result, position),
         write: options.write,
-        ...(options.openStream === undefined ? {} : { openStream: options.openStream(this) }),
+        ...(model.kind === 'own' ? { modelId: model.modelId } : {}),
+        ...(options.openStream === undefined ? {} : { openStream: options.openStream(this, position) }),
       })
       return result.end
     } finally {
@@ -297,6 +360,11 @@ export function installAcpDispatch(
   })
   held.set(agent, binding)
   return true
+}
+
+/** The claimed messages, as the log's user-message events. */
+function userEvents(decision: StepDecisionLike): readonly ContentEvent[] {
+  return decision.messages.map(message => ({ type: 'user/message', payload: message }))
 }
 
 /**

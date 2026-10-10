@@ -35,6 +35,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type { PropsRuntime, SlotCore, SlotMap } from '@deepseek-ai/dsh-client-ui-slots'
 import { openSessionGateway } from '../gateway.ts'
+import type { GatewayOpening } from '../gateway.ts'
 import type { AgentDescriptor, GatewayResult, SessionGateway } from '../gateway.ts'
 import { runSessionProbe } from '../probe.ts'
 import type { ProbeOutcome } from '../probe.ts'
@@ -44,8 +45,11 @@ import { AgentPanel } from '../panel.tsx'
 import type { AgentListPort, AgentPanelProps, ProbeStarter } from '../panel.tsx'
 import { createElement } from 'react'
 
-/** Required browser services. */
-export const inject = ['slots']
+/** Required browser services. The remote namespace is the gateway's whole door
+ * to the host: without declaring it here, the context refuses every read of it
+ * with 「cannot get property without inject」, and the panel reports the host
+ * as having no remote services at all. */
+export const inject = ['slots', 'remote']
 
 export { mountRollUpSurface } from '../surface.ts'
 export type { FederationPort, RollUpSurface, RollUpSurfacePorts } from '../surface.ts'
@@ -131,20 +135,51 @@ export function registerPanelSlots(slots: PanelSlotHost, face: AgentPanelProps):
  * The agent list as one port over the gateway: a snapshot for the first paint,
  * and a reload that asks the host's model catalog again.
  *
- * When the gateway is absent, reload fails with the missing names instead of
- * pretending the host has no agents.
- * @param opening - what opening the gateway found.
- * @returns the port and the names that were missing, for the panel to say.
+ * The gateway is opened per reload, not once at mount: the host's remote
+ * services are provided by other client packages that may still be arriving
+ * when this module applies, and a gateway captured too early would report the
+ * host as missing services it actually has. A missing read retries a few times
+ * across a short window before it gives up and names what is missing.
+ * @param openGateway - opens the gateway now, against the current graph.
+ * @param delay - waits between retries; injected so tests stay instant.
+ * @returns the port the panel renders from.
  */
-export function agentListPort(opening: { readonly gateway: SessionGateway | undefined; readonly missing: readonly string[] }): AgentListPort {
+export function agentListPort(
+  openGateway: () => GatewayOpening,
+  delay: (ms: number) => Promise<void> = ms => new Promise(resolve => { setTimeout(resolve, ms) }),
+): AgentListPort {
   let agents: readonly AgentDescriptor[] = []
+  const read = async (): Promise<GatewayResult<readonly AgentDescriptor[]>> => {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        const opening = openGateway()
+        const list = opening.gateway?.listAgents ?? opening.listAgents
+        if (list !== undefined) return await list()
+      } catch {
+        // A context that has not granted the namespace yet throws on read;
+        // that is "not yet", not "never" — retry.
+      }
+      await delay(1500)
+    }
+    try {
+      const opening = openGateway()
+      const list = opening.gateway?.listAgents ?? opening.listAgents
+      if (list !== undefined) return await list()
+      return {
+        ok: false as const,
+        error: { code: 'gateway/missing', message: `主机服务缺失：${opening.missing.join('、')}` },
+      }
+    } catch (error) {
+      return {
+        ok: false as const,
+        error: { code: 'gateway/missing', message: `主机服务未就绪：${String(error)}` },
+      }
+    }
+  }
   return {
     current: () => agents,
     reload: async () => {
-      if (opening.gateway === undefined) {
-        return { ok: false as const, error: { code: 'gateway/missing', message: `主机服务缺失：${opening.missing.join('、')}` } }
-      }
-      const result = await opening.gateway.listAgents()
+      const result = await read()
       if (result.ok) agents = result.value
       return result
     },
@@ -153,15 +188,23 @@ export function agentListPort(opening: { readonly gateway: SessionGateway | unde
 
 /**
  * The probe as the panel triggers it: one preset id in, one outcome out.
- * A missing gateway reads as 连不上 with the missing names — the honest
- * reading of "this page cannot reach the host".
- * @param opening - what opening the gateway found.
+ * The gateway is opened at click time for the same reason the list is: what
+ * the host provides may settle after mount.
+ * @param openGateway - opens the gateway now, against the current graph.
  * @returns the starter the panel rows call.
  */
-export function panelProbe(opening: { readonly gateway: SessionGateway | undefined; readonly missing: readonly string[] }): ProbeStarter {
-  return presetId => opening.gateway === undefined
-    ? Promise.resolve({ verdict: { kind: 'unreachable', reason: `主机服务缺失：${opening.missing.join('、')}` } })
-    : runSessionProbe(opening.gateway, presetId)
+export function panelProbe(openGateway: () => GatewayOpening): ProbeStarter {
+  return presetId => {
+    let opening: GatewayOpening
+    try {
+      opening = openGateway()
+    } catch (error) {
+      return Promise.resolve({ verdict: { kind: 'unreachable', reason: `主机服务未就绪：${String(error)}` } })
+    }
+    return opening.gateway === undefined
+      ? Promise.resolve({ verdict: { kind: 'unreachable', reason: `主机服务缺失：${opening.missing.join('、')}` } })
+      : runSessionProbe(opening.gateway, presetId)
+  }
 }
 
 /**
@@ -204,13 +247,16 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // leave its own row empty in every other tab.
   ctx.effect(() => () => { section.dispose() }, 'threadharbor: roll-up section')
 
-  const opening = openSessionGateway(ctx)
-  if (opening.gateway === undefined) {
-    log.warn(`probe unavailable: missing host services [${opening.missing.join(', ')}] — the panel mounts and says so`)
+  const openGateway = (): GatewayOpening => openSessionGateway(ctx)
+  // A mount-time read, purely for the self-report: what the host provides may
+  // settle later, so absence here is a log line, never a functional gate.
+  const mountOpening = openGateway()
+  if (mountOpening.gateway === undefined) {
+    log.warn(`probe unavailable at mount: missing host services [${mountOpening.missing.join(', ')}] — the panel mounts, opens the gateway per use, and says so on screen`)
   }
   const face: AgentPanelProps = {
-    agents: agentListPort(opening),
-    probe: panelProbe(opening),
+    agents: agentListPort(openGateway),
+    probe: panelProbe(openGateway),
     rollUp: section,
   }
   registerPanelSlots(ctx.slots, face)
@@ -219,7 +265,7 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // never loaded; these lines are how anyone can tell the difference.
   const identity = section.identity()
   log.info(`panel registered: id=${PANEL_ID}, slots=main+sidebar.panellist, order=${PANEL_ORDER}`)
-  log.info(`probe gateway: ${opening.gateway === undefined ? `unavailable (missing ${opening.missing.join(', ')})` : 'open'}`)
+  log.info(`probe gateway: ${mountOpening.gateway === undefined ? `not open at mount (missing ${mountOpening.missing.join(', ')}); retried per use` : 'open'}`)
   log.info(`roll-up identity: ${identity.hostId}${identity.derived ? ' (derived from page origin; configure it in the panel)' : ''}; session source: not wired — said on screen`)
 }
 

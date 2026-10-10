@@ -166,7 +166,10 @@ export class AcpTurnRunner {
       sessionId,
       prompt: [{ type: 'text', text }],
     }
-    if (this.options.modelId !== undefined) params['modelId'] = this.options.modelId
+    // The session's own selection outranks the configured default: it is what
+    // the user picked for this conversation.
+    const modelId = turn.modelId ?? this.options.modelId
+    if (modelId !== undefined) params['modelId'] = modelId
 
     let reply: unknown
     let failure: unknown

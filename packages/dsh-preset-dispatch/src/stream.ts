@@ -49,6 +49,7 @@ export type StreamOptions = {
 export class AcpAssistantStream {
   readonly attemptId: string
   private readonly runs: MutableRun[] = []
+  private readonly blockIndexes = new Map<'text-chunks' | 'reasoning-chunks', number>()
   private index = 0
   private ended = false
 
@@ -73,12 +74,12 @@ export class AcpAssistantStream {
     })
   }
 
-  textDelta(text: string, index = 0): void {
-    this.pushDelta('text-chunks', text, index)
+  textDelta(text: string): void {
+    this.pushDelta('text-chunks', text)
   }
 
-  reasoningDelta(text: string, index = 0): void {
-    this.pushDelta('reasoning-chunks', text, index)
+  reasoningDelta(text: string): void {
+    this.pushDelta('reasoning-chunks', text)
   }
 
   /** The compacted stream the durable message embeds. */
@@ -131,12 +132,29 @@ export class AcpAssistantStream {
     })
   }
 
-  private pushDelta(type: 'text-chunks' | 'reasoning-chunks', text: string, index: number): void {
+  /**
+   * The block index one kind of delta streams into.
+   *
+   * The conversation view folds streamed chunks into one block per index, so
+   * reasoning and text must not share a slot — a text delta at the reasoning's
+   * index would visibly erase the thought it lands on. Kinds keep the index of
+   * their first appearance, assigned in arrival order.
+   */
+  private blockIndexOf(kind: 'text-chunks' | 'reasoning-chunks'): number {
+    const known = this.blockIndexes.get(kind)
+    if (known !== undefined) return known
+    const fresh = this.blockIndexes.size
+    this.blockIndexes.set(kind, fresh)
+    return fresh
+  }
+
+  private pushDelta(type: 'text-chunks' | 'reasoning-chunks', text: string): void {
     if (this.ended) {
       // A delta after settlement would land in a stream the UI already closed.
       throw new Error('acp stream: attempt already ended')
     }
     const time = this.options.now?.() ?? Date.now()
+    const index = this.blockIndexOf(type)
     const previous = this.runs.at(-1)
     if (previous !== undefined && previous.type === type && previous.index === index && time >= previous.lastTime) {
       previous.dt.push(time - previous.lastTime)

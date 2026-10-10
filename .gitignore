@@ -12,3 +12,8 @@
 /undefined/
 /scripts/dsh-wrapper.sh
 *.log
+
+# 编译产物不该和源码并排放在 src/ 下
+packages/*/src/**/*.js
+packages/*/src/**/*.d.ts
+packages/*/src/**/*.map

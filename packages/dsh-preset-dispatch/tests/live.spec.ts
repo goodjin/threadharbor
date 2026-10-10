@@ -86,7 +86,7 @@ async function runDispatch(command: string, dialect: AcpDialect, options: { mode
   const result = await runner.run({
     kind: 'enter',
     messages: [{ role: 'user', content: [{ type: 'text', text: PROMPT }] }],
-  }, { sessionId: 's1', produce: r => [], write: () => 1, openStream })
+  }, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: r => [], write: () => 1, openStream })
   stream?.settle('assistant/message', () => 1)
 
   return { result, deltas, stream, client }

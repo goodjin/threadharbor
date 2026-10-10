@@ -83,11 +83,11 @@ describe('AcpAssistantStream', () => {
     expect(stream.records().map(r => (r as { texts: readonly string[] }).texts)).toEqual([['first'], ['second']])
   })
 
-  it('starts a new record when the block index changes', () => {
+  it('gives each kind of delta its own block index, assigned in arrival order', () => {
     const { nextRevision } = collector()
     const stream = new AcpAssistantStream({ emit: () => {}, nextRevision, sessionId: 's', attempt: 1, turn: 1, step: 1 })
-    stream.textDelta('first block', 0)
-    stream.textDelta('second block', 1)
+    stream.textDelta('first block')
+    stream.reasoningDelta('second block')
 
     expect(stream.records().map(r => (r as { index: number }).index)).toEqual([0, 1])
   })
@@ -97,8 +97,12 @@ describe('AcpAssistantStream', () => {
     const stream = new AcpAssistantStream({ emit: () => {}, nextRevision, sessionId: 's', attempt: 1, turn: 1, step: 1 })
     stream.reasoningDelta('thinking')
     stream.textDelta('answering')
+    stream.reasoningDelta('more thinking')
 
-    expect(stream.records().map(r => r['type'])).toEqual(['reasoning-chunks', 'text-chunks'])
+    expect(stream.records().map(r => r['type'])).toEqual(['reasoning-chunks', 'text-chunks', 'reasoning-chunks'])
+    // Same kind, same slot: the second thought rejoins the first instead of
+    // opening a third block.
+    expect(stream.records().map(r => (r as { index: number }).index)).toEqual([0, 1, 0])
   })
 
   it('appends the durable event before announcing that the stream ended', () => {

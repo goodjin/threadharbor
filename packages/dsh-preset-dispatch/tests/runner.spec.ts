@@ -43,8 +43,7 @@ const agentThoughtChunk = (text: string) => ({
 })
 
 /** A turn context; streaming is supplied per turn, like the real caller does. */
-const TURN = (stream: Record<string, unknown>) => ({
-  sessionId: 's1',
+const TURN = (stream: Record<string, unknown>) => ({ sessionId: 's1', position: { turn: 1, step: 1 },
   produce: (r: { frames: readonly unknown[]; end: unknown }) => [{ type: 'assistant/message', payload: { frames: r.frames.length } }],
   write: () => 1,
   openStream: () => ({ start: () => {}, records: () => [], abandon: () => {}, settle: () => {},
@@ -61,8 +60,8 @@ describe('AcpTurnRunner', () => {
     const client = fakeClient()
     const runner = new AcpTurnRunner(client, { cwd: '/tmp' })
 
-    await runner.run(DECISION, { sessionId: 's1', produce: () => [], write: () => 1 })
-    await runner.run(DECISION, { sessionId: 's1', produce: () => [], write: () => 1 })
+    await runner.run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
+    await runner.run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
 
     const news = client.calls.filter(call => call.method === 'session/new')
     expect(news).toHaveLength(1)
@@ -70,10 +69,28 @@ describe('AcpTurnRunner', () => {
 
   it('sends the user’s text as the prompt', async () => {
     const client = fakeClient()
-    await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, { sessionId: 's1', produce: () => [], write: () => 1 })
+    await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
 
     const prompt = client.calls.find(call => call.method === 'session/prompt')
     expect((prompt!.params as { prompt: { text: string }[] }).prompt[0]!.text).toBe('hello')
+  })
+
+  it('sends the model the turn chose, and it outranks the configured default', async () => {
+    // The session's own selection is what the user picked for this
+    // conversation; the configured default is only the preset's fallback.
+    const client = fakeClient()
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp', modelId: 'grok-4.7' })
+    await runner.run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1, modelId: 'grok-4.6' })
+    const prompt = client.calls.find(call => call.method === 'session/prompt')!
+    expect((prompt.params as { modelId?: string }).modelId).toBe('grok-4.6')
+  })
+
+  it('keeps the configured default when the turn names no model', async () => {
+    const client = fakeClient()
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp', modelId: 'grok-4.7' })
+    await runner.run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
+    const prompt = client.calls.find(call => call.method === 'session/prompt')!
+    expect((prompt.params as { modelId?: string }).modelId).toBe('grok-4.7')
   })
 
   it('returns only that turn’s frames, not everything seen so far', async () => {
@@ -97,11 +114,11 @@ describe('AcpTurnRunner', () => {
     }
     const runner = new AcpTurnRunner(client, { cwd: '/tmp' })
 
-    expect((await runner.run(DECISION, { sessionId: 's1', produce: () => [], write: () => 1 })).frames).toHaveLength(2)
+    expect((await runner.run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })).frames).toHaveLength(2)
     // The second turn must not carry the first turn's frames along: a stale
     // frame replayed into a new turn reads as the agent answering something it
     // was never asked.
-    const second = await runner.run(DECISION, { sessionId: 's1', produce: () => [], write: () => 1 })
+    const second = await runner.run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
     expect(second.frames).toHaveLength(2)
     for (const frame of second.frames) {
       expect(JSON.stringify(frame.params)).toContain('run 2')
@@ -110,7 +127,7 @@ describe('AcpTurnRunner', () => {
 
   it('reports a turn the agent ended normally as completed', async () => {
     const runner = new AcpTurnRunner(fakeClient(), { cwd: '/tmp' })
-    await expect(runner.run(DECISION, { sessionId: 's1', produce: () => [], write: () => 1 })).resolves.toMatchObject({ end: { kind: 'completed' } })
+    await expect(runner.run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })).resolves.toMatchObject({ end: { kind: 'completed' } })
   })
 
   it('reports an agent that stopped for its own reasons as blocked, not completed', async () => {
@@ -121,7 +138,7 @@ describe('AcpTurnRunner', () => {
       if (method === 'session/new') return { sessionId: 's1' }
       return {}
     }
-    const result = await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, { sessionId: 's1', produce: () => [], write: () => 1 })
+    const result = await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
     expect(result.end.kind).not.toBe('completed')
   })
 
@@ -134,7 +151,7 @@ describe('AcpTurnRunner', () => {
       if (method === 'session/new') throw new Error('agent binary missing')
       return {}
     }
-    await expect(new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, { sessionId: 's1', produce: () => [], write: () => 1 })).rejects.toThrow(/agent binary missing/)
+    await expect(new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })).rejects.toThrow(/agent binary missing/)
   })
 
   it('feeds text to the stream as frames arrive, not after the turn ends', async () => {
@@ -199,8 +216,8 @@ describe('AcpTurnRunner', () => {
       return {}
     }
     const runner = new AcpTurnRunner(client, { cwd: '/tmp' })
-    await expect(runner.run(DECISION, { sessionId: 's1', produce: () => [], write: () => 1 })).rejects.toThrow(/turn blew up/)
-    await expect(runner.run(DECISION, { sessionId: 's1', produce: () => [], write: () => 1 })).rejects.toThrow(/turn blew up/)
+    await expect(runner.run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })).rejects.toThrow(/turn blew up/)
+    await expect(runner.run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })).rejects.toThrow(/turn blew up/)
     expect(client.calls.filter(call => call.method === 'session/new')).toHaveLength(1)
     expect(attempts).toBe(2)
   })
@@ -216,6 +233,6 @@ describe('AcpTurnRunner handshake', () => {
       { cwd: '/tmp', openTimeoutMs: 20 },
     )
     await expect(runner.run({ kind: 'enter', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] },
-      { sessionId: 's1', produce: () => [], write: () => 1 })).rejects.toThrow(/within 20ms/)
+      { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })).rejects.toThrow(/within 20ms/)
   })
 })

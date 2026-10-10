@@ -81,7 +81,7 @@ describe('连接死亡的转播', () => {
     // One request in flight: its rejection proves the client kept its listener.
     const pending = session.run(
       { kind: 'enter', messages: [] },
-      { sessionId: 's1', produce: () => [], write: () => 1 },
+      { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 },
     )
     transport.die('agent process exited')
     await expect(pending).rejects.toThrow('agent process exited')

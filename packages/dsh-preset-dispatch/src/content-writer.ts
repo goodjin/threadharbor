@@ -1,10 +1,15 @@
 /**
  * Writing projected content back onto the session.
  *
- * The three event types are not interchangeable at the call site, and getting
+ * The four event types are not interchangeable at the call site, and getting
  * it wrong fails quietly rather than loudly:
  *
- * - a message is a *surface* event, so its append must carry a surface intent;
+ * - a user message is a *surface* event with no turn of its own: the loop owns
+ *   the boundaries, so the claimed message object is appended as it stands
+ *   (the native step commits them the same way, `agent-loop/src/agent.ts:419-423`
+ *   — the replaced step inherits that duty, or the question vanishes from the
+ *   transcript entirely);
+ * - a model message is a *surface* event, so its append must carry a surface intent;
  * - a tool call is *log-only*, where a third argument is not merely useless but
  *   rejected — passing one loses the event;
  * - a tool result is a surface event that must point back at the call it
@@ -44,6 +49,7 @@ type PairKey = `${number}:${string}`
 const CALL = 'tool/call'
 const RESULT = 'tool/result'
 const MESSAGE = 'assistant/message'
+const USER = 'user/message'
 
 /**
  * Build a writer bound to one session.
@@ -74,6 +80,13 @@ export function makeContentWriter(append: SessionAppend, onOrphan?: (callId: str
           surfaceOp: 'append',
           ...(seq === undefined ? {} : { sourceEventSeqs: [seq] }),
         })
+        continue
+      }
+      if (event.type === USER) {
+        // The loop's own shape: the message object as it was claimed, with the
+        // surface intent. No seq to track — nothing later points at a user
+        // message.
+        append(USER, event.payload, { surfaceOp: 'append' })
         continue
       }
       if (event.type === MESSAGE) {

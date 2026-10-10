@@ -63,6 +63,12 @@ export type GatewayOpening = {
   readonly gateway: SessionGateway | undefined
   /** Every absent name, required or optional — for the panel to show. */
   readonly missing: readonly string[]
+  /**
+   * The agent list on its own, when the catalog is reachable — even where the
+   * probe is not. DSH's own model picker rides the same call, so "the picker
+   * works" and "this exists" are the same statement.
+   */
+  readonly listAgents?: (() => Promise<GatewayResult<readonly AgentDescriptor[]>>) | undefined
 }
 
 /** The one thing this module needs from the context. */
@@ -91,11 +97,35 @@ function lookup(
   service: string,
   method: string | undefined,
 ): { readonly fn: AnyFn | undefined; readonly missing?: string } {
+  // `remote.session` answers to two spellings across hosts: one flat service
+  // name, or the `remote` namespace with `session` under it. Try the flat name
+  // first — the shape the tests stand up — then walk the namespace.
   let holder: unknown
   try {
     holder = ctx.get(service)
   } catch {
-    return { fn: undefined, missing: service }
+    holder = undefined
+  }
+  if (holder === undefined) {
+    const segments = service.split('.')
+    const root = segments[0]
+    if (root !== undefined) {
+      let namespace: unknown
+      try {
+        namespace = ctx.get(root)
+      } catch {
+        namespace = undefined
+      }
+      // Some contributions are plain properties of the context rather than
+      // services (`remote` is one), so a bare get can miss them.
+      if (namespace === undefined) {
+        namespace = (ctx as unknown as Record<string, unknown>)[root]
+      }
+      for (const segment of segments.slice(1)) {
+        namespace = isRecord(namespace) ? namespace[segment] : undefined
+      }
+      holder = namespace
+    }
   }
   if (method === undefined) {
     return isFunction(holder) || isRecord(holder) ? { fn: undefined } : { fn: undefined, missing: service }
@@ -221,6 +251,20 @@ export function openSessionGateway(ctx: ServiceLookup): GatewayOpening {
   const modelCatalog = lookup(ctx, 'remote.session', 'modelCatalog').fn
   if (modelCatalog === undefined) note('remote.session.modelCatalog')
 
+  // Listing the agents rides the catalog alone: DSH's own model picker uses
+  // exactly this call, so a deployment that can show the picker can name its
+  // agents, even where the probe's four calls do not exist.
+  const listAgents: (() => Promise<GatewayResult<readonly AgentDescriptor[]>>) | undefined = modelCatalog === undefined
+    ? undefined
+    : async () => {
+        try {
+          const raw: unknown = await modelCatalog()
+          return resultOf(raw, agentsValue, 'session.modelCatalog')
+        } catch (error) {
+          return { ok: false as const, error: { code: 'gateway/call', message: `session.modelCatalog: ${String(error)}` } }
+        }
+      }
+
   const gateway: SessionGateway | undefined = sessionCreate !== undefined
     && sessionPrompt !== undefined && sessionPage !== undefined && archiveSession !== undefined
     ? {
@@ -288,5 +332,5 @@ export function openSessionGateway(ctx: ServiceLookup): GatewayOpening {
       }
     : undefined
 
-  return { gateway, missing }
+  return { gateway, missing, ...(listAgents === undefined ? {} : { listAgents }) }
 }

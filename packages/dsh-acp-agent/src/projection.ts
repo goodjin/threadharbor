@@ -48,12 +48,13 @@ function assistantEvent(
   acc: Accumulator,
   content: readonly { type: 'text' | 'reasoning'; text: string }[],
   turn: number,
+  step: number,
 ): ProjectionEvent {
   return {
     type: 'assistant/message',
     payload: {
       turn,
-      step: 1,
+      step,
       message: {
         id: randomUUID(),
         role: 'assistant',
@@ -61,7 +62,11 @@ function assistantEvent(
         source: { provider: `acp-${dialect.id}`, model: dialect.id },
       },
       stream: acc.stream ?? [],
-      usage: acc.totalTokens === undefined ? undefined : { inputTokens: 0, outputTokens: acc.totalTokens },
+      // The agent's own reported total, or nothing: the session log's writer
+      // rejects any property that is not lossless JSON, and an explicit
+      // `usage: undefined` is exactly that. A missing key is also the honest
+      // shape — inventing an inputTokens count is not.
+      ...(acc.totalTokens === undefined ? {} : { usage: { outputTokens: acc.totalTokens } }),
     },
   }
 }
@@ -158,12 +163,16 @@ function contentEvents(
   if (options.stream !== undefined) acc.stream = options.stream
   const { thought, text, tools, totalTokens } = acc
   const events: ProjectionEvent[] = []
-  if (thought.length > 0) {
-    events.push(assistantEvent(dialect, acc, [{ type: 'reasoning', text: thought.join('') }], turn))
-  }
-  if (text.length > 0) {
-    events.push(assistantEvent(dialect, acc, [{ type: 'text', text: text.join('') }], turn))
-  }
+  // One message per step, in the canonical native shape: the ordered blocks
+  // carry the reasoning first, then the answer. Two separate messages would
+  // survive in the log, but the conversation view folds each step's message
+  // into one node by keeping the LAST assistant/message — a second message
+  // would erase the first on screen.
+  const content = [
+    ...(thought.length > 0 ? [{ type: 'reasoning' as const, text: thought.join('') }] : []),
+    ...(text.length > 0 ? [{ type: 'text' as const, text: text.join('') }] : []),
+  ]
+  if (content.length > 0) events.push(assistantEvent(dialect, acc, content, turn, step))
   for (const tool of tools.values()) {
     events.push({
       type: 'tool/call',

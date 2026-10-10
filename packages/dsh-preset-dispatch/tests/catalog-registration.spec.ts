@@ -77,7 +77,7 @@ import { catalogAdapter as catalogAdapterFactory } from '../src/catalog.ts'
 describe('attachAcpDispatch catalog wiring', () => {
   it('registers one adapter covering every preset route', () => {
     const llmPort = llm()
-    attachAcpDispatch(ctxWith(llmPort), CONFIG, { answerPermission: async () => ({ outcome: 'reject' }) })
+    attachAcpDispatch(ctxWith(llmPort), CONFIG, { answerPermission: async () => ({ outcome: 'reject' }), positionOf: () => ({ turn: 1, step: 1 }) })
     expect(llmPort.registrations).toHaveLength(1)
     expect(llmPort.registrations[0]!.providers.sort()).toEqual(['acp:acp-claude', 'acp:acp-codex', 'acp:acp-grok'])
   })
@@ -85,13 +85,13 @@ describe('attachAcpDispatch catalog wiring', () => {
   it('registers nothing when there are no presets', () => {
     // An empty registration is rejected by the runtime, so it must not be made.
     const llmPort = llm()
-    attachAcpDispatch(ctxWith(llmPort), { presets: {} }, { answerPermission: async () => ({ outcome: 'reject' }) })
+    attachAcpDispatch(ctxWith(llmPort), { presets: {} }, { answerPermission: async () => ({ outcome: 'reject' }), positionOf: () => ({ turn: 1, step: 1 }) })
     expect(llmPort.registrations).toEqual([])
   })
 
   it('registers nothing when the host has no model registry', () => {
     // A host without one is not ours to fail over: the dispatch still runs.
     const ctx = { on: () => {} } as never
-    expect(() => { attachAcpDispatch(ctx, CONFIG, { answerPermission: async () => ({ outcome: 'reject' }) }) }).not.toThrow()
+    expect(() => { attachAcpDispatch(ctx, CONFIG, { answerPermission: async () => ({ outcome: 'reject' }), positionOf: () => ({ turn: 1, step: 1 }) }) }).not.toThrow()
   })
 })

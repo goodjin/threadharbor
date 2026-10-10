@@ -12,7 +12,7 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { projectTurn } from '../src/projection.ts'
+import { projectStepContent, projectTurn } from '../src/projection.ts'
 import { claudeDialect } from '../src/dialects/claude.ts'
 import { codexDialect } from '../src/dialects/codex.ts'
 import type { AcpFrame } from '../src/acp-client.ts'
@@ -39,5 +39,40 @@ describe('projectTurn with the codex dialect', () => {
     const result = events.find(event => event.type === 'tool/result')!
     const message = (result.payload as { message: { content: { text: string }[] } }).message
     expect(message.content.map(part => part.text).join('')).toContain('total 544')
+  })
+})
+
+describe('projectStepContent', () => {
+  // Synthetic frames are fine here: this pins the event shape the replaced step
+  // writes, not a dialect's reading of an agent's frames.
+  const frames: AcpFrame[] = [
+    { jsonrpc: '2.0', method: 'session/update', params: { sessionId: 's', update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'let me think' } } } },
+    { jsonrpc: '2.0', method: 'session/update', params: { sessionId: 's', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'the answer' } } } },
+  ]
+
+  it('writes one assistant message per step, reasoning blocks before the answer', () => {
+    // The conversation view folds each step's message into one node by keeping
+    // the LAST assistant/message, so a second message would erase the first on
+    // screen. Both blocks ride one message, in canonical order.
+    const events = projectStepContent(frames, { turn: 4, step: 2, dialect: codexDialect })
+    const messages = events.filter(event => event.type === 'assistant/message')
+    expect(messages).toHaveLength(1)
+    const payload = messages[0]!.payload as {
+      turn: number
+      step: number
+      message: { content: { type: string; text: string }[] }
+    }
+    expect(payload.turn).toBe(4)
+    expect(payload.step).toBe(2)
+    expect(payload.message.content).toEqual([
+      { type: 'reasoning', text: 'let me think' },
+      { type: 'text', text: 'the answer' },
+    ])
+  })
+
+  it('carries the step the caller announced, not a hardcoded one', () => {
+    const events = projectStepContent(frames, { turn: 7, step: 3, dialect: codexDialect })
+    const payload = (events.find(event => event.type === 'assistant/message')!.payload) as { step: number }
+    expect(payload.step).toBe(3)
   })
 })

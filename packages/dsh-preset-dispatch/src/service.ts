@@ -43,6 +43,14 @@ export type AttachOptions = FactoryDeps & {
    * was *created* with, and a blank session can change preset afterwards.
    */
   presetOf?(agent: AgentLike): string | undefined
+  /**
+   * Where the loop numbers the step it is about to run.
+   *
+   * Without a source for the numbers the replaced step has nothing true to write
+   * its content under, so this one is required here the way the entry row's
+   * listener is: supply it from the loop's `agent/pre-step` notice.
+   */
+  positionOf(agent: AgentLike): { readonly turn: number; readonly step: number } | undefined
 }
 
 export function attachAcpDispatch(
@@ -68,11 +76,11 @@ export function attachAcpDispatch(
 
     installAcpDispatch(agent as AgentLike & object, table, {
       ...(options.presetOf === undefined ? {} : { presetOf: options.presetOf }),
-      produce: result =>
-        // Turn and step numbers are zero here on purpose: the surrounding
-        // native loop owns both, and the replaced step supplies content only.
-        // They are corrected where the events are written.
-        projectStepContent(result.frames, { turn: 0, step: 0, dialect: binding.dialect }),
+      positionOf: candidate => options.positionOf(candidate),
+      produce: (result, position) =>
+        // The numbers the loop announced stand: content grouped under any other
+        // step is dropped by the conversation view.
+        projectStepContent(result.frames, { turn: position.turn, step: position.step, dialect: binding.dialect }),
       write: events => options.write?.(agent, events),
     })
   })

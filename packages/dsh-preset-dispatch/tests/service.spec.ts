@@ -25,7 +25,10 @@ function fakeContext() {
   }
 }
 
-const deps = { answerPermission: async () => ({ outcome: 'reject' as const }) }
+const deps = {
+  answerPermission: async () => ({ outcome: 'reject' as const }),
+  positionOf: () => ({ turn: 1, step: 1 }),
+}
 
 /**
  * A stand-in with the same arrangement as the real agent: `step` on the

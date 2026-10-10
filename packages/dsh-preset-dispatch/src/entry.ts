@@ -25,17 +25,17 @@
 import Schema from '@deepseek-ai/schemastery'
 import { hostname } from 'node:os'
 import { applyAcpPlugin } from './plugin.ts'
-import { installAcpDispatch } from './dispatch.ts'
+import { installAcpDispatch, presetOfState } from './dispatch.ts'
+import type { AgentLike, AcpPresetBinding, ContentEvent, StepPosition, TurnModelDecision, TurnStreamHandle } from './dispatch.ts'
 import { makeApprovalBridge } from './approval-bridge.ts'
 import { presetsForHost } from './host-filter.ts'
-import { presetOfState } from './dispatch.ts'
 import { makeContentWriter } from './content-writer.ts'
+import { decideSelection, pendingSelectionOf, selectionOf } from './selection.ts'
+import type { SelectionSource } from './selection.ts'
 import type { AcpPresetConfig } from './registry.ts'
-import type { AcpPresetBinding, AgentLike, ContentEvent } from './dispatch.ts'
 import type { AcpDialect } from '@threadharbor/dsh-acp-agent'
 import { projectStepContent } from '@threadharbor/dsh-acp-agent'
 import { AcpAssistantStream } from './stream.ts'
-import type { TurnStreamHandle } from './dispatch.ts'
 
 export const name = 'threadharbor-acp'
 
@@ -106,8 +106,19 @@ export type Config = {
 export function apply(ctx: unknown, config: Config): void {
   const host = ctx as {
     on(event: 'agent/created', handler: (payload: { agent: unknown }) => void): unknown
-    /** Same bus, different event: the row also hears archive-time stop requests. */
+    /**
+     * Same bus, different event: the row also hears archive-time stop requests.
+     */
     on(event: 'workspace/session-stop', handler: (payload: { sessionId: unknown }) => void): unknown
+    /**
+     * The loop's per-step notice, fired before the boundaries are appended. Its
+     * payload carries the turn and step numbers the loop is about to use — the
+     * only source the replaced step has for placing its content.
+     */
+    on(event: 'agent/pre-step', handler: (
+      payload: { agent: unknown; turn: unknown; step: unknown },
+      next: () => Promise<unknown>,
+    ) => Promise<unknown>): unknown
     /**
      * Same bus: the interface's preset selector lands here, never in
      * `agent/created` — the agent already exists when a blank session picks a
@@ -169,6 +180,47 @@ export function apply(ctx: unknown, config: Config): void {
   // log level is not ours to raise.
   process.stderr.write(`[threadharbor] ${summary}\n`)
 
+  // Listen for the loop's step notice from the day this row mounts: the numbers
+  // must already be in hand when the first replaced step runs, not registered by
+  // an install that only happens later. Registered here rather than per agent
+  // for the same reason the takeover is announced at mount — a listener that
+  // only exists after some agent has already stepped misses every earlier turn.
+  host.on('agent/pre-step', (payload, next) => {
+    rememberStepPosition(payload)
+    return next()
+  })
+
+  // The session's own model choice, read from the projection the picker writes.
+  // Resolved per turn: a selection made mid-conversation applies from the next
+  // turn on, the same as it would for a native session. The readers are called
+  // through their owners on purpose — both are service methods that read the
+  // owner's own state, and calling either detached fails inside the service.
+  const projections = host.get?.('sessionProjections') as
+    | { stateOf?(this: unknown, session: unknown, key: string): unknown }
+    | undefined
+  const defaultModel = host.get?.('agentDefaultModel') as
+    | { currentSelection?(this: unknown): unknown }
+    | undefined
+  const turnModel = (agent: AgentLike): TurnModelDecision => {
+    const session = agent.session
+    // The picker's explicit pick for this session comes first.
+    const stateOf = projections?.stateOf
+    let selection: ReturnType<typeof selectionOf>
+    let source: SelectionSource = 'picker'
+    if (projections !== undefined && stateOf !== undefined && session !== undefined) {
+      selection = pendingSelectionOf(stateOf.call(projections, session, 'modelSelection'))
+    }
+    // Otherwise the model a native request would use — the host default. This
+    // is the case a fresh session shows in its composer without any pick ever
+    // having been made.
+    if (selection === undefined && defaultModel?.currentSelection !== undefined) {
+      selection = selectionOf(defaultModel.currentSelection.call(defaultModel))
+      source = 'host-default'
+    }
+    if (selection === undefined) return { kind: 'none' }
+    return decideSelection({ presetId: config.presetId, models: config.models ?? [] }, selection, source)
+  }
+
   // Where a permission request goes. The row must not answer these itself:
   // deciding on the agent's behalf is how an external agent ends up able to do
   // nothing, with nothing on screen to say why.
@@ -223,19 +275,21 @@ export function apply(ctx: unknown, config: Config): void {
       const projection = readProjection(host)
       const installed = installAcpDispatch(agent as AgentLike & object, table, {
         ...(projection === undefined ? {} : { presetOf: projection }),
-        // Turn and step numbers are zero here on purpose: the surrounding native
-        // loop owns both, and the replaced step supplies content only. They are
-        // corrected where the events are written.
-        produce: result =>
+        // The loop announces the real turn and step on its pre-step waterfall
+        // (captured at mount); the conversation view groups content under the
+        // step that declared it, so anything numbered differently is dropped.
+        positionOf: candidate => stepPositions.get(candidate as unknown as object),
+        produce: (result, position) =>
           projectStepContent(result.frames, {
-            turn: 0,
-            step: 0,
+            turn: position.turn,
+            step: position.step,
             dialect,
             ...(result.stream === undefined ? {} : { stream: result.stream }),
           }),
         write,
-        openStream: agent => () =>
-          openAssistantStream(agent, dialect.id, message => host.logger?.warn(message)),
+        turnModel,
+        openStream: (candidate, position) => () =>
+          openAssistantStream(candidate, position, dialect.id, message => host.logger?.warn(message)),
       })
       if (!installed) host.logger?.warn(`acp takeover: ${line} could not be installed`)
     },
@@ -333,6 +387,7 @@ function countersFor(agent: object): { attempt: number; revision: number } {
  */
 function openAssistantStream(
   agent: AgentLike,
+  position: StepPosition,
   dialectId: string,
   warn: (message: string) => void,
 ): TurnStreamHandle | undefined {
@@ -351,8 +406,26 @@ function openAssistantStream(
     sessionId,
     attempt: ++counters.attempt,
     nextRevision: () => ++counters.revision,
-    turn: 0,
-    step: 0,
+    turn: position.turn,
+    step: position.step,
     emit: frame => { emit('agent/assistant-stream', { frame }) },
   })
+}
+
+/**
+ * Where the loop numbers the step it is about to run, per agent.
+ *
+ * The loop states it on its `agent/pre-step` waterfall — the official notice of
+ * "this turn, this step, about to run", carrying the same numbers it appends the
+ * boundaries with. Held per agent because two sessions on one preset step
+ * independently: the numbers are read at the start of each turn, and a
+ * concurrent step elsewhere must not be able to shift them.
+ */
+const stepPositions = new WeakMap<object, StepPosition>()
+
+function rememberStepPosition(payload: { agent: unknown; turn: unknown; step: unknown }): void {
+  const agent = payload.agent
+  if (typeof agent !== 'object' || agent === null) return
+  if (typeof payload.turn !== 'number' || typeof payload.step !== 'number') return
+  stepPositions.set(agent, { turn: payload.turn, step: payload.step })
 }

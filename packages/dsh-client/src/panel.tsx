@@ -4,7 +4,8 @@
  * Everything that decides what the user sees is plain and tested elsewhere —
  * the verdict wording, the probe orchestration, the roll-up section. What is
  * left here is React wiring: one row per agent, the probe state per row, and a
- * div the roll-up section draws into.
+ * div the roll-up section draws into. Looks come from `panel.module.css`, so
+ * this file stays about structure and words.
  *
  * There is no restart control, on purpose. A restart ordered from this page
  * must travel through the very channel that is hung; the host drops its own
@@ -12,13 +13,14 @@
  * (and the probe's verdicts point at the agent's process, not at a button).
  */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { describeVerdict } from './verdict.ts'
 import type { ProbeVerdict } from './verdict.ts'
 import type { RollUpSection } from './rollup-section.ts'
 import type { AgentDescriptor, GatewayResult } from './gateway.ts'
 import type { ProbeOutcome } from './probe.ts'
+import styles from './panel.module.css'
 
 /** What one probe attempt is doing, as the row shows it. */
 export type ProbeRunState =
@@ -47,6 +49,19 @@ export type AgentPanelProps = {
   /** Said instead of an empty list, so "none listed" never reads as "none configured". */
   readonly agentsNote?: string | undefined
 }
+
+/**
+ * Whether the agent list has been read from the host at least once.
+ *
+ * The first snapshot is always empty — the port fetches nothing until asked —
+ * so "empty" and "not read yet" are different states, and showing the empty
+ * note for the second is how this panel used to open on a false alarm.
+ */
+type LoadPhase =
+  | { readonly stage: 'pristine' }
+  | { readonly stage: 'loading' }
+  | { readonly stage: 'loaded' }
+  | { readonly stage: 'failed'; readonly message: string }
 
 /**
  * Drive one probe and report each phase.
@@ -84,14 +99,15 @@ export function AgentRow(props: {
 }): ReactNode {
   const { presetId, label, verdict } = props
   return (
-    <div data-agent={presetId} style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: '8px 0', borderTop: '1px solid var(--dsh-border, #e5e5e5)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <strong data-agent-name="">{label}</strong>
-        <span style={{ opacity: 0.6 }}>{presetId}</span>
-        <span style={{ flex: 1 }} />
+    <div data-agent={presetId} className={styles.agentRow}>
+      <div className={styles.agentHead}>
+        <strong data-agent-name="" className={styles.agentName}>{label}</strong>
+        <span className={styles.agentId}>{presetId}</span>
+        <span className={styles.spacer} />
         <button
           type="button"
           data-action="probe"
+          className={styles.action}
           onClick={() => { props.onProbe(presetId) }}
         >探测</button>
       </div>
@@ -106,21 +122,22 @@ function VerdictLine(props: {
 }): ReactNode {
   const { state } = props
   if (state?.phase === 'running') {
-    return <p data-probe-state="running" style={{ margin: 0, opacity: 0.7 }}>探测中……（最多等一分钟）</p>
+    return <p data-probe-state="running" className={styles.stateLine}>探测中……（最多等一分钟）</p>
   }
   if (state?.phase === 'error') {
-    return <p data-probe-state="error" style={{ margin: 0 }}>探测出错：{state.message}</p>
+    return <p data-probe-state="error" className={styles.stateBad}>探测出错：{state.message}</p>
   }
   if (state?.phase === 'done') {
     const display = describeVerdict(state.verdict)
+    const tone = display.tone === 'ok' ? styles.stateOk : display.tone === 'slow' ? styles.stateWarn : styles.stateBad
     return (
-      <p data-probe-state={display.tone} style={{ margin: 0 }}>
+      <p data-probe-state={display.tone} className={tone}>
         {`${display.headline} · ${display.detail} —— ${display.advice}`}
         {state.archiveNote === undefined ? undefined : <span data-archive-note=""> {state.archiveNote}</span>}
       </p>
     )
   }
-  return <p data-probe-state="idle" style={{ margin: 0, opacity: 0.6 }}>尚未探测。</p>
+  return <p data-probe-state="idle" className={styles.stateLine}>尚未探测。</p>
 }
 
 /**
@@ -130,10 +147,34 @@ function VerdictLine(props: {
  */
 export function AgentPanel(props: AgentPanelProps): ReactNode {
   const [agents, setAgents] = useState<readonly AgentDescriptor[]>(() => props.agents.current())
+  const [load, setLoad] = useState<LoadPhase>(
+    () => props.agents.current().length > 0 ? { stage: 'loaded' } : { stage: 'pristine' },
+  )
   const [probes, setProbes] = useState<ReadonlyMap<string, ProbeRunState>>(new Map())
   const [hostIdDraft, setHostIdDraft] = useState('')
   const [hostTitleDraft, setHostTitleDraft] = useState('')
   const [identityRevision, setIdentityRevision] = useState(0)
+
+  // A fresh mount reads the catalog once instead of waiting for a click: the
+  // panel used to open on "没有列出任何 acp agent" for a host that was serving
+  // one, purely because nobody had pressed 刷新 yet.
+  useEffect(() => {
+    // Runs once per mount: reloading on every phase change would cancel the
+    // very read the phase change belongs to (the effect's own setLoad
+    // re-triggers it), which is exactly the frozen spinner this used to be.
+    let cancelled = false
+    setLoad(previous => previous.stage === 'loaded' ? previous : { stage: 'loading' })
+    void props.agents.reload().then(result => {
+      if (cancelled) return
+      if (result.ok) {
+        setAgents(result.value)
+        setLoad({ stage: 'loaded' })
+      } else {
+        setLoad({ stage: 'failed', message: result.error.message })
+      }
+    })
+    return () => { cancelled = true }
+  }, [props.agents])
 
   const startProbe = (presetId: string): void => {
     void runProbe(props.probe, presetId, state => {
@@ -141,8 +182,14 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
     })
   }
   const refreshAgents = (): void => {
+    setLoad({ stage: 'loading' })
     void props.agents.reload().then(result => {
-      if (result.ok) setAgents(result.value)
+      if (result.ok) {
+        setAgents(result.value)
+        setLoad({ stage: 'loaded' })
+      } else {
+        setLoad({ stage: 'failed', message: result.error.message })
+      }
     })
   }
   const saveIdentity = (): void => {
@@ -159,66 +206,80 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
 
   const identity = props.rollUp.identity()
   return (
-    <div data-threadharbor-panel="" style={{ padding: 16, overflow: 'auto', height: '100%', boxSizing: 'border-box' }}>
-      <section data-panel-section="agents">
-        <h2 style={{ margin: '0 0 4px' }}>Agent 探测</h2>
-        <p data-self-heal-note="" style={{ margin: '0 0 8px', opacity: 0.75 }}>
+    <div data-threadharbor-panel="" className={styles.root}>
+      <section data-panel-section="agents" className={styles.section}>
+        <h2 className={styles.title}>Agent 探测</h2>
+        <p data-self-heal-note="" className={styles.note}>
           连接由主机自己照看：发现断了会自动丢弃并在下一次对话时自动重连，无需在这里操作。
         </p>
-        {agents.length === 0
-          ? (
-              <p data-agents-empty="" style={{ margin: 0 }}>
-                {props.agentsNote ?? '这台主机没有列出任何 acp agent——可能没有配置预设，或模型目录读取失败；点"刷新"再试。'}
-              </p>
-            )
-          : agents.map(agent => (
-              <AgentRow
-                key={agent.presetId}
-                presetId={agent.presetId}
-                label={agent.label}
-                verdict={probes.get(agent.presetId)}
-                onProbe={startProbe}
-              />
-            ))}
-        <button type="button" data-action="refresh-agents" onClick={refreshAgents} style={{ marginTop: 8 }}>刷新</button>
+        {load.stage === 'loading'
+          ? <p data-agents-loading="" className={styles.stateLine}>正在读取本机 agent……</p>
+          : load.stage === 'failed'
+            ? <p data-agents-failed="" className={styles.stateBad}>读取失败：{load.message}</p>
+            : agents.length === 0
+              ? (
+                  <p data-agents-empty="" className={styles.stateLine}>
+                    {props.agentsNote ?? '这台主机没有列出任何 acp agent——可能没有配置预设，或模型目录读取失败；点"刷新"再试。'}
+                  </p>
+                )
+              : (
+                  <div className={styles.card}>
+                    {agents.map(agent => (
+                      <AgentRow
+                        key={agent.presetId}
+                        presetId={agent.presetId}
+                        label={agent.label}
+                        verdict={probes.get(agent.presetId)}
+                        onProbe={startProbe}
+                      />
+                    ))}
+                  </div>
+                )}
+        <div>
+          <button type="button" data-action="refresh-agents" className={styles.action} onClick={refreshAgents}>刷新</button>
+        </div>
       </section>
-      <section data-panel-section="rollup" style={{ marginTop: 16 }}>
-        <h2 style={{ margin: '0 0 4px' }}>跨主机汇总</h2>
-        <p data-identity-line="" style={{ margin: '0 0 8px', opacity: 0.8 }}>
+      <section data-panel-section="rollup" className={styles.section}>
+        <h2 className={styles.title}>主机与汇总</h2>
+        <p data-identity-line="" className={styles.identityLine}>
           本机身份：{identity.hostTitle}（id {identity.hostId}{identity.derived ? '，未配置，按页面来源生成' : ''}）
         </p>
         <form
           data-identity-form=""
-          style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 8 }}
+          className={styles.identityForm}
           onSubmit={event => {
             event.preventDefault()
             saveIdentity()
           }}
         >
-          <label>
-            主机 id{' '}
+          <label className={styles.field}>
+            主机 id
             <input
               value={hostIdDraft}
               data-identity-host-id=""
+              className={styles.input}
               onChange={event => { setHostIdDraft(event.target.value) }}
               placeholder="留空则自动生成"
-              size={16}
             />
           </label>
-          <label>
-            名称{' '}
+          <label className={styles.field}>
+            名称
             <input
               value={hostTitleDraft}
               data-identity-host-title=""
+              className={styles.input}
               onChange={event => { setHostTitleDraft(event.target.value) }}
               placeholder="如：工作室主机"
-              size={16}
             />
           </label>
-          <button type="submit" data-identity-save="">保存身份</button>
+          <button type="submit" data-identity-save="" className={styles.actionPrimary}>保存身份</button>
         </form>
-        <div ref={attachRollUp(props.rollUp)} data-rollup-host="" />
-        <ul data-panel-notices="" style={{ margin: '8px 0 0', paddingLeft: 18, opacity: 0.75 }}>
+        <p className={styles.note}>
+          这里没有「添加主机」的入口，是如实呈现：同一个浏览器里打开的每个页面会自动出现在上面的汇总里，
+          只要给这台主机起个名字；另一台机器的页面不在这个通道里，不会出现，也就无法在这里添加。
+        </p>
+        <div ref={attachRollUp(props.rollUp)} data-rollup-host="" className={styles.rollupHost} />
+        <ul data-panel-notices="" className={styles.notices}>
           {props.rollUp.notices().map(notice => <li key={notice}>{notice}</li>)}
         </ul>
       </section>

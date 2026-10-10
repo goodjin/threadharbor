@@ -276,7 +276,7 @@ describe('预设是建会话之后才选上的（界面的选择器路径）', (
     applyAcpPlugin(wired, 'acp-grok', CONFIG, {
       install: (a, _presetId, _dialect, table) => {
         installs += 1
-        installAcpDispatch(a, table, { produce: () => [], write: () => undefined, presetOf: () => 'acp-grok' })
+        installAcpDispatch(a, table, { produce: () => [], write: () => undefined, presetOf: () => 'acp-grok', positionOf: () => ({ turn: 1, step: 1 }) })
       },
     })
     context.selected('s1', 'acp-grok')
@@ -343,7 +343,7 @@ function installedRow(deps: { transport: () => AcpTransport & { die(reason: stri
     // the handshake itself would wait on an agent no test stands in for.
     startTurn: sessionId => table.get('acp-grok')!.run(
       { kind: 'enter', messages: [] },
-      { sessionId, produce: () => [], write: () => 1 },
+      { sessionId, position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 },
     ),
     stop: sessionId => { context.stopped(sessionId) },
   }
