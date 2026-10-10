@@ -32,11 +32,17 @@ export type ApprovalBridge = (request: PermissionRequest) => Promise<PermissionD
 /**
  * Bridge ACP permission requests to the host.
  *
+ * The agent is resolved per request, not fixed at construction: several
+ * sessions can be live at once and a permission request names the session it
+ * belongs to, so a bridge built around one captured agent would attach every
+ * prompt to the wrong conversation. `agentOf` reads that session off the
+ * request and returns whoever is driving it.
+ *
  * `permission` takes a decision and answers it; this only translates.
  */
 export function makeApprovalBridge(
   ask: ApprovalPort,
-  agent: unknown,
+  agentOf: (request: PermissionRequest) => unknown,
   describe: (request: PermissionRequest) => { toolName: string; callId?: string; reason?: string },
 ): ApprovalBridge {
   return async request => {
@@ -44,7 +50,7 @@ export function makeApprovalBridge(
     let outcome: unknown
     try {
       outcome = await ask({
-        agent,
+        agent: agentOf(request),
         toolName,
         ...(callId === undefined ? {} : { callId }),
         ...(reason === undefined ? {} : { reason }),

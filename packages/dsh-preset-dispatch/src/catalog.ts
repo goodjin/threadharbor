@@ -29,6 +29,23 @@ export type CatalogDeps = {
   modelsOf(presetId: string): readonly { readonly id: string; readonly name: string; readonly description?: string }[]
   /** The frame dialect of one preset's agent. */
   dialectOf(presetId: string): AcpDialect | undefined
+  /**
+   * A model request landed on one of our routes for a session this row does
+   * not drive — the user picked one of our models somewhere the takeover never
+   * reached. This is where a mid-conversation switch runs, and it must end
+   * loudly either way: the caller refuses to pretend to stream.
+   */
+  onForeignModelRequest?(request: ForeignModelRequest): Promise<void> | void
+}
+
+/** A model request that reached one of this adapter's routes from outside. */
+export type ForeignModelRequest = {
+  readonly provider: string
+  readonly model: string
+  /** The session the request belongs to, when the loop stamped one. */
+  readonly sessionId: string
+  /** The conversation the request would have carried, when present. */
+  readonly messages?: readonly unknown[]
 }
 
 const ROUTE_PREFIX = 'acp:'
@@ -71,11 +88,13 @@ const DISPLAY: Readonly<Record<string, string>> = {
 /**
  * The catalog-facing adapter.
  *
- * Deliberately implements only the display side. `stream` throws rather than
- * returning an empty stream: an external turn is driven by the replaced step
- * and never by a model request, so reaching this method means the takeover did
- * not happen — and a session that looks healthy while doing nothing is worse
- * than one that says so.
+ * Deliberately implements only the display side. `stream` never produces a
+ * stream: an external turn is driven by the replaced step and never by a model
+ * request, so reaching this method means the takeover did not happen. When a
+ * switch hook is wired the request is treated as a switch first — planned,
+ * applied or refused by name — and the stream still ends in an error naming
+ * what happened, because a session that looks healthy while doing nothing is
+ * worse than one that says so.
  */
 export function catalogAdapter(config: PresetConfig, deps: CatalogDeps): CatalogAdapterLike {
   return {
@@ -97,10 +116,31 @@ export function catalogAdapter(config: PresetConfig, deps: CatalogDeps): Catalog
       }))
     },
 
-    stream: (options: { provider: string; model: string }) => {
-      throw new Error(
-        `acp catalog: ${options.provider}/${options.model} never streams — an external turn is driven by the replaced step, so reaching the model request means the takeover did not happen`,
-      )
+    // An async generator rather than a synchronous throw: the switch hook is
+    // async, and the generator's rejection surfaces to the loop as the turn's
+    // error — loud, and never a silently empty answer.
+    providerRetryPolicy: (): undefined => undefined,
+    stream: function stream(options: { provider: string; model: string; sessionId?: unknown; messages?: readonly unknown[] }): AsyncIterable<never> {
+      return (async function* foreignModelRequest(): AsyncIterable<never> {
+        if (deps.onForeignModelRequest === undefined || typeof options.sessionId !== 'string') {
+          throw new Error(
+            `acp catalog: ${options.provider}/${options.model} never streams — an external turn is driven by the replaced step, so reaching the model request means the takeover did not happen`,
+          )
+        }
+        const messages = Array.isArray(options.messages) ? options.messages : undefined
+        await deps.onForeignModelRequest({
+          provider: options.provider,
+          model: options.model,
+          sessionId: options.sessionId,
+          ...(messages === undefined ? {} : { messages }),
+        })
+        // The hook reports what it did by throwing; reaching this line means it
+        // performed nothing it wanted to name, so the plain takeover-diagnostic
+        // is the honest remaining answer.
+        throw new Error(
+          `acp catalog: ${options.provider}/${options.model} never streams — an external turn is driven by the replaced step, so reaching the model request means the takeover did not happen`,
+        )
+      })()
     },
   }
 }
@@ -109,5 +149,13 @@ export function catalogAdapter(config: PresetConfig, deps: CatalogDeps): Catalog
 export type CatalogAdapterLike = {
   providerInfo(provider: string): { id: string; name: string }
   listModels(provider: string): Promise<readonly CatalogModel[]>
-  stream(options: { provider: string; model: string }): AsyncIterable<never>
+  stream(options: { provider: string; model: string; sessionId?: unknown; messages?: readonly unknown[] }): AsyncIterable<never>
+  /**
+   * The runtime asks every registered adapter for this, without checking that
+   * it exists — an adapter that omits it takes down every route, not just its
+   * own. Undefined means "use the normal defaults", which is what we mean.
+   */
+  providerRetryPolicy(provider: string): undefined
+  /** Same deal: consumed unconditionally, so it has to be present. */
+  requestImagePricing?(options: unknown): undefined
 }
