@@ -13,11 +13,11 @@ import { rollUpView } from '@threadharbor/dsh-host-federation/rollup-view'
 import { mountRollUp } from '@threadharbor/dsh-host-federation/rollup-mount'
 import type { RollUpMount } from '@threadharbor/dsh-host-federation/rollup-mount'
 import type { RollUpView } from '@threadharbor/dsh-host-federation/rollup-view'
-import type { HostIdentity } from '@threadharbor/dsh-host-federation'
+import type { HostIdentity, RollUp } from '@threadharbor/dsh-host-federation'
 
 /** The parts of the federation this surface needs. */
 export type FederationPort = {
-  rollUp(): { hosts: readonly never[] }
+  rollUp(): RollUp
   identity(): HostIdentity
   publishSessions(): void
   tick(): void

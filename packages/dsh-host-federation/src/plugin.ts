@@ -105,9 +105,14 @@ export function applyHostFederation(
   }, config.heartbeatMs)
 
   const originalDispose = view.dispose.bind(view)
+  // Publish through the view's own method, captured before it is wrapped.
+  // Assigning a wrapper that calls `view.publishSessions()` onto `view` replaces
+  // the very method it calls, so the second call recurses forever and never
+  // returns — which is why nothing that used this had ever run to completion.
+  const originalPublish = view.publishSessions.bind(view)
   return Object.assign(view as HostFederationHandle, {
     settingsKey: () => `${SETTINGS_PREFIX}${view.identity().hostId}`,
-    publishSessions: () => view.publishSessions(),
+    publishSessions: () => { originalPublish() },
     dispose: () => {
       ctx.clearInterval(timer)
       originalDispose()

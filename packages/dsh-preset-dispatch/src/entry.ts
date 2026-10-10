@@ -23,12 +23,15 @@
  */
 
 import Schema from '@deepseek-ai/schemastery'
+import { hostname } from 'node:os'
 import { applyAcpPlugin } from './plugin.ts'
 import { installAcpDispatch } from './dispatch.ts'
+import { makeApprovalBridge } from './approval-bridge.ts'
+import { presetsForHost } from './host-filter.ts'
+import { presetOfState } from './dispatch.ts'
 import { makeContentWriter } from './content-writer.ts'
 import type { AcpPresetConfig } from './registry.ts'
 import type { AcpPresetBinding, AgentLike, ContentEvent } from './dispatch.ts'
-import type { PermissionDecision } from '@threadharbor/dsh-acp-agent'
 import type { AcpDialect } from '@threadharbor/dsh-acp-agent'
 import { projectStepContent } from '@threadharbor/dsh-acp-agent'
 import { AcpAssistantStream } from './stream.ts'
@@ -60,7 +63,23 @@ export const Config: Schema<Config> = Schema.object({
   mode: Schema.string(),
   cwd: Schema.string(),
   models: Schema.array(Model),
+  /**
+   * Which hosts offer this preset. Empty or omitted means every host.
+   *
+   * Not configurable to mean "off here": an omitted field and an explicitly
+   * empty one cannot be told apart once the configuration has been normalised,
+   * and guessing "off" took the whole plugin down on every machine.
+   */
   hosts: Schema.array(Schema.string()),
+  /**
+   * Which host this row is on, as named by the `hosts` filter.
+   *
+   * A row can only evaluate its own `hosts` list against an identity, and the
+   * host has no built-in notion of "this machine" — so the operator names it
+   * here. Absent, the machine's hostname stands in; set it explicitly when the
+   * `hosts` lists use another convention.
+   */
+  hostId: Schema.string(),
 })
 
 export type Config = {
@@ -73,6 +92,7 @@ export type Config = {
   cwd?: string
   models?: { id: string; name: string; description?: string }[]
   hosts?: string[]
+  hostId?: string
 }
 
 /**
@@ -86,8 +106,16 @@ export type Config = {
 export function apply(ctx: unknown, config: Config): void {
   const host = ctx as {
     on(event: 'agent/created', handler: (payload: { agent: unknown }) => void): unknown
-    /** Optional: injected services would refuse to mount without them. */
-    get?(key: 'approval' | 'sessionProjections'): unknown
+    /** Same bus, different event: the row also hears archive-time stop requests. */
+    on(event: 'workspace/session-stop', handler: (payload: { sessionId: unknown }) => void): unknown
+    /**
+     * Optional: injected services would refuse to mount without them.
+     *
+     * Any service name: `approval` and `sessionProjections` here, and the
+     * switch services (`sessions`, `agents`, `sessionController`,
+     * `agentPresets`) through the mounted plugin.
+     */
+    get?(key: string): unknown
     logger?: { info(message: string): void; warn(message: string): void }
   }
 
@@ -102,12 +130,28 @@ export function apply(ctx: unknown, config: Config): void {
     ...(config.hosts === undefined ? {} : { hosts: config.hosts }),
   }
 
+  // The hosts filter decides whether this row is offered here at all. It runs
+  // before anything mounts — a preset reachable only from one machine must not
+  // appear in the picker, answer approvals, or take sessions on any other.
+  // Absent `hosts` means everywhere, so this changes nothing until configured.
+  const hostId = config.hostId === undefined || config.hostId.trim() === ''
+    ? hostname()
+    : config.hostId.trim()
+  if (Object.keys(presetsForHost({ presets: { [config.presetId]: preset } }, hostId).presets).length === 0) {
+    const line = `acp row not mounted: preset=${config.presetId} is offered on `
+      + `[${(config.hosts ?? []).join(', ')}] but this host is ${hostId} — staying off this machine`
+    host.logger?.warn(line)
+    process.stderr.write(`[threadharbor] ${line}\n`)
+    return
+  }
+
   // Say so at mount. This row is invisible by design — it only ever speaks
   // through the sessions it takes over — so without this a preset that loaded
   // the row but never matched a session would look exactly like a plugin that
   // was never installed.
   const summary = `acp row mounted: preset=${config.presetId} agent=${config.agent} `
     + `transport=${config.url === undefined ? 'process' : 'websocket'} `
+    + `host=${hostId} `
     + `preset-reading=${readProjection(host) === undefined ? 'header-only' : 'projection'} `
     + `approvals=${host.get?.('approval') === undefined ? 'refuse-all' : 'host'}`
   host.logger?.info(summary)
@@ -120,8 +164,12 @@ export function apply(ctx: unknown, config: Config): void {
   // deciding on the agent's behalf is how an external agent ends up able to do
   // nothing, with nothing on screen to say why.
   //
-  // The agent is looked up by session rather than captured: several sessions can
-  // be live at once, and a permission request names the session it belongs to.
+  // The one shared bridge does the translating (`approval-bridge.ts`: only
+  // `allowed-once` grants, and a thrown request — the host has no open turn to
+  // attach it to — refuses rather than hangs). This row only says who is
+  // asking: the agent is looked up by session rather than captured, because
+  // several sessions can be live at once and a permission request names the
+  // session it belongs to.
   const agents = new Map<string, unknown>()
   // Opportunistic, like the native tool layer: injecting it would mean the row
   // refuses to mount on a host that has no approval service, and taking every
@@ -130,18 +178,14 @@ export function apply(ctx: unknown, config: Config): void {
   const approval = (found === null || typeof found !== 'object'
     ? undefined
     : found as { request(request: unknown): Promise<unknown> })
-  const ask = approval === undefined ? undefined : async (request: unknown): Promise<PermissionDecision> => {
-    const described = describeRequest(request)
-    const sessionId = sessionIdOfRequest(request)
-    const outcome = await approval.request({
-      agent: sessionId === undefined ? undefined : agents.get(sessionId),
-      ...described,
-    })
-    // Only `allowed-once` means yes. Rejected, cancelled, unavailable and any
-    // value invented later all mean no — a bridge that guessed the other way
-    // would hand out permission nobody agreed to.
-    return outcome === ALLOWED_ONCE ? { outcome: 'allow' } : { outcome: 'reject' }
-  }
+  const ask = approval === undefined ? undefined : makeApprovalBridge(
+    request => approval.request(request),
+    request => {
+      const sessionId = sessionIdOfRequest(request)
+      return sessionId === undefined ? undefined : agents.get(sessionId)
+    },
+    describeRequest,
+  )
 
   applyAcpPlugin(host, config.presetId, preset, {
     ...(readProjection(host) === undefined ? {} : { presetOf: readProjection(host) }),
@@ -223,18 +267,11 @@ function readProjection(host: { get?(key: 'sessionProjections'): unknown }): ((a
   const found = host.get?.('sessionProjections')
   if (found === undefined || found === null || typeof found !== 'object') return undefined
   const projections = found as { stateOf(session: unknown, key: string): unknown }
-  return (agent: { session?: unknown }) => {
-    const value = projections.stateOf(agent.session, 'agentPreset')
-    const record = (typeof value === 'object' && value !== null ? value : {}) as { agentPreset?: unknown }
-    return typeof record['agentPreset'] === 'string' ? record['agentPreset'] : undefined
-  }
+  return (agent: { session?: unknown }) => presetOfState(projections.stateOf(agent.session, 'agentPreset'))
 }
 
 /** Kept so the dialect type stays referenced from the entry. */
 export type { AcpDialect }
-
-/** Only this exact value is a grant; everything else is a refusal. */
-const ALLOWED_ONCE = 'allowed-once'
 
 function sessionIdOfRequest(request: unknown): string | undefined {
   const sessionId = (request as { sessionId?: unknown } | undefined)?.sessionId

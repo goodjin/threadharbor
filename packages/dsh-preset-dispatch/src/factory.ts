@@ -40,6 +40,43 @@ const DIALECTS: Readonly<Record<string, AcpDialect>> = {
   codex: codexDialect,
 }
 
+/**
+ * A transport whose death reaches every listener, not only the last one.
+ *
+ * The real transports hold a single death slot: each `onDeath` registration
+ * replaces the previous handler. The AcpClient owns that slot the moment it is
+ * constructed, so a second listener registered afterwards would silently steal
+ * the client's — in-flight turns would then wait forever on a dead connection
+ * while only the registry heard about the death. Fanning out from one
+ * underlying registration is what keeps both listeners live.
+ */
+class DeathFanoutTransport implements AcpTransport {
+  private readonly inner: AcpTransport
+  private readonly listeners = new Set<(reason: string) => void>()
+  private wired = false
+
+  constructor(inner: AcpTransport) {
+    this.inner = inner
+  }
+
+  send(line: string): void { this.inner.send(line) }
+
+  onLine(handler: (line: string) => void): void { this.inner.onLine(handler) }
+
+  onDeath(handler: (reason: string) => void): void {
+    this.listeners.add(handler)
+    if (this.wired) return
+    this.wired = true
+    // Copied before iterating: a listener that registers another one during
+    // death must not be half-covered by this loop.
+    this.inner.onDeath(reason => {
+      for (const listener of [...this.listeners]) listener(reason)
+    })
+  }
+
+  close(): void { this.inner.close() }
+}
+
 export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): AcpSessionFactory {
   return {
     dialectFor: (_presetId, preset) => DIALECTS[preset.agent ?? ''],
@@ -48,9 +85,12 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
       const preset = config.presets[presetId]
       if (preset === undefined) throw new Error(`acp dispatch: no preset named ${presetId}`)
 
-      const transport = deps.transport?.(preset) ?? (preset.url !== undefined
+      const raw = deps.transport?.(preset) ?? (preset.url !== undefined
         ? new WebSocketAcpTransport({ url: preset.url })
         : new StdioAcpTransport({ command: preset.command ?? '' }))
+      // The client and the registry's death watcher both listen; the fanout is
+      // what lets them without one stealing the other's slot.
+      const transport = new DeathFanoutTransport(raw)
 
       const client = new AcpClient(transport, DIALECTS[preset.agent ?? ''] ?? grokDialect)
       // grok delegates shell execution to the client. Without this the agent
@@ -65,6 +105,7 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
         // runner that forgets its session id would otherwise hand back the
         // same conversation.
         close: () => { client.close() },
+        onDead: handler => { transport.onDeath(handler) },
       }
     },
   }

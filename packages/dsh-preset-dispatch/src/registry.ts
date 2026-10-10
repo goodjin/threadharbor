@@ -50,6 +50,17 @@ export type AcpSession = {
    * the old connection, and the next turn would reuse the agent that is hung.
    */
   close(): void
+  /**
+   * Learn that the connection died under this session.
+   *
+   * The frame stream has nothing to say when a socket or child process goes
+   * away — the transport's death callback is the one event that names it. The
+   * registry listens so it can drop the cached session itself: a cached dead
+   * connection would otherwise be handed back on every later turn, and fixing
+   * that used to require a restart command that reached the host from the
+   * browser — a command that could never be delivered.
+   */
+  onDead(handler: (reason: string) => void): void
 }
 
 /** How an agent is reached; separate so tests can stand in for spawning. */
@@ -80,10 +91,37 @@ export function sessionsRegistry(): SessionRegistry {
   return new Map<string, Map<string, AcpSession>>()
 }
 
+/** What the caller wants said when a dead connection is dropped. */
+export type SessionDropEvent = {
+  readonly presetId: string
+  /** The DSH session whose external connection died. */
+  readonly sessionId: string
+  readonly reason: string
+}
+
+export type PresetTableOptions = {
+  /**
+   * Said when a connection death drops a cached session.
+   *
+   * Optional because the drop is correct whether or not anyone is listening;
+   * a caller that can log passes a sink here so a self-heal stays visible.
+   */
+  readonly onDropped?: (event: SessionDropEvent) => void
+}
+
+/**
+ * Build the preset table.
+ *
+ * One agent is opened per session on first use and reused after — opening is
+ * the expensive part, and a DSH session runs many turns. When a connection
+ * dies, its cached session is dropped here and the next turn opens a fresh
+ * one: the host heals on its own, with no instruction from the page.
+ */
 export function buildPresetTable(
   config: PresetConfig,
   factory: AcpSessionFactory,
   sessions: SessionRegistry,
+  options: PresetTableOptions = {},
 ): Map<string, AcpPresetBinding> {
   const table = new Map<string, AcpPresetBinding>()
   for (const [presetId, preset] of Object.entries(config.presets)) {
@@ -93,10 +131,10 @@ export function buildPresetTable(
     if (dialect === undefined) continue
     // One external conversation per DSH session, not per preset.
     //
-    // Sharing one across sessions is the original bug: two conversations in the
-    // same preset land in the same external session, so each one's answer shows
-    // up in the other's history. The keys are session ids, and a session that
-    // is gone drops its entry with it.
+    // Sharing one across sessions is the original bug: two conversations in
+    // the same preset land in the same external session, so each one's answer
+    // shows up in the other's history. The keys are session ids, and a session
+    // whose connection dies drops its entry with it (see the onDead hookup).
     const opened = new Map<string, AcpSession>()
     sessions.set(presetId, opened)
     table.set(presetId, {
@@ -109,6 +147,13 @@ export function buildPresetTable(
             ...(preset.model === undefined ? {} : { modelId: preset.model }),
             ...(preset.mode === undefined ? {} : { modeId: preset.mode }),
           })
+          const sessionId = turn.sessionId
+          session.onDead(reason => {
+            // Drop only this session's entry: another session's connection is
+            // a different socket and stays exactly as alive as it is.
+            if (opened.get(sessionId) === session) opened.delete(sessionId)
+            options.onDropped?.({ presetId, sessionId, reason })
+          })
           opened.set(turn.sessionId, session)
         }
         return session.run(decision, turn)
@@ -118,18 +163,10 @@ export function buildPresetTable(
   return table
 }
 
-/** The open conversations per preset, so a restart can find and drop them. */
+/** The open conversations per preset, so a teardown can find and drop them. */
 export function openSessionsOf(
   sessions: ReadonlyMap<string, Map<string, AcpSession>>,
   presetId: string,
 ): ReadonlyMap<string, AcpSession> {
   return sessions.get(presetId) ?? new Map<string, AcpSession>()
-}
-
-/** Forget every conversation for a preset, after they have been closed. */
-export function forgetSessions(
-  sessions: Map<string, Map<string, AcpSession>>,
-  presetId: string,
-): void {
-  sessions.set(presetId, new Map<string, AcpSession>())
 }

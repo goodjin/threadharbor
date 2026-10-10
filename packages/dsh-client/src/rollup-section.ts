@@ -1,0 +1,182 @@
+/**
+ * The roll-up, as a panel section.
+ *
+ * This is the assembly the roll-up waited for: a real settings source (the
+ * panel's identity form, backed by page storage), a real channel, a real
+ * heartbeat — and, stated out loud rather than papered over, no real session
+ * source, because reading DSH's session list is a host-side capability this
+ * page does not have. The section mounts anyway, shows the hosts it can truly
+ * see, and says on screen exactly what is missing and why.
+ *
+ * Built directly on the federation's exported pieces. `applyHostFederation`
+ * would have been the front door, but its published handle re-points
+ * `publishSessions` at itself and recurses until the stack gives out — it has
+ * never once run to completion. The steps it meant to take are taken here,
+ * each one owned by this file: defensive settings read, channel fallback
+ * warning, timer ownership, publish-on-start.
+ *
+ * Identity changes restart the federation: the old one says goodbye on
+ * dispose, the new one announces under the new identity, and no stale host is
+ * left behind in the other tabs.
+ */
+
+import { HostFederation, browserChannel, resolveHostIdentity } from '@threadharbor/dsh-host-federation'
+import type { FederationBus, HostIdentity } from '@threadharbor/dsh-host-federation'
+import { mountRollUpSurface } from './surface.ts'
+import type { RollUpSurface } from './surface.ts'
+import type { ConfiguredIdentity, IdentitySettings } from './settings-source.ts'
+
+/** What one host reports about its sessions, as the federation reads it. */
+export type SectionSession = { readonly projectId: string; readonly sessionId: string; readonly title: string }
+
+/** Everything the section needs from the page around it. */
+export type RollUpSectionDeps = {
+  /** The panel's identity form: what this host is called and where it is kept. */
+  settings: IdentitySettings
+  /** JSON-valued storage behind the federation's announcements. */
+  storage: { get(key: string): unknown; set(key: string, value: unknown): void }
+  /** Sessions this host holds; the honest default is none. */
+  sessions(): readonly SectionSession[]
+  /**
+   * Said on screen whenever the session source cannot deliver: why the rows
+   * may be empty. Required — a section that cannot list sessions must say so,
+   * not look broken.
+   */
+  sessionSourceNote: string
+  /** Cross-tab channel; absent means the section opens a BroadcastChannel. */
+  bus?: FederationBus
+  setInterval(handler: () => void, ms: number): number
+  clearInterval(handle: number): void
+  /** Where failures are said out loud instead of swallowed. */
+  report(message: string): void
+  heartbeatMs: number
+  staleMs: number
+}
+
+/** The roll-up as the panel renders it. */
+export type RollUpSection = {
+  /** The drawn roll-up, ready to place in the panel. */
+  element(): HTMLElement
+  /** Who this tab currently says it is. */
+  identity(): HostIdentity
+  /** What the section cannot show, in words the operator can act on. */
+  notices(): readonly string[]
+  /** Save a new identity; an id change re-announces under the new one. */
+  setIdentity(value: ConfiguredIdentity): void
+  /** Stop the heartbeat and say goodbye. */
+  dispose(): void
+}
+
+/** The channel name one roll-up shares; one name means one roll-up. */
+const CHANNEL_NAME = 'dsh-host-federation'
+
+/**
+ * Start the roll-up section.
+ * @param deps - the page-supplied ports; see {@link RollUpSectionDeps}.
+ * @returns the section; dispose stops the heartbeat and says goodbye.
+ */
+export function startRollUpSection(deps: RollUpSectionDeps): RollUpSection {
+  let identity = resolveIdentity()
+  // The federation can report changes before the surface exists; the holder
+  // lets the first drawings and every later one go through the same path.
+  let surface: RollUpSurface | undefined
+  let onChange: () => void = () => {}
+  let federation = open(identity)
+  const timer = deps.setInterval(() => {
+    try {
+      federation.emitHeartbeat()
+    } catch (error: unknown) {
+      deps.report(`host heartbeat failed: ${messageOf(error)}`)
+    }
+  }, deps.heartbeatMs)
+
+  function resolveIdentity(): HostIdentity {
+    let configured: ConfiguredIdentity
+    try {
+      configured = deps.settings.read()
+    } catch (error: unknown) {
+      // A settings read that fails is an ordinary not-configured-yet, not a
+      // reason to take the roll-up down.
+      configured = {}
+      deps.report(`host settings could not be read: ${messageOf(error)}`)
+    }
+    return resolveHostIdentity({
+      configuredHostId: configured.hostId,
+      configuredHostTitle: configured.hostTitle,
+      origin: typeof location === 'undefined' ? '' : location.origin,
+      pathname: typeof location === 'undefined' ? '/' : location.pathname,
+      userAgent: typeof navigator === 'undefined' ? '' : navigator.userAgent,
+    })
+  }
+
+  function open(next: HostIdentity): HostFederation {
+    const bus = deps.bus ?? openChannel()
+    return new HostFederation(next, bus, {
+      staleMs: deps.staleMs,
+      listSessions: () => deps.sessions(),
+      onChange: () => { onChange() },
+    })
+  }
+
+  function openChannel(): FederationBus {
+    const bus = browserChannel(CHANNEL_NAME)
+    // The channel is how other tabs hear about this host at all; a page
+    // without one must not look like a working roll-up that shows nobody.
+    if (typeof BroadcastChannel === 'undefined') {
+      deps.report('no BroadcastChannel on this page: the cross-tab roll-up stays empty and other hosts will not appear')
+    }
+    return bus
+  }
+
+  // Announced up front: a tab that only said hello would leave its own row
+  // empty in every other tab, and nothing is going to come and ask. The
+  // surface publishes on start — that is its documented job — so the section
+  // does not say it twice.
+  federation.start()
+  surface = mountRollUpSurface({
+    federation: {
+      rollUp: () => federation.rollUp(),
+      identity: () => identity,
+      publishSessions: () => { federation.publishSessions(deps.sessions()) },
+      tick: () => { federation.emitHeartbeat() },
+      dispose: () => { federation.dispose() },
+    },
+  })
+  onChange = () => { surface?.refresh() }
+
+  return {
+    element: () => surface?.element() ?? document.createElement('div'),
+    identity: () => identity,
+    notices: () => [
+      deps.sessionSourceNote,
+      '跨主机说明：页签间的通道只在同源之间通信，另一台机器的页面不在这个频道里，因此不会出现在这张列表上。',
+    ],
+    setIdentity: value => {
+      deps.settings.write(value)
+      const next = resolveIdentity()
+      if (next.hostId === identity.hostId) {
+        // Same machine, same id: re-announcing would churn every other tab.
+        identity = next
+        return
+      }
+      // An id change is a different identity on the channel, so the old one
+      // retires (dispose says bye) before the new one is announced.
+      federation.dispose()
+      identity = next
+      federation = open(identity)
+      federation.start()
+      onChange()
+    },
+    dispose: () => {
+      // The timer first: a heartbeat left running after the panel is gone
+      // would keep announcing a host nobody is listening for.
+      deps.clearInterval(timer)
+      surface?.dispose()
+      federation.dispose()
+    },
+  }
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}

@@ -19,18 +19,31 @@
 import { presetIdOf } from './dispatch.ts'
 import type { AgentLike, PresetResolver } from './dispatch.ts'
 import type { PermissionDecision, PermissionRequest } from '@threadharbor/dsh-acp-agent'
-import { buildPresetTable, forgetSessions, openSessionsOf, sessionsRegistry } from './registry.ts'
+import { buildPresetTable, openSessionsOf, sessionsRegistry } from './registry.ts'
 import type { AcpPresetConfig, PresetConfig } from './registry.ts'
 import { makeSessionFactory } from './factory.ts'
-import { makeAgentControls } from './control.ts'
-import { controlsOf } from './control-registry.ts'
-import type { AgentControl } from './control.ts'
+import { modelsOfPreset, registerCatalog } from './catalog-registration.ts'
+import { mountSwitchOnForeignModelRequest } from './switch-mount.ts'
+import type { CatalogDeps } from './catalog.ts'
 import type { AcpPresetBinding } from './dispatch.ts'
-import type { AcpDialect } from '@threadharbor/dsh-acp-agent'
+import type { AcpDialect, AcpTransport } from '@threadharbor/dsh-acp-agent'
 
 /** The part of a Cordis context this entry touches. */
 export type AcpPluginContext = {
   on(event: 'agent/created', handler: (payload: { agent: unknown }) => void): unknown
+  /**
+   * The Workspace registry's stop request for one session's work — dispatched
+   * when a session is archived with its activity still running, among other
+   * callers. The row listens so the external connection does not outlive the
+   * session that stopped.
+   */
+  on(event: 'workspace/session-stop', handler: (payload: { sessionId: unknown }) => void): unknown
+  /**
+   * Read a host service by name; how this row reaches the model registry and
+   * the switch services. Optional: a host offering neither still mounts, and
+   * the pieces that need them say so loudly when they are asked.
+   */
+  get?(key: string): unknown
 }
 
 /** What the caller supplies, since the DSH-facing pieces stay behind ports. */
@@ -64,6 +77,13 @@ export type AcpPluginDeps = {
    * available and the header only as a fallback.
    */
   presetOf?: PresetResolver | undefined
+  /**
+   * Build the transport a preset connects over.
+   *
+   * Optional and aimed at tests: the default is the preset's own URL or
+   * command, which is what every real deployment wants.
+   */
+  transport?(preset: { url?: string; command?: string }): AcpTransport
 }
 
 /**
@@ -88,6 +108,7 @@ export function applyAcpPlugin(
     answerPermission: request => (deps.answerPermission === undefined
       ? Promise.resolve({ outcome: 'reject' })
       : deps.answerPermission(request)),
+    ...(deps.transport === undefined ? {} : { transport: deps.transport }),
   })
   const dialect = factory.dialectFor(presetId, config)
   // An unknown agent is a configuration mistake. Taking sessions over anyway
@@ -95,16 +116,51 @@ export function applyAcpPlugin(
   // the native agent, where they still work.
   if (dialect === undefined) return
   const sessions = sessionsRegistry()
-  const table = buildPresetTable(presets, factory, sessions)
-  // Probe and restart for this row's agent. Held on the context so the client
-  // side can reach it by preset id, and so it is reachable at all: a control
-  // nothing can call is the same as no control.
-  controlsOf(ctx).set(presetId, makeAgentControls(
+  const table = buildPresetTable(presets, factory, sessions, {
+    // A connection death dropping its cached session is the host healing on
+    // its own; said here so a self-heal is visible in the row's report instead
+    // of being indistinguishable from nothing having happened.
+    onDropped: ({ sessionId, reason }) => {
+      deps.report?.(`acp ${presetId}: session ${sessionId}'s connection died (${reason}) — dropped; the next turn opens a fresh one`)
+    },
+  })
+  // What makes the external agent's models appear in the host's own model
+  // picker: the catalog is global to this Host generation and already read by
+  // it. Mounted here rather than left to the standalone entry, because this is
+  // the function the loaded entry actually calls — a registration anywhere
+  // else is the catalogue bug again. Silent when the host has no registry; the
+  // picker then simply shows nothing of ours.
+  const catalogDeps: CatalogDeps = {
+    modelsOf: presetId => modelsOfPreset(presets, factory, presetId),
+    dialectOf: presetId => table.get(presetId)?.dialect,
+  }
+  // A model request landing on one of these routes for a session this row does
+  // not drive is a switch request; the chain (judge → plan → hand over →
+  // apply) runs there and always says how it ended.
+  catalogDeps.onForeignModelRequest = mountSwitchOnForeignModelRequest(
+    ctx,
     presets,
-    factory,
-    id => openSessionsOf(sessions, id),
-    id => { forgetSessions(sessions, id) },
-  ).get(presetId) as AgentControl)
+    catalogDeps,
+    message => { deps.report?.(message) },
+  )
+  registerCatalog(ctx, presets, catalogDeps)
+  // A session whose work was stopped — archived with its turn running, most
+  // visibly — must not leave its external connection open behind it. The stop
+  // request ends the session's work; this closes the socket or child process
+  // that work was running on, and the dropped cache entry means the session's
+  // next turn, if it ever has one, opens fresh. This is also what keeps the
+  // probe's small sessions from leaking one connection per probe: the probe
+  // archives its session when it is done, and the archive is the stop.
+  ctx.on('workspace/session-stop', payload => {
+    const sessionId = payload.sessionId
+    if (typeof sessionId !== 'string') return
+    const opened = sessions.get(presetId)
+    const entry = openSessionsOf(sessions, presetId).get(sessionId)
+    if (opened === undefined || entry === undefined) return
+    opened.delete(sessionId)
+    entry.close()
+    deps.report?.(`acp ${presetId}: session ${sessionId} was stopped — its external connection was closed`)
+  })
 
   ctx.on('agent/created', payload => {
     try {

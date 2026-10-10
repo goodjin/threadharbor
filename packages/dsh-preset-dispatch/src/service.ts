@@ -19,10 +19,9 @@ import type { AgentLike } from './dispatch.ts'
 import type { ContentEvent } from './dispatch.ts'
 import { makeSessionFactory } from './factory.ts'
 import type { FactoryDeps } from './factory.ts'
-import { registerCatalog } from './catalog-registration.ts'
+import { modelsOfPreset, registerCatalog } from './catalog-registration.ts'
 import { buildPresetTable, sessionsRegistry } from './registry.ts'
-import type { AcpPresetConfig, PresetConfig } from './registry.ts'
-import type { AcpDialect } from '@threadharbor/dsh-acp-agent'
+import type { PresetConfig } from './registry.ts'
 
 /** The part of a Cordis context this uses. */
 type ContextLike = {
@@ -46,20 +45,6 @@ export type AttachOptions = FactoryDeps & {
   presetOf?(agent: AgentLike): string | undefined
 }
 
-/** What a preset's agent reports it can serve. */
-function modelsOf(
-  config: PresetConfig,
-  factory: { dialectFor(presetId: string, preset: AcpPresetConfig): AcpDialect | undefined },
-  presetId: string,
-): readonly { id: string; name: string; description?: string }[] {
-  const preset = config.presets[presetId]
-  if (preset === undefined) return []
-  const dialect = factory.dialectFor(presetId, preset)
-  // Not ours, or an agent that publishes nothing: no models to advertise.
-  if (dialect === undefined) return []
-  return preset.models ?? []
-}
-
 export function attachAcpDispatch(
   ctx: ContextLike,
   config: PresetConfig,
@@ -71,7 +56,7 @@ export function attachAcpDispatch(
   // What makes the external agent's models appear in DSH's own model picker:
   // the catalog is global to this Host generation and already read by it.
   registerCatalog(ctx, config, {
-    modelsOf: presetId => modelsOf(config, factory, presetId),
+    modelsOf: presetId => modelsOfPreset(config, factory, presetId),
     dialectOf: presetId => table.get(presetId)?.dialect,
   })
 

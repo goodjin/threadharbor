@@ -42,6 +42,17 @@ describe('applyHostFederation', () => {
     result.dispose()
   })
 
+  it('publishes without calling itself forever', () => {
+    // The handle used to wrap the view's own publish method with a call to
+    // that same method, so publishing recursed until the stack ran out. Every
+    // other test passed because none of them called it.
+    const { ctx } = context()
+    const result = applyHostFederation(ctx, CONFIG)
+    expect(() => { result.publishSessions() }).not.toThrow()
+    expect(result.rollUp().hosts[0]?.sessions.map(s => s.sessionId)).toEqual(['s1'])
+    result.dispose()
+  })
+
   it('keeps announcing on the configured interval', () => {
     // No heartbeat and every other tab would drop this host from the roll-up.
     const { ctx, timers } = context()

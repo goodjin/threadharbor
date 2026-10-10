@@ -41,21 +41,8 @@ const ROOTS = [
  * just the bug it is meant to describe, given a longer life.
  */
 const KNOWN_UNWIRED: Readonly<Record<string, string>> = {
-  'packages/dsh-preset-dispatch/src/catalog.ts':
-    '模型目录适配器。注册在 service.ts 里，而真机加载的是 entry.ts。待接。',
-  'packages/dsh-preset-dispatch/src/catalog-registration.ts':
-    '模型目录注册。同上：注册链路到不了。待接。',
-  'packages/dsh-preset-dispatch/src/host-filter.ts':
-    '按主机过滤 preset。配置里的 hosts 字段因此不生效。待接。',
-  'packages/dsh-preset-dispatch/src/switch.ts':
-    '中途切换 agent 的判定。没有任何调用入口。待接。',
-  'packages/dsh-preset-dispatch/src/switch-plan.ts': '同上，切换计划。',
-  'packages/dsh-preset-dispatch/src/handover.ts': '同上，历史交接。',
-  'packages/dsh-preset-dispatch/src/apply-plan.ts': '同上，切换执行。',
-  'packages/dsh-preset-dispatch/src/approval-bridge.ts':
-    '审批桥。真机路径在 entry.ts 里另写了一份，这一份没被调用。待合并。',
   'packages/dsh-preset-dispatch/src/service.ts':
-    '早期入口，职能与 entry.ts 重叠；entry 重写时漏掉了模型目录注册。',
+    '早期入口，职能与 entry.ts 重叠。模型目录注册已迁到真机路径（plugin.ts 挂载 registerCatalog），此文件只剩 barrel 导出与测试在用；接线检查把它列为配置字段消费方，删它必须先改那道检查。清掉条件：确认没有外部包再调用 attachAcpDispatch，并从配置消费检查的文件清单移除后整体删除。',
   'packages/dsh-client/src/client/RollUpPanel.tsx':
     '跨主机汇总面板的 React 组件。库本身可达，但组装（设置来源 + 会话来源）没完成，所以没有挂它。',
 }

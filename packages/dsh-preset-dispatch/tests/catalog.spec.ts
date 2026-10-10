@@ -46,6 +46,12 @@ describe('providerRoute', () => {
   })
 })
 
+/** Drive the adapter's stream to its (mandatory) failure; rejections propagate. */
+async function failToStream(iterable: AsyncIterable<never>): Promise<never> {
+  for await (const chunk of iterable) void chunk
+  throw new Error('the adapter never yields and never came back quietly')
+}
+
 describe('catalogAdapter', () => {
   const adapter = catalogAdapter(CONFIG, { modelsOf, dialectOf: () => grokDialect })
 
@@ -74,12 +80,46 @@ describe('catalogAdapter', () => {
     expect(await adapter.listModels('deepseek')).toEqual([])
   })
 
-  it('refuses to stream, loudly, naming the route that asked', () => {
+  it('refuses to stream, loudly, naming the route that asked', async () => {
     // External turns are driven by the replaced step, never by a model request.
     // Reaching this method means the takeover did not happen; staying quiet
     // would let a session look healthy while doing nothing.
-    expect(() => adapter.stream({ provider: providerRoute('acp-grok'), model: 'grok-4.7' }))
-      .toThrow(/acp:acp-grok\/grok-4\.7.*takeover did not happen/s)
+    await expect(failToStream(adapter.stream({
+      provider: providerRoute('acp-grok'), model: 'grok-4.7',
+    }))).rejects.toThrow(/acp:acp-grok\/grok-4\.7.*takeover did not happen/s)
+  })
+
+  it('hands a request naming a session to the switch hook before refusing', async () => {
+    // The switch hook is the one way a foreign model request gets answered;
+    // its outcome (thrown or not) is said before the stream's own refusal.
+    const seen: unknown[] = []
+    const hooked = catalogAdapter(CONFIG, {
+      modelsOf,
+      dialectOf: () => grokDialect,
+      onForeignModelRequest: async request => {
+        seen.push(request)
+        throw new Error('switched by forking: continue in session s2')
+      },
+    })
+    await expect(failToStream(hooked.stream({
+      provider: providerRoute('acp-grok'), model: 'grok-4.7', sessionId: 's1',
+    }))).rejects.toThrow(/continue in session s2/)
+    expect(seen).toEqual([{
+      provider: providerRoute('acp-grok'),
+      model: 'grok-4.7',
+      sessionId: 's1',
+    }])
+  })
+
+  it('keeps its refusal when a request carries no session to switch', async () => {
+    const hooked = catalogAdapter(CONFIG, {
+      modelsOf,
+      dialectOf: () => grokDialect,
+      onForeignModelRequest: async () => { throw new Error('should not be reached') },
+    })
+    await expect(failToStream(hooked.stream({
+      provider: providerRoute('acp-grok'), model: 'grok-4.7',
+    }))).rejects.toThrow(/takeover did not happen/)
   })
 })
 

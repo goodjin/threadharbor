@@ -177,6 +177,24 @@ export function presetIdOf(agent: AgentLike, presetOf?: PresetResolver): string 
 export type PresetResolver = (agent: AgentLike) => string | undefined
 
 /**
+ * Read the preset out of a projection state value.
+ *
+ * Verified against `reference/deepseek-harness` @ 5badb15009
+ * (`agent-preset-registry/src/session.ts:34-44`): the `agentPreset` projection's
+ * state **is** the preset string itself (`string | null`), not an object
+ * wrapping it. A reader that only unwraps `state.agentPreset` therefore answers
+ * "nothing" on every real host while looking correct in isolation. Both shapes
+ * are accepted here so the one question — which preset is this session on —
+ * keeps one answer wherever it is asked.
+ */
+export function presetOfState(state: unknown): string | undefined {
+  if (typeof state === 'string') return state === '' ? undefined : state
+  const wrapped = (typeof state === 'object' && state !== null ? state : {}) as { agentPreset?: unknown }
+  const nested = wrapped['agentPreset']
+  return typeof nested === 'string' && nested !== '' ? nested : undefined
+}
+
+/**
  * Flat on the header. Reading `header.meta.agentPreset` — as the design document
  * originally had it — yields undefined forever, so dispatch silently falls back
  * to the native agent with no error anywhere.

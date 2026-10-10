@@ -24,10 +24,14 @@ export function presetsForHost(config: PresetConfig, hostId: string): PresetConf
 /**
  * Whether this preset is offered here.
  *
- * An empty host list is a deliberate "off", not a missing constraint — which is
+ * An empty host list means no restriction, not "off" — which is
  * how a preset gets disabled without deleting its configuration.
  */
 function offeredOn(preset: AcpPresetConfig, hostId: string): boolean {
-  if (preset.hosts === undefined) return true
-  return preset.hosts.includes(hostId)
+  // Empty means no restriction, not "switched off". A configured field and an
+  // omitted one both arrive as an empty list, so reading that as "off" left the
+  // plugin mounted nowhere on any machine — verified by booting the web build.
+  const hosts = preset.hosts ?? []
+  if (hosts.length === 0) return true
+  return hosts.includes(hostId)
 }

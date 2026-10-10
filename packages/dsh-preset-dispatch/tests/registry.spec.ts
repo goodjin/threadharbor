@@ -25,21 +25,43 @@ const CONFIG = {
   },
 } as const
 
-function fakeFactory(): AcpSessionFactory & { built: string[] } {
+/** One session a test can kill, wired the way the factory really wires it. */
+type KillableSession = {
+  run: () => Promise<{ frames: never[]; end: { kind: 'completed' } }>
+  close: () => void
+  onDead: (handler: (reason: string) => void) => void
+  die: (reason: string) => void
+}
+
+function killableSession(): KillableSession {
+  let death: (reason: string) => void = () => {}
+  return {
+    run: async () => ({ frames: [], end: { kind: 'completed' } }),
+    close: () => { closed += 1 },
+    onDead: handler => { death = handler },
+    die: reason => { death(reason) },
+  }
+}
+
+function killableFactory(): AcpSessionFactory & { built: string[]; sessions: KillableSession[] } {
   const built: string[] = []
+  const sessions: KillableSession[] = []
   return {
     built,
+    sessions,
     dialectFor: presetId => stubDialect(presetId),
     open: presetId => {
       built.push(presetId)
-      return { run: async () => ({ frames: [], end: { kind: 'completed' } }), close: () => { closed += 1 } }
+      const session = killableSession()
+      sessions.push(session)
+      return session
     },
   }
 }
 
 describe('buildPresetTable', () => {
   it('includes exactly the configured ACP presets', () => {
-    const table = buildPresetTable(CONFIG, fakeFactory(), sessionsRegistry())
+    const table = buildPresetTable(CONFIG, killableFactory(), sessionsRegistry())
     expect([...table.keys()].sort()).toEqual(['acp-claude', 'acp-grok'])
   })
 
@@ -48,7 +70,7 @@ describe('buildPresetTable', () => {
     // The check is on the agent, not on the preset being listed.
     const factory: AcpSessionFactory = {
       dialectFor: (presetId, config) => config.agent === 'native' ? undefined : stubDialect(presetId),
-      open: () => ({ run: async () => ({ frames: [], end: { kind: 'completed' } }), close: () => { closed += 1 } }),
+      open: () => killableSession(),
     }
     const table = buildPresetTable({ presets: { dsh: { agent: 'native' }, 'acp-grok': CONFIG.presets['acp-grok'] } }, factory, sessionsRegistry())
     expect(table.has('dsh')).toBe(false)
@@ -56,7 +78,7 @@ describe('buildPresetTable', () => {
   })
 
   it('opens one agent per session, not one per turn', async () => {
-    const factory = fakeFactory()
+    const factory = killableFactory()
     const table = buildPresetTable(CONFIG, factory, sessionsRegistry())
     const binding = table.get('acp-grok')!
     const decision = { kind: 'enter' as const, messages: [] }
@@ -68,7 +90,7 @@ describe('buildPresetTable', () => {
   })
 
   it('gives each preset its own agent', async () => {
-    const factory = fakeFactory()
+    const factory = killableFactory()
     const table = buildPresetTable(CONFIG, factory, sessionsRegistry())
     await table.get('acp-grok')!.run({ kind: 'enter', messages: [] }, { sessionId: 's1', produce: () => [], write: () => 1 })
     await table.get('acp-claude')!.run({ kind: 'enter', messages: [] }, { sessionId: 's1', produce: () => [], write: () => 1 })
@@ -84,7 +106,7 @@ describe('buildPresetTable', () => {
       dialectFor: () => stubDialect('x'),
       open: (presetId, options) => {
         opened.push({ presetId, ...(options.modelId === undefined ? {} : { modelId: options.modelId }), ...(options.modeId === undefined ? {} : { modeId: options.modeId }) })
-        return { run: async () => ({ frames: [], end: { kind: 'completed' } }), close: () => { closed += 1 } }
+        return killableSession()
       },
     }
 
@@ -96,7 +118,73 @@ describe('buildPresetTable', () => {
   })
 
   it('ignores a preset whose configuration names no agent', () => {
-    const table = buildPresetTable({ presets: { broken: {} } } as never, fakeFactory(), sessionsRegistry())
+    const table = buildPresetTable({ presets: { broken: {} } } as never, killableFactory(), sessionsRegistry())
     expect(table.size).toBe(0)
+  })
+})
+
+describe('连接死亡后的自愈', () => {
+  const decision = { kind: 'enter' as const, messages: [] }
+  const turnOf = (sessionId: string) => ({ sessionId, produce: () => [], write: () => 1 })
+
+  it('连接死了就丢掉那条会话，下一回合开的是新连接，并如实上报', async () => {
+    // The whole point of the self-heal: the registry used to hand the same dead
+    // connection back forever, and fixing it needed a button that reached the
+    // host from the browser — a button that could never work. Dropping on death
+    // needs no button at all.
+    const factory = killableFactory()
+    const dropped: { presetId: string; sessionId: string; reason: string }[] = []
+    const table = buildPresetTable(CONFIG, factory, sessionsRegistry(), {
+      onDropped: event => { dropped.push(event) },
+    })
+    const binding = table.get('acp-grok')!
+
+    await binding.run(decision, turnOf('s1'))
+    expect(factory.built).toEqual(['acp-grok'])
+
+    factory.sessions[0]!.die('acp agent exited (code=1)')
+    expect(dropped).toEqual([{ presetId: 'acp-grok', sessionId: 's1', reason: 'acp agent exited (code=1)' }])
+
+    await binding.run(decision, turnOf('s1'))
+    expect(factory.built).toEqual(['acp-grok', 'acp-grok'])
+  })
+
+  it('一个会话的连接死了，别的会话的连接不受影响', async () => {
+    const factory = killableFactory()
+    const table = buildPresetTable(CONFIG, factory, sessionsRegistry())
+    const binding = table.get('acp-grok')!
+
+    await binding.run(decision, turnOf('s1'))
+    await binding.run(decision, turnOf('s2'))
+    expect(factory.built).toEqual(['acp-grok', 'acp-grok'])
+
+    factory.sessions[0]!.die('socket closed')
+    await binding.run(decision, turnOf('s2'))
+    // s2's connection was alive, so its next turn must not pay for a reopen.
+    expect(factory.built).toEqual(['acp-grok', 'acp-grok'])
+
+    await binding.run(decision, turnOf('s1'))
+    expect(factory.built).toEqual(['acp-grok', 'acp-grok', 'acp-grok'])
+  })
+
+  it('连接没死时下一回合照旧复用，不无故重开', async () => {
+    const factory = killableFactory()
+    const table = buildPresetTable(CONFIG, factory, sessionsRegistry())
+    const binding = table.get('acp-grok')!
+    await binding.run(decision, turnOf('s1'))
+    await binding.run(decision, turnOf('s1'))
+    expect(factory.built).toEqual(['acp-grok'])
+  })
+
+  it('死亡事件在注册监听之后才来的场景下也接得住——开连接前注册，而非开连接后', async () => {
+    // A connection that dies between turns must still drop the entry: the next
+    // turn would otherwise reuse a corpse that fails only mid-turn.
+    const factory = killableFactory()
+    const table = buildPresetTable(CONFIG, factory, sessionsRegistry())
+    const binding = table.get('acp-grok')!
+    await binding.run(decision, turnOf('s1'))
+    factory.sessions[0]!.die('process exited between turns')
+    await binding.run(decision, turnOf('s1'))
+    expect(factory.built).toEqual(['acp-grok', 'acp-grok'])
   })
 })

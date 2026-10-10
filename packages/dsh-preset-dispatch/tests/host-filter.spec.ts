@@ -38,10 +38,13 @@ describe('presetsForHost', () => {
     expect(ids(presetsForHost(CONFIG, 'beta'))).toContain('on-both')
   })
 
-  it('offers a preset listed for no host nowhere', () => {
-    // An empty list is a deliberate "switched off", not a missing constraint.
-    expect(ids(presetsForHost(CONFIG, 'alpha'))).not.toContain('on-none')
-    expect(ids(presetsForHost(CONFIG, 'beta'))).not.toContain('on-none')
+  it('offers a preset listed for no host everywhere', () => {
+    // An empty list is no restriction, not "switched off". A configured field
+    // and an omitted one both arrive as an empty list, so reading it as "off"
+    // took the whole plugin down on every machine — found by booting the web
+    // build, where the row refused to mount with an empty offered-on list.
+    expect(ids(presetsForHost(CONFIG, 'alpha'))).toContain('on-none')
+    expect(ids(presetsForHost(CONFIG, 'beta'))).toContain('on-none')
   })
 
   it('leaves the other settings of a preset untouched', () => {
@@ -60,6 +63,6 @@ describe('presetsForHost', () => {
   })
 
   it('offers nothing on a host it has never heard of, except unconstrained ones', () => {
-    expect(ids(presetsForHost(CONFIG, 'gamma'))).toEqual(['anywhere'])
+    expect(ids(presetsForHost(CONFIG, 'gamma'))).toEqual(['anywhere', 'on-none'])
   })
 })
