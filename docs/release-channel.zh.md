@@ -1,8 +1,14 @@
 # Stable / Test 双通道发版规范
 
-ThreadHarbor 在本地同时跑两个 DSH Web 实例：stable 通道（端口 3080）服务生产用户，test 通道（端口 3081）给本仓库开发用。两条通道共享同一份浏览器 `localStorage` 和会话存储，但 DSH_HOME、catalog、known_hosts、SSH tunnel 互相隔离。
+ThreadHarbor 在本地同时跑两个 DSH Web 实例：stable 通道（端口 3080）服务生产用户，test 通道（端口 3081）给本仓库开发用。两条通道共享同一份浏览器 `localStorage`，但 DSH_HOME 与 profile 互相隔离。（2026-10-10 复核：hostd 与 gateway 已随多主机迁移阶段 6 下线，通道隔离清单里原来的 catalog、known_hosts、SSH tunnel 都不再存在。）
 
 本规范约束 stable 通道，避免本地未提交改动意外污染生产。
+
+> **补丁文件的下线（2026-10-10 记录）**：hostd 部署删除时一并删掉了
+> `deploy/channels/<channel>.patch.yml`，而 `scripts/dev.sh` 与
+> `scripts/release-channel.mjs` 当时还在硬性要求它们存在，在真实仓库里会直接失败
+> （测试没抓住，因为测试自己在临时产物里造了这些补丁）。两个脚本已改为
+> 「有就用、没有就不带 `--patch`」：插件现在由 profile 自己组装，补丁是可选的。
 
 ## 角色与边界
 
@@ -19,7 +25,7 @@ test 通道的 symlink 始终指向工作区，任何 dirty 改动都会在下�
 2. 不要让 `stable-current` 链向 `dirty: true` 的制品。如果看到 `stable-state.json.current` 对应的制品 `source.dirty === true`，立刻按 "事故响应" 步骤 rollback。
 3. 不要在 3080 还在跑的时候手工覆盖 `~/.dsh-threadharbor-stable/profiles/web/node_modules/threadharbor`。
 4. 不要把 release-channel.mjs 的 `createCandidate({ skipCheck: true })` 当作默认路径。`--skip-check` 只用于离线环境，必须显式声明。
-5. 不要把 hostd/gateway/client 三方的 bundle 分别部署。三方必须来自同一份制品，否则会出现 "新 client + 旧 gateway + 旧 hostd" 的混合状态（症状：浏览器侧报 `remote-agent response id did not match request`、prompt 提交后 UI 永远停留在等待态）。
+5. 不要让两个通道跑到不同来源的制品上（一个链接工作区、一个链接制品）。agent 现在以 DSH 插件形式跑在提供页面那台机器的进程内，「新 client + 旧 gateway + 旧 hostd」那类混合状态已不存在，但同一份制品的原则不变：stable 只能跑 `promote` 过的制品，test 才允许链接工作区。
 
 ## 发版流程（stable 覆盖唯一合法路径）
 
@@ -38,7 +44,7 @@ node scripts/release-channel.mjs bootstrap --channel test --source-home ~/.dsh \
   --workspace ~/.local/share/threadharbor/releases/0.1.0-local.YYYYMMDD.N
 # 停掉手动的 3081，用 release-channel 启动 test
 node scripts/release-channel.mjs start --channel test
-# 浏览器打开 3081，回归 host 列表、prompt、config 编辑、login 流程
+# 浏览器打开 3081，回归 preset 建会话、提问、工具调用投影、权限批准
 
 # 5. 验证通过后 promote
 node scripts/release-channel.mjs promote --version 0.1.0-local.YYYYMMDD.N
@@ -113,20 +119,19 @@ node scripts/release-channel.mjs start --channel stable
 ## 排查清单（出现异常时按顺序核对）
 
 ```sh
-# stable 制品是否干净
+# stable 制品是否干净、manifest 是否与磁盘一致
 node scripts/release-channel.mjs verify --release $(readlink -f ~/.local/share/threadharbor/stable-current)
 
 # profile 是否真的指向 stable-current
 ls -la ~/.dsh-threadharbor-stable/profiles/web/node_modules/threadharbor
 
-# 两个通道加载的 source.dirty
-cat $(readlink -f ~/.local/share/threadharbor/stable-current)/node_modules/.pnpm/@threadharbor+dsh-gateway*/node_modules/@threadharbor/dsh-gateway/lib/index.js \
-  | grep -o "HostdConnectionPool\|ws-broadcaster" | sort | uniq -c
+# 两个通道各自跑的是哪个制品、进程是否还活着
+node scripts/release-channel.mjs status --channel stable
+node scripts/release-channel.mjs status --channel test
 
-# 远端 hostd 是否与 gateway 匹配
-curl -fsS -X POST -H "content-type: application/json" \
-  -d '{"id":"probe","method":"inventory","params":{}}' \
-  http://127.0.0.1:<hostd-port>/v1/control
-# 返回 HTTP_FALLBACK_DISABLED → 远端是新 hostd（走 WS）
-# 返回 inventory → 远端是旧 hostd（gateway 必须用 WS 才兼容）
+# agent 子进程/连接归 DSH 进程所有：重启通道进程即重启 agent，
+# 没有（也不再需要）单独的 hostd 探针
 ```
+
+（2026-10-10 复核：原清单里「grep gateway 产物里的 HostdConnectionPool」和
+「curl hostd 的 /v1/control 探针」两步随 hostd/gateway 下线一并作废。）

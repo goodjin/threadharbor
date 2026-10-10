@@ -33,8 +33,6 @@ export type TurnStreamPort = {
 /** How to reach an agent, and where its work happens. */
 export type RunnerOptions = {
   readonly cwd: string
-  /** Open the live stream for a turn. Omit to run without streaming. */
-  readonly openStream?: () => TurnStreamPort
   /** Applied once, before the first turn; claude needs `default` to ask at all. */
   readonly modeId?: string
   readonly modelId?: string

@@ -2,6 +2,8 @@
 
 **核对时间：2026-10-10。** 下面每一处安装形态都对照 `reference/deepseek-harness`
 （master，`5badb15009`）读过，行号在括号里。
+2026-10-10 第二次复核：补齐 codex / claude 示例里同样必填的 `presetId`，
+按实测修正 codex 的 `mode` 取值，并标注 `models` / `hosts` 两个字段目前的实际状态。
 
 ---
 
@@ -69,9 +71,11 @@ DSH 的 agent preset 本身**就是一个组合**（一组插件行）：
           - id: acp-codex-binding
             name: '@threadharbor/dsh-preset-dispatch'
             config:
+              presetId: acp-codex   # 必填，三家一样
               agent: codex
               command: /Users/good/.local/bin/codex-acp
-              mode: default
+              # mode 留空 = 该构建的默认 agent（"Approve for me"）。
+              # 想让每步都先问，用 read-only；见下方「各家 agent 需要的配置」。
 
     # ── claude code ────────────────────────────────────
     - id: acp-claude
@@ -84,33 +88,38 @@ DSH 的 agent preset 本身**就是一个组合**（一组插件行）：
           - id: acp-claude-binding
             name: '@threadharbor/dsh-preset-dispatch'
             config:
+              presetId: acp-claude  # 必填，三家一样
               agent: claude
               command: /Users/good/.local/bin/claude-agent-acp
-              mode: default
+              mode: default         # claude 默认 bypassPermissions，不写这行它永远不问
 ```
 
 **只想要一个？删掉另外两段即可。** 三段之间没有依赖。
 
 ### 各家 agent 需要的配置
 
-| agent | 方言 | 连接方式 | 必须写的 |
-|---|---|---|---|
-| grok | `grok` | WebSocket | `url` |
-| codex | `codex` | 子进程 | `command`，且 `mode` 用 `on-request` |
-| claude code | `claude` | 子进程 | `command`，且 `mode` 用 `default` |
+| agent | 方言 | 连接方式 | 必须写的 | `mode` 取值（实测自各家 `session/new` 返回） |
+|---|---|---|---|---|
+| grok | `grok` | WebSocket | `url` | 不支持，留空 |
+| codex | `codex` | 子进程 | `command` | `read-only`（每步都问）/ `agent`（默认）/ `agent-full-access`。**没有 `on-request` 这个值**——那是设计文档里 approval_policy 的词汇，不是 `session/set_mode` 收的 modeId |
+| claude code | `claude` | 子进程 | `command` | `default`（Manual，每步都问）/ `acceptEdits` / `plan` / `auto` / `bypassPermissions`（默认）。**想让它问必须显式写 `mode: default`** |
+
+（modeId 清单取自 `packages/dsh-acp-agent/tests/fixtures/captured-frames.json` 里
+三家的 `session/new` 实测帧：codex 的 `modes.availableModes` 与 claude 的
+`modes.availableModes`；grok 实测不返回 modes。）
 
 没有对应二进制就**不要写那一行**——写了会在第一次用到时报连接失败，
 而不是安装时报错。
 
 ### 可选字段
 
-| 字段 | 作用 |
-|---|---|
-| `model` | 固定模型；不写就用会话里选的 |
-| `mode` | agent 的运行模式，各家取值不同 |
-| `cwd` | 工作目录；不写就是进程的工作目录 |
-| `models` | 声明各家提供哪些模型，供输入框的模型选择器显示 |
-| `hosts` | 限定这台 preset 只在哪些主机上出现 |
+| 字段 | 作用 | 现状（2026-10-10） |
+|---|---|---|
+| `model` | 固定模型；不写就用会话里选的 | 生效：会随 `session/prompt` 发给 agent |
+| `mode` | agent 的运行模式，各家取值不同 | 生效：开完会话后经 `session/set_mode` 设置 |
+| `cwd` | 工作目录；不写就是进程的工作目录 | 生效 |
+| `models` | 声明各家提供哪些模型，供输入框的模型选择器显示 | **配置会被接收，但选择器那一半（模型目录注册）还没接上，配了暂时不显示** |
+| `hosts` | 限定这台 preset 只在哪些主机上出现 | **暂不生效**：过滤逻辑没接到真机路径（`tests/wiring.spec.ts` 登记为待接） |
 
 `models` 是**声明**而不是探测：探测要求 agent 已经在跑，而模型选择器得在任何
 会话被打开之前就能画出来。不写 = 这家暂不提供模型。
@@ -173,6 +182,9 @@ agent。注册表是每个进程一份，天然隔离，不需要额外的检查
 
 **没就绪（重要）**
 
+0. **两个配置字段现在配了也白配**：`models`（模型目录注册没接到真机路径）与
+   `hosts`（按主机过滤没接）。字段本身合法、启动不报错，`tests/wiring.spec.ts`
+   的登记名单里两条都在。接上之前不要指望它们起作用。
 1. **汇总视图画出来了，但还没挂进 DSH 的槽位系统。** 视图模型、纯 DOM 渲染器、
    生命周期（启动联邦、发布自己的会话、卸载时一起释放）都已实现并有测试。
    剩下的是写一个 JSX 组件把渲染好的容器放进侧边栏槽位——DSH 的槽位注册收的是

@@ -58,8 +58,10 @@ async function runDispatch(command: string, dialect: AcpDialect, options: { mode
     {
       cwd,
       ...(options.modeId === undefined ? {} : { modeId: options.modeId }),
-      openStream: () => {
-        let attempt = 0
+    },
+  )
+  const openStream = () => {
+    let attempt = 0
         stream = new AcpAssistantStream({
           emit: () => {},
           nextRevision: () => ++attempt,
@@ -68,19 +70,23 @@ async function runDispatch(command: string, dialect: AcpDialect, options: { mode
           turn: 1,
           step: 1,
         })
-        stream.start()
-        return {
-          textDelta: (text: string) => { deltas.push({ text, settled: stream?.finished ?? false }) },
-          reasoningDelta: () => {},
-        }
-      },
-    },
-  )
+    stream.start()
+    return {
+      start: () => {},
+      textDelta: (text: string) => { deltas.push({ text, settled: stream?.finished ?? false }) },
+      reasoningDelta: () => {},
+      records: () => [],
+      settle: () => {},
+      abandon: () => {},
+    }
+  }
 
+  // Through TurnContext, which is where the runner reads it — the same place
+  // dispatch puts it. Passing it as a runner option tested a path nothing uses.
   const result = await runner.run({
     kind: 'enter',
     messages: [{ role: 'user', content: [{ type: 'text', text: PROMPT }] }],
-  }, { sessionId: 's1', produce: r => [], write: () => 1 })
+  }, { sessionId: 's1', produce: r => [], write: () => 1, openStream })
   stream?.settle('assistant/message', () => 1)
 
   return { result, deltas, stream, client }

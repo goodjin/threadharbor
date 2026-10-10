@@ -2,6 +2,9 @@
 
 这三个项目名称相近，但解决的是不同层次的问题。以下结论只采用各项目自己的 README、文档和 release 信息。
 
+> ThreadHarbor 一列的描述按 2026-10-10 仓库现状复核过：多主机迁移完成后，hostd 与
+> gateway 已下线，agent 以 DSH 原生 ACP 插件的形式跑在提供页面那台机器的进程内。
+
 ## AgentHarbor
 
 [`abhiunix/AgentHarbor`](https://github.com/abhiunix/AgentHarbor) 是 macOS/Windows 原生托盘应用，主要统一查看 Claude Code、Cursor、Codex、Gemini CLI 等工具的额度、token、session 用量和估算花费，并把 MCP、rules、skills、hooks、plugins 与 sub-agent 定义部署到各工具的本地配置。它还读取本机 transcript、plans、memory 与权限配置，使用 OS keychain 保存部署 secret。
@@ -18,11 +21,11 @@ SessionPort 所称的 session/context transfer 是模型生成的上下文交接
 
 | 维度 | AgentHarbor | SessionPort | ThreadHarbor |
 | --- | --- | --- | --- |
-| 主要目标 | 本机多工具配置、额度与用量 | 跨 AI 网站搬运上下文 snapshot | 远程 Agent 持续执行与控制 |
-| 运行位置 | Tauri 桌面/托盘 | Chrome；另有 iOS 键盘 | DSH Web gateway + 远程 hostd/worker |
-| 会话语义 | 读取本机已有 transcript | 模型提炼的 JSON snapshot | 后端原生 session、frame 与实时状态 |
-| 断线后执行 | 不负责 Agent 执行 | 没有执行进程 | Agent 继续运行，重连后按 cursor 重放 |
-| 控制能力 | 配置部署、备份、漂移检查 | 捕获、注入、历史与 diff | prompt admission、取消、权限、目录、子会话 |
-| 数据所有权 | 本机 local-only | 浏览器 IndexedDB/用户 Drive | 每个 Web 部署独立 catalog；凭据留在远程主机 |
+| 主要目标 | 本机多工具配置、额度与用量 | 跨 AI 网站搬运上下文 snapshot | 外部 ACP agent 的持续执行与控制（接进 DSH Web） |
+| 运行位置 | Tauri 桌面/托盘 | Chrome；另有 iOS 键盘 | DSH Web 本体 + 进程内 ACP 插件；agent 子进程/连接由 DSH 进程持有，无独立 daemon |
+| 会话语义 | 读取本机已有 transcript | 模型提炼的 JSON snapshot | DSH 原生会话日志：ACP 帧投影成原生会话事件，界面直接复用 |
+| 断线后执行 | 不负责 Agent 执行 | 没有执行进程 | 网页断开不影响回合（agent 归 DSH 进程所有）；DSH 进程重启则回合结束，历史从会话日志恢复 |
+| 控制能力 | 配置部署、备份、漂移检查 | 捕获、注入、历史与 diff | 提问、取消、权限审批桥接、按会话隔离的外部对话、真机活测 |
+| 数据所有权 | 本机 local-only | 浏览器 IndexedDB/用户 Drive | 会话归各自主机的 DSH；agent 凭据留在各自机器，不经过浏览器 |
 
-可以借鉴但不应混淆的能力：AgentHarbor 的 adapter registry、配置 diff 与 drift detection 适合用于 ThreadHarbor 的远端 Agent 发现和配置治理；SessionPort 的可移植 snapshot 与跨模型 handoff 适合作为以后独立功能。它们都不能替代 ThreadHarbor 的 detached execution、原生连接所有权和日志恢复。
+可以借鉴但不应混淆的能力：AgentHarbor 的 adapter registry、配置 diff 与 drift detection 适合用于外部 agent 的发现与配置治理；SessionPort 的可移植 snapshot 与跨模型 handoff 适合作为以后独立功能。它们都不能替代 ThreadHarbor 的持续执行（agent 进程与连接由宿主持有）、原生会话日志投影和真机活测。
