@@ -3,8 +3,13 @@
  *
  * One browser tab per host, plus a page that sums them up. Presence is
  * heartbeat-based rather than goodbye-based: a tab that crashes or is closed
- * mid-write never says goodbye, and a roll-up that waits for one would keep
- * showing its sessions forever.
+ * mid-write never says goodbye, and a host list that waits for one would keep
+ * showing a machine that is gone.
+ *
+ * 2026-10-11：面板改为只列主机（用户决定，覆盖原「主机 → 项目 → 会话」三层
+ * 分组，见 docs/design/dsh-multi-host-migration.md §8.3 的更新记录），会话
+ * 发布与树渲染从协议里撤掉——这个类只剩「谁在场」。'sessions' 一类报文不再
+ * 发出；收到也无法解析，按坏报文丢弃。
  *
  * The broadcast channel is a port, so all of this runs without a browser.
  */
@@ -13,27 +18,16 @@ import type { HostIdentity } from './identity.ts'
 
 /** One message on the channel. */
 export type Announcement = {
-  readonly kind: 'hello' | 'heartbeat' | 'bye' | 'sessions'
+  readonly kind: 'hello' | 'heartbeat' | 'bye'
   readonly hostId: string
   readonly hostTitle: string
   readonly at: number
-  /** Only on a `sessions` publication. */
-  readonly sessions?: readonly HostSession[]
 }
 
 /** A same-origin channel between tabs. */
 export type FederationBus = {
   post(message: unknown): void
   subscribe(listener: (message: unknown) => void): void
-}
-
-/** One session as a host reports it. */
-export type HostSession = {
-  readonly projectId: string
-  readonly sessionId: string
-  readonly title: string
-  /** The project's own name, when the host knows it. */
-  readonly projectTitle?: string
 }
 
 export type HostSnapshot = {
@@ -44,33 +38,9 @@ export type HostSnapshot = {
   readonly self: boolean
 }
 
-export type ProjectGroup = {
-  readonly projectId: string
-  /**
-   * The project's name, taken from whichever session first carried it.
-   *
-   * Sessions cross the channel one at a time and only some of them know the
-   * name, so the first one that does supplies it — better one project's worth of
-   * rows reading "Web" and the rest reading its id.
-   */
-  readonly projectTitle?: string
-  readonly sessions: readonly HostSession[]
-}
-
-export type HostRoll = HostSnapshot & {
-  readonly projects: readonly ProjectGroup[]
-  readonly sessions: readonly HostSession[]
-}
-
-export type RollUp = {
-  readonly hosts: readonly HostRoll[]
-}
-
 export type FederationOptions = {
   /** A host silent for this long is treated as gone. */
   readonly staleMs: number
-  /** Ask a host for its sessions; absent means it contributes none. */
-  listSessions?(hostId: string): readonly HostSession[]
   /** Injectable clock, so the expiry window can be tested without waiting. */
   now?(): number
   /** Called when the set of hosts changes, so a view can re-render. */
@@ -80,11 +50,6 @@ export type FederationOptions = {
 export class HostFederation {
   /** Named `presence`, not `hosts`: a field of that name would shadow the method. */
   private readonly presence = new Map<string, HostSnapshot>()
-  private running = false
-  /** What this tab last published, so it can republish unchanged. */
-  private published: readonly HostSession[] | undefined
-  /** What each foreign host last published. */
-  private readonly reported = new Map<string, readonly HostSession[]>()
 
   constructor(
     private readonly identity: HostIdentity,
@@ -120,21 +85,6 @@ export class HostFederation {
     this.announce('heartbeat')
   }
 
-  /**
-   * Publish what this tab hosts.
-   *
-   * Presence alone only says which machines are open; a roll-up that stops
-   * there is a list with nothing to click. Publishing replaces whatever was
-   * published before, so a closed conversation disappears from the others.
-   */
-  publishSessions(sessions: readonly HostSession[]): void {
-    // A released tab must go quiet: anything it announced afterwards would put
-    // a host back into every other tab's roll-up with nobody behind it.
-    if (!this.running) return
-    this.published = sessions.map(entry => ({ ...entry }))
-    this.announce('sessions')
-  }
-
   hosts(): readonly HostSnapshot[] {
     return [...this.presence.values()].sort(byHostId)
   }
@@ -142,22 +92,6 @@ export class HostFederation {
   /** Every host except this tab's own. */
   foreignHosts(): readonly HostSnapshot[] {
     return this.hosts().filter(host => !host.self)
-  }
-
-  /** Sessions grouped host → project, for one view. */
-  rollUp(): RollUp {
-    return {
-      hosts: this.hosts().map(host => {
-        // A foreign host's sessions are whatever it last published; the local
-        // `listSessions` only answers for this tab's own host.
-        const sessions = host.self ? (this.published ?? this.listSelf()) : this.reported.get(host.hostId) ?? []
-        return {
-          ...host,
-          sessions,
-          projects: groupByProject(sessions),
-        }
-      }),
-    }
   }
 
   /**
@@ -173,11 +107,9 @@ export class HostFederation {
     // host would list this machine twice.
     if (parsed.hostId === this.identity.hostId) return
 
-    if (parsed.kind === 'sessions') {
-      // A publication is also a sign of life: a busy host may not get a
-      // separate heartbeat, and treating it as stale would empty its row.
-      this.reported.set(parsed.hostId, parsed.sessions ?? [])
-      this.touch(parsed)
+    if (parsed.kind === 'bye') {
+      this.presence.delete(parsed.hostId)
+      this.changed()
       return
     }
 
@@ -191,11 +123,6 @@ export class HostFederation {
         lastSeen: parsed.at,
         self: false,
       })
-      this.changed()
-    }
-
-    if (parsed.kind === 'bye') {
-      this.presence.delete(parsed.hostId)
       this.changed()
     }
   }
@@ -213,38 +140,15 @@ export class HostFederation {
     if (dropped) this.changed()
   }
 
+  private running = false
+
   private announce(kind: Announcement['kind']): void {
     this.bus.post({
       kind,
       hostId: this.identity.hostId,
       hostTitle: this.identity.hostTitle,
       at: this.now(),
-      ...(kind === 'sessions' ? { sessions: this.published ?? [] } : {}),
     })
-  }
-
-  /** Record a host as alive, adding it if this is the first word from it. */
-  private touch(parsed: Announcement): void {
-    const existing = this.presence.get(parsed.hostId)
-    if (existing !== undefined) {
-      this.presence.set(parsed.hostId, { ...existing, lastSeen: parsed.at, hostTitle: parsed.hostTitle })
-      return
-    }
-    this.presence.set(parsed.hostId, {
-      hostId: parsed.hostId,
-      hostTitle: parsed.hostTitle,
-      lastSeen: parsed.at,
-      self: false,
-    })
-    this.changed()
-  }
-
-  private listSelf(): readonly HostSession[] {
-    return this.options.listSessions?.(this.identity.hostId) ?? []
-  }
-
-  private listOther(hostId: string): readonly HostSession[] {
-    return this.options.listSessions?.(hostId) ?? []
   }
 
   private now(): number {
@@ -260,7 +164,7 @@ function parseAnnouncement(message: unknown): Announcement | undefined {
   if (typeof message !== 'object' || message === null) return undefined
   const record = message as Record<string, unknown>
   const kind = record['kind']
-  if (kind !== 'hello' && kind !== 'heartbeat' && kind !== 'bye' && kind !== 'sessions') return undefined
+  if (kind !== 'hello' && kind !== 'heartbeat' && kind !== 'bye') return undefined
   const hostId = record['hostId']
   const hostTitle = record['hostTitle']
   const at = record['at']
@@ -269,61 +173,9 @@ function parseAnnouncement(message: unknown): Announcement | undefined {
   if (typeof hostId !== 'string' || hostId === '') return undefined
   if (typeof hostTitle !== 'string') return undefined
   if (typeof at !== 'number' || !Number.isFinite(at)) return undefined
-  if (kind === 'sessions') {
-    return { kind, hostId, hostTitle, at, sessions: parseSessions(record['sessions']) }
-  }
   return { kind, hostId, hostTitle, at }
-}
-
-/**
- * Read a published session list.
- *
- * A malformed publication is dropped rather than trusted: half a list is worse
- * than none, and the host republishes as soon as anything changes.
- */
-function parseSessions(value: unknown): readonly HostSession[] {
-  if (!Array.isArray(value)) return []
-  const entries: HostSession[] = []
-  for (const item of value) {
-    if (typeof item !== 'object' || item === null) continue
-    const record = item as Record<string, unknown>
-    const sessionId = record['sessionId']
-    const projectId = record['projectId']
-    const title = record['title']
-    if (typeof sessionId !== 'string' || sessionId === '') continue
-    if (typeof projectId !== 'string' || projectId === '') continue
-    const projectTitle = record['projectTitle']
-    entries.push({
-      projectId,
-      sessionId,
-      title: typeof title === 'string' ? title : `会话 ${sessionId}`,
-      // The project's display name rides along when the host knows it; a peer
-      // that never heard of it groups these rows under the raw id instead.
-      ...(typeof projectTitle === 'string' && projectTitle !== '' ? { projectTitle } : {}),
-    })
-  }
-  return entries
 }
 
 function byHostId(a: HostSnapshot, b: HostSnapshot): number {
   return a.hostId < b.hostId ? -1 : a.hostId > b.hostId ? 1 : 0
-}
-
-function groupByProject(sessions: readonly HostSession[]): ProjectGroup[] {
-  const byProject = new Map<string, HostSession[]>()
-  for (const session of sessions) {
-    const bucket = byProject.get(session.projectId)
-    if (bucket === undefined) byProject.set(session.projectId, [session])
-    else bucket.push(session)
-  }
-  return [...byProject.entries()]
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([projectId, items]) => {
-      const named = items.find(item => item.projectTitle !== undefined)
-      return {
-        projectId,
-        ...(named === undefined ? {} : { projectTitle: named.projectTitle }),
-        sessions: items,
-      }
-    })
 }

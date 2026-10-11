@@ -332,7 +332,9 @@ describe('switchDrivenSession — the pick a driven session makes at its turn', 
       report: () => {},
     })
     expect(decision).toMatchObject({ kind: 'redirected' })
-    expect(decision.kind === 'redirected' && decision.reason).toContain('created-1')
+    expect(decision.kind === 'redirected' && decision.sessionId).toBe('created-1')
+    expect(decision.kind === 'redirected' && decision.target).toBe('acp-claude')
+    expect(decision.kind === 'redirected' && decision.note).toContain('created-1')
     expect(fixture.effects.created).toEqual([{ agentPreset: 'acp-claude', cwd: '/workspace' }])
     expect(fixture.effects.prompts).toHaveLength(1)
     expect(
@@ -359,7 +361,7 @@ describe('switchDrivenSession — the pick a driven session makes at its turn', 
     await switchDrivenSession(common)
     const again = await switchDrivenSession(common)
     expect(again).toMatchObject({ kind: 'redirected' })
-    expect(again.kind === 'redirected' && again.reason).toContain('此前已切到')
+    expect(again.kind === 'redirected' && again.note).toContain('此前已切到')
     expect(fixture.effects.created).toHaveLength(1)
   })
 

@@ -9,9 +9,10 @@
  * the panel actually lands in both slots. A registration that throws here is
  * a red test, not a silently blank page.
  *
- * This file is a `rollup-mount` spec on purpose: the workspace test config runs
- * those under jsdom, and the panel mounts a roll-up section that needs a real
- * document — the one environment fact the old hidden crash depended on.
+ * This file needs jsdom because apply() touches `window` (sessionStorage and
+ * localStorage for the identity settings, setInterval for the heartbeat) —
+ * the one environment fact a hidden crash used to depend on. It was named
+ * `rollup-mount.spec.ts` for that; the name now says what it tests.
  */
 
 import { describe, expect, it } from 'vitest'

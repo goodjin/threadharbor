@@ -320,7 +320,9 @@ export async function switchDrivenSession(params: {
   if (prior !== undefined && prior.target === params.target) {
     return {
       kind: 'redirected',
-      reason: `这个会话此前已切到 ${params.target}：对话在新会话 ${prior.sessionId} 里，请到那个会话继续`,
+      target: prior.target,
+      sessionId: prior.sessionId,
+      note: `这个会话此前已切到 ${params.target}：对话在新会话 ${prior.sessionId} 里，请到那个会话继续`,
     }
   }
 
@@ -372,7 +374,9 @@ export async function switchDrivenSession(params: {
     )
     return {
       kind: 'redirected',
-      reason: `已按新会话切换到 ${params.selection.provider}/${params.selection.model}：新会话 ${result.sessionId} `
+      target: params.target,
+      sessionId: result.sessionId,
+      note: `已按新会话切换到 ${params.selection.provider}/${params.selection.model}：新会话 ${result.sessionId} `
         + `已带上${result.droppedTokens === undefined ? '整段' : '部分'}对话历史`
         + `${question === '' ? '' : '，并已把这条消息提交给它'}。请到新会话继续。`,
     }

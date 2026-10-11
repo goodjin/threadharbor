@@ -30,7 +30,6 @@ for (const source of globSync('packages/dsh-client/src/client/**/*.ts')) {
     }
   }
 }
-exported.add('mountRollUpSurface')
 const missing = [...new Set([...exported])].filter(name => !client.includes(name))
 if (missing.length > 0) {
   throw new Error(

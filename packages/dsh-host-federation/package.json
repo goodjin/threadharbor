@@ -10,14 +10,6 @@
       "types": "./src/index.ts",
       "default": "./src/index.ts"
     },
-    "./rollup-view": {
-      "types": "./src/rollup-view.ts",
-      "default": "./src/rollup-view.ts"
-    },
-    "./rollup-mount": {
-      "types": "./src/rollup-mount.ts",
-      "default": "./src/rollup-mount.ts"
-    },
     "./package.json": "./package.json"
   }
 }

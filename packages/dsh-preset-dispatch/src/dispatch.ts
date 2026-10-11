@@ -44,6 +44,25 @@ export type StepEndReason =
   | { readonly kind: 'blocked'; readonly reason?: unknown }
   | { readonly kind: 'aborted'; readonly reason: unknown }
   | { readonly kind: 'error'; readonly error: { readonly message: string; readonly code: string } }
+  | {
+    /**
+     * The turn ended because its conversation was handed over: a model pick
+     * asked for another agent, and the switch carried the conversation and the
+     * question into the session named here. Not a failure — the loop records
+     * it as the turn's ending, and `TurnEndReasonMap` (the host's
+     * merge-extensible union of endings) is the declared place for a plugin
+     * variant whose loss cannot misread the log. Clients that do not know the
+     * kind ignore it, which is exactly how DSH's own readers treat endings
+     * they do not own.
+     */
+    readonly kind: 'agent-switch/handover'
+    /** The preset the conversation moved to, as a `acp:` catalog id without the prefix. */
+    readonly target: string
+    /** The session that now carries the conversation and the question. */
+    readonly sessionId: string
+    /** The user-facing sentence describing the handover, composed at the switch. */
+    readonly note: string
+  }
 
 /** What one external turn produced: the frames it sent, and how it ended. */
 export type AcpStepResult = {
@@ -94,14 +113,19 @@ export type TurnModelDecision =
   | {
     /**
      * The switch this pick asked for has already happened: the conversation
-     * and the question now live in the session named by the reason, and this
-     * turn must end saying so. The question is deliberately not written on
+     * and the question now live in the session named by `sessionId`, and this
+     * turn ends pointing there. The question is deliberately not written on
      * this session's log — it was asked, answered-to-be, in the session the
      * switch created, and recording it here too would put one question in two
      * conversations.
      */
     readonly kind: 'redirected'
-    readonly reason: string
+    /** The preset the conversation moved to, without the `acp:` catalog prefix. */
+    readonly target: string
+    /** The session that now carries the conversation and the question. */
+    readonly sessionId: string
+    /** The user-facing sentence describing the handover, composed at the switch. */
+    readonly note: string
   }
 
 /** The live stream this turn writes into, if streaming is on. */
@@ -360,7 +384,17 @@ export function installAcpDispatch(
         throw new Error(model.reason)
       }
       if (model.kind === 'redirected') {
-        throw new Error(model.reason)
+        // The switch succeeded, so the turn ends by naming where the
+        // conversation went — a neutral ending, not a thrown error. Throwing
+        // here is what made the client render this turn as a failure even
+        // though the switch had worked; the loop appends whatever ending the
+        // step returns as the turn's `turn/end` reason verbatim.
+        return {
+          kind: 'agent-switch/handover',
+          target: model.target,
+          sessionId: model.sessionId,
+          note: model.note,
+        }
       }
       // The user's claimed messages go on the log before the turn runs, the
       // way the native step commits them — they are the turn's input.

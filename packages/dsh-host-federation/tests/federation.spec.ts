@@ -4,7 +4,7 @@
  * The shape decided for phase 4: one browser tab per host, and a page that
  * sums them up. A tab has no way to know another tab closed cleanly, so presence
  * is heartbeat-based rather than goodbye-based — a tab that vanishes mid-write
- * would otherwise keep contributing its sessions forever.
+ * would otherwise keep its row online forever.
  *
  * The broadcast channel is a port, so all of this runs without a browser.
  */
@@ -74,7 +74,7 @@ describe('HostFederation presence', () => {
 
   it('drops a host that stops announcing itself', () => {
     // The load-bearing case: a tab that crashes or is closed never says
-    // goodbye, and its sessions must not linger in the roll-up forever.
+    // goodbye, and its row must not linger online forever.
     const { fed } = setup()
     fed.start()
     fed.receive({ kind: 'hello', ...THEM, at: 0 })
@@ -131,59 +131,14 @@ describe('HostFederation presence', () => {
     // Nothing of ours should be left on the channel for others to see.
     expect(fed.hosts().map(h => h.hostId)).toEqual(['alpha'])
   })
-})
 
-describe('HostFederation roll-up', () => {
-  const sessionsOf = (hostId: string) => hostId === 'beta'
-    ? [{ projectId: 'p1', sessionId: 's2', title: 'From beta' }]
-    : [{ projectId: 'p1', sessionId: 's1', title: 'From alpha' }]
-
-  function withSessions() {
-    const bus = fakeBus()
-    const fed = new HostFederation(ME, bus, {
-      staleMs: 1_000,
-      // Only answers for this tab's own host: a tab cannot read another host's
-      // workspaces, so a foreign host's sessions come from what it publishes.
-      listSessions: () => sessionsOf('alpha'),
-    })
+  it('drops a legacy session announcement instead of listing from it', () => {
+    // 2026-10-11 面板改为主机列表后，'sessions' 报文不再有读者，协议里已撤掉；
+    // 收到这类报文（理论上只剩旧构建的标签页）必须当作坏报文丢弃，而不是据此
+    // 把一台主机加进列表。
+    const { fed } = setup()
     fed.start()
-    return { bus, fed }
-  }
-
-  it('groups sessions under the host they came from', () => {
-    const { fed } = withSessions()
-    fed.receive({ kind: 'hello', ...THEM, at: 0 })
-    fed.receive({ kind: 'sessions', ...THEM, at: 0, sessions: sessionsOf('beta') })
-    const roll = fed.rollUp()
-    expect(roll.hosts.map(h => ({ hostId: h.hostId, sessions: h.sessions.map(s => s.sessionId) })))
-      .toEqual([
-        { hostId: 'alpha', sessions: ['s1'] },
-        { hostId: 'beta', sessions: ['s2'] },
-      ])
-  })
-
-  it('groups projects under the host, then sessions under the project', () => {
-    const { fed } = withSessions()
-    fed.receive({ kind: 'hello', ...THEM, at: 0 })
-    fed.receive({ kind: 'sessions', ...THEM, at: 0, sessions: sessionsOf('beta') })
-    const beta = fed.rollUp().hosts.find(h => h.hostId === 'beta')!
-    expect(beta.projects.map(p => p.projectId)).toEqual(['p1'])
-    expect(beta.projects[0]!.sessions.map(s => s.sessionId)).toEqual(['s2'])
-  })
-
-  it('drops a host’s sessions when it stops announcing', () => {
-    // Otherwise the roll-up keeps advertising sessions that no longer exist.
-    const { fed } = withSessions()
-    fed.receive({ kind: 'hello', ...THEM, at: 0 })
-    fed.receive({ kind: 'sessions', ...THEM, at: 0, sessions: sessionsOf('beta') })
-    fed.expire(1_001)
-    expect(fed.rollUp().hosts.map(h => h.hostId)).toEqual(['alpha'])
-  })
-
-  it('does not list a host twice when two tabs share its id', () => {
-    const { fed } = withSessions()
-    fed.receive({ kind: 'hello', ...THEM, at: 0 })
-    fed.receive({ kind: 'hello', ...THEM, at: 1 })
-    expect(fed.rollUp().hosts.map(h => h.hostId)).toEqual(['alpha', 'beta'])
+    fed.receive({ kind: 'sessions', ...THEM, at: 0, sessions: [{ projectId: 'p1', sessionId: 's1', title: 'x' }] })
+    expect(fed.hosts().map(h => h.hostId)).toEqual(['alpha'])
   })
 })

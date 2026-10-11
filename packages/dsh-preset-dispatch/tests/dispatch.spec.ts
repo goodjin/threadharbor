@@ -365,7 +365,9 @@ describe('installAcpDispatch', () => {
   it('ends a redirected turn pointing at the new session, without recording the question here', async () => {
     // The switch already delivered the conversation AND the question to the
     // session it created; writing the question on this session's log too would
-    // put one question in two conversations' hands.
+    // put one question in two conversations' hands. The turn ends by naming
+    // where the conversation went — returned to the loop as the turn's ending,
+    // not thrown, so the client renders a handover and not a failure.
     const agent = new FakeAgent('acp-grok')
     const ran: StepDecisionLike[] = []
     const written: string[] = []
@@ -376,12 +378,21 @@ describe('installAcpDispatch', () => {
         produce: () => [],
         write: events => { written.push(...events.map(event => event.type)); return 1 },
         positionOf: () => ({ turn: 1, step: 1 }),
-        turnModel: async () => ({ kind: 'redirected', reason: '已切到新会话 n1，请到那里继续' }),
+        turnModel: async () => ({
+          kind: 'redirected',
+          target: 'acp-codex',
+          sessionId: 'n1',
+          note: '已切到新会话 n1，请到那里继续',
+        }),
       },
     )
-    await expect(
-      (agent as unknown as { step(d: StepDecisionLike): Promise<unknown> }).step(DECISION),
-    ).rejects.toThrow('已切到新会话 n1，请到那里继续')
+    const ended = await (agent as unknown as { step(d: StepDecisionLike): Promise<unknown> }).step(DECISION)
+    expect(ended).toEqual({
+      kind: 'agent-switch/handover',
+      target: 'acp-codex',
+      sessionId: 'n1',
+      note: '已切到新会话 n1，请到那里继续',
+    })
     expect(ran).toEqual([])
     expect(written).toEqual([])
   })

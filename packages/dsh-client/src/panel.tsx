@@ -2,14 +2,15 @@
  * The panel itself: one sidebar entry's worth of screen.
  *
  * Everything that decides what the user sees is plain and tested elsewhere —
- * the verdict wording, the probe orchestration, the roll-up tree. What is
- * left here is React wiring over three cards, each one a layer of the §8.3
- * shape:
+ * the verdict wording, the probe orchestration, the host-list merge. What is
+ * left here is React wiring over three cards:
  *
- * 1. 主机与会话 — the tree, host → project → session, drawn by the plain-DOM
- *    renderer. Status lives on the host row; a conversation row is a title.
+ * 1. 主机 — one row per host with its basic facts: name, id, 本机/在线/未连接
+ *    badge, registered address, heartbeat age. 2026-10-11 用户决定：这个面板
+ *    只列主机，不再显示会话与项目（覆盖设计文档 §8.3 原三层分组）——会话读
+ *    取与树渲染的代码已随该决定移除。
  * 2. 本机 agent — this host's agents and their probes. This is host-level
- *    information in its own card: probe verdicts never ride session rows.
+ *    information in its own card: probe verdicts never ride other rows.
  * 3. 主机登记 — the operator's inventory of other hosts. Adding a host here
  *    records it and states the steps; it does not open a connection, because
  *    a page cannot reach across origins — the card says so in as many words.
@@ -29,6 +30,7 @@ import type { ProbeOutcome } from './probe.ts'
 import { probeReach } from './reach.ts'
 import type { ReachOutcome } from './reach.ts'
 import type { HostRegistration, RegistrationResult } from '@threadharbor/dsh-host-federation'
+import type { HostSnapshot } from '@threadharbor/dsh-host-federation'
 import styles from './panel.module.css'
 
 /** What one probe attempt is doing, as the row shows it. */
@@ -60,7 +62,7 @@ export type HostRegistryPort = {
 export type AgentPanelProps = {
   readonly agents: AgentListPort
   readonly probe: ProbeStarter
-  /** The roll-up section, owned by the wiring so the panel has no setup to do. */
+  /** The host-list section, owned by the wiring so the panel has no setup to do. */
   readonly rollUp: RollUpSection
   /** The registration list for other hosts; owned by the wiring. */
   readonly registry: HostRegistryPort
@@ -82,6 +84,94 @@ type LoadPhase =
   | { readonly stage: 'loading' }
   | { readonly stage: 'loaded' }
   | { readonly stage: 'failed'; readonly message: string }
+
+/**
+ * One host row in the list, merged from the two sources that know about hosts:
+ * the channel's presence (self + whoever announces) and the registration list
+ * (the operator's inventory, which knows hosts that are not open right now).
+ */
+export type HostListRow = {
+  readonly hostId: string
+  /** What the row leads with: the operator's registered name, else the host's own. */
+  readonly name: string
+  readonly self: boolean
+  /** Present on the channel right now. */
+  readonly online: boolean
+  /** When the host was last heard, in the page's clock; only when online. */
+  readonly lastSeen?: number
+  /** The address the operator registered; only when there is one. */
+  readonly address?: string
+}
+
+/**
+ * Merge presence and registrations into one list, self first.
+ *
+ * Both sources are real data, neither is trusted to be complete: presence
+ * knows nothing of hosts whose tab is closed, registrations know nothing of
+ * hosts nobody registered. A hostId in both carries the registered name and
+ * address on the live row.
+ * @param hosts - the hosts present on the channel, self included.
+ * @param registrations - the operator's registered hosts.
+ * @returns one row per known host, self first, then by id.
+ */
+export function mergeHostRows(
+  hosts: readonly HostSnapshot[],
+  registrations: readonly HostRegistration[],
+): readonly HostListRow[] {
+  const byId = new Map<string, HostListRow>()
+  for (const host of hosts) {
+    byId.set(host.hostId, {
+      hostId: host.hostId,
+      name: nonEmpty(host.hostTitle) ?? host.hostId,
+      self: host.self,
+      online: true,
+      lastSeen: host.lastSeen,
+    })
+  }
+  for (const registration of registrations) {
+    const existing = byId.get(registration.hostId)
+    const address = nonEmpty(registration.address)
+    if (existing === undefined) {
+      byId.set(registration.hostId, {
+        hostId: registration.hostId,
+        name: nonEmpty(registration.hostTitle) ?? registration.hostId,
+        self: false,
+        online: false,
+        ...(address === undefined ? {} : { address }),
+      })
+    } else {
+      byId.set(registration.hostId, {
+        ...existing,
+        // 登记的名字是这台机器的操作者起的，优先于主机自报的派生名。
+        name: nonEmpty(registration.hostTitle) ?? existing.name,
+        ...(address === undefined ? {} : { address }),
+      })
+    }
+  }
+  return [...byId.values()].sort((a, b) => {
+    if (a.self !== b.self) return a.self ? -1 : 1
+    return a.hostId < b.hostId ? -1 : a.hostId > b.hostId ? 1 : 0
+  })
+}
+
+function nonEmpty(value: string | undefined): string | undefined {
+  return value === undefined || value === '' ? undefined : value
+}
+
+/**
+ * How long since the host was last heard, in words.
+ * @param lastSeen - the page-clock time of the last announcement.
+ * @param now - the page clock; defaults to Date.now, injected for tests.
+ * @returns 刚刚 / N 秒前 / N 分钟前 / N 小时前.
+ */
+export function heartbeatWord(lastSeen: number, now: number = Date.now()): string {
+  const seconds = Math.max(0, Math.floor((now - lastSeen) / 1000))
+  if (seconds < 5) return '刚刚'
+  if (seconds < 60) return `${seconds} 秒前`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes} 分钟前`
+  return `${Math.floor(minutes / 60)} 小时前`
+}
 
 /**
  * Drive one probe and report each phase.
@@ -167,7 +257,7 @@ function VerdictLine(props: {
   return <p data-probe-state="idle" className={styles.stateLine}>未探测</p>
 }
 
-/** The identity line above the tree: this tab's claim, visible at a glance. */
+/** The identity line above the list: this tab's claim, visible at a glance. */
 function IdentityLine(props: { readonly section: RollUpSection }): ReactNode {
   const identity = props.section.identity()
   return (
@@ -177,9 +267,37 @@ function IdentityLine(props: { readonly section: RollUpSection }): ReactNode {
   )
 }
 
+/** One host's row: name and id, the badge, the quiet second line. */
+function HostRow(props: { readonly row: HostListRow }): ReactNode {
+  const { row } = props
+  const badge = row.self
+    ? { word: '本机', tone: 'self' as const }
+    : row.online
+      ? { word: '在线', tone: 'online' as const }
+      : { word: '未连接', tone: 'offline' as const }
+  return (
+    <div data-host-row={row.hostId} className={styles.hostRow}>
+      <div className={styles.hostHead}>
+        <strong data-host-name="" className={styles.hostName}>{row.name}</strong>
+        <span className={styles.agentId}>{row.hostId}</span>
+        <span data-host-badge={badge.tone} className={styles.hostBadge}>{badge.word}</span>
+        <span className={styles.spacer} />
+      </div>
+      <p data-host-meta="" className={styles.stateLine}>
+        {row.address === undefined
+          ? undefined
+          : <span data-host-address="">{row.address} · </span>}
+        {row.online && row.lastSeen !== undefined
+          ? <span data-host-heartbeat="">最近心跳 {heartbeatWord(row.lastSeen)}</span>
+          : undefined}
+      </p>
+    </div>
+  )
+}
+
 /**
- * The panel body: the tree on top, this host's agents and the host registry
- * under it.
+ * The panel body: the host list on top, this host's agents and the host
+ * registry under it.
  * @param props - the injected face.
  * @returns the panel.
  */
@@ -201,6 +319,13 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   const [registryMessage, setRegistryMessage] = useState<{ readonly tone: 'ok' | 'bad'; readonly text: string } | undefined>(undefined)
   const [confirmingRemove, setConfirmingRemove] = useState<string | undefined>(undefined)
   const [reaches, setReaches] = useState<ReadonlyMap<string, ReachOutcome | 'probing'>>(new Map())
+  // The host list lives in the section, not in React state; this tick is what
+  // re-reads it — presence changes and heartbeat ages both arrive without one.
+  const [, setListTick] = useState(0)
+  useEffect(() => {
+    const timer = window.setInterval(() => { setListTick(tick => tick + 1) }, 3000)
+    return () => { window.clearInterval(timer) }
+  }, [])
 
   // A fresh mount reads the catalog once instead of waiting for a click: the
   // panel used to open on "没有列出任何 acp agent" for a host that was serving
@@ -282,15 +407,22 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   const identity = props.rollUp.identity()
   const onlineIds = props.rollUp.onlineHostIds()
   const registrations = props.registry.list()
+  // Re-read on every render, including every list tick: presence and the
+  // registry both change out from under this component.
+  const hostRows = mergeHostRows(props.rollUp.hosts(), registrations)
+  const onlineCount = hostRows.filter(row => row.online).length
   return (
     <div data-threadharbor-panel="" className={styles.root}>
       <section data-panel-section="hosts" className={styles.card}>
         <div className={styles.cardHead}>
-          <h2 className={styles.title}>主机与会话</h2>
+          <h2 className={styles.title}>主机</h2>
           <span className={styles.spacer} />
+          <span data-host-count="" className={styles.stateLine}>共 {hostRows.length} 台 · 在线 {onlineCount} 台</span>
           <IdentityLine key={identityRevision} section={props.rollUp} />
         </div>
-        <div ref={attachRollUp(props.rollUp)} data-rollup-host="" className={styles.rollupHost} />
+        <div data-host-list="" className={styles.hostList}>
+          {hostRows.map(row => <HostRow key={row.hostId} row={row} />)}
+        </div>
         <details className={styles.noteDetails}>
           <summary className={styles.summary}>主机身份与说明</summary>
           <form
@@ -324,7 +456,9 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
             <button type="submit" data-identity-save="" className={styles.actionPrimary}>保存身份</button>
           </form>
           <ul data-panel-notices="" className={styles.notices}>
-            {props.rollUp.notices().map(notice => <li key={notice}>{notice}</li>)}
+            <li>「在线」= 这台机器的页面在同一个浏览器的同源标签页里开着并按心跳报数；关闭或崩溃的页面过了静默窗口会自动转为未列出。</li>
+            <li>另一台机器（另一个源）的页面不在这个频道里；要让一台主机出现在这里，登记它（下方第三张卡）并在那台机器上打开它自己的页面。</li>
+            <li>会话与项目不再在此列出（2026-10-11 决定）：要看某台主机的会话，去那台主机自己的页面。</li>
           </ul>
         </details>
       </section>
@@ -532,12 +666,4 @@ function RegistrationRow(props: {
         : undefined}
     </li>
   )
-}
-
-/** Place the section's element; the section keeps owning it across remounts. */
-function attachRollUp(section: RollUpSection): (host: HTMLDivElement | null) => void {
-  return host => {
-    if (host === null) return
-    host.replaceChildren(section.element())
-  }
 }

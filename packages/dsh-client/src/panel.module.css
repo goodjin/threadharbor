@@ -1,15 +1,13 @@
 /*
  * The 各主机 panel's skin.
  *
- * Hierarchy first: the verdict word and its measured number are the loudest
- * things on the page, everything explanatory is folded into a <details>, and
- * each section is one card so the page reads as two groups instead of one
- * long column. Built only from DSH's own design tokens (--dsw-*): the panel
- * sits inside DSH's shell, so hard-coded colors would disagree with whatever
- * theme the shell is in. Class names are CSS modules; the one plain-DOM
- * subtree (the roll-up, rendered by dsh-host-federation without React) is
- * styled through :global() rules scoped under the panel root, keyed by the
- * data attributes that renderer already emits.
+ * Hierarchy first: the host name and its badge are the loudest things in the
+ * first card, the verdict word and its measured number the loudest in the
+ * second, everything explanatory is folded into a <details>, and each section
+ * is one card so the page reads as three groups instead of one long column.
+ * Built only from DSH's own design tokens (--dsw-*): the panel sits inside
+ * DSH's shell, so hard-coded colors would disagree with whatever theme the
+ * shell is in. Class names are CSS modules.
  */
 
 .root {
@@ -261,121 +259,63 @@
 }
 
 /*
- * The roll-up subtree is plain DOM from dsh-host-federation; these rules reach
- * it by the data attributes it already carries, so the renderer stays free of
- * styling while the panel keeps one coherent look. Each host is its own small
- * card, so two hosts read as two groups — never as one stretched table.
+ * The host list: one row per machine — name and id leading, the badge beside
+ * them, the quiet second line (address, heartbeat age) under. Two hosts read
+ * as two rows, never as one stretched table.
  */
-.rollupHost {
+.hostList {
   display: flex;
   flex-direction: column;
-  gap: 10px;
 }
 
-.rollupHost :global([data-rollup]) > p:global([data-empty]) {
-  margin: 0;
-  color: var(--dsw-alias-label-caption);
-  font-size: 12px;
-}
-
-.rollupHost :global([data-host-section]) {
-  margin: 0;
-  padding: 10px 12px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: var(--dsw-radius-sm);
-  background: var(--dsw-alias-bg-layer-1);
+.hostRow {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 2px;
+  padding: 10px 0;
 }
 
-.rollupHost :global([data-host-section]) h3:global([data-host-name]) {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 600;
+.hostRow + .hostRow {
+  border-top: 1px solid var(--dsw-alias-border-l2);
 }
 
-/* The host head is the status line: name, badge, counts — nothing else. */
-.rollupHost :global([data-host-head]) {
+.hostHead {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
 }
 
-.rollupHost :global([data-host-badge]) {
+.hostName {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.hostBadge {
   font-size: 11px;
   font-weight: 600;
   border-radius: 999px;
   padding: 1px 8px;
 }
 
-.rollupHost :global([data-host-badge='self']) {
+.hostBadge[data-host-badge='self'] {
   background: var(--dsw-alias-brand-primary);
   color: var(--dsw-alias-label-primary-inverted);
 }
 
-.rollupHost :global([data-host-badge='online']) {
+.hostBadge[data-host-badge='online'] {
   background: var(--dsw-static-green-500);
   color: var(--dsw-alias-label-primary-inverted);
 }
 
-.rollupHost :global([data-host-count]) {
-  color: var(--dsw-alias-label-caption);
-  font-size: 12px;
-}
-
-.rollupHost :global([data-host-details]) {
-  font-size: 12px;
-  color: var(--dsw-alias-label-caption);
-}
-
-.rollupHost :global([data-host-details]) p:global([data-host-note]),
-.rollupHost :global([data-host-details]) p:global([data-host-seen]) {
-  margin: 6px 0 0;
-}
-
-.rollupHost :global([data-host-section]) p:global([data-host-empty]) {
-  margin: 0;
-  color: var(--dsw-alias-label-caption);
-  font-size: 12px;
-}
-
-.rollupHost :global([data-project-block]) {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding-left: 14px;
-}
-
-.rollupHost :global([data-project-block]) h4:global([data-project]) {
-  margin: 0;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--dsw-alias-label-caption);
-}
-
-/* A qualified label (same project name on two hosts) is worth seeing at a
-   glance, not only in the text. */
-.rollupHost :global([data-project-block]) h4:global([data-project-shared]) {
-  color: var(--dsw-alias-state-warn-label);
-}
-
-.rollupHost :global([data-project-block]) button:global([data-session]) {
-  appearance: none;
-  text-align: left;
-  font: inherit;
-  font-size: 12px;
-  color: var(--dsw-alias-label-primary);
+.hostBadge[data-host-badge='offline'] {
   background: var(--dsw-alias-bg-layer-2);
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: var(--dsw-radius-sm);
-  padding: 4px 10px;
-  cursor: pointer;
+  color: var(--dsw-alias-label-caption);
+  border: 1px solid var(--dsw-alias-border-l3);
 }
 
-.rollupHost :global([data-project-block]) button:global([data-session]):hover {
-  border-color: var(--dsw-alias-border-l4);
+.hostRow [data-host-heartbeat] {
+  font-variant-numeric: tabular-nums;
 }
 
 /*

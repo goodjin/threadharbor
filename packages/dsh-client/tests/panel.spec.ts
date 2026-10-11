@@ -19,11 +19,12 @@ import { renderToString } from 'react-dom/server'
 import { createElement } from 'react'
 import { describeVerdict } from '../src/verdict.ts'
 import { IDENTITY_STORAGE_KEY, IDENTITY_TAB_STORAGE_KEY, layeredIdentitySettings, storageIdentitySettings } from '../src/settings-source.ts'
-import { runProbe, AgentPanel, AgentRow, type ProbeRunState } from '../src/panel.tsx'
+import { runProbe, AgentPanel, AgentRow, mergeHostRows, heartbeatWord, type ProbeRunState } from '../src/panel.tsx'
 import type { AgentListPort, HostRegistryPort } from '../src/panel.tsx'
 import type { ProbeOutcome } from '../src/probe.ts'
 import type { ProbeVerdict } from '../src/verdict.ts'
 import type { RollUpSection } from '../src/rollup-section.ts'
+import type { HostRegistration } from '@threadharbor/dsh-host-federation'
 
 /** A string-map stand-in for the slice of localStorage these settings touch. */
 function fakeStorage(initial: Record<string, string> = {}): {
@@ -337,18 +338,121 @@ describe('主机登记卡', () => {
   })
 })
 
-/** The roll-up section the panel mounts under itself; plain stand-in. */
-function fakeRollUpSection(): RollUpSection {
-  // No DOM in this environment: renderToString never invokes ref callbacks, so
-  // the element is only ever handed around, never placed.
-  const element = { tagName: 'div' } as never
+describe('主机列表卡', () => {
+  const renderPanel = (rollUp: RollUpSection, registry: HostRegistryPort): string =>
+    renderToString(createElement(AgentPanel, { agents: fakeAgents([]), probe: fakeProbe().probe, rollUp, registry }))
+
+  it('只列主机：名字、id、徽标一行，会话与项目一概不出现', () => {
+    // 2026-10-11 用户决定：面板只列主机。三层树（主机 → 项目 → 会话）的任何
+    // 痕迹——树容器、项目块、会话行、旧卡名——都必须从这里消失。
+    const html = renderPanel(fakeRollUpSection(), fakeRegistry())
+    expect(html).toContain('data-panel-section="hosts"')
+    expect(html).toContain('data-host-list=""')
+    expect(html).toContain('data-host-row="self"')
+    expect(html).toContain('data-host-name=""')
+    expect(html).toContain('data-host-badge="self"')
+    expect(html).not.toContain('data-rollup')
+    expect(html).not.toContain('data-project')
+    expect(html).not.toContain('data-session')
+    expect(html).not.toContain('主机与会话')
+  })
+
+  it('频道上在线的外来主机带在线徽标和最近心跳', () => {
+    const html = renderPanel(fakeRollUpSection([
+      { hostId: 'self', hostTitle: '本机', self: true },
+      { hostId: 'beta', hostTitle: '测试机', self: false },
+    ]), fakeRegistry())
+    expect(html).toContain('data-host-row="beta"')
+    expect(html).toContain('data-host-badge="online"')
+    expect(html).toContain('data-host-heartbeat')
+    expect(html).toContain('最近心跳')
+  })
+
+  it('登记过但不在频道上的主机显示未连接，带登记的地址与显示名', () => {
+    const html = renderPanel(fakeRollUpSection(), fakeRegistry([
+      { hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' },
+    ]))
+    expect(html).toContain('data-host-row="bench"')
+    expect(html).toContain('data-host-badge="offline"')
+    expect(html).toContain('data-host-address=""')
+    expect(html).toContain('http://192.168.1.20:3081')
+    // 未连接的那一行没有心跳可报（本机行有，不在此列）。
+    const benchRow = html.slice(html.indexOf('data-host-row="bench"'), html.indexOf('data-host-row="bench"') + 500)
+    expect(benchRow).not.toContain('data-host-heartbeat')
+  })
+
+  it('头部一眼可见总数与在线数', () => {
+    const html = renderPanel(fakeRollUpSection([
+      { hostId: 'self', hostTitle: '本机', self: true },
+      { hostId: 'beta', hostTitle: 'B', self: false },
+    ]), fakeRegistry())
+    // React 在文本插值之间插注释节点；比对这些字样先把它们剥掉。
+    const text = html.replace(/<!--.*?-->/g, '')
+    expect(html).toContain('data-host-count=""')
+    expect(text).toContain('共 2 台')
+    expect(text).toContain('在线 2 台')
+  })
+
+  it('说明收进折叠：另一台机器怎么才会出现在这里', () => {
+    const html = renderPanel(fakeRollUpSection(), fakeRegistry())
+    expect(html).toContain('<details')
+    expect(html).toContain('另一台机器')
+  })
+})
+
+describe('主机行合并', () => {
+  const presence = (hostId: string, hostTitle: string, self = false) => ({ hostId, hostTitle, lastSeen: 500, self })
+
+  it('登记的名字和地址盖过主机自报的派生名', () => {
+    const rows = mergeHostRows([presence('bench', '127-0-0-1-3081-x')], [
+      { hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081', createdAt: 0 } satisfies HostRegistration,
+    ])
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ hostId: 'bench', name: '测试机', online: true, address: 'http://192.168.1.20:3081' })
+  })
+
+  it('只在登记簿里的主机也有一行：未连接，无心跳', () => {
+    const rows = mergeHostRows([presence('self', '本机', true)], [
+      { hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081', createdAt: 0 } satisfies HostRegistration,
+    ])
+    expect(rows.map(row => row.hostId)).toEqual(['self', 'bench'])
+    expect(rows[1]).toMatchObject({ name: '测试机', online: false })
+    expect(rows[1]?.lastSeen).toBeUndefined()
+  })
+
+  it('本机永远排第一，其余按 id 稳定排序', () => {
+    const rows = mergeHostRows([presence('zeta', 'Z'), presence('alpha', 'A'), presence('self', '本机', true)], [])
+    expect(rows.map(row => row.hostId)).toEqual(['self', 'alpha', 'zeta'])
+  })
+
+  it('两处都没有名字时以主机标识兜底', () => {
+    const rows = mergeHostRows([presence('beta', '')], [])
+    expect(rows[0]?.name).toBe('beta')
+  })
+})
+
+describe('心跳措辞', () => {
+  it('按久暂选词：刚刚、秒、分、时', () => {
+    const now = 1_000_000
+    expect(heartbeatWord(now, now)).toBe('刚刚')
+    expect(heartbeatWord(now - 5_000, now)).toBe('5 秒前')
+    expect(heartbeatWord(now - 120_000, now)).toBe('2 分钟前')
+    expect(heartbeatWord(now - 7_200_000, now)).toBe('2 小时前')
+  })
+})
+
+/**
+ * The roll-up section the panel reads from; plain stand-in. 2026-10-11 起它
+ * 只供身份、在场名单和在线 id：没有元素、没有说明、没有会话再发布。
+ */
+function fakeRollUpSection(
+  hosts: readonly { hostId: string; hostTitle: string; self: boolean }[] = [{ hostId: 'self', hostTitle: '本机', self: true }],
+): RollUpSection {
   return {
-    element: () => element,
     identity: () => ({ hostId: 'self', hostTitle: '本机', derived: true }),
+    hosts: () => hosts.map((host, index) => ({ hostId: host.hostId, hostTitle: host.hostTitle, lastSeen: 1000 + index, self: host.self })),
+    onlineHostIds: () => hosts.map(host => host.hostId),
     setIdentity: () => {},
-    onlineHostIds: () => ['self'],
-    notices: () => [],
-    republish: () => {},
     dispose: () => {},
   }
 }
