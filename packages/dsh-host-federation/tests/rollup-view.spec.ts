@@ -106,4 +106,38 @@ describe('rollUpView', () => {
     })]))
     expect(view.hosts[1]!.projects[0]!.sessions[0]!.own).toBe(false)
   })
+  it('qualifies a project name shared by two hosts, on both sides', () => {
+    // §8.3: the same basename on two machines is two projects; neither row
+    // may read as the other one.
+    const view = rollUpView(rollUp([
+      host('alpha', { self: true, projects: [{ projectId: 'p1', projectTitle: 'Web', sessions: [session('s1')] }] }),
+      host('beta', { projects: [{ projectId: 'p1', projectTitle: 'Web', sessions: [session('s2')] }] }),
+    ]))
+    const alphaProject = view.hosts.find(h => h.hostId === 'alpha')!.projects[0]!
+    const betaProject = view.hosts.find(h => h.hostId === 'beta')!.projects[0]!
+    expect(alphaProject.label).toBe('Web · ALPHA')
+    expect(betaProject.label).toBe('Web · BETA')
+    expect(alphaProject.sharedName).toBe(true)
+    expect(alphaProject.baseLabel).toBe('Web')
+  })
+
+  it('leaves a unique project name unqualified', () => {
+    const view = rollUpView(rollUp([
+      host('alpha', { self: true, projects: [{ projectId: 'p1', projectTitle: 'Web', sessions: [session('s1')] }] }),
+      host('beta', { projects: [{ projectId: 'p2', projectTitle: 'Bench', sessions: [] }] }),
+    ]))
+    const project = view.hosts.find(h => h.hostId === 'alpha')!.projects[0]!
+    expect(project.label).toBe('Web')
+    expect(project.sharedName).toBe(false)
+  })
+
+  it('counts each host’s sessions on the host row', () => {
+    const view = rollUpView(rollUp([
+      host('alpha', { self: true, projects: [{ projectId: 'p1', projectTitle: 'Web', sessions: [session('s1'), session('s2')] }] }),
+      host('beta', { projects: [{ projectId: 'p1', projectTitle: 'Web', sessions: [session('s3')] }] }),
+    ]))
+    expect(view.hosts.find(h => h.hostId === 'alpha')!.sessionCount).toBe(2)
+    expect(view.hosts.find(h => h.hostId === 'beta')!.sessionCount).toBe(1)
+    expect(view.totalSessions).toBe(3)
+  })
 })

@@ -292,10 +292,14 @@ function parseSessions(value: unknown): readonly HostSession[] {
     const title = record['title']
     if (typeof sessionId !== 'string' || sessionId === '') continue
     if (typeof projectId !== 'string' || projectId === '') continue
+    const projectTitle = record['projectTitle']
     entries.push({
       projectId,
       sessionId,
       title: typeof title === 'string' ? title : `会话 ${sessionId}`,
+      // The project's display name rides along when the host knows it; a peer
+      // that never heard of it groups these rows under the raw id instead.
+      ...(typeof projectTitle === 'string' && projectTitle !== '' ? { projectTitle } : {}),
     })
   }
   return entries
@@ -314,11 +318,12 @@ function groupByProject(sessions: readonly HostSession[]): ProjectGroup[] {
   }
   return [...byProject.entries()]
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([projectId, items]) => ({
-      projectId,
-      ...(items.find(item => item.projectTitle !== undefined)?.projectTitle === undefined
-        ? {}
-        : { projectTitle: items.find(item => item.projectTitle !== undefined)!.projectTitle }),
-      sessions: items,
-    }))
+    .map(([projectId, items]) => {
+      const named = items.find(item => item.projectTitle !== undefined)
+      return {
+        projectId,
+        ...(named === undefined ? {} : { projectTitle: named.projectTitle }),
+        sessions: items,
+      }
+    })
 }

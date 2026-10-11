@@ -6,6 +6,11 @@
  * is easiest to read and to check. Re-rendering replaces the container's
  * children wholesale, which is cheap at this size and removes a whole class of
  * "the list still shows yesterday's hosts" bugs.
+ *
+ * The tree is host → project → session, and the host row is where status lives:
+ * a badge, a one-line count, and a folded 说明. These specs pin that hierarchy —
+ * a session row must never carry host status, and a host with nothing must say
+ * so instead of drawing empty nodes.
  */
 
 import { describe, expect, it } from 'vitest'
@@ -23,6 +28,10 @@ const session = (sessionId: string, hostId: string, own: boolean) => ({
   sessionId, projectId: 'p1', title: `会话 ${sessionId}`, hostId, own,
 })
 
+const project = (label: string, sessions: ReturnType<typeof session>[]) => ({
+  projectId: 'p1', label, baseLabel: label, sharedName: false, sessions,
+})
+
 const view = (overrides: Partial<RollUpView> = {}): RollUpView => ({
   empty: false,
   totalSessions: 2,
@@ -32,7 +41,8 @@ const view = (overrides: Partial<RollUpView> = {}): RollUpView => ({
     self: true,
     lastSeen: 0,
     empty: false,
-    projects: [{ projectId: 'p1', label: 'Web', sessions: [session('s1', 'alpha', true), session('s2', 'beta', false)] }],
+    sessionCount: 2,
+    projects: [project('Web', [session('s1', 'alpha', true), session('s2', 'beta', false)])],
   }],
   ...overrides,
 })
@@ -46,6 +56,71 @@ describe('mountRollUp', () => {
     expect(text(root)).toContain('Studio')
     expect(text(root)).toContain('Web')
     expect(text(root)).toContain('会话 s1')
+  })
+
+  it('puts the status badge on the host row, and only there', () => {
+    const root = container()
+    mountRollUp(root, () => view())
+    const badges = root.querySelectorAll('[data-host-badge]')
+    expect(badges.length).toBe(1)
+    expect(badges[0]!.getAttribute('data-host-badge')).toBe('self')
+    expect(badges[0]!.textContent).toBe('本机')
+    // A session row carries a title, not status words.
+    const sessionRow = root.querySelector('[data-session="s1"]')!
+    expect(sessionRow.textContent).toBe('会话 s1')
+  })
+
+  it('summarizes a host in one count line', () => {
+    const root = container()
+    mountRollUp(root, () => view())
+    expect(root.querySelector('[data-host-count]')?.textContent).toBe('1 个项目 · 2 个会话')
+  })
+
+  it('folds the host note and id into a details block', () => {
+    const root = container()
+    mountRollUp(root, () => view({
+      hosts: [{ ...view().hosts[0]!, self: false }],
+    }), { now: () => 65_000, hostNote: host => host.empty ? '没有会话' : undefined })
+    const details = root.querySelector('[data-host-details]')!
+    expect(details.querySelector('[data-host-note]')).toBeNull()
+    expect(details.querySelector('[data-host-seen]')?.textContent).toContain('alpha')
+    expect(details.querySelector('[data-host-seen]')?.textContent).toContain('1 分钟前')
+    // The badge reads 在线 for a foreign host.
+    expect(root.querySelector('[data-host-badge]')?.getAttribute('data-host-badge')).toBe('online')
+  })
+
+  it('gives a self host a details block only when it has something to say', () => {
+    const root = container()
+    mountRollUp(root, () => view())
+    expect(root.querySelector('[data-host-details]')).toBeNull()
+    const withNote = container()
+    mountRollUp(withNote, () => view(), { hostNote: () => '会话来源失败：原因' })
+    expect(withNote.querySelector('[data-host-note]')?.textContent).toBe('会话来源失败：原因')
+  })
+
+  it('says a host has nothing instead of drawing empty project nodes', () => {
+    const root = container()
+    mountRollUp(root, () => view({
+      hosts: [{ ...view().hosts[0]!, projects: [], sessionCount: 0, empty: true }],
+      totalSessions: 0,
+    }))
+    expect(root.querySelector('[data-host-empty]')?.textContent).toBe('本机还没有会话。')
+    expect(root.querySelector('[data-project-block]')).toBeNull()
+  })
+
+  it('shows the qualified label for a shared project name', () => {
+    const root = container()
+    mountRollUp(root, () => view({
+      hosts: [{ ...view().hosts[0]!, projects: [project('Web · Studio', [session('s1', 'alpha', true)])] }],
+    }))
+    const heading = root.querySelector('[data-project]')!
+    expect(heading.textContent).toBe('Web · Studio')
+    expect(heading.hasAttribute('data-project-shared')).toBe(false)
+    const shared = container()
+    mountRollUp(shared, () => view({
+      hosts: [{ ...view().hosts[0]!, projects: [{ ...project('Web · Studio', [session('s1', 'alpha', true)]), sharedName: true }] }],
+    }))
+    expect(shared.querySelector('[data-project]')?.hasAttribute('data-project-shared')).toBe(true)
   })
 
   it('says so when no host is open anywhere', () => {
@@ -73,7 +148,7 @@ describe('mountRollUp', () => {
     const handle = mountRollUp(root, () => current)
     expect(text(root)).toContain('会话 s1')
 
-    current = view({ hosts: [{ ...view().hosts[0]!, label: 'Renamed', projects: [] }], totalSessions: 0 })
+    current = view({ hosts: [{ ...view().hosts[0]!, label: 'Renamed', projects: [], sessionCount: 0, empty: true }], totalSessions: 0 })
     handle.render()
     expect(text(root)).toContain('Renamed')
     expect(text(root)).not.toContain('会话 s1')

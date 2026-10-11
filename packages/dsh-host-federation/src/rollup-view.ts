@@ -5,6 +5,11 @@
  * rules are where the mistakes live, and they are worth testing without a
  * browser in the loop. What comes out is a plain tree — hosts, then projects,
  * then sessions — which any host can hand to whatever it draws with.
+ *
+ * §8.3's display rule lives here: a project belongs to exactly one host, and
+ * the same project name on two hosts is two projects. A base name shared by
+ * more than one host is therefore qualified with the host's own name wherever
+ * it appears, so the two never read as one.
  */
 
 import type { RollUp } from './federation.ts'
@@ -21,7 +26,15 @@ export type SessionView = {
 
 export type ProjectView = {
   readonly projectId: string
+  /**
+   * The name as it should be shown: the project's own title, suffixed with the
+   * holding host's name when that same title exists on another host too.
+   */
   readonly label: string
+  /** The project title without the host qualifier, for callers that group by it. */
+  readonly baseLabel: string
+  /** True when `label` carries the host qualifier because the name is shared. */
+  readonly sharedName: boolean
   readonly sessions: readonly SessionView[]
 }
 
@@ -31,6 +44,8 @@ export type HostViewRow = {
   readonly self: boolean
   readonly lastSeen: number
   readonly projects: readonly ProjectView[]
+  /** How many sessions this host holds in total, for the one-line host summary. */
+  readonly sessionCount: number
   /** Nothing published yet, or nothing open. */
   readonly empty: boolean
 }
@@ -55,24 +70,29 @@ export function rollUpView(rollUp: RollUp): RollUpView {
     .sort((a, b) => Number(b.self) - Number(a.self) || a.hostId.localeCompare(b.hostId))
     .map(toHostView)
   return {
-    hosts,
-    totalSessions: hosts.reduce((sum, host) => sum + host.projects.reduce((n, p) => n + p.sessions.length, 0), 0),
+    hosts: qualifySharedNames(hosts),
+    totalSessions: hosts.reduce((sum, host) => sum + host.sessionCount, 0),
     empty: hosts.length === 0,
   }
 }
 
 function toHostView(host: RollUp['hosts'][number]): HostViewRow {
-  const projects = host.projects.map(project => ({
-    projectId: project.projectId,
-    label: project.projectTitle === undefined || project.projectTitle === '' ? project.projectId : project.projectTitle,
-    sessions: project.sessions.map(entry => ({
-      sessionId: entry.sessionId,
-      projectId: entry.projectId,
-      title: entry.title,
-      hostId: host.hostId,
-      own: host.self,
-    })),
-  }))
+  const projects = host.projects.map(project => {
+    const label = project.projectTitle === undefined || project.projectTitle === '' ? project.projectId : project.projectTitle
+    return {
+      projectId: project.projectId,
+      label,
+      baseLabel: label,
+      sharedName: false,
+      sessions: project.sessions.map(entry => ({
+        sessionId: entry.sessionId,
+        projectId: entry.projectId,
+        title: entry.title,
+        hostId: host.hostId,
+        own: host.self,
+      })),
+    }
+  })
   return {
     hostId: host.hostId,
     // An operator who never set a title still needs something to click.
@@ -80,6 +100,29 @@ function toHostView(host: RollUp['hosts'][number]): HostViewRow {
     self: host.self,
     lastSeen: host.lastSeen,
     projects,
+    sessionCount: projects.reduce((sum, project) => sum + project.sessions.length, 0),
     empty: projects.every(project => project.sessions.length === 0),
   }
+}
+
+/**
+ * Mark every project whose base name another host also uses.
+ *
+ * The qualifier is the host's own label, so the tree reads 「Web · Bench」 and
+ * 「Web · Studio」 — same project name, visibly two projects on two machines.
+ */
+function qualifySharedNames(hosts: readonly HostViewRow[]): readonly HostViewRow[] {
+  const uses = new Map<string, number>()
+  for (const host of hosts) {
+    for (const project of host.projects) {
+      uses.set(project.baseLabel, (uses.get(project.baseLabel) ?? 0) + 1)
+    }
+  }
+  return hosts.map(host => ({
+    ...host,
+    projects: host.projects.map(project => {
+      if ((uses.get(project.baseLabel) ?? 0) <= 1) return project
+      return { ...project, label: `${project.baseLabel} · ${host.label}`, sharedName: true }
+    }),
+  }))
 }

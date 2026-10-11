@@ -123,7 +123,7 @@ function sectionDeps(overrides: {
         set: (key, value) => { stored.set(key, JSON.stringify(value)) },
       },
       sessions: () => [],
-      sessionSourceNote: '会话来源未接：浏览器侧拿不到 DSH 的会话列表。',
+      sourceNotes: () => ['会话来源未接：浏览器侧拿不到 DSH 的会话列表。'],
       bus,
       setInterval: (handler: () => void) => {
         const handle = nextHandle++
@@ -161,7 +161,7 @@ describe('面板里的汇总区块', () => {
     const section = startRollUpSection(deps)
     const drawn = section.element()
     expect(drawn.querySelector('[data-rollup]')).not.toBeNull()
-    expect(drawn.textContent).toContain('还没有发布会话。')
+    expect(drawn.textContent).toContain('本机还没有会话。')
     section.dispose()
   })
 

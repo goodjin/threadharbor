@@ -9,9 +9,9 @@
  * catalog, which is what that picker reads.
  *
  * What lives here now is one panel, registered into DSH's client slots:
- * an agent probe section on top (the probe walks DSH's own public session calls
- * — see gateway.ts and probe.ts), and the cross-host roll-up — whose settings
- * source this panel is — underneath.
+ * the host → project → session tree (fed by DSH's own workspace and session
+ * projections — the same sources the stock sidebar reads), this host's agent
+ * probes, and the host registry whose settings source this panel is.
  *
  * There is no restart control here, and that is not an omission: a restart
  * ordered from this page must travel through the channel that is hung. The
@@ -33,23 +33,35 @@ import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 // Type-only: the renderer contributes `ctx.slots` itself.
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+// Type-only: these two merge `workspaces` and `sessions` into the Context
+// interface — the projections this panel's tree reads, typed at the same
+// boundary DSH's own sidebar reads them.
+import type {} from '@deepseek-ai/dsh-api-workspace-controller/client'
+import type {} from '@deepseek-ai/dsh-api-session-controller/client'
 import type { PropsRuntime, SlotCore, SlotMap } from '@deepseek-ai/dsh-client-ui-slots'
 import { openSessionGateway } from '../gateway.ts'
 import type { GatewayOpening } from '../gateway.ts'
 import type { AgentDescriptor, GatewayResult, SessionGateway } from '../gateway.ts'
 import { runSessionProbe } from '../probe.ts'
 import type { ProbeOutcome } from '../probe.ts'
-import { storageIdentitySettings } from '../settings-source.ts'
+import { layeredIdentitySettings } from '../settings-source.ts'
+import { buildHostSessions, readSessionSources } from '../session-source.ts'
+import type { SessionRead } from '../session-source.ts'
+import { hostRegistry } from '@threadharbor/dsh-host-federation'
 import { startRollUpSection } from '../rollup-section.ts'
+import type { SectionSession } from '../rollup-section.ts'
 import { AgentPanel } from '../panel.tsx'
 import type { AgentListPort, AgentPanelProps, ProbeStarter } from '../panel.tsx'
 import { createElement } from 'react'
 
 /** Required browser services. The remote namespace is the gateway's whole door
- * to the host: without declaring it here, the context refuses every read of it
- * with 「cannot get property without inject」, and the panel reports the host
- * as having no remote services at all. */
-export const inject = ['slots', 'remote']
+ *  to the host: without declaring it here, the context refuses every read of it
+ *  with 「cannot get property without inject」, and the panel reports the host
+ *  as having no remote services at all. `workspaces` and `sessions` are the
+ *  same story — the workspace and session projections this panel's tree reads;
+ *  undeclared, every read throws, and the tree stays empty behind a note that
+ *  blames a missing service. */
+export const inject = ['slots', 'remote', 'workspaces', 'sessions']
 
 export { mountRollUpSurface } from '../surface.ts'
 export type { FederationPort, RollUpSurface, RollUpSurfacePorts } from '../surface.ts'
@@ -63,12 +75,19 @@ export { openSessionGateway } from '../gateway.ts'
 export type { AgentDescriptor, GatewayOpening, GatewayResult, SessionGateway } from '../gateway.ts'
 export { runSessionProbe } from '../probe.ts'
 export type { ProbeOutcome, ProbeRunOptions } from '../probe.ts'
-export { IDENTITY_STORAGE_KEY, storageIdentitySettings } from '../settings-source.ts'
+export {
+  IDENTITY_STORAGE_KEY,
+  IDENTITY_TAB_STORAGE_KEY,
+  layeredIdentitySettings,
+  storageIdentitySettings,
+} from '../settings-source.ts'
 export type { ConfiguredIdentity, IdentitySettings, IdentityStorage } from '../settings-source.ts'
+export { buildHostSessions, readSessionSources } from '../session-source.ts'
+export type { SessionRead, SessionListSource, SourceSession, WorkspaceListSource } from '../session-source.ts'
 export { startRollUpSection } from '../rollup-section.ts'
 export type { RollUpSection, RollUpSectionDeps, SectionSession } from '../rollup-section.ts'
 export { AgentPanel, AgentRow, runProbe } from '../panel.tsx'
-export type { AgentListPort, AgentPanelProps, ProbeRunState, ProbeStarter } from '../panel.tsx'
+export type { AgentListPort, AgentPanelProps, HostRegistryPort, ProbeRunState, ProbeStarter } from '../panel.tsx'
 
 /** Shared identity of the sidebar entry and the body it mounts. */
 const PANEL_ID = 'threadharbor-rollup'
@@ -78,9 +97,6 @@ const PANEL_ORDER = 100
 /** How often this tab re-announces itself, and how long silence means gone. */
 const HEARTBEAT_MS = 10_000
 const STALE_MS = 30_000
-/** Why the roll-up's rows may be empty; said on screen, not swallowed. */
-const SESSION_SOURCE_NOTE =
-  '会话来源未接：本页面拿不到 DSH 的会话列表（会话数据在主机进程里，浏览器侧没有读取接口），所以各主机的行目前是空的。'
 
 /** One effect's worth of cleanup, as the slot host accepts it. */
 type SlotEffect = (() => void) | Iterable<() => void, void, void>
@@ -104,6 +120,16 @@ export type ClientPanelContext = {
   /** Any service name; absent names and absent services both read as undefined. */
   get(name: string): unknown
   slots: PanelSlotHost
+  /**
+   * Service reads through the context proxy — how DSH's own client packages
+   * reach sibling services (`ctx.workspaces.list`, `ctx.sessions.list`).
+   * Both are declared in this plugin's `inject`, so the reads resolve; a
+   * context that has not granted one yet throws, which callers treat as
+   * "not yet". Declared `unknown` here: the values cross a dynamic boundary
+   * and are narrowed by predicates before use, never trusted as-is.
+   */
+  readonly workspaces: unknown
+  readonly sessions: unknown
 }
 
 /**
@@ -208,6 +234,45 @@ export function panelProbe(openGateway: () => GatewayOpening): ProbeStarter {
 }
 
 /**
+ * This host's session source, read from DSH's own client projections.
+ *
+ * The services are read per call, not captured at apply time: like the remote
+ * namespaces, the workspace and session controllers may still be arriving, and
+ * a source captured too early would freeze the tree at "missing" forever.
+ * @param ctx - the page's context.
+ * @returns the reader the section publishes through.
+ */
+export function hostSessionSource(ctx: ClientPanelContext): {
+  sessions(): readonly SectionSession[]
+  sourceNotes(): readonly string[]
+} {
+  let lastRead: SessionRead | undefined
+  const read = (): SessionRead => {
+    const { workspaces, sessions } = readSessionSources(ctx)
+    return buildHostSessions(workspaces, sessions)
+  }
+  return {
+    sessions: () => {
+      lastRead = read()
+      return lastRead.ok
+        ? lastRead.sessions.map(row => ({
+            projectId: row.projectId,
+            sessionId: row.sessionId,
+            title: row.title,
+            projectTitle: row.projectTitle,
+          }))
+        : []
+    },
+    sourceNotes: () => {
+      // Re-read only when nothing was read yet, so the note matches the rows
+      // actually published instead of drifting ahead of them.
+      if (lastRead === undefined) lastRead = read()
+      return lastRead.ok ? [] : [lastRead.note]
+    },
+  }
+}
+
+/**
  * Register the panel: the sidebar row and the main body it opens, sharing one
  * panel id.
  *
@@ -218,9 +283,8 @@ export function panelProbe(openGateway: () => GatewayOpening): ProbeStarter {
  * previous mount of this panel.
  *
  * What this page cannot have is said, not hidden: if the host's remote
- * namespaces are missing, the panel still mounts and says what is missing;
- * the roll-up's session source is likewise not wired (see
- * SESSION_SOURCE_NOTE), and the panel carries that sentence on screen.
+ * namespaces are missing, the panel still mounts and says what is missing; the
+ * session source names what it could not read, on screen, per host.
  * @param ctx - the browser plugin context.
  */
 export function apply(ctx: ClientContext): void {
@@ -230,12 +294,16 @@ export function apply(ctx: ClientContext): void {
 /** The same wiring, typed by the narrow face the panel actually uses. */
 function applyToClientPanel(ctx: ClientPanelContext): void {
   const log = ctx.logger('threadharbor-client')
-  const settings = storageIdentitySettings(window.localStorage)
+  // Identity is layered: this tab's claim (sessionStorage) outranks the
+  // origin's default (localStorage), so two tabs of one DSH can claim two
+  // hosts without collapsing on the next reload.
+  const settings = layeredIdentitySettings(window.sessionStorage, window.localStorage)
+  const sessions = hostSessionSource(ctx)
   const section = startRollUpSection({
     settings,
     storage: browserStorage(),
-    sessions: () => [],
-    sessionSourceNote: SESSION_SOURCE_NOTE,
+    sessions: sessions.sessions,
+    sourceNotes: sessions.sourceNotes,
     setInterval: (handler, ms) => window.setInterval(handler, ms),
     clearInterval: handle => { window.clearInterval(handle) },
     report: message => { log.warn(message) },
@@ -246,6 +314,22 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // while the panel is open: a tab that never opens the panel would otherwise
   // leave its own row empty in every other tab.
   ctx.effect(() => () => { section.dispose() }, 'threadharbor: roll-up section')
+
+  // Live sources republish: a session opened or closed here reaches the other
+  // tabs on the source's own change, not on the next heartbeat. The shapes
+  // were validated in readSessionSources, so subscribe is either absent or a
+  // real bound function.
+  const { workspaces, sessions: sessionList } = readSessionSources(ctx)
+  for (const source of [workspaces, sessionList]) {
+    const subscribe = source?.subscribe
+    if (subscribe === undefined) continue
+    try {
+      const detach = subscribe(() => { section.republish() })
+      ctx.effect(() => () => { detach() }, 'threadharbor: session source subscription')
+    } catch (error) {
+      log.warn(`session source subscription failed: ${String(error)} — the heartbeat still republishes`)
+    }
+  }
 
   const openGateway = (): GatewayOpening => openSessionGateway(ctx)
   // A mount-time read, purely for the self-report: what the host provides may
@@ -258,6 +342,11 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
     agents: agentListPort(openGateway),
     probe: panelProbe(openGateway),
     rollUp: section,
+    registry: hostRegistry(browserJsonStorage()),
+    listenStorage: handler => {
+      window.addEventListener('storage', handler)
+      return () => { window.removeEventListener('storage', handler) }
+    },
   }
   registerPanelSlots(ctx.slots, face)
 
@@ -266,7 +355,7 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   const identity = section.identity()
   log.info(`panel registered: id=${PANEL_ID}, slots=main+sidebar.panellist, order=${PANEL_ORDER}`)
   log.info(`probe gateway: ${mountOpening.gateway === undefined ? `not open at mount (missing ${mountOpening.missing.join(', ')}); retried per use` : 'open'}`)
-  log.info(`roll-up identity: ${identity.hostId}${identity.derived ? ' (derived from page origin; configure it in the panel)' : ''}; session source: not wired — said on screen`)
+  log.info(`roll-up identity: ${identity.hostId}${identity.derived ? ' (derived from page origin; configure it in the panel)' : ''}; session source: DSH workspace/session projections, failures said on screen`)
 }
 
 /** The glyph the sidebar draws. Self-contained so the panel needs no icon set. */
@@ -286,7 +375,7 @@ function PanelIcon(props: PropsRuntime<'sidebar.panellist'>): ReturnType<typeof 
   )
 }
 
-/** localStorage behind the shape the federation reads. */
+/** localStorage behind the shape the federation announcements read. */
 function browserStorage(): { get(key: string): unknown; set(key: string, value: unknown): void } {
   return {
     get: key => {
@@ -303,6 +392,27 @@ function browserStorage(): { get(key: string): unknown; set(key: string, value: 
       } catch {
         // A full or blocked storage must not stop the roll-up; the channel is
         // what carries the live data and it does not go through here.
+      }
+    },
+  }
+}
+
+/** localStorage behind the registry's read/write face. */
+function browserJsonStorage(): { getItem(key: string): string | null; setItem(key: string, value: string): void } {
+  return {
+    getItem: key => {
+      try {
+        return window.localStorage.getItem(key)
+      } catch {
+        return null
+      }
+    },
+    setItem: (key, value) => {
+      try {
+        window.localStorage.setItem(key, value)
+      } catch {
+        // A full or blocked storage must not stop the panel; the registry
+        // re-reads on the next action.
       }
     },
   }

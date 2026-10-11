@@ -18,9 +18,9 @@ import { describe, expect, it } from 'vitest'
 import { renderToString } from 'react-dom/server'
 import { createElement } from 'react'
 import { describeVerdict } from '../src/verdict.ts'
-import { IDENTITY_STORAGE_KEY, storageIdentitySettings } from '../src/settings-source.ts'
+import { IDENTITY_STORAGE_KEY, IDENTITY_TAB_STORAGE_KEY, layeredIdentitySettings, storageIdentitySettings } from '../src/settings-source.ts'
 import { runProbe, AgentPanel, AgentRow, type ProbeRunState } from '../src/panel.tsx'
-import type { AgentListPort } from '../src/panel.tsx'
+import type { AgentListPort, HostRegistryPort } from '../src/panel.tsx'
 import type { ProbeOutcome } from '../src/probe.ts'
 import type { ProbeVerdict } from '../src/verdict.ts'
 import type { RollUpSection } from '../src/rollup-section.ts'
@@ -123,6 +123,7 @@ describe('面板渲染', () => {
       agents: fakeAgents([{ presetId: 'acp-grok', label: 'Grok' }, { presetId: 'acp-claude', label: 'Claude' }]),
       probe: fakeProbe().probe,
       rollUp,
+      registry: fakeRegistry(),
     }))
     expect(html).toContain('data-agent="acp-grok"')
     expect(html).toContain('data-agent="acp-claude"')
@@ -135,6 +136,7 @@ describe('面板渲染', () => {
       agents: fakeAgents([]),
       probe: fakeProbe().probe,
       rollUp: fakeRollUpSection(),
+      registry: fakeRegistry(),
     }))
     expect(html).toContain('data-self-heal-note')
     expect(html).toContain('自动重连')
@@ -145,6 +147,7 @@ describe('面板渲染', () => {
       agents: fakeAgents([]),
       probe: fakeProbe().probe,
       rollUp: fakeRollUpSection(),
+      registry: fakeRegistry(),
       agentsNote: '主机目录读不出来：gateway down',
     }))
     expect(html).toContain('主机目录读不出来：gateway down')
@@ -181,6 +184,7 @@ describe('面板渲染', () => {
       agents: fakeAgents([{ presetId: 'acp-grok', label: 'Grok' }]),
       probe: fakeProbe().probe,
       rollUp: fakeRollUpSection(),
+      registry: fakeRegistry(),
     }))
     expect(html).toContain('data-self-heal-note=""')
     expect(html).toContain('<details')
@@ -192,11 +196,12 @@ describe('面板渲染', () => {
       agents: fakeAgents([]),
       probe: fakeProbe().probe,
       rollUp: fakeRollUpSection(),
+      registry: fakeRegistry(),
     }))
     expect(html).toContain('data-identity-line=""')
     expect(html).toContain('本机')
     expect(html).toContain('self')
-    expect(html).toContain('（未配置，按页面来源生成）')
+    expect(html).toContain('按页面来源自动生成')
     expect(html).toContain('data-identity-form=""')
   })
 })
@@ -220,6 +225,118 @@ describe('runProbe', () => {
   })
 })
 
+describe('分层身份：标签页自己的声明压过本源默认', () => {
+  it('标签页存过就用标签页的，没存过退回本源默认', () => {
+    const tab = fakeStorage().storage
+    const local = fakeStorage({ [IDENTITY_STORAGE_KEY]: JSON.stringify({ hostId: 'origin-default', hostTitle: '源默认' }) }).storage
+    const settings = layeredIdentitySettings(tab, local)
+    expect(settings.read()).toEqual({ hostId: 'origin-default', hostTitle: '源默认' })
+    settings.write({ hostId: 'tab-b', hostTitle: '标签页乙' })
+    expect(settings.read()).toEqual({ hostId: 'tab-b', hostTitle: '标签页乙' })
+  })
+
+  it('写入同时落到两层：本标签页重载不走样，新标签页继承本源默认', () => {
+    const tab = fakeStorage().storage
+    const local = fakeStorage().storage
+    const settings = layeredIdentitySettings(tab, local)
+    settings.write({ hostId: 'bench', hostTitle: '测试机' })
+    expect(JSON.parse(tab.getItem(IDENTITY_TAB_STORAGE_KEY)!)).toEqual({ hostId: 'bench', hostTitle: '测试机' })
+    expect(JSON.parse(local.getItem(IDENTITY_STORAGE_KEY)!)).toEqual({ hostId: 'bench', hostTitle: '测试机' })
+    // A fresh tab has no claim of its own; it reads the origin default.
+    expect(layeredIdentitySettings(fakeStorage().storage, local).read()).toEqual({ hostId: 'bench', hostTitle: '测试机' })
+  })
+
+  it('两个标签页各自声明后互不覆盖：乙的写入不动甲的声明', () => {
+    const tabA = fakeStorage().storage
+    const tabB = fakeStorage().storage
+    const local = fakeStorage().storage
+    layeredIdentitySettings(tabA, local).write({ hostId: 'host-a', hostTitle: '甲' })
+    layeredIdentitySettings(tabB, local).write({ hostId: 'host-b', hostTitle: '乙' })
+    expect(layeredIdentitySettings(tabA, local).read().hostId).toBe('host-a')
+    expect(layeredIdentitySettings(tabB, local).read().hostId).toBe('host-b')
+  })
+})
+
+describe('主机登记卡', () => {
+  it('没有登记时说明这是登记不是连接，并给出入口', () => {
+    const html = renderToString(createElement(AgentPanel, {
+      agents: fakeAgents([]),
+      probe: fakeProbe().probe,
+      rollUp: fakeRollUpSection(),
+      registry: fakeRegistry(),
+    }))
+    expect(html).toContain('data-registry-posture=""')
+    expect(html).toContain('不是建立连接')
+    expect(html).toContain('data-registry-empty=""')
+    expect(html).toContain('添加一台主机需要什么')
+  })
+
+  it('登记一行带身份、地址和如实的状态词', () => {
+    const html = renderToString(createElement(AgentPanel, {
+      agents: fakeAgents([]),
+      probe: fakeProbe().probe,
+      rollUp: fakeRollUpSection(),
+      registry: fakeRegistry([{ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' }]),
+    }))
+    expect(html).toContain('data-registry-row="bench"')
+    expect(html).toContain('http://192.168.1.20:3081')
+    expect(html).toContain('data-registry-status="bad"')
+    expect(html).toContain('未连接')
+    expect(html).toContain('听不到其他源的标签页')
+  })
+
+  it('本源在线的登记显示已连接，不再要求测可达', () => {
+    const section = { ...fakeRollUpSection(), onlineHostIds: () => ['self', 'bench'] } satisfies RollUpSection
+    const html = renderToString(createElement(AgentPanel, {
+      agents: fakeAgents([]),
+      probe: fakeProbe().probe,
+      rollUp: section,
+      registry: fakeRegistry([{ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' }]),
+    }))
+    expect(html).toContain('data-registry-status="ok"')
+    expect(html).toContain('已连接')
+    expect(html).not.toContain('data-registry-reach-try')
+  })
+
+  it('本机身份的登记行标为本机', () => {
+    const html = renderToString(createElement(AgentPanel, {
+      agents: fakeAgents([]),
+      probe: fakeProbe().probe,
+      rollUp: fakeRollUpSection(),
+      registry: fakeRegistry([{ hostId: 'self', hostTitle: '本机', address: 'http://127.0.0.1:3081' }]),
+    }))
+    expect(html).toContain('data-registry-status="ok"')
+    expect(html).toContain('这就是当前标签页的身份')
+  })
+
+  it('环境前提写在卡里：内网绑定、trusted-host、token、安全代价一个不少', () => {
+    const html = renderToString(createElement(AgentPanel, {
+      agents: fakeAgents([]),
+      probe: fakeProbe().probe,
+      rollUp: fakeRollUpSection(),
+      registry: fakeRegistry(),
+    }))
+    expect(html).toContain('--trusted-host')
+    expect(html).toContain('0.0.0.0')
+    expect(html).toContain('token')
+    expect(html).toContain('远程代码执行')
+    expect(html).toContain('不做脱敏')
+    expect(html).toContain('凭证留在主机侧')
+  })
+
+  it('删除入口先问后删，确认文案写明只动本机登记', () => {
+    const html = renderToString(createElement(AgentPanel, {
+      agents: fakeAgents([]),
+      probe: fakeProbe().probe,
+      rollUp: fakeRollUpSection(),
+      registry: fakeRegistry([{ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' }]),
+    }))
+    expect(html).toContain('data-registry-remove-ask=""')
+    // The confirm only appears after the ask; the closed state does not have it.
+    expect(html).not.toContain('data-registry-remove-confirm')
+  })
+})
+
 /** The roll-up section the panel mounts under itself; plain stand-in. */
 function fakeRollUpSection(): RollUpSection {
   // No DOM in this environment: renderToString never invokes ref callbacks, so
@@ -229,7 +346,19 @@ function fakeRollUpSection(): RollUpSection {
     element: () => element,
     identity: () => ({ hostId: 'self', hostTitle: '本机', derived: true }),
     setIdentity: () => {},
+    onlineHostIds: () => ['self'],
     notices: () => [],
+    republish: () => {},
     dispose: () => {},
+  }
+}
+
+/** A registry stand-in for the 主机登记 card. */
+function fakeRegistry(entries: readonly { hostId: string; hostTitle: string; address: string }[] = []): HostRegistryPort {
+  const list = entries.map(entry => ({ ...entry, createdAt: 0 }))
+  return {
+    list: () => list,
+    add: () => ({ ok: false, error: { kind: 'bad-address', detail: 'stand-in' } }),
+    remove: () => true,
   }
 }

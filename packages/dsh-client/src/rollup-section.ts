@@ -3,10 +3,10 @@
  *
  * This is the assembly the roll-up waited for: a real settings source (the
  * panel's identity form, backed by page storage), a real channel, a real
- * heartbeat — and, stated out loud rather than papered over, no real session
- * source, because reading DSH's session list is a host-side capability this
- * page does not have. The section mounts anyway, shows the hosts it can truly
- * see, and says on screen exactly what is missing and why.
+ * heartbeat — and a real session source: this host's sessions, read from DSH's
+ * own client projections and published to every other same-origin tab. When
+ * that source cannot deliver, the section says exactly why instead of showing
+ * a tree that looks caught up.
  *
  * Built directly on the federation's exported pieces. `applyHostFederation`
  * would have been the front door, but its published handle re-points
@@ -22,12 +22,13 @@
 
 import { HostFederation, browserChannel, resolveHostIdentity } from '@threadharbor/dsh-host-federation'
 import type { FederationBus, HostIdentity } from '@threadharbor/dsh-host-federation'
+import { mountRollUp } from '@threadharbor/dsh-host-federation/rollup-mount'
 import { mountRollUpSurface } from './surface.ts'
 import type { RollUpSurface } from './surface.ts'
 import type { ConfiguredIdentity, IdentitySettings } from './settings-source.ts'
 
 /** What one host reports about its sessions, as the federation reads it. */
-export type SectionSession = { readonly projectId: string; readonly sessionId: string; readonly title: string }
+export type SectionSession = { readonly projectId: string; readonly sessionId: string; readonly title: string; readonly projectTitle?: string }
 
 /** Everything the section needs from the page around it. */
 export type RollUpSectionDeps = {
@@ -35,14 +36,14 @@ export type RollUpSectionDeps = {
   settings: IdentitySettings
   /** JSON-valued storage behind the federation's announcements. */
   storage: { get(key: string): unknown; set(key: string, value: unknown): void }
-  /** Sessions this host holds; the honest default is none. */
+  /** Sessions this host holds; re-read on every publish. */
   sessions(): readonly SectionSession[]
   /**
-   * Said on screen whenever the session source cannot deliver: why the rows
-   * may be empty. Required — a section that cannot list sessions must say so,
-   * not look broken.
+   * Why the tree's rows may be empty or stale, in words the operator can act
+   * on. Empty when the session source is healthy: nothing is said about a
+   * read that succeeded.
    */
-  sessionSourceNote: string
+  sourceNotes(): readonly string[]
   /** Cross-tab channel; absent means the section opens a BroadcastChannel. */
   bus?: FederationBus
   setInterval(handler: () => void, ms: number): number
@@ -63,6 +64,10 @@ export type RollUpSection = {
   notices(): readonly string[]
   /** Save a new identity; an id change re-announces under the new one. */
   setIdentity(value: ConfiguredIdentity): void
+  /** The hostIds currently present on the channel, this tab's included. */
+  onlineHostIds(): readonly string[]
+  /** Re-read this host's sessions and announce them again. */
+  republish(): void
   /** Stop the heartbeat and say goodbye. */
   dispose(): void
 }
@@ -82,13 +87,22 @@ export function startRollUpSection(deps: RollUpSectionDeps): RollUpSection {
   let surface: RollUpSurface | undefined
   let onChange: () => void = () => {}
   let federation = open(identity)
-  const timer = deps.setInterval(() => {
+  const timer = deps.setInterval(() => { beat() }, deps.heartbeatMs)
+
+  function beat(): void {
+    try {
+      // The re-read is the point: sessions opened or closed since the last
+      // beat reach the other tabs without anyone pressing anything.
+      federation.publishSessions(deps.sessions())
+    } catch (error: unknown) {
+      deps.report(`session publish failed: ${messageOf(error)}`)
+    }
     try {
       federation.emitHeartbeat()
     } catch (error: unknown) {
       deps.report(`host heartbeat failed: ${messageOf(error)}`)
     }
-  }, deps.heartbeatMs)
+  }
 
   function resolveIdentity(): HostIdentity {
     let configured: ConfiguredIdentity
@@ -138,9 +152,21 @@ export function startRollUpSection(deps: RollUpSectionDeps): RollUpSection {
       rollUp: () => federation.rollUp(),
       identity: () => identity,
       publishSessions: () => { federation.publishSessions(deps.sessions()) },
-      tick: () => { federation.emitHeartbeat() },
+      tick: () => { beat() },
       dispose: () => { federation.dispose() },
     },
+    // The per-host words the tree folds into each host's 说明: this host
+    // explains a failed session read; a foreign one explains what its
+    // presence means when it has published nothing.
+    mount: (container, read) => mountRollUp(container, read, {
+      hostNote: host => {
+        if (host.self) {
+          const notes = deps.sourceNotes()
+          return notes.length > 0 ? notes.join(' ') : undefined
+        }
+        return host.empty ? '这台主机还没有发布任何会话——它的标签页打开并发布后会自动出现在这里。' : undefined
+      },
+    }),
   })
   onChange = () => { surface?.refresh() }
 
@@ -148,8 +174,8 @@ export function startRollUpSection(deps: RollUpSectionDeps): RollUpSection {
     element: () => surface?.element() ?? document.createElement('div'),
     identity: () => identity,
     notices: () => [
-      deps.sessionSourceNote,
-      '跨主机说明：页签间的通道只在同源之间通信，另一台机器的页面不在这个频道里，因此不会出现在这张列表上。',
+      ...deps.sourceNotes(),
+      '跨主机说明：页签间的通道只在同源之间通信。同一台 DSH 的多个标签页会互相看见；另一台机器（另一个源）的页面不在这个频道里，要让它出现，请在那里打开它自己的页面。',
     ],
     setIdentity: value => {
       deps.settings.write(value)
@@ -157,6 +183,7 @@ export function startRollUpSection(deps: RollUpSectionDeps): RollUpSection {
       if (next.hostId === identity.hostId) {
         // Same machine, same id: re-announcing would churn every other tab.
         identity = next
+        onChange()
         return
       }
       // An id change is a different identity on the channel, so the old one
@@ -165,6 +192,15 @@ export function startRollUpSection(deps: RollUpSectionDeps): RollUpSection {
       identity = next
       federation = open(identity)
       federation.start()
+      onChange()
+    },
+    onlineHostIds: () => federation.hosts().map(host => host.hostId),
+    republish: () => {
+      try {
+        federation.publishSessions(deps.sessions())
+      } catch (error: unknown) {
+        deps.report(`session publish failed: ${messageOf(error)}`)
+      }
       onChange()
     },
     dispose: () => {

@@ -137,6 +137,37 @@ describe('publishing sessions', () => {
     fed.expire(1_500)
     expect(fed.foreignHosts().map(h => h.hostId)).toEqual(['beta'])
   })
+  it('keeps a project title through the wire and into the other tab’s groups', () => {
+    // §8.3: the tree names projects. A title dropped at parse time would
+    // leave every foreign project row reading its raw id.
+    const channel = bus()
+    const fed = new HostFederation(ME, channel.port, { staleMs: 1_000 })
+    fed.start()
+    channel.deliver({
+      kind: 'sessions',
+      hostId: 'beta',
+      hostTitle: 'Beta box',
+      at: 0,
+      sessions: [{ projectId: 'w1', sessionId: 'b1', title: '会话 b1', projectTitle: 'Web' }],
+    })
+    const beta = fed.rollUp().hosts.find(h => h.hostId === 'beta')
+    expect(beta?.projects[0]?.projectTitle).toBe('Web')
+  })
+
+  it('drops a malformed project title instead of trusting it', () => {
+    const channel = bus()
+    const fed = new HostFederation(ME, channel.port, { staleMs: 1_000 })
+    fed.start()
+    channel.deliver({
+      kind: 'sessions',
+      hostId: 'beta',
+      hostTitle: 'Beta box',
+      at: 0,
+      sessions: [{ projectId: 'w1', sessionId: 'b1', title: 'x', projectTitle: 42 }],
+    })
+    const beta = fed.rollUp().hosts.find(h => h.hostId === 'beta')
+    expect(beta?.projects[0]?.projectTitle).toBeUndefined()
+  })
 })
 
 function sessionOf(fed: HostFederation, hostId: string): HostSession[] {

@@ -34,14 +34,19 @@ const MAX_ID_LENGTH = 64
  *
  * Ids end up in storage keys and in the UI as a label, so path separators and
  * whitespace-only values are rejected here rather than producing keys that
- * collide or read badly.
+ * collide or read badly. Exported because the host registry admits a
+ * registration only under the same rules the identity resolver applies.
  */
-function usable(id: string | undefined): id is string {
+export function isValidHostId(id: string | undefined): id is string {
   if (id === undefined) return false
   const trimmed = id.trim()
   if (trimmed === '' || trimmed.length > MAX_ID_LENGTH) return false
   // A separator inside the id would let one host's slot read another's.
   return !trimmed.includes('/') && !trimmed.includes('\\')
+}
+
+function usable(id: string | undefined): id is string {
+  return isValidHostId(id)
 }
 
 /**
