@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest'
 import { projectTurn } from '../src/projection.ts'
 import { claudeDialect } from '../src/dialects/claude.ts'
 import { codexDialect } from '../src/dialects/codex.ts'
+import { grokDialect } from '../src/dialects/grok.ts'
 import type { AcpFrame } from '../src/acp-client.ts'
 
 const captured = JSON.parse(
@@ -73,6 +74,47 @@ describe('separating conversation content from chatter', () => {
   it('does not mistake a context-window reading for a token count', () => {
     // codex/claude send `usage_update {used, size}`; `size` is the window, not
     // a billable count, and reading it as one would report 1,000,000 tokens.
-    expect(codexDialect.readUpdateTokens({ update: { sessionUpdate: 'usage_update', used: 19978, size: 1000000 } })).toBeUndefined()
+    // The window reading is on an update frame, which `readReplyUsage` never
+    // looks at — it reads only the prompt reply.
+    expect(codexDialect.readReplyUsage({ update: { sessionUpdate: 'usage_update', used: 19978, size: 1000000 } })).toBeUndefined()
+  })
+})
+
+describe('reading the turn usage off the session/prompt reply', () => {
+  const codexReply = (captured['codex']!['promptReply'] as readonly unknown[])[0]
+  const claudeReply = (captured['claude']!['promptReply'] as readonly unknown[])[0]
+
+  it("reads codex's breakdown and renames its buckets into DSH's names", () => {
+    // Real capture: `cachedReadTokens`/`thoughtTokens` are the agent's spellings;
+    // DSH's usage buckets are `cacheReadTokens`/`reasoningTokens`.
+    expect(codexDialect.readReplyUsage(codexReply)).toEqual({
+      inputTokens: 1182,
+      outputTokens: 100,
+      cacheReadTokens: 16768,
+      reasoningTokens: 0,
+      totalTokens: 18050,
+    })
+  })
+
+  it("reads claude's breakdown, whose cachedWrite bucket codex does not send", () => {
+    expect(claudeDialect.readReplyUsage(claudeReply)).toEqual({
+      inputTokens: 21411,
+      outputTokens: 721,
+      cacheReadTokens: 19344,
+      cacheWriteTokens: 0,
+      totalTokens: 41476,
+    })
+  })
+
+  it('reports nothing for grok, whose only number is an unusable running total', () => {
+    // grok keeps `totalTokens` on update frames' `_meta` — a session-to-date
+    // total. Split into input and output it cannot be, and DSH's own token
+    // projection would compute `NaN` from half a usage, so grok reports none.
+    expect(grokDialect.readReplyUsage({ stopReason: 'end_turn' })).toBeUndefined()
+  })
+
+  it('reports nothing when the reply has no usage object', () => {
+    expect(codexDialect.readReplyUsage({ stopReason: 'end_turn' })).toBeUndefined()
+    expect(codexDialect.readReplyUsage(undefined)).toBeUndefined()
   })
 })

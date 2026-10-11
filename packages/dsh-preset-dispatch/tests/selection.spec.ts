@@ -4,9 +4,9 @@
  * The replaced step never fires a model request, so the picker's choice would
  * otherwise sit unused while the preset's agent answers anyway — the exact
  * "the interface shows one thing, the session does another" state these tests
- * pin down. Both directions matter: a selection the preset serves must reach
- * the turn, and one it does not serve must refuse with a reason that names the
- * models involved.
+ * pin down. The linkage (`follow.ts`) keeps the two picks in step, so the
+ * refusal here is the fallback for picks nothing can serve, and the host
+ * default — which nobody picked — is no opinion at all.
  */
 
 import { describe, expect, it } from 'vitest'
@@ -49,7 +49,19 @@ describe('decideSelection', () => {
     expect(selectionOf({ provider: 'x' })).toBeUndefined()
   })
 
-  it('refuses a foreign provider, naming the models on both sides', () => {
+  it('treats the host default as no opinion, whatever it names', () => {
+    // A fresh session on a preset shows the host default in its composer
+    // without anyone picking it. The preset answers with its own default
+    // instead of refusing — refusing here would make scenario 1 impossible.
+    expect(decideSelection(CONFIG, { provider: 'deepseek-official', model: 'deepseek-v4-pro' }, 'host-default'))
+      .toEqual({ kind: 'none' })
+    expect(decideSelection(CONFIG, { provider: 'acp:acp-codex', model: 'gpt-5.2' }, 'host-default'))
+      .toEqual({ kind: 'none' })
+    expect(decideSelection(CONFIG, { provider: 'acp:acp-grok', model: 'dropped-model' }, 'host-default'))
+      .toEqual({ kind: 'none' })
+  })
+
+  it('refuses an explicit native pick, saying why and what would work', () => {
     // The visible failure this module exists to prevent: the picker shows the
     // whole catalog, so a native selection lands here looking servable.
     const decision = decideSelection(CONFIG, { provider: 'deepseek-official', model: 'deepseek-v4-pro' })
@@ -57,26 +69,28 @@ describe('decideSelection', () => {
     if (decision.kind !== 'refuse') return
     expect(decision.reason).toContain('deepseek-official / deepseek-v4-pro')
     expect(decision.reason).toContain('acp-grok')
-    expect(decision.reason).toContain('grok-4.7')
+    expect(decision.reason).toContain('新建')
   })
 
-  it('refuses a model routed to another ACP preset too', () => {
-    // Two ACP rows can be live at once; a session on one must not answer with
-    // the other's agent just because both are external.
-    expect(decideSelection(CONFIG, { provider: 'acp:acp-codex', model: 'gpt-5.2' }).kind).toBe('refuse')
+  it('refuses an explicit pick of another preset\'s model, naming that preset', () => {
+    // Two ACP rows can be live at once. The follow should have moved the
+    // session; when it could not — the target preset not on this host, or the
+    // session started — the turn says what stood in the way.
+    const decision = decideSelection(CONFIG, { provider: 'acp:acp-codex', model: 'gpt-5.2' })
+    expect(decision.kind).toBe('refuse')
+    if (decision.kind !== 'refuse') return
+    expect(decision.reason).toContain('acp-codex')
+    expect(decision.reason).toContain('自动切换没有发生')
   })
 
   it('refuses this preset route naming a model the preset never advertised', () => {
     // The picker shows every catalog group; "provider matches" alone would let
     // a model this agent never offered through.
-    expect(decideSelection(CONFIG, { provider: 'acp:acp-grok', model: 'grok-4.7-fast' }).kind).toBe('refuse')
-  })
-
-  it('names the host default as the source when the refusal is about it', () => {
-    const decision = decideSelection(CONFIG, { provider: 'deepseek-official', model: 'deepseek-v4-pro' }, 'host-default')
+    const decision = decideSelection(CONFIG, { provider: 'acp:acp-grok', model: 'grok-4.7-fast' })
     expect(decision.kind).toBe('refuse')
     if (decision.kind !== 'refuse') return
-    expect(decision.reason).toContain('这台主机的默认模型 deepseek-official / deepseek-v4-pro')
+    expect(decision.reason).toContain('grok-4.7-fast')
+    expect(decision.reason).toContain('grok-4.5')
   })
 
   it('says so honestly when the preset declares no models at all', () => {

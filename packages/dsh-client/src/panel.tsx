@@ -88,7 +88,10 @@ export async function runProbe(probe: ProbeStarter, presetId: string, onPhase: (
 
 /**
  * One agent's row: name, the probe button, the verdict.
- * @param props - the agent, the current probe state, and the handler.
+ *
+ * The verdict is the row's payload, so it leads: a colored state word and the
+ * measured number, with the advice one click away instead of printed under
+ * everything. @param props - the agent, the current probe state, and the handler.
  * @returns the row.
  */
 export function AgentRow(props: {
@@ -116,7 +119,7 @@ export function AgentRow(props: {
   )
 }
 
-/** The verdict line under one row: what the probe found, and what to do. */
+/** The verdict line under one row: state word first, evidence second, advice folded away. */
 function VerdictLine(props: {
   readonly state?: ProbeRunState | undefined
 }): ReactNode {
@@ -129,15 +132,19 @@ function VerdictLine(props: {
   }
   if (state?.phase === 'done') {
     const display = describeVerdict(state.verdict)
-    const tone = display.tone === 'ok' ? styles.stateOk : display.tone === 'slow' ? styles.stateWarn : styles.stateBad
     return (
-      <p data-probe-state={display.tone} className={tone}>
-        {`${display.headline} · ${display.detail} —— ${display.advice}`}
-        {state.archiveNote === undefined ? undefined : <span data-archive-note=""> {state.archiveNote}</span>}
-      </p>
+      <div data-probe-state={display.tone} className={styles.verdictLine} data-verdict-tone={display.tone}>
+        <span data-verdict-word="" className={styles.verdictWord} data-verdict-tone={display.tone}>{display.headline}</span>
+        <span data-verdict-detail="" className={styles.verdictDetail}>{display.detail}</span>
+        <details className={styles.verdictMore}>
+          <summary className={styles.summary}>建议</summary>
+          <p className={styles.verdictAdvice}>{display.advice}</p>
+          {state.archiveNote === undefined ? undefined : <p data-archive-note="" className={styles.verdictAdvice}>{state.archiveNote}</p>}
+        </details>
+      </div>
     )
   }
-  return <p data-probe-state="idle" className={styles.stateLine}>尚未探测。</p>
+  return <p data-probe-state="idle" className={styles.stateLine}>未探测</p>
 }
 
 /**
@@ -207,11 +214,12 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   const identity = props.rollUp.identity()
   return (
     <div data-threadharbor-panel="" className={styles.root}>
-      <section data-panel-section="agents" className={styles.section}>
-        <h2 className={styles.title}>Agent 探测</h2>
-        <p data-self-heal-note="" className={styles.note}>
-          连接由主机自己照看：发现断了会自动丢弃并在下一次对话时自动重连，无需在这里操作。
-        </p>
+      <section data-panel-section="agents" className={styles.card}>
+        <div className={styles.cardHead}>
+          <h2 className={styles.title}>Agent 状态</h2>
+          <span className={styles.spacer} />
+          <button type="button" data-action="refresh-agents" className={styles.action} onClick={refreshAgents}>刷新</button>
+        </div>
         {load.stage === 'loading'
           ? <p data-agents-loading="" className={styles.stateLine}>正在读取本机 agent……</p>
           : load.stage === 'failed'
@@ -223,7 +231,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                   </p>
                 )
               : (
-                  <div className={styles.card}>
+                  <div className={styles.agentList}>
                     {agents.map(agent => (
                       <AgentRow
                         key={agent.presetId}
@@ -235,53 +243,61 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                     ))}
                   </div>
                 )}
-        <div>
-          <button type="button" data-action="refresh-agents" className={styles.action} onClick={refreshAgents}>刷新</button>
-        </div>
+        <details data-self-heal-note="" className={styles.noteDetails}>
+          <summary className={styles.summary}>连接由谁照看</summary>
+          <p className={styles.note}>
+            连接由主机自己照看：发现断了会自动丢弃并在下一次对话时自动重连，无需在这里操作。
+          </p>
+        </details>
       </section>
-      <section data-panel-section="rollup" className={styles.section}>
-        <h2 className={styles.title}>主机与汇总</h2>
-        <p data-identity-line="" className={styles.identityLine}>
-          本机身份：{identity.hostTitle}（id {identity.hostId}{identity.derived ? '，未配置，按页面来源生成' : ''}）
-        </p>
-        <form
-          data-identity-form=""
-          className={styles.identityForm}
-          onSubmit={event => {
-            event.preventDefault()
-            saveIdentity()
-          }}
-        >
-          <label className={styles.field}>
-            主机 id
-            <input
-              value={hostIdDraft}
-              data-identity-host-id=""
-              className={styles.input}
-              onChange={event => { setHostIdDraft(event.target.value) }}
-              placeholder="留空则自动生成"
-            />
-          </label>
-          <label className={styles.field}>
-            名称
-            <input
-              value={hostTitleDraft}
-              data-identity-host-title=""
-              className={styles.input}
-              onChange={event => { setHostTitleDraft(event.target.value) }}
-              placeholder="如：工作室主机"
-            />
-          </label>
-          <button type="submit" data-identity-save="" className={styles.actionPrimary}>保存身份</button>
-        </form>
-        <p className={styles.note}>
-          这里没有「添加主机」的入口，是如实呈现：同一个浏览器里打开的每个页面会自动出现在上面的汇总里，
-          只要给这台主机起个名字；另一台机器的页面不在这个通道里，不会出现，也就无法在这里添加。
-        </p>
+      <section data-panel-section="rollup" className={styles.card}>
+        <div className={styles.cardHead}>
+          <h2 className={styles.title}>主机汇总</h2>
+          <span data-identity-line="" className={styles.identityLine}>
+            {identity.hostTitle} · {identity.hostId}{identity.derived ? '（未配置，按页面来源生成）' : ''}
+          </span>
+        </div>
         <div ref={attachRollUp(props.rollUp)} data-rollup-host="" className={styles.rollupHost} />
         <ul data-panel-notices="" className={styles.notices}>
           {props.rollUp.notices().map(notice => <li key={notice}>{notice}</li>)}
         </ul>
+        <details className={styles.noteDetails}>
+          <summary className={styles.summary}>主机身份与说明</summary>
+          <form
+            data-identity-form=""
+            className={styles.identityForm}
+            onSubmit={event => {
+              event.preventDefault()
+              saveIdentity()
+            }}
+          >
+            <label className={styles.field}>
+              主机 id
+              <input
+                value={hostIdDraft}
+                data-identity-host-id=""
+                className={styles.input}
+                onChange={event => { setHostIdDraft(event.target.value) }}
+                placeholder="留空则自动生成"
+              />
+            </label>
+            <label className={styles.field}>
+              名称
+              <input
+                value={hostTitleDraft}
+                data-identity-host-title=""
+                className={styles.input}
+                onChange={event => { setHostTitleDraft(event.target.value) }}
+                placeholder="如：工作室主机"
+              />
+            </label>
+            <button type="submit" data-identity-save="" className={styles.actionPrimary}>保存身份</button>
+          </form>
+          <p className={styles.note}>
+            这里没有「添加主机」的入口，是如实呈现：同一个浏览器里打开的每个页面会自动出现在上面的汇总里，
+            只要给这台主机起个名字；另一台机器的页面不在这个通道里，不会出现，也就无法在这里添加。
+          </p>
+        </details>
       </section>
     </div>
   )

@@ -46,27 +46,32 @@ const RESERVED_FOR_OUTPUT_TOKENS = 8_192
  * `{ sessionId }` (api/session-controller/src/index.ts:152,421-423), and
  * `agentPresets` with `select(agent, presetId)` (preset/agent-preset-registry/src/index.ts:59,347-362).
  */
-type HostServices = {
+export type HostServices = {
   readonly sessions?: ((id: string) => unknown) | undefined
   readonly projections?: ((session: unknown, key: string) => unknown) | undefined
   readonly controller?: ((request: { sessionId: string }) => Promise<unknown>) | undefined
   readonly agents?: ((id: string) => unknown) | undefined
   readonly presets?: ((agent: unknown, presetId: string) => Promise<unknown>) | undefined
+  /** The preset registry's own `list`, bound to the registry. */
+  readonly presetList?: (() => Promise<unknown>) | undefined
 }
 
 /** The services a switch needs, read off the context and validated. */
-function servicesOf(ctx: object): HostServices {
+export function servicesOf(ctx: object): HostServices {
   const get = (ctx as { get?: unknown }).get
   if (typeof get !== 'function') return {}
   const read = get as (this: object, key: string) => unknown
   // Read one service and take its one method, checking shape as it goes: "the
   // service is there but its method is not" is the same absence as a missing
   // service, and both surface in the missing list rather than as a TypeError.
+  // The method is bound to its service on the way out — a method called
+  // detached from its owner reads `this` as undefined and dies inside the
+  // service, which would dress a working host up as a missing one.
   const method = (key: string, name: string): unknown => {
     const holder = read.call(ctx, key)
     if (typeof holder !== 'object' || holder === null) return undefined
     const value = (holder as Record<string, unknown>)[name]
-    return typeof value === 'function' ? value : undefined
+    return typeof value === 'function' ? (value as (this: object) => unknown).bind(holder) : undefined
   }
   return {
     sessions: method('sessions', 'get') as ((id: string) => unknown) | undefined,
@@ -74,6 +79,7 @@ function servicesOf(ctx: object): HostServices {
     controller: method('sessionController', 'fork') as ((request: { sessionId: string }) => Promise<unknown>) | undefined,
     agents: method('agents', 'get') as ((id: string) => unknown) | undefined,
     presets: method('agentPresets', 'select') as ((agent: unknown, presetId: string) => Promise<unknown>) | undefined,
+    presetList: method('agentPresets', 'list') as (() => Promise<unknown>) | undefined,
   }
 }
 
@@ -83,8 +89,40 @@ function present<T>(value: T | undefined, name: string): T {
   return value
 }
 
+/**
+ * The two moves a switch can make, wired to the host services.
+ *
+ * Shared with the model-follow (`follow.ts`), which performs the same fork
+ * when a started session picks another preset's model.
+ */
+export function switchPortsOf(services: HostServices): SwitchPorts {
+  const agents = present(services.agents, 'agents')
+  const presets = present(services.presets, 'agentPresets')
+  const controller = present(services.controller, 'sessionController')
+  return {
+    select: async (sessionId, presetId) => {
+      if (presetId === undefined) {
+        throw new Error('this row cannot hand a session back to the native agent: it does not know the native preset id')
+      }
+      const agent = agents(sessionId)
+      if (typeof agent !== 'object' || agent === null) {
+        throw new Error(`no live agent for session ${sessionId} is visible to this row, so preset ${presetId} cannot be selected on it`)
+      }
+      await presets(agent, presetId)
+    },
+    fork: async sessionId => {
+      const value = await controller({ sessionId })
+      const forked = (typeof value === 'object' && value !== null ? value : {}) as { sessionId?: unknown }
+      if (typeof forked['sessionId'] !== 'string' || forked['sessionId'] === '') {
+        throw new Error('the host accepted the fork but did not name the session it created')
+      }
+      return { sessionId: forked['sessionId'] }
+    },
+  }
+}
+
 /** Whether the session has produced any turn yet, per its own projection. */
-function startedOf(boundary: unknown): boolean {
+export function startedOf(boundary: unknown): boolean {
   const record = (typeof boundary === 'object' && boundary !== null ? boundary : {}) as {
     openTurnStartSeq?: unknown
     lastTurn?: unknown
@@ -145,9 +183,6 @@ export function mountSwitchOnForeignModelRequest(
     }
     const sessions = present(services.sessions, 'sessions')
     const projections = present(services.projections, 'sessionProjections')
-    const agents = present(services.agents, 'agents')
-    const presets = present(services.presets, 'agentPresets')
-    const controller = present(services.controller, 'sessionController')
 
     const session = sessions(request.sessionId)
     if (session === undefined) {
@@ -182,26 +217,7 @@ export function mountSwitchOnForeignModelRequest(
       }
     }
 
-    const ports: SwitchPorts = {
-      select: async (sessionId, presetId) => {
-        if (presetId === undefined) {
-          throw new Error('this row cannot hand a session back to the native agent: it does not know the native preset id')
-        }
-        const agent = agents(sessionId)
-        if (typeof agent !== 'object' || agent === null) {
-          throw new Error(`no live agent for session ${sessionId} is visible to this row, so preset ${presetId} cannot be selected on it`)
-        }
-        await presets(agent, presetId)
-      },
-      fork: async sessionId => {
-        const value = await controller({ sessionId })
-        const forked = (typeof value === 'object' && value !== null ? value : {}) as { sessionId?: unknown }
-        if (typeof forked['sessionId'] !== 'string' || forked['sessionId'] === '') {
-          throw new Error('the host accepted the fork but did not name the session it created')
-        }
-        return { sessionId: forked['sessionId'] }
-      },
-    }
+    const ports: SwitchPorts = switchPortsOf(services)
 
     const result = await applySwitchPlan(plan, request.sessionId, ports)
     if (result.kind === 'nothing') {

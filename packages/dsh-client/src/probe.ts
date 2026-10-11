@@ -39,9 +39,6 @@ export type ProbeOutcome = {
   readonly archiveNote?: string
 }
 
-/** The reply the probe looks for, by event type, in the session's log. */
-const replyType = 'assistant/message'
-
 /** A request id without depending on a crypto object being present. */
 function defaultMintId(): string {
   const globalCrypto = globalThis.crypto
@@ -65,7 +62,7 @@ export async function runSessionProbe(
 ): Promise<ProbeOutcome> {
   const slowAfterMs = options.slowAfterMs ?? PROBE_DEFAULTS.slowAfterMs
   const timeoutMs = options.timeoutMs ?? PROBE_DEFAULTS.timeoutMs
-  const pollMs = options.pollMs ?? 500
+  const pollMs = options.pollMs ?? 100
   const prompt = options.prompt ?? PROBE_DEFAULTS.prompt
   const now = options.now ?? (() => Date.now())
   const delay = options.delay ?? (async (ms: number) => await new Promise(resolve => { setTimeout(resolve, ms) }))
@@ -81,13 +78,24 @@ export async function runSessionProbe(
   }
   const sessionId = created.value.sessionId
 
+  // Both host signals attach before the prompt: an error or a status flip that
+  // lands between prompt and reply is the classification, and a listener
+  // attached one await too late misses exactly the fastest deaths.
   let failure: string | undefined
-  // Attached before the prompt: an error that lands between prompt and reply
-  // is the classification, and a listener attached one await too late misses
-  // exactly the fastest deaths.
-  const unsubscribe = gateway.subscribeSessionErrors((eventSessionId, message) => {
+  const unsubscribeErrors = gateway.subscribeSessionErrors((eventSessionId, message) => {
     if (eventSessionId === sessionId && failure === undefined) failure = message
   })
+  let sawRunning = false
+  let finishedAt: number | undefined
+  const unsubscribeStatus = gateway.subscribeSessionStatus((eventSessionId, running) => {
+    if (eventSessionId !== sessionId) return
+    if (running) sawRunning = true
+    else if (sawRunning && finishedAt === undefined) finishedAt = now()
+  })
+  const unsubscribe = (): void => {
+    unsubscribeErrors()
+    unsubscribeStatus()
+  }
 
   // stopActivity rides along in the gateway: a hung turn must be stopped, not
   // just forgotten. Written before the stops land, the archive also takes the
@@ -104,18 +112,20 @@ export async function runSessionProbe(
       return await cleanUp(judgeProbe({ kind: 'failed', reason: prompted.error.message }, { slowAfterMs }))
     }
     for (;;) {
-      const events = await gateway.readRecentEvents({ sessionId, maxMessages: 10 })
-      // A page that comes back wrong is a reading problem, not proof the
-      // agent died — the deadline decides instead.
-      if (events.ok && events.value.some(event => event.type === replyType)) {
-        return await cleanUp(judgeProbe({ kind: 'replied', ms: now() - started } satisfies ProbeEvidence, { slowAfterMs }))
+      // The host's own account of the turn: the agent picked the work up
+      // (running) and put it back down (idle again). That pair, with no error
+      // in between, is the reply — reading the log back would need a session
+      // page cut that only the follow stream hands out, and the probe does
+      // not open one.
+      if (finishedAt !== undefined) {
+        return await cleanUp(judgeProbe({ kind: 'replied', ms: finishedAt - started } satisfies ProbeEvidence, { slowAfterMs }))
       }
       if (failure !== undefined) {
         return await cleanUp(judgeProbe({ kind: 'failed', reason: failure }, { slowAfterMs }))
       }
       const elapsed = now() - started
       if (elapsed >= timeoutMs) {
-        return await cleanUp(judgeProbe({ kind: 'silent', ms: elapsed } satisfies ProbeEvidence, { slowAfterMs }))
+        return await cleanUp(judgeProbe({ kind: 'silent', ms: elapsed, started: sawRunning } satisfies ProbeEvidence, { slowAfterMs }))
       }
       await delay(pollMs)
     }

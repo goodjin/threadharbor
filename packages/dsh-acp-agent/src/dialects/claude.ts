@@ -18,6 +18,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { AcpDialect, ToolCall } from './types.ts'
+import { replyUsageOf } from './usage.ts'
 
 function record(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {}
@@ -103,11 +104,8 @@ export const claudeDialect: AcpDialect = {
     })
   },
 
-  readUpdateTokens() {
-    // claude reports token counts on the session/prompt *response*, not on
-    // session/update frames. `usage_update` carries {used, size}, which is
-    // context-window occupancy — deliberately not read as a token count.
-    return undefined
+  readReplyUsage(result) {
+    return replyUsageOf(result)
   },
 
   isContent(update) {

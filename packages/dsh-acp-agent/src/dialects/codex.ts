@@ -16,12 +16,15 @@
  *     silently yields empty output for every codex tool call.
  *
  * `session/new` returns `models.availableModels` like grok, but **without**
- * `currentModelId`. Token counts arrive on the `session/prompt` response, not
- * on any update frame, so `readUpdateTokens` reports nothing here.
+ * `currentModelId`. Token counts arrive on the `session/prompt` response under
+ * `usage`, with the cache buckets spelled `cachedReadTokens`/`cachedWriteTokens`
+ * and the output's reasoning subset as `thoughtTokens` — DSH's names differ, so
+ * `readReplyUsage` translates instead of passing the object through.
  */
 
 import { randomUUID } from 'node:crypto'
 import type { AcpDialect, ToolCall } from './types.ts'
+import { replyUsageOf } from './usage.ts'
 
 function record(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {}
@@ -70,10 +73,8 @@ export const codexDialect: AcpDialect = {
     })
   },
 
-  readUpdateTokens() {
-    // codex reports usage on the session/prompt response. `usage_update` carries
-    // {used, size}, which is context-window occupancy, not a token count.
-    return undefined
+  readReplyUsage(result) {
+    return replyUsageOf(result)
   },
 
   isContent(update) {

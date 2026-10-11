@@ -23,7 +23,9 @@ import { buildPresetTable, openSessionsOf, sessionsRegistry } from './registry.t
 import type { AcpPresetConfig, PresetConfig } from './registry.ts'
 import { makeSessionFactory } from './factory.ts'
 import { modelsOfPreset, registerCatalog } from './catalog-registration.ts'
-import { mountSwitchOnForeignModelRequest } from './switch-mount.ts'
+import { mountSwitchOnForeignModelRequest, servicesOf } from './switch-mount.ts'
+import { followModelSelection, followPresetSelection } from './follow.ts'
+import { selectionOf } from './selection.ts'
 import type { CatalogDeps } from './catalog.ts'
 import type { AcpPresetBinding } from './dispatch.ts'
 import type { AcpDialect, AcpTransport } from '@threadharbor/dsh-acp-agent'
@@ -125,6 +127,9 @@ export function applyAcpPlugin(
   // would hand them to a dialect that does not exist; better to leave them on
   // the native agent, where they still work.
   if (dialect === undefined) return
+  // The models this preset offers the picker — the same list the host's model
+  // selector reads, and the list the preset→model follow selects from.
+  const pickerModels = modelsOfPreset(presets, factory, presetId)
   const sessions = sessionsRegistry()
   const table = buildPresetTable(presets, factory, sessions, {
     // A connection death dropping its cached session is the host healing on
@@ -180,6 +185,7 @@ export function applyAcpPlugin(
       if (binding === undefined) return
       if (holdsAcpDispatch(agent, binding)) return
       deps.install(agent, presetId, dialect, table)
+      void followPresetSelection(servicesOf(ctx), presetId, pickerModels, agentIdentifier(agent) ?? '?', agent, reportOf(deps))
     } catch (error) {
       // Left alone: whatever this session is, it keeps a working step. Said out
       // loud, though — a takeover that loads, matches, announces itself and then
@@ -194,8 +200,29 @@ export function applyAcpPlugin(
   // would otherwise run the native agent with no error anywhere. The scope
   // filter delivers exactly the sessions this preset now drives, so the event
   // is both the signal and the filter.
+  //
+  // The same stream carries `model/selection` — the model picker's pick — for
+  // every session this preset currently drives. That is the other half of the
+  // linkage: a pick of another preset's model moves the session to that preset
+  // when it still can (`follow.ts`); a started session is locked by the host
+  // and stays for the turn-time refusal, which names the reason.
   ctx.on('session/event', (session, event) => {
     try {
+      if (event.type === 'model/selection') {
+        const selection = selectionOf(event.data)
+        const sessionId = sessionIdentifier(session)
+        if (selection === undefined || sessionId === undefined) return
+        const agentLike: AgentLike = { session: session as { header?: { agentPreset?: string } } }
+        void followModelSelection(
+          servicesOf(ctx),
+          presetId,
+          selection,
+          sessionId,
+          agentLike,
+          reportOf(deps),
+        )
+        return
+      }
       if (event.type !== 'agent-preset/selected') return
       const data = event.data
       if (typeof data !== 'object' || data === null || !('agentPreset' in data)) return
@@ -217,6 +244,7 @@ export function applyAcpPlugin(
       if (agent === undefined) return
       if (holdsAcpDispatch(agent, binding)) return
       deps.install(agent, presetId, dialect, table)
+      void followPresetSelection(servicesOf(ctx), presetId, pickerModels, sessionId, agent, reportOf(deps))
     } catch (error) {
       // Same contract as the `agent/created` path: this session keeps its
       // working step, and what happened is said out loud instead.
@@ -225,11 +253,21 @@ export function applyAcpPlugin(
   })
 }
 
+/** The report port, defaulting to nowhere. */
+function reportOf(deps: AcpPluginDeps): (message: string) => void {
+  return message => { deps.report?.(message) }
+}
+
 /** The session id off the event's session argument, if it carries one. */
 function sessionIdentifier(session: unknown): string | undefined {
   if (typeof session !== 'object' || session === null) return undefined
   const id = (session as { id?: unknown }).id
   return typeof id === 'string' && id !== '' ? id : undefined
+}
+
+/** The session id off the agent, from its session's id. */
+function agentIdentifier(agent: AgentLike): string | undefined {
+  return sessionIdentifier(agent.session)
 }
 
 /**

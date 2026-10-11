@@ -2,11 +2,12 @@
  * The one door from this page to the host: DSH's own Remote namespaces.
  *
  * The probe lives in the browser and drives the exact calls the rest of the UI
- * drives — `remote.session.create/prompt/page`, `remote.session.modelCatalog`,
- * `remote.workspace.archiveSession`, and the `api-session/error` event. What
- * this module adds is the shape-checking around them: a namespace that is
- * absent, half-loaded, or answering with something unexpected must read as
- * "missing" or "failed", never as a TypeError from deep inside a panel click.
+ * drives — `remote.session.create/prompt`, `remote.session.modelCatalog`,
+ * `remote.workspace.archiveSession`, and the `api-session/error` and
+ * `api-session/status` events. What this module adds is the shape-checking
+ * around them: a namespace that is absent, half-loaded, or answering with
+ * something unexpected must read as "missing" or "failed", never as a
+ * TypeError from deep inside a panel click.
  *
  * These tests stand in for the namespaces with plain objects, because what is
  * under test is exactly the checking — not the wire.
@@ -70,7 +71,7 @@ describe('打开会话网关', () => {
       'remote.workspace': { archiveSession: async () => okResult({}) },
     }))
     expect(opening.gateway).toBeUndefined()
-    expect(opening.missing.some(name => name.includes('remote.session.page'))).toBe(true)
+    expect(opening.missing.some(name => name.includes('remote.session.prompt'))).toBe(true)
   })
 })
 
@@ -106,23 +107,6 @@ describe('经网关建会话、发话、读历史', () => {
       mode: 'queue',
       content: [{ type: 'text', text: 'ping' }],
     })
-  })
-
-  it('读历史走 session.page：从头读这个会话，带回事件类型序列', async () => {
-    const seen: unknown[] = []
-    const opening = openSessionGateway(fakeCtx({
-      'remote': { $on: () => () => {} },
-      'remote.session': sessionNamespace({
-        page: async (request: unknown) => {
-          seen.push(request)
-          return okResult({ records: [{ event: { type: 'user/message', seq: 1 } }, { event: { type: 'assistant/message', seq: 2 } }] })
-        },
-      }),
-      'remote.workspace': { archiveSession: async () => okResult({}) },
-    }))
-    const result = await opening.gateway!.readRecentEvents({ sessionId: 's-probe', maxMessages: 10 })
-    expect(result).toEqual({ ok: true, value: [{ type: 'user/message' }, { type: 'assistant/message' }] })
-    expect(seen[0]).toMatchObject({ address: { kind: 'session', sessionId: 's-probe' }, throughSeq: -1, maxMessages: 10 })
   })
 
   it('远端返回失败时原样带出代码和消息', async () => {
@@ -166,7 +150,7 @@ describe('经网关归档小会话', () => {
   })
 })
 
-describe('订阅会话错误事件', () => {
+describe('订阅会话错误与状态事件', () => {
   it('经 remote.$on 订阅 api-session/error，退订生效', () => {
     let listener: ((sessionId: string, message: string) => void) | undefined
     let disposed = 0
@@ -188,12 +172,34 @@ describe('订阅会话错误事件', () => {
     expect(disposed).toBe(1)
   })
 
+  it('经 remote.$on 订阅 api-session/status，拿到的是 (会话, 是否在跑)', () => {
+    let listener: ((sessionId: string, running: boolean) => void) | undefined
+    let disposed = 0
+    const opening = openSessionGateway(fakeCtx({
+      'remote': {
+        $on: (event: string, handler: (sessionId: string, running: boolean) => void) => {
+          listener = handler
+          expect(event).toBe('api-session/status')
+          return () => { disposed += 1 }
+        },
+      },
+      'remote.session': sessionNamespace(),
+      'remote.workspace': { archiveSession: async () => okResult({}) },
+    }))
+    const unsubscribe = opening.gateway!.subscribeSessionStatus(() => {})
+    expect(listener).toBeTypeOf('function')
+    listener!('s-probe', true)
+    unsubscribe()
+    expect(disposed).toBe(1)
+  })
+
   it('remote 本体缺席时退订是无操作，缺失进清单', () => {
     const opening = openSessionGateway(fakeCtx({
       'remote.session': sessionNamespace(),
       'remote.workspace': { archiveSession: async () => okResult({}) },
     }))
     expect(() => opening.gateway!.subscribeSessionErrors(() => {})).not.toThrow()
+    expect(() => opening.gateway!.subscribeSessionStatus(() => {})).not.toThrow()
     expect(opening.missing.some(name => name === 'remote')).toBe(true)
   })
 })

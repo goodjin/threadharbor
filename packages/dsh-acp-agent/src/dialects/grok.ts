@@ -8,8 +8,10 @@
  * `title` with a human activity line ("Execute `echo ...`"). The name therefore
  * has to be latched, which is what `carried?.name ||` below does.
  *
- * It is also the only one that reports token counts on the update frame's
- * `_meta`; codex and claude send them on the `session/prompt` response instead.
+ * It also keeps its token count as a running `totalTokens` on the update
+ * frame's `_meta` — a session-to-date total that cannot be split into the
+ * input/output pair a DSH usage requires, so grok turns carry no usage. codex
+ * and claude send a full breakdown on the `session/prompt` response instead.
  *
  * Transport note: grok is reached over a WebSocket whose URL carries the secret
  * as `server-key` — there is no Authorization header. That is a property of
@@ -18,7 +20,6 @@
 
 import { randomUUID } from 'node:crypto'
 import type { AcpDialect, ToolCall } from './types.ts'
-
 function record(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {}
 }
@@ -79,9 +80,12 @@ export const grokDialect: AcpDialect = {
     })
   },
 
-  readUpdateTokens(params) {
-    const total = record(params['_meta'])['totalTokens']
-    return typeof total === 'number' ? total : undefined
+  readReplyUsage() {
+    // grok never sends a usage object on the prompt reply; it keeps a running
+    // `totalTokens` on update frames' `_meta`. A total alone cannot be split
+    // into the input/output pair a DSH usage requires, so there is nothing
+    // honest to report — the projection writes no usage for grok turns.
+    return undefined
   },
 
   isContent(update) {

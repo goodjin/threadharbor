@@ -29,7 +29,8 @@ describe('judgeProbe', () => {
   })
 
   it('到点没回复也没报错就是卡住', () => {
-    expect(judgeProbe({ kind: 'silent', ms: 60_000 }, { slowAfterMs: 15_000 })).toEqual({ kind: 'hung', ms: 60_000 })
+    expect(judgeProbe({ kind: 'silent', ms: 60_000 }, { slowAfterMs: 15_000 })).toEqual({ kind: 'hung', ms: 60_000, started: false })
+    expect(judgeProbe({ kind: 'silent', ms: 60_000, started: true }, { slowAfterMs: 15_000 })).toEqual({ kind: 'hung', ms: 60_000, started: true })
   })
 
   it('根本没问出去就是连不上，带原因', () => {

@@ -12,8 +12,10 @@
  *                codex        → update.rawOutput.formatted_output (no content)
  *   models       grok/codex → session/new .models.availableModels
  *                claude      → session/new .configOptions[id=model].options
- *   turn tokens  grok  → session/update params._meta.totalTokens
- *                codex/claude → the session/prompt *response* (not an update)
+ *   turn tokens  codex/claude → the session/prompt *response*'s `usage`
+ *                grok        → nothing usable: only a running total on
+ *                              session/update ._meta, which cannot be split
+ *                              into the input/output pair a DSH usage needs
  */
 
 /** A tool call as this agent reported it, folded across its update frames. */
@@ -28,6 +30,24 @@ export type ToolCall = {
   status?: string | undefined
   /** Output text harvested from whichever field this agent uses. */
   output: string
+}
+
+/**
+ * One turn's token usage, in the bucket names DSH's own session events use.
+ *
+ * Shaped after the reference `TokenUsage`: `inputTokens` and `outputTokens`
+ * are the required pair; every other bucket is present only when the agent
+ * actually reported it. A field the agent did not report must stay absent —
+ * a `0` in its place is a fabricated number, and DSH's token accounting
+ * reads these fields as facts.
+ */
+export type TurnUsage = {
+  readonly inputTokens: number
+  readonly outputTokens: number
+  readonly cacheReadTokens?: number
+  readonly cacheWriteTokens?: number
+  readonly reasoningTokens?: number
+  readonly totalTokens?: number
 }
 
 export interface AcpDialect {
@@ -51,8 +71,16 @@ export interface AcpDialect {
   /** The model list carried by a `session/new` reply. */
   readModels(reply: unknown): readonly { id: string; name: string; description?: string }[]
 
-  /** Token counts carried by a `session/update` frame, if any. */
-  readUpdateTokens(params: Record<string, unknown>): number | undefined
+  /**
+   * The token usage carried by a turn's `session/prompt` reply, if any.
+   *
+   * The reply frame reaches the projection among the turn's frames, so this
+   * reads it there. Where the usage lives — and whether the agent reports one
+   * at all — is agent-specific: codex and claude put a full breakdown on the
+   * reply, grok only keeps a running total on its update frames, which cannot
+   * be split into the required input/output pair and therefore yields nothing.
+   */
+  readReplyUsage(result: unknown): TurnUsage | undefined
 
   /** True when this update frame is conversation content rather than chatter. */
   isContent(update: Record<string, unknown>): boolean

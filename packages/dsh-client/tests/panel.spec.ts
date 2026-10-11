@@ -160,6 +160,45 @@ describe('面板渲染', () => {
     expect(html).toContain('正常')
     expect(html).toContain('归档失败：workspace is stopping')
   })
+
+  it('结论是行里的主角：状态词单独着色，数字用等宽数字，建议收进折叠', () => {
+    const html = renderToString(createElement(AgentRow, {
+      presetId: 'acp-grok',
+      label: 'Grok',
+      verdict: { phase: 'done', verdict: { kind: 'slow', ms: 20_000 } } satisfies ProbeRunState,
+      onProbe: () => {},
+    }))
+    expect(html).toContain('data-verdict-word=""')
+    expect(html).toContain('data-verdict-tone="slow"')
+    expect(html).toContain('data-verdict-detail=""')
+    expect(html).toContain('20000 ms')
+    expect(html).toContain('<details')
+    expect(html).toContain('再探测一次')
+  })
+
+  it('说明性文字默认折叠：自愈说明收进 details', () => {
+    const html = renderToString(createElement(AgentPanel, {
+      agents: fakeAgents([{ presetId: 'acp-grok', label: 'Grok' }]),
+      probe: fakeProbe().probe,
+      rollUp: fakeRollUpSection(),
+    }))
+    expect(html).toContain('data-self-heal-note=""')
+    expect(html).toContain('<details')
+    expect(html).toContain('自动重连')
+  })
+
+  it('身份表单收进折叠，头部只留一行身份', () => {
+    const html = renderToString(createElement(AgentPanel, {
+      agents: fakeAgents([]),
+      probe: fakeProbe().probe,
+      rollUp: fakeRollUpSection(),
+    }))
+    expect(html).toContain('data-identity-line=""')
+    expect(html).toContain('本机')
+    expect(html).toContain('self')
+    expect(html).toContain('（未配置，按页面来源生成）')
+    expect(html).toContain('data-identity-form=""')
+  })
 })
 
 describe('runProbe', () => {

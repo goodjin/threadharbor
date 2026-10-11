@@ -16,7 +16,7 @@ import type { AcpDialect } from '@threadharbor/dsh-acp-agent'
 
 /** A dialect is only ever read as an opaque handle by the registry. */
 const stubDialect = (id: string): AcpDialect =>
-  ({ id, foldTool: () => ({ callId: '', name: '', arguments: {} }), toolOutput: () => '', readModels: () => [], readUpdateTokens: () => undefined, isContent: () => true }) as unknown as AcpDialect
+  ({ id, foldTool: () => ({ callId: '', name: '', arguments: {} }), toolOutput: () => '', readModels: () => [], readReplyUsage: () => undefined, isContent: () => true }) as unknown as AcpDialect
 
 const CONFIG = {
   presets: {

@@ -9,8 +9,9 @@
  *   - The tool's name is in `title`, and **only on the opening frame** — later
  *     `tool_call_update`s overwrite `title` with a human activity line. That is
  *     the bug the original projection was written to avoid.
- *   - Token counts ride on the update frame's `_meta`, which is the one place
- *     codex and claude do *not* report them.
+ *   - It keeps only a running `totalTokens` on the update frame's `_meta` —
+ *     a total that cannot be split into the input/output pair DSH's usage
+ *     requires, so grok turns carry no usage at all.
  */
 
 import { readFileSync } from 'node:fs'
@@ -41,10 +42,14 @@ describe('projectTurn with the grok dialect', () => {
     expect(message.content.map(part => part.text).join('')).toBe('THREADHARBOR_TOOL_OK\n')
   })
 
-  it('reads the token count grok puts on the update frame’s _meta', () => {
+  it('writes no usage from the running total grok keeps on _meta', () => {
+    // A session-to-date total cannot be split into the input/output pair DSH's
+    // usage requires, and DSH's token projection once turned such a fragment
+    // into `NaN` — which failed every later history load of the session. No
+    // usable usage means none is written; the total is not repurposed either.
     const events = projectTurn(grok['messageWithTokens'] as AcpFrame[], { turn: 1, dialect: grokDialect })
     const message = events.find(event => event.type === 'assistant/message')!
-    expect((message.payload as { usage: { outputTokens: number } }).usage.outputTokens).toBe(21576)
+    expect((message.payload as { usage?: unknown }).usage).toBeUndefined()
   })
 
   it('drops the setup chatter grok emits before any turn content', () => {

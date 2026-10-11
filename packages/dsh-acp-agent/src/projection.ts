@@ -9,7 +9,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { AcpFrame } from './acp-client.ts'
-import type { AcpDialect, ToolCall } from './dialects/types.ts'
+import type { AcpDialect, ToolCall, TurnUsage } from './dialects/types.ts'
 
 /**
  * One packed run of deltas, as the durable message embeds it.
@@ -29,7 +29,8 @@ type Accumulator = {
   thought: readonly string[]
   text: readonly string[]
   readonly tools: Map<string, ToolCall>
-  totalTokens?: number | undefined
+  /** The turn's usage, when the agent reported one complete enough to write. */
+  usage?: TurnUsage | undefined
   /** The compacted live stream, filled in when the turn ran with streaming on. */
   stream?: readonly StreamRecord[]
 }
@@ -50,25 +51,118 @@ function assistantEvent(
   turn: number,
   step: number,
 ): ProjectionEvent {
+  // DSH's `TokenUsage` requires the input/output pair; anything less is
+  // not a usage but a fragment, and DSH's own token projection computes
+  // its uncached-input bucket straight from `usage.inputTokens` — a
+  // fragment there turned that bucket into `NaN` and made every later
+  // history load of the session fail. Optional buckets ride along only
+  // when the agent reported them; a missing report is never written as 0.
+  const usage = writableUsage(acc.usage)
   return {
     type: 'assistant/message',
-    payload: {
+    payload: withoutNonFinite({
       turn,
       step,
       message: {
         id: randomUUID(),
         role: 'assistant',
         content,
-        source: { provider: `acp-${dialect.id}`, model: dialect.id },
+        // The host's own replay validation (core/session `assertMessageEventShape`)
+        // requires a model source: `kind: 'model'` plus provider and model. A
+        // source without `kind` appends fine but fails the session at fork time.
+        source: { kind: 'model', provider: `acp-${dialect.id}`, model: dialect.id },
       },
       stream: acc.stream ?? [],
-      // The agent's own reported total, or nothing: the session log's writer
-      // rejects any property that is not lossless JSON, and an explicit
-      // `usage: undefined` is exactly that. A missing key is also the honest
-      // shape — inventing an inputTokens count is not.
-      ...(acc.totalTokens === undefined ? {} : { usage: { outputTokens: acc.totalTokens } }),
-    },
+      ...(usage === undefined ? {} : { usage }),
+    }),
   }
+}
+
+/**
+ * The usage as the session log may carry it, or nothing.
+ *
+ * The required pair must both be finite non-negative integers — that is the
+ * same bar DSH's own token meter applies before it believes a usage. One
+ * missing or broken half means the agent reported no usable usage, and a
+ * fragment must not be written: there is no honest way to fill it in.
+ */
+function writableUsage(usage: TurnUsage | undefined): TurnUsage | undefined {
+  if (usage === undefined) return undefined
+  if (!isCount(usage.inputTokens) || !isCount(usage.outputTokens)) return undefined
+  const buckets = {
+    ...optionalBucket(usage.cacheReadTokens, 'cacheReadTokens'),
+    ...optionalBucket(usage.cacheWriteTokens, 'cacheWriteTokens'),
+    ...optionalBucket(usage.reasoningTokens, 'reasoningTokens'),
+    ...optionalBucket(usage.totalTokens, 'totalTokens'),
+  }
+  return { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, ...buckets }
+}
+
+/** DSH's own bar for a believable count: a safe, finite, non-negative integer. */
+function isCount(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 0
+}
+
+/** One optional bucket, kept only when the agent reported a believable count. */
+function optionalBucket(value: number | undefined, name: keyof TurnUsage): Partial<TurnUsage> {
+  return value !== undefined && isCount(value) ? { [name]: value } : {}
+}
+
+/**
+ * The projection's last gate: a number that is not finite never reaches an
+ * event.
+ *
+ * JSON has no way to carry NaN or Infinity, but a frame value like `1e999`
+ * parses into exactly that, and the session log's writer rejects a whole
+ * event on the first unrepresentable number — one bad field would take the
+ * turn's answer down with it. This walk drops such a field instead, keeping
+ * the event; values it does not touch are returned as the same reference, so
+ * the happy path stays allocation-free.
+ */
+export function withoutNonFinite<T>(value: T): T {
+  return clean(value) === DROP ? value : (clean(value) as T)
+}
+
+/** Signals "this value cannot be written"; never escapes the module. */
+const DROP = Symbol('non-finite')
+
+function clean(value: unknown): unknown {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : DROP
+  if (Array.isArray(value)) {
+    let copy: unknown[] | undefined
+    for (let index = 0; index < value.length; index++) {
+      const item = clean(value[index])
+      if (item === DROP) { copy ??= value.slice(0, index); continue }
+      if (item !== value[index] && copy === undefined) copy = value.slice(0, index)
+      copy?.push(item)
+    }
+    return copy ?? value
+  }
+  if (typeof value === 'object' && value !== null) {
+    const source = value as Record<string, unknown>
+    let copy: Record<string, unknown> | undefined
+    for (const [key, member] of Object.entries(source)) {
+      const cleanedMember = clean(member)
+      if (cleanedMember === DROP) {
+        copy ??= {}
+        for (const [kept, keptValue] of Object.entries(source)) {
+          if (kept === key) break
+          copy[kept] = keptValue
+        }
+        continue
+      }
+      if (cleanedMember !== member && copy === undefined) {
+        copy = {}
+        for (const [kept, keptValue] of Object.entries(source)) {
+          if (kept === key) break
+          copy[kept] = keptValue
+        }
+      }
+      if (copy !== undefined) copy[key] = cleanedMember
+    }
+    return copy ?? value
+  }
+  return value
 }
 
 /**
@@ -127,12 +221,19 @@ function accumulate(frames: readonly AcpFrame[], dialect: AcpDialect): Accumulat
   const thought: string[] = []
   const text: string[] = []
   const tools = new Map<string, ToolCall>()
-  let totalTokens: number | undefined
+  let usage: TurnUsage | undefined
 
   for (const frame of frames) {
+    if (frame.method === undefined) {
+      // A reply frame — within a turn the only request this side sends is
+      // `session/prompt`, so its reply is the one frame carrying usage. The
+      // handshake replies (initialize, session/new) never reach a turn's
+      // frames: they are answered while the session is being opened.
+      if (frame.result !== undefined) usage = dialect.readReplyUsage(frame.result)
+      continue
+    }
     if (frame.method !== 'session/update') continue
-    const params = recordOf(frame.params)
-    const update = recordOf(params['update'])
+    const update = recordOf(recordOf(frame.params)['update'])
     const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
     if (kind === 'agent_thought_chunk') thought.push(textOf(update['content']))
     else if (kind === 'agent_message_chunk') text.push(textOf(update['content']))
@@ -143,11 +244,9 @@ function accumulate(frames: readonly AcpFrame[], dialect: AcpDialect): Accumulat
     } else if (!dialect.isContent(update)) {
       // chatter — setup phases, command lists, context-window updates
     }
-    const reported = dialect.readUpdateTokens(params)
-    if (reported !== undefined) totalTokens = reported
   }
 
-  return { thought, text, tools, totalTokens }
+  return { thought, text, tools, usage }
 }
 
 function contentEvents(
@@ -161,7 +260,7 @@ function contentEvents(
 ): ProjectionEvent[] {
   const { dialect, turn, step } = options
   if (options.stream !== undefined) acc.stream = options.stream
-  const { thought, text, tools, totalTokens } = acc
+  const { thought, text, tools } = acc
   const events: ProjectionEvent[] = []
   // One message per step, in the canonical native shape: the ordered blocks
   // carry the reasoning first, then the answer. Two separate messages would
@@ -176,12 +275,12 @@ function contentEvents(
   for (const tool of tools.values()) {
     events.push({
       type: 'tool/call',
-      payload: { turn, step, callId: tool.callId, name: tool.name, arguments: JSON.stringify(tool.arguments) },
+      payload: withoutNonFinite({ turn, step, callId: tool.callId, name: tool.name, arguments: JSON.stringify(tool.arguments) }),
     })
     const isError = tool.status === 'failed'
     events.push({
       type: 'tool/result',
-      payload: {
+      payload: withoutNonFinite({
         turn,
         step,
         message: {
@@ -193,7 +292,7 @@ function contentEvents(
           isError,
         },
         ...(isError ? { error: { name: 'tool', code: tool.status ?? 'failed', reason: tool.title } } : {}),
-      },
+      }),
     })
   }
   return events
@@ -202,7 +301,7 @@ function contentEvents(
 /** The user turn's own event, appended before the agent starts work. */
 export function projectUserMessage(text: string, turn: number): ProjectionEvent[] {
   return [
-    { type: 'user/message', payload: { turn, message: { id: randomUUID(), role: 'user', content: [{ type: 'text', text }], source: { source: 'user' } } } },
+    { type: 'user/message', payload: withoutNonFinite({ turn, message: { id: randomUUID(), role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } } }) },
     { type: 'turn/start', payload: { turn } },
   ]
 }

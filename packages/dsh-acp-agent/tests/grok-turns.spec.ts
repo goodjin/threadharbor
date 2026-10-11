@@ -48,12 +48,16 @@ describe('grok turns over captured frames', () => {
     expect(blocks.map(b => b.type)).toEqual(['reasoning', 'text'])
   })
 
-  it('keeps the token count grok reports in _meta', () => {
+  it('writes no usage from the total grok reports in _meta', () => {
+    // grok's only token number is a session-to-date total. A usage needs the
+    // input/output pair; writing the total as one side of it is what once made
+    // DSH's token projection compute `NaN` and refuse the whole session
+    // history, so an unusable total means no usage is written.
     const events = turn([
       update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'PONG' } }, { totalTokens: 21576 }),
     ])
     const message = events.find(e => e.type === 'assistant/message')!
-    expect((message.payload as { usage: { outputTokens: number } }).usage.outputTokens).toBe(21576)
+    expect((message.payload as { usage?: unknown }).usage).toBeUndefined()
   })
 
   it('keeps the tool name from the opening call, not the human title of an update', () => {

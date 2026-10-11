@@ -22,11 +22,6 @@ export type AgentDescriptor = {
   readonly label: string
 }
 
-/** One event from a session's log, narrowed to what a probe needs to see. */
-export type WireEvent = {
-  readonly type: string
-}
-
 /**
  * The calls a browser-side probe needs, all of them DSH's own.
  *
@@ -38,12 +33,16 @@ export type SessionGateway = {
   listAgents(): Promise<GatewayResult<readonly AgentDescriptor[]>>
   /** Hear `api-session/error`; returns the unsubscribe function. */
   subscribeSessionErrors(listener: (sessionId: string, message: string) => void): () => void
+  /**
+   * Hear `api-session/status` — the host's own (sessionId, running) signal,
+   * emitted while an agent takes and finishes a turn. Returns the unsubscribe
+   * function.
+   */
+  subscribeSessionStatus(listener: (sessionId: string, running: boolean) => void): () => void
   /** Create a session; the preset rides along, which is what mounts the agent. */
   createSession(request: { readonly agentPreset: string }): Promise<GatewayResult<{ readonly sessionId: string }>>
   /** One shortest message, queued. */
   sendPrompt(request: { readonly requestId: string; readonly sessionId: string; readonly text: string }): Promise<GatewayResult<unknown>>
-  /** The session's log from the beginning, newest events included. */
-  readRecentEvents(request: { readonly sessionId: string; readonly maxMessages: number }): Promise<GatewayResult<readonly WireEvent[]>>
   /**
    * End the session and its running work together.
    *
@@ -88,7 +87,10 @@ const isFunction = (value: unknown): value is AnyFn => typeof value === 'functio
 function methodOf(holder: unknown, name: string): AnyFn | undefined {
   if (!isRecord(holder)) return undefined
   const value = holder[name]
-  return isFunction(value) ? value : undefined
+  // Bound to its owner: DSH's own `remote.$on` reads instance state, and a
+  // method called detached from the object it came off dies on `this` before
+  // doing anything ("Cannot read properties of undefined (reading 'events')").
+  return isFunction(value) ? (value as (...args: unknown[]) => unknown).bind(holder) as AnyFn : undefined
 }
 
 /** Read `service.method` off the context, or say it was missing. */
@@ -174,20 +176,6 @@ const sessionValue = (value: unknown): { readonly sessionId: string } | undefine
   return typeof sessionId === 'string' ? { sessionId } : undefined
 }
 
-const eventsValue = (value: unknown): readonly WireEvent[] | undefined => {
-  const record = objectValue(value)
-  const records = record?.['records']
-  if (!Array.isArray(records)) return undefined
-  const events: WireEvent[] = []
-  for (const item of records) {
-    const event = objectValue(item)?.['event']
-    const type = objectValue(event)?.['type']
-    if (typeof type !== 'string') return undefined
-    events.push({ type })
-  }
-  return events
-}
-
 const acpPrefix = 'acp:'
 
 /** Split an `acp:<presetId>` catalog id, or say it is not one of ours. */
@@ -239,12 +227,11 @@ export function openSessionGateway(ctx: ServiceLookup): GatewayOpening {
     return undefined
   }
 
-  // Required: the four calls the probe itself is made of.
+  // Required: the calls the probe itself is made of.
   const sessionCreate = lookup(ctx, 'remote.session', 'create').fn ?? note('remote.session.create')
   const sessionPrompt = lookup(ctx, 'remote.session', 'prompt').fn ?? note('remote.session.prompt')
-  const sessionPage = lookup(ctx, 'remote.session', 'page').fn ?? note('remote.session.page')
   const archiveSession = lookup(ctx, 'remote.workspace', 'archiveSession').fn ?? note('remote.workspace.archiveSession')
-  // Optional: without the error event the probe cannot tell 连不上 from 卡住
+  // Optional: without the host's events the probe cannot tell 连不上 from 卡住
   // and says so; without the catalog the agent list is a failure, not a crash.
   const remoteOn = lookup(ctx, 'remote', '$on').fn
   if (remoteOn === undefined) note('remote')
@@ -266,7 +253,7 @@ export function openSessionGateway(ctx: ServiceLookup): GatewayOpening {
       }
 
   const gateway: SessionGateway | undefined = sessionCreate !== undefined
-    && sessionPrompt !== undefined && sessionPage !== undefined && archiveSession !== undefined
+    && sessionPrompt !== undefined && archiveSession !== undefined
     ? {
         listAgents: async () => {
           if (modelCatalog === undefined) {
@@ -282,6 +269,11 @@ export function openSessionGateway(ctx: ServiceLookup): GatewayOpening {
         subscribeSessionErrors: listener => {
           if (remoteOn === undefined) return () => {}
           const dispose = remoteOn('api-session/error', listener)
+          return isFunction(dispose) ? dispose : () => {}
+        },
+        subscribeSessionStatus: listener => {
+          if (remoteOn === undefined) return () => {}
+          const dispose = remoteOn('api-session/status', listener)
           return isFunction(dispose) ? dispose : () => {}
         },
         createSession: async request => {
@@ -304,21 +296,6 @@ export function openSessionGateway(ctx: ServiceLookup): GatewayOpening {
             return resultOf(raw, objectValue, 'session.prompt')
           } catch (error) {
             return { ok: false as const, error: { code: 'gateway/call', message: `session.prompt: ${String(error)}` } }
-          }
-        },
-        readRecentEvents: async request => {
-          const payload = {
-            address: { kind: 'session' as const, sessionId: request.sessionId },
-            // The probe session is brand new; reading from the beginning is the
-            // whole history, and -1 is how the client asks for it.
-            throughSeq: -1,
-            maxMessages: request.maxMessages,
-          }
-          try {
-            const raw: unknown = await awaited(sessionPage!(payload))
-            return resultOf(raw, eventsValue, 'session.page')
-          } catch (error) {
-            return { ok: false as const, error: { code: 'gateway/call', message: `session.page: ${String(error)}` } }
           }
         },
         archiveSession: async request => {

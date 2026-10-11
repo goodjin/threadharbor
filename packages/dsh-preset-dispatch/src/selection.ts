@@ -1,13 +1,24 @@
 /**
- * Whether the session's chosen model is one this row serves.
+ * Whether the session's chosen model is one this row serves — and what the
+ * preset and the model mean for each other.
  *
  * The takeover replaces the whole step, so the loop never fires a model request
  * and nothing in the host reacts to the picker — the selection would sit unused
- * while the preset's agent answers anyway, which is exactly the "the interface
- * shows one thing, the session does another" state this module prevents. The
- * durable `modelSelection` projection records what was picked but not yet used
- * (`pending`); the replaced step reads it at turn time, the one moment a turn
- * can still decide who should answer.
+ * while the preset's agent answers anyway. DSH's own composition keeps the
+ * preset and the model independent: the preset adds capabilities, the model
+ * chooses the route, and a native session may freely run preset X with model Y
+ * from any provider. The takeover cannot ask the native loop to route, so the
+ * honest equivalent of that independence is that the two picks follow each
+ * other instead of colliding:
+ *
+ *   - a model this preset serves is used as-is;
+ *   - the host default, when it names some other route, means "no opinion" —
+ *     the preset answers with its own default (a session created on a preset
+ *     shows the host default in its composer without any pick ever made);
+ *   - an explicit pick this preset cannot serve refuses the turn, and the row
+ *     wires the two together so the refusal stays the rare, honest fallback
+ *     (`plugin.ts` follows a preset pick with this preset's first model, and a
+ *     model pick with the preset that serves it).
  *
  * The projection's shape is verified against `reference/deepseek-harness` @
  * `5badb15009` (`api/session-controller/src/model-selection-projection.ts`):
@@ -29,14 +40,14 @@ export type SelectionLike = {
 
 /** What one turn should do about the session's chosen model. */
 export type SelectionDecision =
-  /** Nothing pending — answer with whatever the preset drives. */
+  /** Nothing pending that names a model — answer with whatever the preset drives. */
   | { readonly kind: 'none' }
-  /** The pending selection names a model this preset serves; use it. */
+  /** The selection names a model this preset serves; use it. */
   | { readonly kind: 'own'; readonly modelId: string }
   /**
-   * The pending selection names a model this preset does not serve. The turn is
-   * refused with the reason: answering anyway would put one agent's words under
-   * another model's name.
+   * The selection names a model nothing here can serve the session with. The
+   * turn is refused with the reason: answering anyway would put one agent's
+   * words under another model's name.
    */
   | { readonly kind: 'refuse'; readonly reason: string }
 
@@ -47,6 +58,9 @@ export type SelectionConfig = {
   /** The models this preset's agent serves, as configured. */
   readonly models: readonly { readonly id: string }[]
 }
+
+/** Where a turn's effective model choice came from. */
+export type SelectionSource = 'picker' | 'host-default'
 
 /**
  * Read the pending selection out of a projection state value.
@@ -73,42 +87,60 @@ export function selectionOf(value: unknown): SelectionLike | undefined {
   return { provider: selection['provider'], model: selection['model'] }
 }
 
-/** Where a turn's effective model choice came from, as the refusal names it. */
-export type SelectionSource = 'picker' | 'host-default'
-
 /**
  * Decide what this turn does about the session's chosen model.
  *
- * The provider route decides: a route can only be this preset's, another ACP
- * preset's, or a native one. Only the first can be served here, and only for a
+ * The provider route decides: a route can be this preset's, another ACP
+ * preset's, or a native one. Only the first is served here, and only for a
  * model the preset's list actually names — the picker shows every catalog
  * group, so "provider matches" alone would still let a model this agent never
- * advertised through.
+ * advertised through. The host default is the one soft case: nobody expressed
+ * a wish, so the preset answers with its own default rather than refusing.
  */
 export function decideSelection(
   config: SelectionConfig,
   selection: SelectionLike,
   source: SelectionSource = 'picker',
 ): SelectionDecision {
-  if (selection.provider === routeOf(config.presetId)
-    && config.models.some(model => model.id === selection.model)) {
-    return { kind: 'own', modelId: selection.model }
+  if (selection.provider === routeOf(config.presetId)) {
+    const own = config.models.find(model => model.id === selection.model)
+    if (own !== undefined) return { kind: 'own', modelId: own.id }
+    // The host default naming this route with a model the list has dropped is
+    // still "no opinion": nothing here was picked on purpose.
+    if (source === 'host-default') return { kind: 'none' }
+    return { kind: 'refuse', reason: staleModelMessage(config, selection) }
   }
-  return { kind: 'refuse', reason: refusalMessage(config, selection, source) }
+  // The host default was never picked by anyone; the preset's own default
+  // answers. This is the state every fresh session on a preset starts in.
+  if (source === 'host-default') return { kind: 'none' }
+  if (selection.provider.startsWith(ROUTE_PREFIX)) {
+    return { kind: 'refuse', reason: otherPresetMessage(config, selection) }
+  }
+  return { kind: 'refuse', reason: nativeModelMessage(config, selection) }
 }
 
 function routeOf(presetId: string): string {
   return `${ROUTE_PREFIX}${presetId}`
 }
 
-function refusalMessage(config: SelectionConfig, selection: SelectionLike, source: SelectionSource): string {
+function staleModelMessage(config: SelectionConfig, selection: SelectionLike): string {
   const served = config.models.length === 0
     ? '该预设没有声明任何模型'
     : `该预设提供的模型：${config.models.map(model => model.id).join('、')}`
-  const origin = source === 'picker'
-    ? `模型选择器里选中的 ${selection.provider} / ${selection.model}`
-    : `这台主机的默认模型 ${selection.provider} / ${selection.model}`
-  return `这个会话运行在 ${config.presetId} 预设上，由它的外部 agent 应答；${origin} `
-    + `不由这个预设提供，本回合不会执行——否则界面显示的和实际回答的会是两个模型。`
-    + `请改选 ${served}；或者把会话建在提供该模型的预设上。`
+  return `模型选择器里选中的 ${selection.provider} / ${selection.model} 不由 ${config.presetId} 预设提供`
+    + `（${served}），本回合不会用它执行。请改选列出的模型。`
+}
+
+function otherPresetMessage(config: SelectionConfig, selection: SelectionLike): string {
+  const target = selection.provider.slice(ROUTE_PREFIX.length)
+  return `模型选择器里选中的 ${selection.provider} / ${selection.model} 由另一个预设（${target}）提供，`
+    + `而本会话仍运行在 ${config.presetId} 预设上。自动切换没有发生：${target} 可能不在本机，`
+    + `或本会话已开始、预设无法再换。请把会话切到 ${target}，或新建会话时选择它。`
+}
+
+function nativeModelMessage(config: SelectionConfig, selection: SelectionLike): string {
+  return `这个会话运行在 ${config.presetId} 预设上，由它的外部 agent 应答；模型选择器里选中的`
+    + ` ${selection.provider} / ${selection.model} 是原生模型，不由任何已挂载的 acp 预设提供，`
+    + `已开始的会话也不能交回原生 agent——否则界面显示的和实际回答的会是两个模型。`
+    + `要使用原生模型，请新建一个不带这个预设的会话。`
 }

@@ -1,12 +1,15 @@
 /*
  * The 各主机 panel's skin.
  *
- * Built only from DSH's own design tokens (--dsw-*): the panel sits inside
- * DSH's shell, so hard-coded colors would disagree with whatever theme the
- * shell is in. Class names are CSS modules; the one plain-DOM subtree (the
- * roll-up, rendered by dsh-host-federation without React) is styled through
- * :global() rules scoped under the panel root, keyed by the data attributes
- * that renderer already emits.
+ * Hierarchy first: the verdict word and its measured number are the loudest
+ * things on the page, everything explanatory is folded into a <details>, and
+ * each section is one card so the page reads as two groups instead of one
+ * long column. Built only from DSH's own design tokens (--dsw-*): the panel
+ * sits inside DSH's shell, so hard-coded colors would disagree with whatever
+ * theme the shell is in. Class names are CSS modules; the one plain-DOM
+ * subtree (the roll-up, rendered by dsh-host-federation without React) is
+ * styled through :global() rules scoped under the panel root, keyed by the
+ * data attributes that renderer already emits.
  */
 
 .root {
@@ -14,26 +17,41 @@
   color: var(--dsw-alias-label-primary);
   font-size: 13px;
   line-height: 1.6;
-  padding: 20px 24px 32px;
-  max-width: 720px;
+  /* Content-adaptive: as tall as its content, never stretched over the whole
+     main area; the scroll only engages when the shell really constrains. */
+  height: auto;
+  max-height: 100%;
+  max-width: 640px;
   margin: 0 auto;
-  overflow: auto;
-  height: 100%;
+  padding: 16px 4px 24px;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  gap: 28px;
+  gap: 14px;
+  overflow: auto;
 }
 
-.section {
+/* One card per section: the group boundary the page used to lack. */
+.card {
+  border: 1px solid var(--dsw-alias-settings-card-stroke);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-settings-card-fill);
+  padding: 12px 16px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
+}
+
+.cardHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
 }
 
 .title {
   margin: 0;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
   line-height: 1.4;
 }
@@ -44,18 +62,36 @@
   font-size: 12px;
 }
 
-.card {
-  border: 1px solid var(--dsw-alias-settings-card-stroke);
-  border-radius: var(--dsw-radius-md);
-  background: var(--dsw-alias-settings-card-fill);
-  overflow: hidden;
+/* Explanatory text lives folded away by default. */
+.noteDetails {
+  margin: 0;
+}
+
+.noteDetails > .note {
+  margin-top: 6px;
+}
+
+.summary {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.summary:hover {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.agentList {
+  display: flex;
+  flex-direction: column;
 }
 
 .agentRow {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 12px 16px;
+  padding: 10px 0;
 }
 
 .agentRow + .agentRow {
@@ -90,7 +126,7 @@
   color: var(--dsw-alias-label-primary);
   font: inherit;
   font-size: 12px;
-  padding: 4px 12px;
+  padding: 3px 12px;
   cursor: pointer;
 }
 
@@ -111,36 +147,83 @@
   color: var(--dsw-alias-label-caption);
 }
 
-.stateOk {
-  composes: stateLine;
-  color: var(--dsw-static-green-500);
-}
-
-.stateWarn {
-  composes: stateLine;
-  color: var(--dsw-alias-state-warn-label);
-}
-
 .stateBad {
   composes: stateLine;
   color: var(--dsw-alias-state-error-primary);
 }
 
-.identityLine {
-  margin: 0;
-  font-size: 12px;
+/*
+ * The verdict is the row's payload: a state word with its own color and a
+ * leading dot, the measured number beside it in tabular figures, the advice
+ * one click away.
+ */
+.verdictLine {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.verdictWord {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.verdictWord::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  margin-right: 6px;
+  vertical-align: 1px;
+}
+
+.verdictWord[data-verdict-tone='ok'] {
+  color: var(--dsw-static-green-500);
+}
+
+.verdictWord[data-verdict-tone='slow'] {
+  color: var(--dsw-alias-state-warn-label);
+}
+
+.verdictWord[data-verdict-tone='hung'],
+.verdictWord[data-verdict-tone='unreachable'] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.verdictDetail {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.verdictMore {
+  min-width: 0;
+}
+
+.verdictAdvice {
+  margin: 6px 0 0;
   color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+  max-width: 52ch;
+}
+
+.identityLine {
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .identityForm {
   display: grid;
-  grid-template-columns: minmax(160px, 220px) minmax(160px, 220px) auto;
+  grid-template-columns: minmax(150px, 200px) minmax(150px, 200px) auto;
   gap: 10px;
   align-items: end;
-  padding: 12px 16px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: var(--dsw-radius-md);
-  background: var(--dsw-alias-bg-layer-2);
+  margin-top: 10px;
 }
 
 .field {
@@ -170,22 +253,23 @@
 .notices {
   margin: 0;
   padding-left: 18px;
-  color: var(--dsw-alias-label-caption);
+  color: var(--dsw-alias-label-tertiary);
   font-size: 12px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }
 
 /*
  * The roll-up subtree is plain DOM from dsh-host-federation; these rules reach
  * it by the data attributes it already carries, so the renderer stays free of
- * styling while the panel keeps one coherent look.
+ * styling while the panel keeps one coherent look. Each host is its own small
+ * card, so two hosts read as two groups — never as one stretched table.
  */
 .rollupHost {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 
 .rollupHost :global([data-rollup]) > p:global([data-empty]) {
@@ -196,12 +280,13 @@
 
 .rollupHost :global([data-host-section]) {
   margin: 0;
-  padding: 12px 16px;
+  padding: 10px 12px;
   border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: var(--dsw-radius-md);
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-layer-1);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
 .rollupHost :global([data-host-section]) h3:global([data-self]) {
@@ -219,7 +304,7 @@
 .rollupHost :global([data-project-block]) {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 
 .rollupHost :global([data-project-block]) h4:global([data-project]) {
@@ -235,10 +320,10 @@
   font: inherit;
   font-size: 12px;
   color: var(--dsw-alias-label-primary);
-  background: var(--dsw-alias-bg-layer-1);
+  background: var(--dsw-alias-bg-layer-2);
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: var(--dsw-radius-sm);
-  padding: 5px 10px;
+  padding: 4px 10px;
   cursor: pointer;
 }
 

@@ -24,8 +24,8 @@ export type ProbeVerdict =
   | { readonly kind: 'ok'; readonly ms: number }
   /** Answered, but slower than this agent is allowed to be. */
   | { readonly kind: 'slow'; readonly ms: number }
-  /** No answer within the deadline. */
-  | { readonly kind: 'hung'; readonly ms: number }
+  /** No answer within the deadline. `started` says the agent picked the work up and never finished. */
+  | { readonly kind: 'hung'; readonly ms: number; readonly started: boolean }
   /** Could not even reach it: wrong address, nothing listening, bad credentials. */
   | { readonly kind: 'unreachable'; readonly reason: string }
 
@@ -33,8 +33,12 @@ export type ProbeVerdict =
 export type ProbeEvidence =
   /** The agent answered; `ms` is how long the answer took. */
   | { readonly kind: 'replied'; readonly ms: number }
-  /** The deadline passed with no answer and no error. */
-  | { readonly kind: 'silent'; readonly ms: number }
+  /**
+   * The deadline passed with no answer and no error. `started` says whether
+   * the host ever reported the agent picking the work up — the difference
+   * between "took the turn and never finished" and "never moved at all".
+   */
+  | { readonly kind: 'silent'; readonly ms: number; readonly started?: boolean }
   /** The probe could not ask: creation, admission or the session itself failed. */
   | { readonly kind: 'failed'; readonly reason: string }
 
@@ -65,7 +69,7 @@ export function judgeProbe(evidence: ProbeEvidence, thresholds: ProbeThresholds)
         ? { kind: 'slow', ms: evidence.ms }
         : { kind: 'ok', ms: evidence.ms }
     case 'silent':
-      return { kind: 'hung', ms: evidence.ms }
+      return { kind: 'hung', ms: evidence.ms, started: evidence.started ?? false }
     case 'failed':
       return { kind: 'unreachable', reason: evidence.reason }
   }
@@ -109,8 +113,12 @@ export function describeVerdict(verdict: ProbeVerdict): VerdictDisplay {
       return {
         tone: 'hung',
         headline: '卡住',
-        detail: `${verdict.ms} ms 内无回应`,
-        advice: '到点没有回应——agent 多半没在工作。去主机上查看这个 agent 的进程和日志；连接如果断了，主机会在下一次对话时自动重连。',
+        detail: verdict.started
+          ? `${verdict.ms} ms 内开了工但没有完成`
+          : `${verdict.ms} ms 内无回应`,
+        advice: verdict.started
+          ? 'agent 领了这轮对话但一直没交回——多半卡在它那一侧。去主机上看这个 agent 的进程和日志；连接如果断了，主机会在下一次对话时自动重连。'
+          : '到点没有动静——agent 多半没在工作。去主机上查看这个 agent 的进程和日志；连接如果断了，主机会在下一次对话时自动重连。',
       }
     case 'unreachable':
       return {

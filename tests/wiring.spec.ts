@@ -17,7 +17,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 const PACKAGES = ['dsh-acp-agent', 'dsh-client', 'dsh-host-federation', 'dsh-preset-dispatch'] as const
 
@@ -43,8 +43,6 @@ const ROOTS = [
 const KNOWN_UNWIRED: Readonly<Record<string, string>> = {
   'packages/dsh-preset-dispatch/src/service.ts':
     '早期入口，职能与 entry.ts 重叠。模型目录注册已迁到真机路径（plugin.ts 挂载 registerCatalog），此文件只剩 barrel 导出与测试在用；接线检查把它列为配置字段消费方，删它必须先改那道检查。清掉条件：确认没有外部包再调用 attachAcpDispatch，并从配置消费检查的文件清单移除后整体删除。',
-  'packages/dsh-client/src/client/RollUpPanel.tsx':
-    '跨主机汇总面板的 React 组件。库本身可达，但组装（设置来源 + 会话来源）没完成，所以没有挂它。',
 }
 
 function packageExports(pkg: string): Record<string, unknown> {
@@ -53,10 +51,17 @@ function packageExports(pkg: string): Record<string, unknown> {
   return (JSON.parse(readFileSync(file, 'utf8')) as { exports?: Record<string, unknown> }).exports ?? {}
 }
 
-/** Resolve one import specifier to a file inside this repo, or null. */
-function resolveSpecifier(pkg: string, spec: string): string | null {
+/**
+ * Resolve one import specifier to a file inside this repo, or null.
+ *
+ * Relative specifiers resolve against the importing file's own directory, and
+ * `join` is what makes `./` and `../` both land right — a hand-stripped prefix
+ * (slice(2)) silently broke every `../` hop, and resolving against `src/`
+ * made subdirectory modules look reachable only through the barrel.
+ */
+function resolveSpecifier(pkg: string, spec: string, fromDir: string): string | null {
   if (spec.startsWith('.')) {
-    const base = join('packages', pkg, 'src', spec.slice(2))
+    const base = join(fromDir, spec)
     const candidates = /\.tsx?$/.test(base)
       ? [base]
       : [`${base}.ts`, `${base}.tsx`, join(base, 'index.ts')]
@@ -82,8 +87,9 @@ function reachableFromHost(): Set<string> {
     if (seen.has(file) || !existsSync(file)) continue
     seen.add(file)
     const pkg = file.split('/')[1]
+    const fromDir = dirname(file)
     for (const match of readFileSync(file, 'utf8').matchAll(imports)) {
-      const target = resolveSpecifier(pkg, match[1])
+      const target = resolveSpecifier(pkg, match[1], fromDir)
       if (target !== null) queue.push(target)
     }
   }
