@@ -32,6 +32,8 @@ import { presetsForHost } from './host-filter.ts'
 import { makeContentWriter } from './content-writer.ts'
 import { decideSelection, pendingSelectionOf, selectionOf } from './selection.ts'
 import type { SelectionSource } from './selection.ts'
+import { switchDrivenSession } from './switch-mount.ts'
+import { switchShared } from './switch-shared.ts'
 import type { AcpPresetConfig } from './registry.ts'
 import type { AcpDialect } from '@threadharbor/dsh-acp-agent'
 import { projectStepContent } from '@threadharbor/dsh-acp-agent'
@@ -44,6 +46,15 @@ const Model = Schema.object({
   id: Schema.string().required(),
   name: Schema.string().required(),
   description: Schema.string(),
+  /**
+   * The model's context window in tokens, when the operator declares it.
+   *
+   * The only number a mid-conversation switch may refuse on: the handover
+   * compares the conversation's size against the target's window, and a
+   * window nobody declared never refuses — the planner refuses only on a
+   * number the target actually claims.
+   */
+  contextWindow: Schema.number(),
 })
 
 export const Config: Schema<Config> = Schema.object({
@@ -90,7 +101,7 @@ export type Config = {
   model?: string
   mode?: string
   cwd?: string
-  models?: { id: string; name: string; description?: string }[]
+  models?: { id: string; name: string; description?: string; contextWindow?: number }[]
   hosts?: string[]
   hostId?: string
 }
@@ -201,7 +212,10 @@ export function apply(ctx: unknown, config: Config): void {
   const defaultModel = host.get?.('agentDefaultModel') as
     | { currentSelection?(this: unknown): unknown }
     | undefined
-  const turnModel = (agent: AgentLike): TurnModelDecision => {
+  const turnModel = async (
+    agent: AgentLike,
+    decision: { readonly messages: readonly unknown[] },
+  ): Promise<TurnModelDecision> => {
     const session = agent.session
     // The picker's explicit pick for this session comes first.
     const stateOf = projections?.stateOf
@@ -218,7 +232,30 @@ export function apply(ctx: unknown, config: Config): void {
       source = 'host-default'
     }
     if (selection === undefined) return { kind: 'none' }
-    return decideSelection({ presetId: config.presetId, models: config.models ?? [] }, selection, source)
+    const decided = decideSelection({ presetId: config.presetId, models: config.models ?? [] }, selection, source)
+    if (decided.kind !== 'refuse') return decided
+    // A pick this preset cannot serve. When it names ANOTHER preset's model,
+    // and that preset is mounted on this host, this is the §9.2 switch: it is
+    // carried out here, before this turn runs anything, as a new session with
+    // the whole conversation and this question. Picks of native models are not
+    // a preset switch — the refusal already says what to do about those.
+    if (!selection.provider.startsWith('acp:')) return decided
+    const target = selection.provider.slice('acp:'.length)
+    if (target === config.presetId) return decided
+    if (switchShared.modelsOf(target).length === 0) return decided
+    return switchDrivenSession({
+      ctx: host as object,
+      shared: switchShared,
+      presetId: config.presetId,
+      target,
+      selection,
+      agent,
+      decision,
+      report: message => {
+        host.logger?.warn(message)
+        process.stderr.write(`[threadharbor] ${message}\n`)
+      },
+    })
   }
 
   // Where a permission request goes. The row must not answer these itself:

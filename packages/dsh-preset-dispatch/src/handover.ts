@@ -12,6 +12,85 @@
  * stated — a silent truncation is the one outcome this refuses to produce.
  */
 
+/**
+ * One message of the conversation being handed over, flattened to what a
+ * prompt can carry.
+ *
+ * Only the conversation's own words travel: system instructions belong to the
+ * target's own composition, and tool traffic is the old agent's scratch work —
+ * carrying it would present one agent's tool calls as another's history.
+ */
+export type HandoverMessage = {
+  readonly role: 'user' | 'assistant' | 'other'
+  readonly text: string
+}
+
+/** Read one content block's text, or nothing when it carries none. */
+function textBlockOf(block: unknown): string {
+  if (typeof block === 'string') return block
+  const record = (typeof block === 'object' && block !== null ? block : {}) as { type?: unknown; text?: unknown }
+  if (record['type'] !== 'text' || typeof record['text'] !== 'string') return ''
+  return record['text']
+}
+
+/** Flatten one raw message's content — a string or a block array — to its text. */
+function textOfMessage(message: unknown): string {
+  const record = (typeof message === 'object' && message !== null ? message : {}) as { content?: unknown }
+  const content = record['content']
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content.map(textBlockOf).filter(text => text !== '').join('\n')
+}
+
+/**
+ * Flatten the conversation a request or a session log carries into handover
+ * messages.
+ *
+ * Roles other than user and assistant (system, tool) read as `other`; the
+ * assembler drops them. Anything unshaped reads as empty and is dropped the
+ * same way — a handover carries what is actually there, never a guess.
+ */
+export function messagesOf(raw: readonly unknown[] | undefined): readonly HandoverMessage[] {
+  if (raw === undefined) return []
+  const messages: HandoverMessage[] = []
+  for (const message of raw) {
+    const role = (typeof message === 'object' && message !== null ? message : {}) as { role?: unknown }
+    const kind = role['role']
+    const text = textOfMessage(message)
+    if (text === '') continue
+    messages.push({
+      role: kind === 'user' || kind === 'assistant' ? kind : 'other',
+      text,
+    })
+  }
+  return messages
+}
+
+/**
+ * Assemble the messages into the text that primes a new conversation.
+ *
+ * The block says plainly what it is and what it is for: the receiving agent is
+ * being handed a conversation it did not take part in, and the question that
+ * follows is addressed to it. The roles are named in the text, so a model that
+ * has never heard of this harness still reads the exchange correctly.
+ */
+export function assembleHandover(messages: readonly HandoverMessage[]): string {
+  const labelOf: Readonly<Record<HandoverMessage['role'], string>> = {
+    user: '用户',
+    assistant: '助手',
+    other: '其他',
+  }
+  const lines = messages.map(message => `【${labelOf[message.role]}】${message.text}`)
+  return [
+    `以下是一次会话切换时完整移交的此前对话记录，共 ${String(messages.length)} 条。`
+      + '请把这段记录当作已经发生过的上下文，并回答记录之后的问题。',
+    '',
+    ...lines,
+    '',
+    '——记录结束——',
+  ].join('\n')
+}
+
 export type HandoverInput = {
   /** Size of the conversation being handed over. */
   readonly historyTokens: number

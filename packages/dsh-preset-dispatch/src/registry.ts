@@ -26,9 +26,16 @@ export type AcpPresetConfig = {
    *
    * Declared rather than probed: probing needs the agent to be running, and the
    * picker has to render before anyone has opened a session. An absent list
-   * means the agent offers nothing here yet.
+   * means the agent offers nothing here yet. `contextWindow`, when declared,
+   * is the only number a switch may refuse on — a window nobody declared never
+   * refuses a handover.
    */
-  readonly models?: readonly { readonly id: string; readonly name: string; readonly description?: string }[]
+  readonly models?: readonly {
+    readonly id: string
+    readonly name: string
+    readonly description?: string
+    readonly contextWindow?: number
+  }[]
   /**
    * Hosts this preset is offered on.
    *
@@ -107,6 +114,18 @@ export type PresetTableOptions = {
    * a caller that can log passes a sink here so a self-heal stays visible.
    */
   readonly onDropped?: (event: SessionDropEvent) => void
+  /**
+   * Handed-over conversations keyed by session, consumed by a new session's
+   * first model request.
+   *
+   * Optional so a table can be built without one (standalone attaches); the
+   * mounted rows pass the shared switch fabric, because a switch started by
+   * one row continues in a session another row drives.
+   */
+  readonly primer?: {
+    take(sessionId: string): string | undefined
+    restore(sessionId: string, text: string): void
+  }
 }
 
 /**
@@ -146,6 +165,7 @@ export function buildPresetTable(
             cwd: preset.cwd ?? process.cwd(),
             ...(preset.model === undefined ? {} : { modelId: preset.model }),
             ...(preset.mode === undefined ? {} : { modeId: preset.mode }),
+            ...(options.primer === undefined ? {} : { primer: options.primer }),
           })
           const sessionId = turn.sessionId
           session.onDead(reason => {

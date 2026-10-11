@@ -83,12 +83,26 @@ export type StepPosition = {
  * What one turn decided about the session's chosen model.
  *
  * Mirrors `decideSelection`; carried as a port result so the dispatch stays
- * mechanical and the row — which owns the preset's model list — decides.
+ * mechanical and the row — which owns the preset's model list — decides. The
+ * decision may take work (a mid-conversation switch is performed here, before
+ * the turn runs anywhere), so the port may return a promise.
  */
 export type TurnModelDecision =
   | { readonly kind: 'none' }
   | { readonly kind: 'own'; readonly modelId: string }
   | { readonly kind: 'refuse'; readonly reason: string }
+  | {
+    /**
+     * The switch this pick asked for has already happened: the conversation
+     * and the question now live in the session named by the reason, and this
+     * turn must end saying so. The question is deliberately not written on
+     * this session's log — it was asked, answered-to-be, in the session the
+     * switch created, and recording it here too would put one question in two
+     * conversations.
+     */
+    readonly kind: 'redirected'
+    readonly reason: string
+  }
 
 /** The live stream this turn writes into, if streaming is on. */
 export type TurnStreamHandle = {
@@ -163,9 +177,11 @@ export type AcpDispatchOptions = {
    * The replaced step never fires a model request, so the picker's choice would
    * otherwise sit unused while the preset's agent answers anyway. A refusal
    * throws, ending the turn as a named error; an own model rides the turn as
-   * its `modelId`.
+   * its `modelId`; a redirection ends the turn pointing at the session the
+   * switch moved the conversation to. Handed the step's claimed messages so a
+   * switch can carry the question it has not yet written anywhere.
    */
-  readonly turnModel?: (agent: AgentLike) => TurnModelDecision
+  readonly turnModel?: (agent: AgentLike, decision: StepDecisionLike) => TurnModelDecision | Promise<TurnModelDecision>
   /** Open this agent's live stream for a turn, if it can stream. */
   readonly openStream?: (agent: AgentLike, position: StepPosition) => () => TurnStreamHandle | undefined
 }
@@ -330,14 +346,25 @@ export function installAcpDispatch(
     }
     active.add(this)
     try {
-      // The user's claimed messages go on the log before the turn runs, the way
-      // the native step commits them — they are the turn's input, and a refusal
-      // below must still leave the question on the record.
+      // Decided before anything is written. A refusal still leaves the
+      // question on this session's record; a switch must not record it here —
+      // the question is asked, with the whole conversation, in the session the
+      // switch created, and writing it here too would put one question in two
+      // conversations' hands.
+      const model = (await options.turnModel?.(this, decision)) ?? { kind: 'none' as const }
+      if (model.kind === 'refuse') {
+        // The user's claimed messages go on the log before the turn refuses,
+        // the way the native step commits them — a refusal must still leave
+        // the question on the record.
+        options.write(userEvents(decision))
+        throw new Error(model.reason)
+      }
+      if (model.kind === 'redirected') {
+        throw new Error(model.reason)
+      }
+      // The user's claimed messages go on the log before the turn runs, the
+      // way the native step commits them — they are the turn's input.
       options.write(userEvents(decision))
-      // The picker's choice never becomes a model request here, so the row
-      // decides per turn what the session actually asked for.
-      const model = options.turnModel?.(this) ?? { kind: 'none' }
-      if (model.kind === 'refuse') throw new Error(model.reason)
       // Run after the input is committed: the content events describe what the
       // turn produced, so producing them beforehand would write the previous
       // turn's remainder. The turn owns its own writing, including the stream's

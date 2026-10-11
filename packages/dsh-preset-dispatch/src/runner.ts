@@ -45,6 +45,21 @@ export type RunnerOptions = {
    * is happening. Give up loudly instead.
    */
   readonly openTimeoutMs?: number
+  /**
+   * A conversation handed over from another session, keyed by session.
+   *
+   * A switch into this preset continues in a new DSH session, and this
+   * runner's external conversation starts empty — the takeover sends only the
+   * new turn's user text. The handed-over text rides the first model request
+   * here, ahead of it, which is the whole of the handover: the agent reads the
+   * prior conversation and then the question. Taken on the first attempt and
+   * put back if that attempt failed to deliver, so a failed turn never
+   * silently continues without the history it was promised.
+   */
+  readonly primer?: {
+    take(sessionId: string): string | undefined
+    restore(sessionId: string, text: string): void
+  }
 }
 
 /** Long enough for a cold process to start, short enough to not strand a turn. */
@@ -64,7 +79,7 @@ function textOf(content: unknown): string {
 }
 
 /** Pull the user-authored text out of a step decision's messages. */
-function promptText(messages: readonly unknown[]): string {
+export function promptText(messages: readonly unknown[]): string {
   const parts: string[] = []
   for (const message of messages as readonly UserText[]) {
     if (message.role !== undefined && message.role !== 'user') continue
@@ -161,7 +176,15 @@ export class AcpTurnRunner {
     this.stream = stream
     stream?.start()
 
-    const text = promptText(decision.messages)
+    // The handed-over conversation rides ahead of this turn's question, on the
+    // first request only. Taken before the request and put back if the request
+    // failed: a retry that re-sends it would double the history, but a retry
+    // without it would silently drop the conversation — and that is the one
+    // outcome a handover must never produce.
+    const handedOver = this.options.primer?.take(turn.sessionId)
+    const text = handedOver === undefined
+      ? promptText(decision.messages)
+      : `${handedOver}\n\n${promptText(decision.messages)}`
     const params: Record<string, unknown> = {
       sessionId,
       prompt: [{ type: 'text', text }],
@@ -188,6 +211,7 @@ export class AcpTurnRunner {
       // The turn produced nothing worth keeping; close the stream without
       // claiming a commit that will not happen.
       stream?.abandon()
+      if (handedOver !== undefined) this.options.primer?.restore(turn.sessionId, handedOver)
       throw failure
     }
 

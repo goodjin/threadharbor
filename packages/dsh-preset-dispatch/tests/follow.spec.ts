@@ -112,10 +112,11 @@ function services(overrides: {
       selected.push([candidate, presetId])
       return Promise.resolve({})
     },
-    controller: request => {
-      forks.push(request.sessionId)
-      return Promise.resolve({ sessionId: `${request.sessionId}-fork` })
+    createSession: request => {
+      forks.push(`create:${request.agentPreset ?? 'native'}`)
+      return Promise.resolve({ sessionId: 'created-1' })
     },
+    promptSession: () => Promise.resolve({ accepted: true }),
   }
   return { services, appends, selected, forks, reports }
 }
@@ -164,13 +165,15 @@ describe('followModelSelection — the move that lands on the session', () => {
   })
 
   it('does not move a started session, and says why', async () => {
-    // The host locks a started session's preset; forking was proven not to
-    // unlock it. The pick stays pending and the turn refuses with the reason.
+    // The host locks a started session's preset, and a fork replays the lock
+    // (the copy's prefix carries the source's turn boundaries). The pick stays
+    // pending; the mounted switch performs it at the next turn.
     const fixture = services({ currentPreset: 'acp-grok', started: true })
     await followModelSelection(fixture.services, 'acp-grok', pick, 's1', { session: fixture.services.sessions?.('s1') }, message => fixture.reports.push(message))
     expect(fixture.selected).toEqual([])
     expect(fixture.forks).toEqual([])
     expect(fixture.reports.join('\n')).toContain('has started')
+    expect(fixture.reports.join('\n')).toContain('new-session handover')
   })
 
   it('says so, and moves nothing, when the target preset is not on this host', async () => {

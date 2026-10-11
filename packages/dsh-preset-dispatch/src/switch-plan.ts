@@ -46,6 +46,10 @@ export type SwitchPlan =
     readonly kind: 'refuse'
     readonly locked: boolean
     readonly shortBy?: number
+    /** What the target's declared window could still take (window minus output reserve). */
+    readonly fitsTokens?: number
+    /** The target's declared window, echoed so the refusal can name it. */
+    readonly windowTokens?: number
     readonly reason?: string
   }
 
@@ -89,7 +93,16 @@ export function planSwitch(
     // same conversation — so this refuses whichever way the switch could have
     // gone. Splitting the conversation in two would be the alternative, and
     // that is not something to do silently.
-    return { kind: 'refuse', locked: decision.kind === 'locked', shortBy: handover.shortBy }
+    const fits = session.targetContextWindow === undefined
+      ? undefined
+      : session.targetContextWindow - session.reservedForOutput
+    return {
+      kind: 'refuse',
+      locked: decision.kind === 'locked',
+      shortBy: handover.shortBy,
+      ...(fits === undefined ? {} : { fitsTokens: fits }),
+      ...(session.targetContextWindow === undefined ? {} : { windowTokens: session.targetContextWindow }),
+    }
   }
 
   // The whole conversation fits. Whether this session can change in place is

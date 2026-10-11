@@ -33,7 +33,10 @@ function ports(over: Partial<SwitchPorts> = {}) {
   const calls: string[] = []
   const made: Partial<SwitchPorts> = {
     select: async (sessionId, preset) => { calls.push(`select:${sessionId}:${preset}`) },
-    fork: async (sessionId) => { calls.push(`fork:${sessionId}`); return { sessionId: `${sessionId}-copy` } },
+    fork: async request => {
+      calls.push(`fork:${request.sessionId}`)
+      return { sessionId: `${request.sessionId}-copy` }
+    },
     ...over,
   }
   return { ports: made as SwitchPorts, calls }
@@ -70,19 +73,31 @@ describe('applySwitchPlan', () => {
     expect(calls).toEqual(['select:s1:undefined'])
   })
 
-  it('forks first and selects on the new session', async () => {
-    // Selecting on the old session would fail — it is locked — so the order
-    // matters, not just the calls.
+  it('creates the new session on the target preset and carries the conversation', async () => {
+    // A started session cannot take a preset in place, and a DSH fork replays
+    // the lock, so the executor's fork port creates a blank session bound to
+    // the target and hands it the conversation — no select on the source.
     const { ports: p, calls } = ports()
     const plan = planSwitch(CONFIG, deps, toClaude, fresh({ started: true }), {})
-    expect(await applySwitchPlan(plan, 's1', p)).toEqual({ kind: 'switched', sessionId: 's1-copy' })
-    expect(calls).toEqual(['fork:s1', 'select:s1-copy:acp-claude'])
+    expect(await applySwitchPlan(plan, 's1', p, { history: [{ role: 'user', text: '问' }], prompt: '问' }))
+      .toEqual({ kind: 'switched', sessionId: 's1-copy' })
+    expect(calls).toEqual(['fork:s1'])
+  })
+
+  it('refuses to create a session when the conversation could not be read', async () => {
+    // A new session that silently continues without the history is exactly the
+    // quiet truncation this chain exists to prevent.
+    const { ports: p, calls } = ports()
+    const plan = planSwitch(CONFIG, deps, toClaude, fresh({ started: true }), {})
+    await expect(applySwitchPlan(plan, 's1', p)).rejects.toThrow(/could not be read/)
+    await expect(applySwitchPlan(plan, 's1', p, { history: [], prompt: '问' })).rejects.toThrow(/could not be read/)
+    expect(calls).toEqual([])
   })
 
   it('refuses to act on a plan that refuses', async () => {
     const { ports: p, calls } = ports()
     const plan = planSwitch(CONFIG, deps, toClaude, fresh({ started: true, historyTokens: 300_000 }), {})
-    await expect(applySwitchPlan(plan, 's1', p)).rejects.toThrow(/108000|108,000/)
+    await expect(applySwitchPlan(plan, 's1', p, { history: [{ role: 'user', text: '问' }], prompt: '问' })).rejects.toThrow(/108000|108,000/)
     expect(calls).toEqual([])
   })
 
@@ -92,20 +107,18 @@ describe('applySwitchPlan', () => {
     await expect(applySwitchPlan(plan, 's1', p)).rejects.toThrow(/target unreachable/)
   })
 
-  it('says what it made when the selection fails after a fork', async () => {
-    // Two sessions now exist, one an empty copy. Reporting only the error
-    // would leave the user hunting for a stray session.
-    const { ports: p } = ports({ select: async () => { throw new Error('target unreachable') } })
+  it('propagates the fork port\'s failure, which names the session it made', async () => {
+    // The mounted fork port wraps part-way failures with the created session's
+    // id; the executor passes that through untouched.
+    const { ports: p, calls } = ports({
+      fork: async request => {
+        calls.push(`fork:${request.sessionId}`)
+        throw new Error('created-1: handover failed')
+      },
+    })
     const plan = planSwitch(CONFIG, deps, toClaude, fresh({ started: true }), {})
-    await expect(applySwitchPlan(plan, 's1', p)).rejects.toThrow(/s1-copy/)
-  })
-
-  it('does not select when the fork itself fails', async () => {
-    // No session was created, so there is nothing to select on. Trying anyway
-    // would fail against the locked original.
-    const { ports: p, calls } = ports({ fork: async () => { throw new Error('cannot fork') } })
-    const plan = planSwitch(CONFIG, deps, toClaude, fresh({ started: true }), {})
-    await expect(applySwitchPlan(plan, 's1', p)).rejects.toThrow(/cannot fork/)
-    expect(calls).toEqual([])
+    await expect(applySwitchPlan(plan, 's1', p, { history: [{ role: 'user', text: '问' }], prompt: '问' }))
+      .rejects.toThrow(/created-1.*handover failed/)
+    expect(calls).toEqual(['fork:s1'])
   })
 })

@@ -25,6 +25,7 @@ import { makeSessionFactory } from './factory.ts'
 import { modelsOfPreset, registerCatalog } from './catalog-registration.ts'
 import { mountSwitchOnForeignModelRequest, servicesOf } from './switch-mount.ts'
 import { followModelSelection, followPresetSelection } from './follow.ts'
+import { switchShared } from './switch-shared.ts'
 import { selectionOf } from './selection.ts'
 import type { CatalogDeps } from './catalog.ts'
 import type { AcpPresetBinding } from './dispatch.ts'
@@ -130,6 +131,21 @@ export function applyAcpPlugin(
   // The models this preset offers the picker — the same list the host's model
   // selector reads, and the list the preset→model follow selects from.
   const pickerModels = modelsOfPreset(presets, factory, presetId)
+  // Shared switch fabric: this row's presence and its models go in, so a
+  // switch started by ANY row can plan against what this host actually
+  // mounts, and its primer goes out, so this row's sessions consume the
+  // conversation a switch from another row handed them. The session-liveness
+  // reader is wired from the same services the switch chain itself uses.
+  switchShared.registerPreset(presetId, config, pickerModels.map(model => ({
+    id: model.id,
+    name: model.name,
+    ...(model.description === undefined ? {} : { description: model.description }),
+    ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }),
+  })))
+  switchShared.wireSessions(sessionId => {
+    const read = servicesOf(ctx).sessions
+    return read === undefined ? undefined : read(sessionId)
+  })
   const sessions = sessionsRegistry()
   const table = buildPresetTable(presets, factory, sessions, {
     // A connection death dropping its cached session is the host healing on
@@ -137,6 +153,14 @@ export function applyAcpPlugin(
     // of being indistinguishable from nothing having happened.
     onDropped: ({ sessionId, reason }) => {
       deps.report?.(`acp ${presetId}: session ${sessionId}'s connection died (${reason}) — dropped; the next turn opens a fresh one`)
+    },
+    // Handed-over conversations from switches other rows made into this
+    // preset: consumed by the new session's first model request. The shared
+    // fabric speaks the fuller switch vocabulary; the table needs only the
+    // primer half.
+    primer: {
+      take: sessionId => switchShared.takeHandover(sessionId),
+      restore: (sessionId, text) => switchShared.restoreHandover(sessionId, text),
     },
   })
   // What makes the external agent's models appear in the host's own model
@@ -156,6 +180,7 @@ export function applyAcpPlugin(
     ctx,
     presets,
     catalogDeps,
+    switchShared,
     message => { deps.report?.(message) },
   )
   registerCatalog(ctx, presets, catalogDeps)
@@ -204,8 +229,10 @@ export function applyAcpPlugin(
   // The same stream carries `model/selection` — the model picker's pick — for
   // every session this preset currently drives. That is the other half of the
   // linkage: a pick of another preset's model moves the session to that preset
-  // when it still can (`follow.ts`); a started session is locked by the host
-  // and stays for the turn-time refusal, which names the reason.
+  // when it still can (`follow.ts`); a started session cannot move in place
+  // (its preset is locked, and a fork replays the lock), so the pick is
+  // carried out as the §9.2 switch at the turn that would have run the wrong
+  // agent — new session, whole conversation, question included.
   ctx.on('session/event', (session, event) => {
     try {
       if (event.type === 'model/selection') {

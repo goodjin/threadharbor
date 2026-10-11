@@ -361,4 +361,28 @@ describe('installAcpDispatch', () => {
     await (agent as unknown as { step(d: StepDecisionLike): Promise<unknown> }).step(DECISION)
     expect(used).toBe('grok-4.6')
   })
+
+  it('ends a redirected turn pointing at the new session, without recording the question here', async () => {
+    // The switch already delivered the conversation AND the question to the
+    // session it created; writing the question on this session's log too would
+    // put one question in two conversations' hands.
+    const agent = new FakeAgent('acp-grok')
+    const ran: StepDecisionLike[] = []
+    const written: string[] = []
+    installAcpDispatch(
+      agent,
+      new Map([['acp-grok', binding(async decision => { ran.push(decision); return { frames: [], end: { kind: 'completed' } } })]]),
+      {
+        produce: () => [],
+        write: events => { written.push(...events.map(event => event.type)); return 1 },
+        positionOf: () => ({ turn: 1, step: 1 }),
+        turnModel: async () => ({ kind: 'redirected', reason: '已切到新会话 n1，请到那里继续' }),
+      },
+    )
+    await expect(
+      (agent as unknown as { step(d: StepDecisionLike): Promise<unknown> }).step(DECISION),
+    ).rejects.toThrow('已切到新会话 n1，请到那里继续')
+    expect(ran).toEqual([])
+    expect(written).toEqual([])
+  })
 })

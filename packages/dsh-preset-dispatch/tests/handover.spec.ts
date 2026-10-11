@@ -11,7 +11,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { decideHandover } from '../src/handover.ts'
+import { assembleHandover, decideHandover, messagesOf } from '../src/handover.ts'
 
 const BASE = {
   historyTokens: 1_000,
@@ -98,5 +98,42 @@ describe('decideHandover', () => {
   it('refuses a target window that is not a real number', () => {
     const d = decideHandover({ ...BASE, targetContextWindow: Number.NaN })
     expect(d.kind).toBe('bad-input')
+  })
+})
+describe('messagesOf', () => {
+  it('reads user and assistant text from request-shaped messages', () => {
+    const messages = messagesOf([
+      { role: 'user', content: [{ type: 'text', text: '一' }] },
+      { role: 'assistant', content: '二' },
+      { role: 'system', content: [{ type: 'text', text: '指令' }] },
+      { role: 'user', content: [{ type: 'image', data: 'x' }] },
+      '不是对象',
+    ])
+    expect(messages).toEqual([
+      { role: 'user', text: '一' },
+      { role: 'assistant', text: '二' },
+      { role: 'other', text: '指令' },
+    ])
+  })
+
+  it('reads nothing from an absent conversation', () => {
+    expect(messagesOf(undefined)).toEqual([])
+  })
+})
+
+describe('assembleHandover', () => {
+  it('states what the block is and labels the roles', () => {
+    const text = assembleHandover([
+      { role: 'user', text: '一' },
+      { role: 'assistant', text: '二' },
+    ])
+    expect(text).toContain('共 2 条')
+    expect(text).toContain('【用户】一')
+    expect(text).toContain('【助手】二')
+    expect(text).toContain('记录结束')
+  })
+
+  it('says zero for an empty conversation rather than pretending', () => {
+    expect(assembleHandover([])).toContain('共 0 条')
   })
 })

@@ -34,7 +34,7 @@ export function modelsOfPreset(
   config: PresetConfig,
   factory: { dialectFor(presetId: string, preset: AcpPresetConfig): AcpDialect | undefined },
   presetId: string,
-): readonly { id: string; name: string; description?: string }[] {
+): readonly { id: string; name: string; description?: string; contextWindow?: number }[] {
   const preset = config.presets[presetId]
   if (preset === undefined) return []
   const dialect = factory.dialectFor(presetId, preset)

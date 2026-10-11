@@ -18,9 +18,13 @@
  *   A pending model the preset does serve is the user's own pick and stays.
  * - **model → preset.** When a blank session picks another preset's model,
  *   the session selects that preset in place. A started session cannot move:
- *   the host only takes a preset on a blank session, and a fork of a started
- *   session carries the started state across (verified on a real host), so
- *   the pick is left to the turn-time refusal, which names the reason.
+ *   its preset is locked, and — verified in the reference source, correcting
+ *   an earlier guess — a fork replays the lock too, because the copy's event
+ *   prefix includes the source's turn boundaries and the lock check folds
+ *   `turn/start` events. So nothing moves here; the pick is carried out at
+ *   the session's next turn by the mounted switch (`switch-mount.ts`), which
+ *   creates the new session, carries the whole conversation, and asks the
+ *   question there.
  *
  * Both writes are events this row itself hears back; each rule treats its own
  * writes as no-ops, so the loop closes instead of feeding itself.
@@ -67,9 +71,10 @@ export type ModelFollowDecision =
   /** Blank session — select the target preset in place. */
   | { readonly kind: 'switch'; readonly target: string }
   /**
-   * Started session — the host locks its preset (`agent-preset/locked`), and a
-   * fork inherits the lock, so there is no honest move; the pending pick is
-   * left for the turn-time refusal, which names the reason.
+   * Started session — the host locks its preset, and a fork replays the lock
+   * (the copy's prefix carries the source's turn boundaries), so nothing can
+   * move here; the pick switches at the session's next turn, where the mounted
+   * switch creates the new session and carries the conversation.
    */
   | { readonly kind: 'locked'; readonly target: string }
 
@@ -78,11 +83,12 @@ export type ModelFollowDecision =
  * what should move?
  *
  * `started` says the session has produced a turn. The host only lets a blank
- * session take a preset, and a fork of a started session carries the started
- * state across — verified on a real host: the fork is created, then
- * `select` fails with "This session has already started". Planning that fork
- * anyway would strand an empty copy of the conversation beside a refused
- * pick, so a started session reports `locked` instead of moving.
+ * session take a preset, and a fork of a started session replays the same
+ * lock — the fork's copied prefix includes `turn/start` events, and the lock
+ * check folds them (verified in the reference source, correcting an earlier
+ * "the fork is fresh" assumption). Planning a fork here anyway would strand an
+ * empty copy of the conversation beside a refused pick, so a started session
+ * reports `locked` instead of moving.
  */
 export function decideModelFollow(
   config: { readonly presetId: string },
@@ -164,7 +170,7 @@ export async function followModelSelection(
   const decision = decideModelFollow({ presetId }, selection, currentPreset, started)
   if (decision.kind === 'none') return
   if (decision.kind === 'locked') {
-    report(`acp ${presetId}: session ${sessionId} picked ${selection.provider}/${selection.model} (preset ${decision.target}) but the session has started and this host only takes a preset on a blank session — leaving the pick to the turn-time refusal`)
+    report(`acp ${presetId}: session ${sessionId} picked ${selection.provider}/${selection.model} (preset ${decision.target}) but the session has started and neither its preset nor a fork's can change — the pick switches as a new-session handover at that session's next turn`)
     return
   }
   const target = decision.target

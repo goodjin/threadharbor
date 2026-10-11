@@ -38,10 +38,22 @@ export type { CatalogAdapterLike, CatalogDeps, CatalogModel } from './catalog.ts
 export { decideOnSelection } from './switch.ts'
 export type { SelectionDecision, SelectionState } from './switch.ts'
 export { presetsForHost } from './host-filter.ts'
-export { decideHandover } from './handover.ts'
-export type { HandoverDecision, HandoverInput, HandoverOptions } from './handover.ts'
+export { assembleHandover, decideHandover, messagesOf } from './handover.ts'
+export type { HandoverDecision, HandoverInput, HandoverMessage, HandoverOptions } from './handover.ts'
 export { planSwitch } from './switch-plan.ts'
 export type { SwitchOptions, SwitchPlan, SwitchSessionState } from './switch-plan.ts'
 export { applySwitchPlan } from './apply-plan.ts'
-export type { ApplyResult, SwitchPorts } from './apply-plan.ts'
+export type { ApplyResult, ForkRequest, SwitchCarry, SwitchPorts } from './apply-plan.ts'
+export {
+  estimateTokens,
+  mountSwitchOnForeignModelRequest,
+  servicesOf,
+  splitQuestion,
+  startedOf,
+  switchDrivenSession,
+  switchPortsOf,
+} from './switch-mount.ts'
+export type { HostServices } from './switch-mount.ts'
+export { makeSwitchShared, switchShared } from './switch-shared.ts'
+export type { MountedModel, SwitchRecord, SwitchShared } from './switch-shared.ts'
 export { catalogRoutes, registerCatalog } from './catalog-registration.ts'

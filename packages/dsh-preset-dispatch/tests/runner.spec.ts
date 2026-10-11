@@ -236,3 +236,60 @@ describe('AcpTurnRunner handshake', () => {
       { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })).rejects.toThrow(/within 20ms/)
   })
 })
+
+describe('AcpTurnRunner — handed-over conversation', () => {
+  const TURN_OF = (sessionId: string) => ({
+    sessionId, position: { turn: 1, step: 1 }, produce: () => [], write: () => 1,
+  })
+
+  it('rides the first model request ahead of the question, once', async () => {
+    const client = fakeClient()
+    const taken: string[] = []
+    const restored: string[] = []
+    // A real ledger hands the text to the first taker only.
+    let primed = true
+    const runner = new AcpTurnRunner(client, {
+      cwd: '/tmp',
+      primer: {
+        take: id => {
+          taken.push(id)
+          if (!primed) return undefined
+          primed = false
+          return '【移交记录】'
+        },
+        restore: (id, text) => { restored.push(`${id}:${text}`) },
+      },
+    })
+
+    await runner.run(DECISION, TURN_OF('s1'))
+    await runner.run(DECISION, TURN_OF('s1'))
+
+    const prompts = client.calls.filter(call => call.method === 'session/prompt')
+    expect(prompts).toHaveLength(2)
+    expect((prompts[0]!.params as { prompt: { text: string }[] }).prompt[0]!.text)
+      .toBe('【移交记录】\n\nhello')
+    expect((prompts[1]!.params as { prompt: { text: string }[] }).prompt[0]!.text).toBe('hello')
+    expect(taken).toEqual(['s1', 's1'])
+    expect(restored).toEqual([])
+  })
+
+  it('puts the handover back when the request fails, so a retry keeps the history', async () => {
+    const client = fakeClient()
+    client.request = async method => {
+      if (method === 'session/prompt') throw new Error('agent died')
+      if (method === 'session/new') return { sessionId: 's9' }
+      return {}
+    }
+    const restored: string[] = []
+    const runner = new AcpTurnRunner(client, {
+      cwd: '/tmp',
+      primer: {
+        take: () => '【移交记录】',
+        restore: (id, text) => { restored.push(`${id}:${text}`) },
+      },
+    })
+
+    await expect(runner.run(DECISION, TURN_OF('s1'))).rejects.toThrow(/agent died/)
+    expect(restored).toEqual(['s1:【移交记录】'])
+  })
+})
