@@ -207,6 +207,25 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
     }
   })
 
+  it('详情页顶部有「主机管理」标题：点开每一台主机都进设置界面', async () => {
+    // 2026-10-12 用户决定：设置按钮去掉，各主机按钮收进面板，点开每台主机
+    // 进设置界面，现有主机信息作为其中一个栏目。本测试钉住「主机管理」这个入口名。
+    const { container, root } = await mountPanel(makeRegistry([
+      { hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' },
+    ]))
+    try {
+      click(container, '[data-host-open="bench"]')
+      expect(q(container, '[data-panel-page="detail"]')).toBeTruthy()
+      const heading = q(container, '[data-host-management-heading]')
+      expect(heading).toBeTruthy()
+      expect(heading.textContent).toContain('主机管理')
+      // 主机信息仍是其中一个栏目（自报标识、状态等），没被标题取代。
+      expect(q(container, '[data-reported-facts]')).toBeTruthy()
+    } finally {
+      await unmount(root)
+    }
+  })
+
   it('详情页改显示名保存后回到列表：那一行的主行跟着变', async () => {
     const registry = makeRegistry([
       { hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' },

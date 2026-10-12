@@ -497,6 +497,9 @@ export function HostFormPage(props: {
           onClick={props.onCancel}
         >‹ 返回</button>
         <h2 className={styles.title}>{props.heading}</h2>
+        {/* 点开每一台主机都进这里：标题点明这是「主机管理」设置界面，
+            下面的主机信息（自报标识、状态、登记字段）是其中一个栏目。 */}
+        <span data-host-management-heading="" className={styles.managementTag}>主机管理</span>
         <span className={styles.spacer} />
       </div>
       {reported === undefined

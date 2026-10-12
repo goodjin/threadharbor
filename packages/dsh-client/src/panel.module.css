@@ -54,6 +54,18 @@
   line-height: 1.4;
 }
 
+/* 详情页顶部的「主机管理」标记：点开的每一台主机都进这里，标题点明这是
+   主机管理设置界面，下面的主机信息（自报标识、状态、登记字段）是其中一个栏目。 */
+.managementTag {
+  padding: 1px 8px;
+  border: 1px solid var(--dsh-alias-label-caption, currentColor);
+  border-radius: 10px;
+  color: var(--dsh-alias-label-caption, inherit);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.6;
+}
+
 .sectionHead {
   display: flex;
   align-items: center;
