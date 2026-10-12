@@ -167,3 +167,32 @@
               models:
                 - id: grok-4.7
                   name: Grok 4.7
+    - id: acp-cursor
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: acp-cursor
+        name: Cursor
+        order: 35
+        plugins:
+          - id: acp-cursor-binding
+            name: '@threadharbor/dsh-preset-dispatch'
+            config:
+              presetId: acp-cursor
+              agent: cursor
+              # cursor 的 ACP 走 stdio：`agent ... acp` 一配就自启动。
+              # 注意：cursor 的二进制也叫 agent，但 ~/.local/bin/agent 是 grok
+              # 的（会冲突）——这里必须指向 cursor 自己的 agent 二进制。本机
+              # 装好后改成真实路径，例如 ~/.local/bin/cursor-agent。
+              command: /Users/good/.local/bin/cursor-agent
+              cwd: /Users/good/github/threadharbor
+              # cursor 的 modelId 带配置后缀（grok-4.7[context=256k,...]），是
+              # 不同的配置组合而非推理档位，不能按 effort 归并——否则不同的
+              # 配置会被压成一行。关掉归并，每个 id 独立成行。
+              collapseEfforts: false
+              # 清单 = 2026-09-14 真机探针（captured-frames.cursor.json 的
+              # session/new）读到的 availableModels，一字不差。
+              models:
+                - id: grok-4.7[context=256k,reasoning_effort=high,fast=true]
+                  name: grok-4.7
+                - id: claude-opus-5-5[context=300k,effort=medium,fast=false]
+                  name: claude-opus-5-5

@@ -209,6 +209,62 @@ describe('AcpClient handling agent-initiated requests', () => {
   })
 })
 
+describe('AcpClient agent-specific extension requests', () => {
+  it('lets a wired hook answer cursor/ask_question with a benign skipped outcome', async () => {
+    // The blocking custom method stalls the turn if left unanswered; the hook
+    // resolves it so the agent proceeds.
+    const transport = fakeTransport()
+    const client = new AcpClient(transport, { id: 'cursor' })
+    client.onExtensionRequest = frame => {
+      if (frame.method === 'cursor/ask_question') { client.reply(frame.id as number, { outcome: { outcome: 'skipped' } }); return true }
+      return false
+    }
+    transport.deliver(JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'cursor/ask_question', params: {} }))
+    await flush()
+
+    expect(transport.sent).toHaveLength(1)
+    const answer = JSON.parse(transport.sent[0]!) as { id: number; result: { outcome: { outcome: string } } }
+    expect(answer.id).toBe(7)
+    expect(answer.result.outcome.outcome).toBe('skipped')
+  })
+
+  it('answers cursor/create_plan with cancelled', async () => {
+    const transport = fakeTransport()
+    const client = new AcpClient(transport, { id: 'cursor' })
+    client.onExtensionRequest = frame => {
+      if (frame.method === 'cursor/create_plan') { client.reply(frame.id as number, { outcome: { outcome: 'cancelled' } }); return true }
+      return false
+    }
+    transport.deliver(JSON.stringify({ jsonrpc: '2.0', id: 8, method: 'cursor/create_plan', params: {} }))
+    await flush()
+
+    const answer = JSON.parse(transport.sent[0]!) as { result: { outcome: { outcome: string } } }
+    expect(answer.result.outcome.outcome).toBe('cancelled')
+  })
+
+  it('falls through to the default error when the hook declines', async () => {
+    const transport = fakeTransport()
+    const client = new AcpClient(transport, { id: 'cursor' })
+    client.onExtensionRequest = () => false
+    transport.deliver(JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'cursor/something_else', params: {} }))
+    await flush()
+
+    const answer = JSON.parse(transport.sent[0]!) as { id: number; error?: unknown }
+    expect(answer.id).toBe(9)
+    expect(answer.error).toBeDefined()
+  })
+
+  it('sends the default error when no hook is wired at all', async () => {
+    const transport = fakeTransport()
+    const client = new AcpClient(transport, { id: 'codex' })
+    transport.deliver(JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'cursor/ask_question', params: {} }))
+    await flush()
+
+    const answer = JSON.parse(transport.sent[0]!) as { id: number; error?: unknown }
+    expect(answer.error).toBeDefined()
+  })
+})
+
 describe('a connection that dies', () => {
   it('fails the request that was waiting, instead of waiting forever', async () => {
     const transport = fakeTransport()

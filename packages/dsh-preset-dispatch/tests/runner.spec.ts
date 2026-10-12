@@ -67,6 +67,23 @@ describe('AcpTurnRunner', () => {
     expect(news).toHaveLength(1)
   })
 
+  it('authenticates between initialize and session/new when the port has one', async () => {
+    // Cursor must authenticate (after an interactive `agent login`) before
+    // session/new; the other agents have no such step and omit the method.
+    const client = fakeClient()
+    ;(client as AcpClientPort & { authenticate?: () => Promise<unknown> }).authenticate = async () => {
+      client.calls.push({ method: 'authenticate', params: {} })
+    }
+    await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
+
+    const order = client.calls.map(call => call.method)
+    expect(order).toContain('authenticate')
+    // authenticate lands after initialize and before session/new — the order
+    // cursor's handshake requires.
+    expect(order.indexOf('authenticate')).toBeGreaterThan(order.indexOf('initialize'))
+    expect(order.indexOf('authenticate')).toBeLessThan(order.indexOf('session/new'))
+  })
+
   it('sends the user’s text as the prompt', async () => {
     const client = fakeClient()
     await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })

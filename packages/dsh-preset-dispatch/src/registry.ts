@@ -43,6 +43,17 @@ export type AcpPresetConfig = {
    * a deliberate "off", which is how a preset gets disabled without deleting it.
    */
   readonly hosts?: readonly string[]
+  /**
+   * Whether the catalog may collapse same-base `[effort]` model ids into one
+   * row plus a reasoning axis.
+   *
+   * True (the default) for codex/claude, whose `base[effort]` ids are genuinely
+   * one model at different efforts. False for cursor, whose `modelId` carries a
+   * config suffix (`grok-4.7[context=256k,reasoning_effort=high,fast=true]`)
+   * that is a distinct configuration, not an effort axis — collapsing would
+   * merge different configs into one row.
+   */
+  readonly collapseEfforts?: boolean
 }
 
 export type PresetConfig = { readonly presets: Readonly<Record<string, AcpPresetConfig>> }

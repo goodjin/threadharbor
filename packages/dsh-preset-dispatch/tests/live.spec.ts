@@ -54,7 +54,7 @@ async function runDispatch(command: string, dialect: AcpDialect, options: { mode
   // frame sink here would make every streaming assertion below pass vacuously
   // — the frames reach the client but never the turn.
   const runner = new AcpTurnRunner(
-    adaptClient(client),
+    adaptClient(client, grokDialect),
     {
       cwd,
       ...(options.modeId === undefined ? {} : { modeId: options.modeId }),

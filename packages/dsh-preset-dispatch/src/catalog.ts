@@ -225,6 +225,7 @@ const DISPLAY: Readonly<Record<string, string>> = {
   grok: 'Grok',
   claude: 'Claude',
   codex: 'Codex',
+  cursor: 'Cursor',
 }
 
 /**
@@ -250,10 +251,21 @@ export function catalogAdapter(config: PresetConfig, deps: CatalogDeps): Catalog
       const presetId = presetOfRoute(provider)
       if (presetId === undefined) return []
       if (config.presets[presetId] === undefined) return []
+      const models = deps.modelsOf(presetId)
       // Collapse same-base entries (one model published as base[low]…base[ultra])
       // into a single row carrying its efforts, so the picker shows the model
       // once and reasoning effort becomes a separate axis rather than N rows.
-      return collapseEffortModels(deps.modelsOf(presetId)).map(model => collapsedToCatalog(provider, model))
+      // A preset that opts out (cursor, whose ids carry a config suffix rather
+      // than an effort) gets one row per id, uncollapsed.
+      if (config.presets[presetId]?.collapseEfforts === false) {
+        return models.map(model => collapsedToCatalog(provider, {
+          baseId: model.id,
+          displayName: model.name,
+          ...(model.description === undefined ? {} : { description: model.description }),
+          efforts: undefined,
+        }))
+      }
+      return collapseEffortModels(models).map(model => collapsedToCatalog(provider, model))
     },
 
     // The catalog resolves every advertised model once at build time, and the

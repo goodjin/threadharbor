@@ -14,12 +14,17 @@ import { describe, expect, it } from 'vitest'
 import { projectTurn } from '../src/projection.ts'
 import { claudeDialect } from '../src/dialects/claude.ts'
 import { codexDialect } from '../src/dialects/codex.ts'
+import { cursorDialect } from '../src/dialects/cursor.ts'
 import { grokDialect } from '../src/dialects/grok.ts'
 import type { AcpFrame } from '../src/acp-client.ts'
 
 const captured = JSON.parse(
   readFileSync(fileURLToPath(new URL('./fixtures/captured-frames.json', import.meta.url)), 'utf8'),
 ) as Record<string, Record<string, unknown>>
+
+const cursorCaptured = JSON.parse(
+  readFileSync(fileURLToPath(new URL('./fixtures/captured-frames.cursor.json', import.meta.url)), 'utf8'),
+) as Record<string, unknown>
 
 const claudeNew = captured['claude']!['sessionNew']
 const codexNew = captured['codex']!['sessionNew']
@@ -116,5 +121,59 @@ describe('reading the turn usage off the session/prompt reply', () => {
   it('reports nothing when the reply has no usage object', () => {
     expect(codexDialect.readReplyUsage({ stopReason: 'end_turn' })).toBeUndefined()
     expect(codexDialect.readReplyUsage(undefined)).toBeUndefined()
+  })
+})
+
+describe('cursor dialect', () => {
+  const toolFrames = cursorCaptured['tool'] as readonly Record<string, unknown>[]
+  const update = (frame: Record<string, unknown>) => (frame['params'] as { update: Record<string, unknown> })['update']
+
+  it('authenticates with cursor_login before session/new', () => {
+    expect(cursorDialect.authenticateMethodId).toBe('cursor_login')
+  })
+
+  it('reads models from models.availableModels, keeping the config suffix in the id', () => {
+    const models = cursorDialect.readModels(cursorCaptured['sessionNew'])
+    expect(models.map(model => model.id)).toEqual([
+      'grok-4.7[context=256k,reasoning_effort=high,fast=true]',
+      'claude-opus-5-5[context=300k,effort=medium,fast=false]',
+    ])
+    // The display name drops the config bundle, showing the bare model.
+    expect(models[0]!.name).toBe('grok-4.7')
+  })
+
+  it('takes the tool name from kind, as codex does', () => {
+    const call = cursorDialect.foldTool(undefined, update(toolFrames[0]!))
+    expect(call.name).toBe('execute')
+    expect(call.arguments).toEqual({ command: 'echo CURSOR_ACP_OK' })
+  })
+
+  it('reads tool output from rawOutput.stdout, not content', () => {
+    // The opening frame has no output yet; the completed frame carries stdout.
+    const opening = cursorDialect.foldTool(undefined, update(toolFrames[0]!))
+    expect(opening.output).toBe('')
+    const done = cursorDialect.foldTool(opening, update(toolFrames[2]!))
+    expect(done.output).toBe('CURSOR_ACP_OK\n')
+    expect(done.status).toBe('completed')
+  })
+
+  it('collapses the newline in toolCallId so the id stays single-line', () => {
+    const opening = cursorDialect.foldTool(undefined, update(toolFrames[0]!))
+    expect(opening.callId).not.toContain('\n')
+    // The same id on the next frame still folds onto the same call.
+    const next = cursorDialect.foldTool(opening, update(toolFrames[1]!))
+    expect(next.callId).toBe(opening.callId)
+  })
+
+  it('reports no token usage — cursor never sends it over ACP', () => {
+    expect(cursorDialect.readReplyUsage(cursorCaptured['promptReply'])).toBeUndefined()
+    expect(cursorDialect.readReplyUsage({ stopReason: 'end_turn' })).toBeUndefined()
+  })
+
+  it('treats its custom update frames as content, not chatter', () => {
+    expect(cursorDialect.isContent({ sessionUpdate: 'tool_call' })).toBe(true)
+    expect(cursorDialect.isContent({ sessionUpdate: 'current_mode_update' })).toBe(false)
+    expect(cursorDialect.isContent({ sessionUpdate: 'available_commands_update' })).toBe(false)
+    expect(cursorDialect.isContent({ sessionUpdate: 'session_info_update' })).toBe(false)
   })
 })

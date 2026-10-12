@@ -6,6 +6,7 @@ export { projectTurn, projectUserMessage, projectStepContent } from './projectio
 export type { ProjectionEvent, StreamRecord } from './projection.ts'
 export { claudeDialect } from './dialects/claude.ts'
 export { codexDialect } from './dialects/codex.ts'
+export { cursorDialect } from './dialects/cursor.ts'
 export { grokDialect } from './dialects/grok.ts'
 export type { AcpDialect, ToolCall } from './dialects/types.ts'
 export { TerminalService } from './terminals.ts'

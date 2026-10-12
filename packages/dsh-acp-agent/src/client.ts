@@ -51,6 +51,18 @@ export class AcpClient {
   onPermissionRequest: (request: PermissionRequest) => Promise<PermissionDecision> = async () => ({ outcome: 'reject' })
 
   /**
+   * Answers an agent-initiated request the built-in handlers do not recognize.
+   *
+   * Cursor sends two blocking custom methods — `cursor/ask_question` and
+   * `cursor/create_plan` — that stall the turn if left unanswered (the default
+   * here is a JSON-RPC error, which the agent does not treat as a resolution).
+   * Return true to mean "I answered this frame"; the client then sends nothing
+   * further. Return false to fall through to the default error. Wired by the
+   * factory per agent, so the client itself stays agent-agnostic.
+   */
+  onExtensionRequest: (frame: AcpFrame) => boolean = () => false
+
+  /**
    * Serves the terminal sub-protocol, when this client offers it.
    *
    * Some agents — grok among them — ask the client to run shell commands rather
@@ -145,6 +157,10 @@ export class AcpClient {
       if (frame.method === 'session/request_permission') void this.answerPermission(frame)
       else if (frame.method.startsWith('terminal/')) void this.answerTerminal(frame)
       else if (frame.method.startsWith('fs/')) void this.answerFile(frame)
+      // An agent-specific extension the built-in handlers do not know. Give the
+      // wired hook first crack (cursor's blocking `cursor/*` methods); only when
+      // it declines do we send the generic "cannot serve" error.
+      else if (this.onExtensionRequest(frame)) return
       else this.respond(frame.id, undefined, `client cannot serve ${frame.method}`)
       return
     }
@@ -179,6 +195,17 @@ export class AcpClient {
         ? { jsonrpc: '2.0', id, result }
         : { jsonrpc: '2.0', id, error: { code: -32601, message: errorMessage } },
     ))
+  }
+
+  /**
+   * Send a JSON-RPC result for an agent-initiated request, by id.
+   *
+   * The public face of `respond`, for the wired `onExtensionRequest` hook:
+   * a per-agent extension handler answers the frame itself (cursor's blocking
+   * `cursor/*` methods) and returns true so the default error is not sent.
+   */
+  reply(id: number | string, result: unknown): void {
+    this.respond(id as number, result, undefined)
   }
 
   /**

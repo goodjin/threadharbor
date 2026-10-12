@@ -72,6 +72,29 @@ describe('catalogRoutes', () => {
   })
 })
 
+describe('a preset that opts out of effort collapse', () => {
+  it('keeps each config-suffixed model id as its own row, with no reasoning axis', async () => {
+    // Cursor's ids carry a config bundle (context/reasoning/fast), not a single
+    // effort axis. Collapsing would merge distinct configs into one row; with
+    // collapseEfforts:false each id stays its own row.
+    const cursorModels = [
+      { id: 'grok-4.7[context=256k,reasoning_effort=high,fast=true]', name: 'grok-4.7' },
+      { id: 'grok-4.7[context=256k,reasoning_effort=low,fast=false]', name: 'grok-4.7' },
+    ]
+    const cursorConfig: PresetConfig = { presets: { 'acp-cursor': { agent: 'cursor', collapseEfforts: false, models: cursorModels } } }
+    const adapter = catalogAdapterFactory(cursorConfig, {
+      modelsOf: () => cursorModels,
+      dialectOf: () => undefined,
+    })
+    const models = await adapter.listModels(providerRoute('acp-cursor'))
+    expect(models.map(model => model.id)).toEqual([
+      'grok-4.7[context=256k,reasoning_effort=high,fast=true]',
+      'grok-4.7[context=256k,reasoning_effort=low,fast=false]',
+    ])
+    for (const model of models) expect(model.reasoning).toBeUndefined()
+  })
+})
+
 import { catalogAdapter as catalogAdapterFactory } from '../src/catalog.ts'
 
 describe('attachAcpDispatch catalog wiring', () => {

@@ -55,6 +55,16 @@ export interface AcpDialect {
   readonly id: string
 
   /**
+   * The `authenticate` method to call between `initialize` and `session/new`.
+   *
+   * Most agents go straight from `initialize` to `session/new`. Cursor does not:
+   * it requires an `authenticate { methodId }` round-trip (after an interactive
+   * `agent login`) first, and `session/new` fails without it. When set, the
+   * runner sends it; when absent, no authenticate step happens.
+   */
+  readonly authenticateMethodId?: string | undefined
+
+  /**
    * Fold one tool-related update frame into the call it belongs to.
    *
    * `carried` is the call as earlier frames of the same id established, or

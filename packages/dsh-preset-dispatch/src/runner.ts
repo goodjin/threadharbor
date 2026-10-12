@@ -22,6 +22,15 @@ export type AcpClientPort = {
    * "wait, then it all appears" behaviour streaming exists to remove.
    */
   onFrame(handler: (frame: AcpFrame) => void): void
+
+  /**
+   * The agent's `authenticate` round-trip, when it has one.
+   *
+   * Cursor must authenticate (after an interactive `agent login`) between
+   * `initialize` and `session/new`; the other agents have no such step, so the
+   * port omits this and the runner skips it. Absent means "no authenticate".
+   */
+  authenticate?(): Promise<unknown>
 }
 
 /** Where a turn's text and reasoning go as they arrive. */
@@ -272,6 +281,8 @@ export class AcpTurnRunner {
       clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: true },
     })
     this.client.notify('initialized', {})
+    // Cursor authenticates here; the other agents have no such step.
+    if (this.client.authenticate !== undefined) await this.client.authenticate()
     const reply = (await this.client.request('session/new', {
       cwd: this.options.cwd,
       mcpServers: [],

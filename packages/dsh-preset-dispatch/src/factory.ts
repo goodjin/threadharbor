@@ -14,6 +14,7 @@ import {
   WebSocketAcpTransport,
   claudeDialect,
   codexDialect,
+  cursorDialect,
   grokDialect,
 } from '@threadharbor/dsh-acp-agent'
 import type { AcpDialect, AcpTransport, PermissionDecision, PermissionRequest } from '@threadharbor/dsh-acp-agent'
@@ -39,6 +40,7 @@ const DIALECTS: Readonly<Record<string, AcpDialect>> = {
   grok: grokDialect,
   claude: claudeDialect,
   codex: codexDialect,
+  cursor: cursorDialect,
 }
 
 /**
@@ -102,13 +104,25 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
       // what lets them without one stealing the other's slot.
       const transport = new DeathFanoutTransport(raw)
 
-      const client = new AcpClient(transport, DIALECTS[preset.agent ?? ''] ?? grokDialect)
+      const dialect = DIALECTS[preset.agent ?? ''] ?? grokDialect
+      const client = new AcpClient(transport, dialect)
       // grok delegates shell execution to the client. Without this the agent
       // waits for a terminal that never appears, and the turn hangs silently.
       client.terminals = new TerminalService()
       client.onPermissionRequest = async request => await deps.answerPermission(request)
+      // Cursor sends two blocking custom methods that stall the turn if left
+      // unanswered. Answer them with a benign outcome so the agent proceeds;
+      // any other unknown method still falls through to the default error.
+      if (preset.agent === 'cursor') {
+        client.onExtensionRequest = frame => {
+          if (typeof frame.id !== 'number') return false
+          if (frame.method === 'cursor/ask_question') { client.reply(frame.id, { outcome: { outcome: 'skipped' } }); return true }
+          if (frame.method === 'cursor/create_plan') { client.reply(frame.id, { outcome: { outcome: 'cancelled' } }); return true }
+          return false
+        }
+      }
 
-      const runner = new AcpTurnRunner(adaptClient(client), options)
+      const runner = new AcpTurnRunner(adaptClient(client, dialect), options)
       return {
         run: async (decision, turn) => await runner.run(decision, turn),
         // Drops the connection itself, not just the runner's bookkeeping: a
@@ -128,10 +142,15 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
  * reaches it as it lands, which is what lets text reach the UI while the agent
  * is still working.
  */
-export function adaptClient(client: AcpClient): AcpClientPort {
+export function adaptClient(client: AcpClient, dialect: AcpDialect): AcpClientPort {
   return {
     request: (method, params) => client.request(method, params),
     notify: (method, params) => { client.notify(method, params) },
     onFrame: handler => { client.onFrame(frame => { handler(frame) }) },
+    // Cursor must authenticate (after an interactive `agent login`) before
+    // session/new; the runner calls this between initialize and session/new.
+    ...(dialect.authenticateMethodId === undefined
+      ? {}
+      : { authenticate: () => client.request('authenticate', { methodId: dialect.authenticateMethodId }) }),
   }
 }
