@@ -435,10 +435,11 @@ export function HostRow(props: {
         className={styles.hostRowButton}
         onClick={props.onOpen}
       >
-        <strong data-host-name="" className={styles.hostName}>{row.name}</strong>
-        <span data-host-id-label="" className={styles.hostIdShort} title={row.hostId}>{row.hostId}</span>
+        <span className={styles.hostMain}>
+          <strong data-host-name="" className={styles.hostName}>{row.name}</strong>
+          <span data-host-id-label="" className={styles.hostIdShort} title={row.hostId}>{row.hostId}</span>
+        </span>
         <span data-host-badge={badge.tone} className={styles.hostBadge}>{badge.word}</span>
-        <span className={styles.spacer} />
         <span className={styles.chevron} aria-hidden="true">▸</span>
       </button>
     </div>
@@ -958,31 +959,29 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
 
   return (
     <div data-threadharbor-panel="" className={styles.root}>
-      <section data-panel-page="list" className={styles.card}>
-        <div className={styles.cardHead}>
-          <h2 className={styles.title}>主机</h2>
-          <span className={styles.spacer} />
-          <button
-            type="button"
-            data-action="add-host"
-            className={styles.actionPrimary}
-            onClick={() => { setFormMessage(undefined); setView({ page: 'add' }) }}
-          >添加新主机</button>
+      <div className={styles.pageHead}>
+        <h2 className={styles.title}>主机</h2>
+        <span className={styles.spacer} />
+        <button
+          type="button"
+          data-action="add-host"
+          className={styles.actionPrimary}
+          onClick={() => { setFormMessage(undefined); setView({ page: 'add' }) }}
+        >添加新主机</button>
+      </div>
+      <StoragePostureLine posture={props.hostStore?.posture()} />
+      <div data-host-list="" data-panel-page="list" className={styles.hostList}>
+        <div data-host-list-head="" className={styles.hostListHead} aria-hidden="true">
+          <span className={styles.hostListHeadLabel}>主机</span>
         </div>
-        <StoragePostureLine posture={props.hostStore?.posture()} />
-        <div data-host-list="" className={styles.hostList}>
-          <div data-host-list-head="" className={styles.hostListHead} aria-hidden="true">
-            <span className={styles.hostListHeadLabel}>主机</span>
-          </div>
-          {hostRows.map(row => (
-            <HostRow
-              key={row.hostId}
-              row={row}
-              onOpen={() => { setFormMessage(undefined); setConfirmingRemove(false); setView({ page: 'detail', hostId: row.hostId }) }}
-            />
-          ))}
-        </div>
-      </section>
+        {hostRows.map(row => (
+          <HostRow
+            key={row.hostId}
+            row={row}
+            onOpen={() => { setFormMessage(undefined); setConfirmingRemove(false); setView({ page: 'detail', hostId: row.hostId }) }}
+          />
+        ))}
+      </div>
     </div>
   )
 }

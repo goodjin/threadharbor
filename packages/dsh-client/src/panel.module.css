@@ -21,12 +21,21 @@
   height: auto;
   max-height: 100%;
   margin: 0;
-  padding: 16px 4px 24px;
+  /* 左右各 20px：之前 4px 让所有内容贴边，是「没间距、对不齐」的根因。 */
+  padding: 16px 20px 24px;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
   overflow: auto;
+}
+
+/* 列表页的页头：标题靠左、添加按钮靠右，是这页最响的一行。 */
+.pageHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
 }
 
 /* One card per page: the frame the list, the detail and the add form share. */
@@ -58,9 +67,9 @@
    主机管理设置界面，下面的主机信息（自报标识、状态、登记字段）是其中一个栏目。 */
 .managementTag {
   padding: 1px 8px;
-  border: 1px solid var(--dsh-alias-label-caption, currentColor);
+  border: 1px solid var(--dsw-alias-label-caption, currentColor);
   border-radius: 10px;
-  color: var(--dsh-alias-label-caption, inherit);
+  color: var(--dsw-alias-label-caption, inherit);
   font-size: 12px;
   font-weight: 500;
   line-height: 1.6;
@@ -347,7 +356,8 @@
   display: flex;
   flex-direction: column;
   border: 1px solid var(--dsw-alias-settings-card-stroke);
-  border-radius: var(--dsh-radius-md);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-settings-card-fill);
   overflow: hidden;
 }
 
@@ -356,8 +366,8 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
+  gap: 12px;
+  padding: 8px 16px;
   background: var(--dsw-alias-bg-layer-2);
   color: var(--dsw-alias-label-caption);
   font-size: 11px;
@@ -387,17 +397,25 @@
   color: inherit;
   font: inherit;
   text-align: left;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
   min-width: 0;
   width: 100%;
-  padding: 10px 0;
+  padding: 12px 16px;
   cursor: pointer;
 }
 
 .hostRowButton:hover .hostName {
   color: var(--dsw-alias-label-secondary);
+}
+
+.hostMain {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
 .hostName {
@@ -408,7 +426,7 @@
 .hostIdShort {
   color: var(--dsw-alias-label-caption);
   font-size: 12px;
-  max-width: 22ch;
+  max-width: 32ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
