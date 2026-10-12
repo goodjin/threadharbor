@@ -17,3 +17,7 @@
 packages/*/src/**/*.js
 packages/*/src/**/*.d.ts
 packages/*/src/**/*.map
+
+# 例外：手写的类型声明不是编译产物，必须入库（否则干净检出缺 *.module.css
+# 声明，tsc 直接报错）。见 packages/dsh-client/src/css-modules.d.ts。
+!packages/*/src/**/*.d.ts
