@@ -1233,3 +1233,49 @@ hostd 时代的「远程主机」假设——而那正是阶段 6 要拿掉的�
   gitignored、未被 git 跟踪，mtime 9 月 1 日，早于 hostd 移除）。全仓检索确认
   无任何**当前**源码构造 `known_hosts` 路径（仅 `.worktrees/abc` 的旧 hostd
   gateway 与 `reference/` 里有），属 hostd 时代遗留、不会再生成的死文件，已删除。
+
+### 落地记录：思考强度独立 + 主机管理入口（2026-10-12）
+
+用户本轮四项诉求，按依赖顺序逐项落地（4→3→1→2），验收在 3081 web 页面上点
+起来对不对。全绿（typecheck --force + 560 用例 + freshness + build）：
+
+- **模型去重 + 思考强度独立成选择框（第 3、4 项）**：根因是真机探针确认的——
+  codex-acp 把思考强度**拼进模型 id**（`gpt-6-astra[low]`…`[ultra]` 是六个真实
+  不同的 wire id，不是显示标签；claude/grok 是裸 id，不带后缀）。catalog 原样
+  列出全部，于是「一个模型出现六次」且没有独立的强度维度。改法数据驱动、按
+  agent 各自处理，不写死后缀表：`collapseEffortModels()` 把同一基础模型的多个
+  `[强度]` 归并成一行，各后缀收进 `reasoning.efforts`——DSH 的选择器只在模型带
+  `reasoning` 时渲染强度子控件，于是强度成了独立的一轴。`selection.ts` 按基础
+  id 认账（picker 选基础 id，预设声明的是带后缀的 wire id），选基础 id 时把
+  `[后缀]` 拼回，让 effort 经 DSH 自己的 `reasoningEffort` 字段流到 agent。**刻意
+  不带 `defaultEffort`**：DSH 的选择器把它缺省为「显示 Provider default 行、不
+  预选」，这是诚实的首屏——agent 自己挑默认，直到用户选；设了会静默预选用户没
+  选的强度。
+- **各 Agent 下模型去重（第 4 项）**：同一 `collapseEffortModels` 顺手解决——带
+  后缀的归并成一行，裸 id（claude/grok）原样通过，不发明强度。
+- **主机管理入口（第 2 项）**：用户要「设置按钮去掉、各主机按钮进面板、点开每台
+  主机进设置界面、现有主机信息作为其中一个栏目」。**设置按钮压不掉**——它来自
+  `dsh-client-ui-settings`（不在本仓库），slot API 也没有隐藏标志，所以按用户
+  备选项「只加主机管理，保留设置」走。详情页本来就是单台主机的设置界面（登记
+  字段 + 自报标识 + 状态 + agent + 删除登记 + 测网络可达），只缺个名字：顶部加
+  「主机管理」标记，点明这是主机管理设置界面，下面的主机信息仍是其中一个栏目。
+- **desktop→web profile 模型配置（第 1 项）**：web profile 缺 `llm-deepseek` 块、
+  `agent-default-model` 指向 `iquest/glm-5.2`（desktop 是 `minimax-cn/MiniMax-M3.1-Flash-Preview`）。
+  两项都改（用户确认「与 desktop 一致」）。**注意这份文件在仓库外**
+  （`~/.dsh/profiles/web/cordis.patch.yml`），改前已给用户看 diff，改的是本机
+  profile，不进版本库。
+
+### 已知限制（2026-10-12 核对，文档化，未修）
+
+- **「已切换」卡片不在重访时渲染**：跨 preset 切换（§9.2）后，目标会话会显示一张
+  「已切换」提示卡，但**重新打开该会话时不复现**——切换是一次性动作，卡片只在该次
+  会话里出现一次。这是刻意为之（切换不是状态，是事件），不是 bug，但用户可能预期
+  它重访时还在。
+- **agent 自报名字可能与选择器标签不一致**：选择器里显示的是预设配置的 label
+  （如 `@deepseek-ai/dsh-agent-preset`），而 agent 自报的名字是另一套（如
+  `Claude Opus 4.8`）。详情页把两个值都摆出来、不一致就明说，但用户会困惑「为什么
+  同一个 agent 有两个名字」。这是 ACP 协议下 agent 自报身份 vs 预设配置的固有差，
+  无法消除，只能并列展示。
+- **跨机器模型目录读取失败时无提示**：某台主机未连接时，它的 agent 区显示「这台
+  主机没有列出任何 acp agent」——但真正原因可能是网络不通、token 过期、或目录
+  读取失败，三者在这个空态里无法区分。诊断信息只在主机自己页面的控制台里。
