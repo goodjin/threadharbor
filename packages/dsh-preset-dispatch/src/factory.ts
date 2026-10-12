@@ -8,6 +8,7 @@
 
 import {
   AcpClient,
+  GrokServeTransport,
   StdioAcpTransport,
   TerminalService,
   WebSocketAcpTransport,
@@ -81,13 +82,22 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
   return {
     dialectFor: (_presetId, preset) => DIALECTS[preset.agent ?? ''],
 
-    open: (presetId, options): AcpSession => {
+    open: async (presetId, options): Promise<AcpSession> => {
       const preset = config.presets[presetId]
       if (preset === undefined) throw new Error(`acp dispatch: no preset named ${presetId}`)
 
+      // grok is reached over a `grok agent serve` WebSocket this transport starts
+      // and owns (random port + secret, ready-wait, kill on close) — unlike the
+      // stdio agents, whose command spawns itself. A preset that names a static
+      // url keeps the plain WebSocket path; tests inject their own transport.
       const raw = deps.transport?.(preset) ?? (preset.url !== undefined
         ? new WebSocketAcpTransport({ url: preset.url })
-        : new StdioAcpTransport({ command: preset.command ?? '' }))
+        : preset.agent === 'grok'
+          ? await GrokServeTransport.create({
+              command: preset.command ?? 'grok',
+              ...(preset.cwd === undefined ? {} : { cwd: preset.cwd }),
+            })
+          : new StdioAcpTransport({ command: preset.command ?? '' }))
       // The client and the registry's death watcher both listen; the fanout is
       // what lets them without one stealing the other's slot.
       const transport = new DeathFanoutTransport(raw)

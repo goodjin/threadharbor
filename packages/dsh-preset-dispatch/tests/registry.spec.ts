@@ -54,7 +54,7 @@ function killableFactory(): AcpSessionFactory & { built: string[]; sessions: Kil
       built.push(presetId)
       const session = killableSession()
       sessions.push(session)
-      return session
+      return Promise.resolve(session)
     },
   }
 }
@@ -70,7 +70,7 @@ describe('buildPresetTable', () => {
     // The check is on the agent, not on the preset being listed.
     const factory: AcpSessionFactory = {
       dialectFor: (presetId, config) => config.agent === 'native' ? undefined : stubDialect(presetId),
-      open: () => killableSession(),
+      open: () => Promise.resolve(killableSession()),
     }
     const table = buildPresetTable({ presets: { dsh: { agent: 'native' }, 'acp-grok': CONFIG.presets['acp-grok'] } }, factory, sessionsRegistry())
     expect(table.has('dsh')).toBe(false)
@@ -106,7 +106,7 @@ describe('buildPresetTable', () => {
       dialectFor: () => stubDialect('x'),
       open: (presetId, options) => {
         opened.push({ presetId, ...(options.modelId === undefined ? {} : { modelId: options.modelId }), ...(options.modeId === undefined ? {} : { modeId: options.modeId }) })
-        return killableSession()
+        return Promise.resolve(killableSession())
       },
     }
 

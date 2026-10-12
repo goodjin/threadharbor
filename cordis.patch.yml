@@ -145,3 +145,25 @@
                 - id: haiku
                   name: iquest-q1
                   description: Custom Haiku model
+    - id: acp-grok
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: acp-grok
+        name: Grok
+        order: 25
+        plugins:
+          - id: acp-grok-binding
+            name: '@threadharbor/dsh-preset-dispatch'
+            config:
+              presetId: acp-grok
+              agent: grok
+              # grok 不是 stdio 子进程，而是一个 WebSocket 服务：preset-dispatch
+              # 会先拉起 `grok agent serve`（随机端口 + 密钥、等它就绪、关闭时
+              # 回收），再连上它返回的 ws url。command 指向 grok 二进制本身。
+              command: /Users/good/.local/bin/grok
+              cwd: /Users/good/Documents/deepseek-harness
+              # 清单 = 2026-10-09 真机探针（captured-frames.json 的 session/new）
+              # 读到的 availableModels，一字不差。
+              models:
+                - id: grok-4.7
+                  name: Grok 4.7

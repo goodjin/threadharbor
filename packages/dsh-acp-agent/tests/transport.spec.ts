@@ -9,7 +9,8 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { grokWebSocketUrl, WebSocketAcpTransport } from '../src/transport.ts'
+import { GrokServeTransport, grokWebSocketUrl, WebSocketAcpTransport } from '../src/transport.ts'
+import type { GrokServeChild } from '../src/transport.ts'
 
 /** A socket stand-in with just the surface the transport touches. */
 function fakeSocket() {
@@ -94,5 +95,142 @@ describe('WebSocketAcpTransport', () => {
     const WebSocketAcpTransportCtor = WebSocketAcpTransport
     new WebSocketAcpTransportCtor({ url: 'ws://x/ws?server-key=y', createSocket: () => socket }).close()
     expect(socket.state.closed).toBe(true)
+  })
+})
+
+/** A grok serve process stand-in: records its spawn args and lets the test drive exit. */
+function fakeServeChild() {
+  const state = {
+    killed: undefined as NodeJS.Signals | undefined,
+    spawn: undefined as { command: string; args: string[] } | undefined,
+    exitHandlers: [] as ((code: number | null, signal: NodeJS.Signals | null) => void)[],
+    errorHandlers: [] as ((error: Error) => void)[],
+    stderrListener: undefined as ((chunk: string) => void) | undefined,
+  }
+  const child: GrokServeChild = {
+    stderr: {
+      setEncoding() {},
+      on(event, handler) { if (event === 'data') state.stderrListener = handler as (chunk: string) => void },
+    },
+    on(event, handler) {
+      if (event === 'error') state.errorHandlers.push(handler as (error: Error) => void)
+      if (event === 'exit') state.exitHandlers.push(handler as (code: number | null, signal: NodeJS.Signals | null) => void)
+    },
+    kill(signal) { state.killed = signal },
+  }
+  return {
+    child,
+    state,
+    emitExit(code: number | null, signal: NodeJS.Signals | null) { state.exitHandlers.forEach(h => h(code, signal)) },
+    emitError(error: Error) { state.errorHandlers.forEach(h => h(error)) },
+    emitStderr(chunk: string) { state.stderrListener?.(chunk) },
+  }
+}
+
+/** Build a GrokServeTransport with every OS touch-point injected, so no real port or process. */
+async function makeGrokServe() {
+  const socket = fakeSocket()
+  const serve = fakeServeChild()
+  let spawnArgs: { command: string; args: string[] } | undefined
+  const transport = await GrokServeTransport.create({
+    command: '/path/to/grok',
+    pickPort: () => Promise.resolve(54321),
+    waitUntilReady: () => Promise.resolve(),
+    createSocket: () => socket,
+    spawn: (command, args) => {
+      spawnArgs = { command, args: [...args] }
+      return serve.child
+    },
+  })
+  return { transport, socket, serve, spawnArgs: () => spawnArgs }
+}
+
+describe('GrokServeTransport', () => {
+  it('spawns `grok agent serve` on a chosen port with a secret', async () => {
+    const { spawnArgs } = await makeGrokServe()
+    const args = spawnArgs()?.args ?? []
+    expect(spawnArgs()?.command).toBe('/path/to/grok')
+    expect(args.slice(0, 4)).toEqual(['agent', 'serve', '--bind', '127.0.0.1:54321'])
+    const secretIdx = args.indexOf('--secret')
+    expect(secretIdx).toBeGreaterThan(0)
+    expect(args[secretIdx + 1]).toBeTruthy()
+  })
+
+  it('dials the WebSocket once the serve process is ready', async () => {
+    const { transport, socket } = await makeGrokServe()
+    // The transport is only returned after readiness, so the inner socket is
+    // already built — sending routes straight through once the socket opens.
+    socket.connect()
+    transport.send('{"a":1}')
+    expect(socket.state.sent).toContain('{"a":1}')
+  })
+
+  it('forwards frames in both directions', async () => {
+    const { transport, socket } = await makeGrokServe()
+    const seen: string[] = []
+    transport.onLine(line => seen.push(line))
+    socket.connect()
+    transport.send('out')
+    socket.deliver('in')
+    expect(socket.state.sent).toContain('out')
+    expect(seen).toEqual(['in'])
+  })
+
+  it('reports the serve process dying', async () => {
+    const { transport, serve } = await makeGrokServe()
+    const deaths: string[] = []
+    transport.onDeath(reason => deaths.push(reason))
+    serve.emitExit(0, null)
+    expect(deaths).toHaveLength(1)
+    expect(deaths[0]).toContain('exited')
+  })
+
+  it('reports the serve process failing to start', async () => {
+    const { transport, serve } = await makeGrokServe()
+    const deaths: string[] = []
+    transport.onDeath(reason => deaths.push(reason))
+    serve.emitError(new Error('boom'))
+    expect(deaths).toHaveLength(1)
+    expect(deaths[0]).toContain('could not run')
+  })
+
+  it('reports the socket dying', async () => {
+    const { transport, socket } = await makeGrokServe()
+    const deaths: string[] = []
+    transport.onDeath(reason => deaths.push(reason))
+    socket.die('connection closed')
+    expect(deaths).toEqual(['connection closed'])
+  })
+
+  it('closes both the socket and the serve process', async () => {
+    const { transport, serve, socket } = await makeGrokServe()
+    transport.close()
+    expect(serve.state.killed).toBe('SIGTERM')
+    expect(socket.state.closed).toBe(true)
+  })
+
+  it('does not report death after an intentional close', async () => {
+    const { transport, serve } = await makeGrokServe()
+    const deaths: string[] = []
+    transport.onDeath(reason => deaths.push(reason))
+    transport.close()
+    serve.emitExit(0, null)
+    expect(deaths).toEqual([])
+  })
+
+  it('forwards serve stderr to the diagnostic sink', async () => {
+    const diagnostics: string[] = []
+    const socket = fakeSocket()
+    const serve = fakeServeChild()
+    await GrokServeTransport.create({
+      command: 'grok',
+      pickPort: () => Promise.resolve(1),
+      waitUntilReady: () => Promise.resolve(),
+      createSocket: () => socket,
+      onDiagnostic: line => diagnostics.push(line),
+      spawn: () => serve.child,
+    })
+    serve.emitStderr('listening on 2419\n')
+    expect(diagnostics).toContain('listening on 2419')
   })
 })

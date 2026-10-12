@@ -39,7 +39,7 @@ async function askPermission(answer: PermissionDecision | Error): Promise<unknow
     },
   )
   // Opening the session is what builds the client and connects the handler.
-  factory.open('acp-grok', { cwd: '/tmp' })
+  await factory.open('acp-grok', { cwd: '/tmp' })
 
   transport.push({
     jsonrpc: '2.0', id: 99, method: 'session/request_permission',

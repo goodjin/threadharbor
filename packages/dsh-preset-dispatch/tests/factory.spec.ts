@@ -39,11 +39,11 @@ describe('makeSessionFactory', () => {
     expect(factory.dialectFor('dsh', {})).toBeUndefined()
   })
 
-  it('reports a preset that is not configured instead of opening nothing', () => {
+  it('reports a preset that is not configured instead of opening nothing', async () => {
     // Opening nothing would leave the session running with no agent, which
     // looks exactly like an agent that is merely slow.
     const factory = makeSessionFactory(CONFIG, deps)
-    expect(() => factory.open('acp-missing', { cwd: '/tmp' })).toThrow(/no preset named/)
+    await expect(factory.open('acp-missing', { cwd: '/tmp' })).rejects.toThrow(/no preset named/)
   })
 })
 
@@ -74,7 +74,7 @@ describe('连接死亡的转播', () => {
       { presets: { 'acp-grok': { agent: 'grok', url: 'ws://127.0.0.1:2419' } } },
       { ...deps, transport: () => transport },
     )
-    const session = factory.open('acp-grok', { cwd: '/tmp' })
+    const session = await factory.open('acp-grok', { cwd: '/tmp' })
     const seenBySession: string[] = []
     session.onDead(reason => { seenBySession.push(reason) })
 
@@ -88,13 +88,13 @@ describe('连接死亡的转播', () => {
     expect(seenBySession).toEqual(['agent process exited'])
   })
 
-  it('会话自己关掉时不再报告死亡', () => {
+  it('会话自己关掉时不再报告死亡', async () => {
     const transport = killableTransport()
     const factory = makeSessionFactory(
       { presets: { 'acp-grok': { agent: 'grok', url: 'ws://127.0.0.1:2419' } } },
       { ...deps, transport: () => transport },
     )
-    const session = factory.open('acp-grok', { cwd: '/tmp' })
+    const session = await factory.open('acp-grok', { cwd: '/tmp' })
     const deaths: string[] = []
     session.onDead(reason => { deaths.push(reason) })
     session.close()

@@ -6,7 +6,9 @@
  * interface.
  */
 
-import { spawn } from 'node:child_process'
+import { spawn as nodeSpawn } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
+import { createConnection, createServer } from 'node:net'
 
 export interface AcpTransport {
   /** Write one newline-delimited JSON frame. */
@@ -55,7 +57,7 @@ export type StdioTransportOptions = {
 
 /** ACP over a child process's stdin/stdout, as codex and claude both speak it. */
 export class StdioAcpTransport implements AcpTransport {
-  private readonly child: ReturnType<typeof spawn>
+  private readonly child: ReturnType<typeof nodeSpawn>
   private handler: (line: string) => void = () => {}
   private death: (reason: string) => void = () => {}
   /**
@@ -73,7 +75,7 @@ export class StdioAcpTransport implements AcpTransport {
     // Spawned here rather than in a field initializer: with class fields, the
     // initializers run before the constructor assigns `this.options`, so a
     // field initializer would dereference an undefined options.
-    this.child = spawn(this.options.command, [...(this.options.args ?? [])], {
+    this.child = nodeSpawn(this.options.command, [...(this.options.args ?? [])], {
       ...(this.options.cwd === undefined ? {} : { cwd: this.options.cwd }),
       stdio: ['pipe', 'pipe', 'pipe'],
       ...(this.options.env === undefined ? {} : { env: this.options.env }),
@@ -215,5 +217,179 @@ function openBrowserWebSocket(url: string): SocketLike {
       socket.onerror = () => handler('acp agent connection errored')
       socket.onclose = event => handler(`acp agent connection closed${event.reason === '' ? '' : `: ${event.reason}`}`)
     },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// grok agent serve: spawn the WebSocket server, then connect to it.
+//
+// codex and claude are child processes the preset spawns and speaks to over
+// stdio. grok is the opposite: it is a long-lived WebSocket server the preset
+// has to start first, then dial. So the transport owns the whole lifecycle —
+// pick a free port, spawn `grok agent serve`, wait until it actually accepts a
+// connection, dial it, and kill it when the session closes. Nothing else in the
+// preset layer knows how to do any of that; without this the grok entry would
+// point at a URL no process is listening on.
+// ---------------------------------------------------------------------------
+
+/** The child process surface this transport needs, so tests can stand one in. */
+export type GrokServeChild = {
+  readonly stderr: { on(event: 'data', handler: (chunk: string) => void): void; setEncoding(encoding: string): void } | null
+  on(event: 'error', handler: (error: Error) => void): void
+  on(event: 'exit', handler: (code: number | null, signal: NodeJS.Signals | null) => void): void
+  kill(signal?: NodeJS.Signals): void
+}
+
+/** What spawns the serve process; injectable so tests avoid a real child. */
+export type GrokServeSpawn = (command: string, args: readonly string[], options: {
+  readonly cwd?: string
+  readonly env?: NodeJS.ProcessEnv
+}) => GrokServeChild
+
+export type GrokServeOptions = {
+  /** Path to the grok binary. */
+  readonly command: string
+  /** Extra args after `agent serve --bind … --secret …`. */
+  readonly args?: readonly string[]
+  readonly cwd?: string
+  readonly env?: NodeJS.ProcessEnv
+  /** Bind host without a port; a free port is chosen. Default `127.0.0.1`. */
+  readonly bind?: string
+  /** Agent diagnostics land here; never part of the protocol. */
+  readonly onDiagnostic?: (line: string) => void
+  readonly createSocket?: (url: string) => SocketLike
+  /** Injectable so tests avoid a real port scan. */
+  readonly pickPort?: () => Promise<number>
+  /** Injectable so tests avoid spawning a real grok. */
+  readonly spawn?: GrokServeSpawn
+  /** Injectable so tests avoid waiting on a real port. */
+  readonly waitUntilReady?: (bind: string, port: number) => Promise<void>
+  /** How long to wait for the serve process to accept a connection. */
+  readonly readyTimeoutMs?: number
+}
+
+/** A 24-byte secret, so the server-key is not guessable from a public build. */
+function randomSecret(): string {
+  return randomBytes(24).toString('hex')
+}
+
+/** Ask the OS for a free port, then release it for grok to take. */
+function pickFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer()
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      const port = typeof address === 'object' && address !== null ? address.port : 0
+      server.close(() => resolve(port))
+    })
+  })
+}
+
+/**
+ * Wait until the serve process is actually accepting connections on `port`.
+ *
+ * A WebSocket constructed a moment too early gets a refused connect and dies,
+ * which from the client's side looks like a grok that went silent — so the port
+ * has to be listening before the dial. A TCP connect is the honest signal here;
+ * the real protocol handshake still happens afterwards, over the WebSocket.
+ */
+function waitForPort(bind: string, port: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  return new Promise((resolve, reject) => {
+    const attempt = (): void => {
+      const socket = createConnection({ host: bind, port })
+      socket.once('connect', () => { socket.destroy(); resolve() })
+      socket.once('error', () => {
+        socket.destroy()
+        if (Date.now() >= deadline) {
+          reject(new Error(`grok agent serve did not accept a connection on ${bind}:${port} within ${timeoutMs}ms`))
+        } else {
+          setTimeout(attempt, 100)
+        }
+      })
+    }
+    attempt()
+  })
+}
+
+/**
+ * grok reached over a `grok agent serve` this transport starts and owns.
+ *
+ * Every frame method delegates to the inner WebSocket once it is up; the serve
+ * process is the part that is different, so it is spawned here and killed on
+ * close. A death of either the process or the socket reaches the session, the
+ * same as for a stdio agent.
+ */
+export class GrokServeTransport implements AcpTransport {
+  private readonly child: GrokServeChild
+  private readonly inner: WebSocketAcpTransport
+  private handler: (line: string) => void = () => {}
+  private death: (reason: string) => void = () => {}
+  private closed = false
+
+  private constructor(child: GrokServeChild, inner: WebSocketAcpTransport) {
+    this.child = child
+    this.inner = inner
+    child.on('error', error => this.die(`acp agent grok could not run: ${error.message}`))
+    child.on('exit', (code, signal) => this.die(
+      `acp agent grok exited (code=${code ?? 'none'} signal=${signal ?? 'none'})`,
+    ))
+    inner.onDeath(reason => this.die(reason))
+  }
+
+  /** Spawn the serve process, wait for it, and dial it. */
+  static async create(options: GrokServeOptions): Promise<GrokServeTransport> {
+    const bind = options.bind ?? '127.0.0.1'
+    const port = await (options.pickPort?.() ?? pickFreePort())
+    const secret = randomSecret()
+    const args = ['agent', 'serve', '--bind', `${bind}:${port}`, '--secret', secret, ...(options.args ?? [])]
+    const spawn = options.spawn ?? nodeSpawn
+    const child = spawn(options.command, args, {
+      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+      ...(options.env === undefined ? {} : { env: options.env }),
+    })
+    const onDiagnostic = options.onDiagnostic
+    if (onDiagnostic !== undefined && child.stderr !== null) {
+      child.stderr.setEncoding('utf8')
+      child.stderr.on('data', chunk => {
+        for (const line of chunk.split('\n')) {
+          const trimmed = line.trim()
+          if (trimmed.length > 0) onDiagnostic(trimmed)
+        }
+      })
+    }
+    await (options.waitUntilReady?.(bind, port) ?? waitForPort(bind, port, options.readyTimeoutMs ?? 30_000))
+    const url = grokWebSocketUrl(`${bind}:${port}`, secret)
+    const inner = new WebSocketAcpTransport({
+      url,
+      ...(options.createSocket === undefined ? {} : { createSocket: options.createSocket }),
+    })
+    return new GrokServeTransport(child, inner)
+  }
+
+  /** A death already reported (our own close) must not reach the session. */
+  private die(reason: string): void {
+    if (this.closed) return
+    this.death(reason)
+  }
+
+  send(line: string): void {
+    this.inner.send(line)
+  }
+
+  onLine(handler: (line: string) => void): void {
+    this.inner.onLine(handler)
+  }
+
+  onDeath(handler: (reason: string) => void): void {
+    this.death = handler
+  }
+
+  close(): void {
+    if (this.closed) return
+    this.closed = true
+    this.inner.close()
+    this.child.kill('SIGTERM')
   }
 }

@@ -358,6 +358,10 @@ describe('会话停下来的善后', () => {
     const counters = transportCounter()
     const row = installedRow({ transport: counters.transport })
     row.startTurn('probe-1').catch(() => {})
+    // Opening is async now (grok's serve must be ready before it is dialed), so
+    // the session lands in the registry one microtask after the turn starts —
+    // yield before acting on the connection it opened.
+    await new Promise(resolve => setTimeout(resolve, 0))
     expect(counters.count()).toBe(1)
 
     row.stop('probe-1')
@@ -366,6 +370,7 @@ describe('会话停下来的善后', () => {
     // The dropped entry means the next turn cannot reuse the closed
     // connection — a fresh one is opened instead.
     row.startTurn('probe-2').catch(() => {})
+    await new Promise(resolve => setTimeout(resolve, 0))
     expect(counters.count()).toBe(2)
   })
 
@@ -377,11 +382,14 @@ describe('会话停下来的善后', () => {
     expect(counters.closes()).toBe(0)
   })
 
-  it('连接死亡的自愈上报走 report，说得出会话和原因', () => {
+  it('连接死亡的自愈上报走 report，说得出会话和原因', async () => {
     const counters = transportCounter()
     const said: string[] = []
     const row = installedRow({ transport: counters.transport, report: message => { said.push(message) } })
     row.startTurn('s1').catch(() => {})
+    // The death listener is wired once the async open resolves; yield so the
+    // die() lands on a session that is actually being watched.
+    await new Promise(resolve => setTimeout(resolve, 0))
     row.transports[0]!.die('socket died')
     expect(said.some(message => message.includes('s1') && message.includes('socket died'))).toBe(true)
   })

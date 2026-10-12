@@ -82,7 +82,7 @@ export type AcpSessionFactory = {
    */
   dialectFor(presetId: string, config: AcpPresetConfig): AcpDialect | undefined
   /** Open the agent for one DSH session. Called once per session. */
-  open(presetId: string, options: RunnerOptions): AcpSession
+  open(presetId: string, options: RunnerOptions): Promise<AcpSession>
 }
 
 /**
@@ -161,7 +161,7 @@ export function buildPresetTable(
       run: async (decision, turn) => {
         let session = opened.get(turn.sessionId)
         if (session === undefined) {
-          session = factory.open(presetId, {
+          session = await factory.open(presetId, {
             cwd: preset.cwd ?? process.cwd(),
             ...(preset.model === undefined ? {} : { modelId: preset.model }),
             ...(preset.mode === undefined ? {} : { modeId: preset.mode }),
