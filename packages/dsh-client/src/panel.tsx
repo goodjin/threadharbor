@@ -235,6 +235,21 @@ function nonEmpty(value: string | undefined): string | undefined {
 }
 
 /**
+ * The host part of a registered address — the IP or MagicDNS name the operator
+ * typed — pulled out for display, so the row and the detail page can show the
+ * IP beside the name. Returns undefined when there is no parseable address.
+ */
+export function hostOf(address: string | undefined): string | undefined {
+  const trimmed = address?.trim() ?? ''
+  if (trimmed === '') return undefined
+  try {
+    return new URL(trimmed).hostname
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * How long since the host was last heard, in words.
  * @param lastSeen - the page-clock time of the last announcement.
  * @param now - the page clock; defaults to Date.now, injected for tests.
@@ -422,6 +437,10 @@ export function HostRow(props: {
   readonly onOpen: () => void
 }): ReactNode {
   const { row } = props
+  // 副行只在地址里的 IP / 地址名跟名字不一样时显示：本机名就是 IP（127.0.0.1），
+  // 再列一遍是重复；没有地址的（本机）也不硬塞内部标识充数。
+  const ip = hostOf(row.address)
+  const secondary = ip !== undefined && ip !== row.name ? ip : undefined
   const badge = row.self
     ? { word: '本机', tone: 'self' as const }
     : row.online
@@ -437,7 +456,9 @@ export function HostRow(props: {
       >
         <span className={styles.hostMain}>
           <strong data-host-name="" className={styles.hostName}>{row.name}</strong>
-          <span data-host-id-label="" className={styles.hostIdShort} title={row.hostId}>{row.hostId}</span>
+          {secondary !== undefined
+            ? <span data-host-id-label="" className={styles.hostIdShort} title={secondary}>{secondary}</span>
+            : undefined}
         </span>
         <span data-host-badge={badge.tone} className={styles.hostBadge}>{badge.word}</span>
         <span className={styles.chevron} aria-hidden="true">▸</span>
@@ -843,11 +864,12 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
       }
       // 本机的标识与名字是本机身份，可编辑；地址是登记簿的东西，只读展示。
       // 外来主机登记过就能整行改；只是路过（同源另一标签页）就没有可填的。
+      // 本机：标识与名字可改（名字是本机身份），地址只读——那是这个标签页
+      // 自己的 URL，不是登记簿里的。外来主机：整行可改；路过（同源另一标签页）
+      // 也开放填写，保存即登记。
       const fields = row.self
         ? { id: true, title: true, address: false }
-        : registration !== undefined
-          ? { id: true, title: true, address: true }
-          : { id: false, title: false, address: false }
+        : { id: true, title: true, address: true }
       const reach = reaches.get(row.hostId)
       return (
         <div data-threadharbor-panel="" className={styles.root}>

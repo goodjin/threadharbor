@@ -45,10 +45,13 @@ class FakeAgents implements AgentListPort {
  * 由 rollup-section.spec.ts 对真实现验证，这里只供面板接线使用。
  */
 class FakeRollUp implements RollUpSection {
+  private readonly all: readonly HostSnapshot[]
   private snapshot: HostSnapshot
 
   constructor(hosts: readonly HostSnapshot[] = []) {
-    this.snapshot = { ...(hosts.find(host => host.self) ?? hosts[0] ?? { hostId: 'self-host', hostTitle: '本机', lastSeen: 1_000, self: true }) }
+    const fallback = { hostId: 'self-host', hostTitle: '本机', lastSeen: 1_000, self: true }
+    this.all = hosts.length > 0 ? hosts : [fallback]
+    this.snapshot = { ...(this.all.find(host => host.self) ?? this.all[0] ?? fallback) }
   }
 
   identity(): HostIdentity {
@@ -56,11 +59,12 @@ class FakeRollUp implements RollUpSection {
   }
 
   hosts(): readonly HostSnapshot[] {
-    return [this.snapshot]
+    // 自报那条以 this.snapshot 为准（setIdentity 改的是它），其余是种子里的路过主机。
+    return this.all.map(host => (host.self ? this.snapshot : host))
   }
 
   onlineHostIds(): readonly string[] {
-    return [this.snapshot.hostId]
+    return this.all.map(host => (host.self ? this.snapshot.hostId : host.hostId))
   }
 
   setIdentity(value: ConfiguredIdentity): void {
@@ -112,14 +116,14 @@ function makeRegistry(entries: readonly { hostId: string; hostTitle: string; add
 
 const SELF_HOST: HostSnapshot = { hostId: 'self-host', hostTitle: '本机', lastSeen: 1_000, self: true }
 
-async function mountPanel(registry: HostRegistryPort, hostStore?: FakeHostStore): Promise<{ container: HTMLElement; root: Root }> {
+async function mountPanel(registry: HostRegistryPort, hostStore?: FakeHostStore, rollUp?: FakeRollUp): Promise<{ container: HTMLElement; root: Root }> {
   const container = document.createElement('div')
   document.body.appendChild(container)
   const root = createRoot(container)
   const props: AgentPanelProps = {
     agents: new FakeAgents([{ presetId: 'acp-grok', label: 'Grok' }]),
     probe: () => new Promise(() => {}),
-    rollUp: new FakeRollUp([SELF_HOST]),
+    rollUp: rollUp ?? new FakeRollUp([SELF_HOST]),
     registry,
     ...(hostStore === undefined ? {} : { hostStore }),
   }
@@ -167,6 +171,8 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
       expect(q(container, '[data-panel-page="list"]')).toBeTruthy()
       expect(q(container, '[data-action="add-host"]').textContent).toContain('添加新主机')
       expect(q(container, '[data-host-row="bench"]')).toBeTruthy()
+      expect(q(container, '[data-host-row="bench"] [data-host-name]').textContent).toBe('测试机')
+      expect(q(container, '[data-host-row="bench"] [data-host-id-label]').textContent).toBe('192.168.1.20')
       expect(container.querySelector('[data-agent-section]')).toBeNull()
       expect(container.querySelector('[data-panel-page="detail"]')).toBeNull()
     } finally {
@@ -186,6 +192,28 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
       click(container, '[data-form-cancel-bottom]')
       expect(q(container, '[data-panel-page="list"]')).toBeTruthy()
       expect(container.querySelector('[data-agent-section]')).toBeNull()
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('点路过的主机（同源在线、未登记）进详情页：名字和地址可填，保存即登记', async () => {
+    const registry = makeRegistry()
+    const { container, root } = await mountPanel(
+      registry,
+      undefined,
+      new FakeRollUp([
+        SELF_HOST,
+        { hostId: 'peer', hostTitle: '同源的另一个标签页', lastSeen: 1_000, self: false },
+      ]),
+    )
+    try {
+      click(container, '[data-host-open="peer"]')
+      expect(q(container, '[data-panel-page="detail"]')).toBeTruthy()
+      // 路过的主机现在也可填：名字和地址是 input，不是只读 span。
+      expect(q(container, '[data-form-field-title=""]').tagName).toBe('INPUT')
+      expect(q(container, '[data-form-field-address=""]').tagName).toBe('INPUT')
+      expect(q(container, '[data-form-confirm]').textContent).toContain('保存')
     } finally {
       await unmount(root)
     }
