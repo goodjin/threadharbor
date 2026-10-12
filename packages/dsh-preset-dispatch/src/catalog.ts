@@ -115,20 +115,29 @@ function splitEffort(id: string): { base: string; effort: string } | undefined {
  */
 export function collapseEffortModels(models: readonly { id: string; name: string; description?: string }[]): CollapsedModel[] {
   const order: string[] = []
-  const byBase = new Map<string, { displayName: string; description?: string; count: number; efforts: CatalogEffort[] }>()
+  const byBase = new Map<string, { wireId?: string; displayName: string; description?: string; count: number; efforts: CatalogEffort[] }>()
   for (const model of models) {
     const split = splitEffort(model.id)
     if (split === undefined) {
-      if (!byBase.has(model.id)) {
-        order.push(model.id)
-        byBase.set(model.id, bareEntry(model.name, model.description))
+      // Bare-id agent (claude, grok): collapse by display name, not wire id.
+      // claude publishes five entries (default/opus/fable/sonnet/haiku) that all
+      // display as "GLM-5.3"; without name-based dedup the picker shows five
+      // identical rows. The first entry's real wire id is kept as baseId so a
+      // selection re-attaches to a real id, not the display label.
+      const existing = byBase.get(model.name)
+      if (existing === undefined) {
+        order.push(model.name)
+        byBase.set(model.name, { wireId: model.id, displayName: model.name, count: 1, ...(model.description === undefined ? {} : { description: model.description }), efforts: undefined as unknown as CatalogEffort[] })
+      } else {
+        existing.count += 1
+        if (existing.description === undefined && model.description !== undefined) existing.description = model.description
       }
       continue
     }
     const existing = byBase.get(split.base)
     if (existing === undefined) {
       order.push(split.base)
-      byBase.set(split.base, { ...bareEntry(baseName(model.name, split.effort), model.description), efforts: [{ id: split.effort, name: model.name, wireId: model.id }] })
+      byBase.set(split.base, { displayName: baseName(model.name, split.effort), ...(model.description === undefined ? {} : { description: model.description }), count: 1, efforts: [{ id: split.effort, name: model.name, wireId: model.id }] })
       continue
     }
     existing.count += 1
@@ -138,8 +147,9 @@ export function collapseEffortModels(models: readonly { id: string; name: string
     }
   }
   return order.map(base => {
-    const entry = byBase.get(base) as { displayName: string; description?: string; count: number; efforts: CatalogEffort[] | undefined }
-    return { baseId: base, displayName: entry.displayName, ...(entry.description === undefined ? {} : { description: entry.description }), efforts: entry.efforts }
+    const entry = byBase.get(base) as { wireId?: string; displayName: string; description?: string; count: number; efforts: CatalogEffort[] }
+    // Bare-id rows carry the real wire id; suffixed rows use the stripped base id.
+    return { baseId: entry.wireId ?? base, displayName: entry.displayName, ...(entry.description === undefined ? {} : { description: entry.description }), efforts: entry.efforts }
   })
 }
 
@@ -148,10 +158,6 @@ export function collapseEffortModels(models: readonly { id: string; name: string
  * when the agent reported none — `exactOptionalPropertyTypes` rejects an explicit
  * `undefined` for an optional property, so the field is left off rather than set.
  */
-function bareEntry(name: string, description: string | undefined): { displayName: string; description?: string; count: number; efforts: CatalogEffort[] } {
-  return { displayName: name, ...(description === undefined ? {} : { description }), count: 1, efforts: undefined as unknown as CatalogEffort[] }
-}
-
 /** Strip a trailing ` (effort)` from a display name, leaving the base model's label. */
 function baseName(name: string, effort: string): string {
   const suffix = `(${effort})`

@@ -55,6 +55,22 @@ describe('collapseEffortModels', () => {
     ])
   })
 
+  it('显示名相同的多个裸 id 归并成一行，wire id 取第一个真实 id', () => {
+    // claude 发布 default/opus/fable/sonnet/haiku 五个裸 id，全显示成同一个名字。
+    // 旧逻辑按 id 归并 → 五行；按 name 归并 → 一行，且 baseId 必须是真 wire id 而非显示名。
+    const result = collapseEffortModels([
+      { id: 'default', name: 'GLM-5.3' },
+      { id: 'opus', name: 'GLM-5.3' },
+      { id: 'fable', name: 'GLM-5.3' },
+      { id: 'sonnet', name: 'GLM-5.3' },
+      { id: 'haiku', name: 'GLM-5.3' },
+    ])
+    expect(result).toHaveLength(1)
+    expect(result[0]?.baseId).toBe('default')
+    expect(result[0]?.displayName).toBe('GLM-5.3')
+    expect(result[0]?.efforts).toBeUndefined()
+  })
+
   it('不同基础模型不互相归并', () => {
     const result = collapseEffortModels([
       { id: 'gpt-6-astra[low]', name: 'A (low)' },
