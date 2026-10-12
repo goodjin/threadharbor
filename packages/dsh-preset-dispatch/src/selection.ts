@@ -32,10 +32,35 @@
 /** The provider route prefix every ACP catalog route carries. */
 const ROUTE_PREFIX = 'acp:'
 
+/**
+ * The base wire id of a model, with any `[effort]` suffix stripped.
+ *
+ * Some agents publish one model per effort as `base[effort]`; the catalog
+ * collapses those to `base` and rides effort separately, so a picker selection
+ * arrives as the bare base. The preset's declared list still carries the
+ * suffixed ids, so matching compares base-to-base — a `base` pick is served
+ * when the preset advertises `base` at any effort.
+ */
+function baseIdOf(id: string): string {
+  const open = id.lastIndexOf('[')
+  if (open === -1 || !id.endsWith(']')) return id
+  const base = id.slice(0, open)
+  const effort = id.slice(open + 1, -1)
+  if (base === '' || effort === '' || effort.includes('[') || effort.includes(']')) return id
+  return base
+}
+
 /** A model selection, as the projection records it. */
 export type SelectionLike = {
   readonly provider: string
   readonly model: string
+  /**
+   * The reasoning effort the picker paired with this model, when the model
+   * advertises one. Carried end-to-end so a collapsed base pick can re-attach
+   * its `[effort]` suffix before reaching the agent — the agent selects effort
+   * through the model id, not a separate parameter.
+   */
+  readonly reasoningEffort?: string
 }
 
 /** What one turn should do about the session's chosen model. */
@@ -43,7 +68,7 @@ export type SelectionDecision =
   /** Nothing pending that names a model — answer with whatever the preset drives. */
   | { readonly kind: 'none' }
   /** The selection names a model this preset serves; use it. */
-  | { readonly kind: 'own'; readonly modelId: string }
+  | { readonly kind: 'own'; readonly modelId: string; readonly reasoningEffort?: string }
   /**
    * The selection names a model nothing here can serve the session with. The
    * turn is refused with the reason: answering anyway would put one agent's
@@ -82,9 +107,14 @@ export function pendingSelectionOf(state: unknown): SelectionLike | undefined {
  */
 export function selectionOf(value: unknown): SelectionLike | undefined {
   if (typeof value !== 'object' || value === null) return undefined
-  const selection = value as { provider?: unknown; model?: unknown }
+  const selection = value as { provider?: unknown; model?: unknown; reasoningEffort?: unknown }
   if (typeof selection['provider'] !== 'string' || typeof selection['model'] !== 'string') return undefined
-  return { provider: selection['provider'], model: selection['model'] }
+  // The effort rides alongside the model, not inside it: the picker keeps them
+  // separate, and the agent only accepts the combined wire id. Dropping it here
+  // would leave a collapsed base pick with no way to re-attach its suffix.
+  return typeof selection['reasoningEffort'] === 'string'
+    ? { provider: selection['provider'], model: selection['model'], reasoningEffort: selection['reasoningEffort'] }
+    : { provider: selection['provider'], model: selection['model'] }
 }
 
 /**
@@ -103,8 +133,24 @@ export function decideSelection(
   source: SelectionSource = 'picker',
 ): SelectionDecision {
   if (selection.provider === routeOf(config.presetId)) {
-    const own = config.models.find(model => model.id === selection.model)
-    if (own !== undefined) return { kind: 'own', modelId: own.id }
+    // The picker now selects the collapsed base id (effort rides DSH's own
+    // reasoningEffort field), while the preset's declared list still carries the
+    // suffixed wire ids. A bare base pick is served when the preset advertises
+    // that base at any effort; a still-suffixed pick (an older session stamped
+    // with one) is matched exactly and passed through verbatim so it keeps
+    // reaching the agent as the exact wire id it reported.
+    const exact = config.models.find(model => model.id === selection.model)
+    if (exact !== undefined) {
+      return { kind: 'own', modelId: exact.id, ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }) }
+    }
+    const bare = baseIdOf(selection.model)
+    const byBase = config.models.find(model => baseIdOf(model.id) === bare)
+    if (byBase !== undefined) {
+      // A bare base pick: the effort rides the model id as a suffix the agent
+      // accepts, so it travels with the decision rather than separately.
+      const modelId = selection.reasoningEffort === undefined ? bare : `${bare}[${selection.reasoningEffort}]`
+      return { kind: 'own', modelId, ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }) }
+    }
     // The host default naming this route with a model the list has dropped is
     // still "no opinion": nothing here was picked on purpose.
     if (source === 'host-default') return { kind: 'none' }

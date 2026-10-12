@@ -22,7 +22,7 @@ describe('pendingSelectionOf', () => {
     expect(pendingSelectionOf({
       lastUsed: { provider: 'acp:acp-grok', model: 'grok-4.7' },
       pending: { provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'high' },
-    })).toEqual({ provider: 'deepseek-official', model: 'deepseek-v4-pro' })
+    })).toEqual({ provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'high' })
   })
 
   it('reads nothing when the selection was already consumed', () => {
@@ -44,7 +44,7 @@ describe('decideSelection', () => {
 
   it('reads a bare selection value, as the host default reports it', () => {
     expect(selectionOf({ provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'high' }))
-      .toEqual({ provider: 'deepseek-official', model: 'deepseek-v4-pro' })
+      .toEqual({ provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'high' })
     expect(selectionOf(null)).toBeUndefined()
     expect(selectionOf({ provider: 'x' })).toBeUndefined()
   })
@@ -98,5 +98,31 @@ describe('decideSelection', () => {
     expect(decision.kind).toBe('refuse')
     if (decision.kind !== 'refuse') return
     expect(decision.reason).toContain('没有声明任何模型')
+  })
+
+  it('serves a base-model pick even when the preset only declares suffixed ids', () => {
+    // 思考强度已被收进 reasoning.efforts，picker 选的是基础 id
+    // （gpt-6-astra）。选择层必须按基础 id 认账并原样放行基础 id——
+    // effort 走 DSH 自己的 reasoningEffort 字段，不经过这一层，所以这里返回
+    // 的 modelId 就是基础 id，不带任何 [后缀]。
+    const codex = { presetId: 'acp-codex', models: [{ id: 'gpt-6-astra[low]' }, { id: 'gpt-6-astra[high]' }] }
+    const decision = decideSelection(codex, { provider: 'acp:acp-codex', model: 'gpt-6-astra' })
+    expect(decision.kind).toBe('own')
+    if (decision.kind === 'own') expect(decision.modelId).toBe('gpt-6-astra')
+  })
+
+  it('matches a suffixed pick to its base entry, serving the declared wire id', () => {
+    // 一个仍带 [后缀] 的旧选择（或 host default）也要认账：按基础 id 对上声明项，
+    // 返回声明的那条带后缀的 wire id——agent 只认它。
+    const codex = { presetId: 'acp-codex', models: [{ id: 'gpt-6-astra[low]' }, { id: 'gpt-6-astra[high]' }] }
+    const decision = decideSelection(codex, { provider: 'acp:acp-codex', model: 'gpt-6-astra[high]' })
+    expect(decision.kind).toBe('own')
+    if (decision.kind === 'own') expect(decision.modelId).toBe('gpt-6-astra[high]')
+  })
+
+  it('still refuses a base model the preset never advertised at any effort', () => {
+    const codex = { presetId: 'acp-codex', models: [{ id: 'gpt-6-astra[low]' }, { id: 'gpt-6-astra[high]' }] }
+    const decision = decideSelection(codex, { provider: 'acp:acp-codex', model: 'gpt-9-unknown' })
+    expect(decision.kind).toBe('refuse')
   })
 })

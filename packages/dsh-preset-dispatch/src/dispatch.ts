@@ -108,7 +108,7 @@ export type StepPosition = {
  */
 export type TurnModelDecision =
   | { readonly kind: 'none' }
-  | { readonly kind: 'own'; readonly modelId: string }
+  | { readonly kind: 'own'; readonly modelId: string; readonly reasoningEffort?: string }
   | { readonly kind: 'refuse'; readonly reason: string }
   | {
     /**
@@ -168,6 +168,12 @@ export type TurnContext = {
   readonly write: ContentWriter
   /** The model this turn asked for, when the session's own selection named one. */
   readonly modelId?: string
+  /**
+   * The reasoning effort paired with that model, when the picker selected one
+   * for a model that advertises efforts. The agent selects effort through the
+   * model id, so the runner re-attaches it as the `[effort]` suffix.
+   */
+  readonly reasoningEffort?: string
   readonly openStream?: () => TurnStreamHandle | undefined
 }
 
@@ -411,7 +417,9 @@ export function installAcpDispatch(
         position,
         produce: result => options.produce(result, position),
         write: options.write,
-        ...(model.kind === 'own' ? { modelId: model.modelId } : {}),
+        ...(model.kind === 'own'
+          ? { modelId: model.modelId, ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort }) }
+          : {}),
         ...(options.openStream === undefined ? {} : { openStream: options.openStream(this, position) }),
       })
       return result.end

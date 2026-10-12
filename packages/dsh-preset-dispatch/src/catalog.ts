@@ -21,7 +21,143 @@ export type CatalogModel = {
   readonly id: string
   readonly name: string
   readonly description?: string
+  /**
+   * Reasoning efforts this model offers, when the agent publishes one model per
+   * effort as `base[effort]`. Absent for bare-id agents — DSH's picker renders a
+   * reasoning sub-control exactly when this is present, which is what turns the
+   * effort into a separate axis instead of N duplicate rows.
+   */
+  readonly reasoning?: { readonly efforts: readonly { readonly id: string; readonly name: string }[] }
 }
+
+/**
+ * One collapsed base model as the catalog publishes it: base id, base display
+ * name, the declared description, and — only when the agent publishes efforts —
+ * a `reasoning.efforts` array, which is the signal DSH's picker reads to render
+ * the effort as a separate choice instead of one row per effort.
+ *
+ * Deliberately omits `defaultEffort`: DSH's picker treats an absent default as
+ * "show a Provider default row and pre-select nothing" (it synthesizes that row
+ * only when `defaultEffort` is undefined), which is the honest first paint — the
+ * agent picks its own default until the user chooses an effort. Setting one here
+ * would silently pre-select an effort the user never chose.
+ */
+function collapsedToCatalog(
+  provider: string,
+  model: CollapsedModel,
+): CatalogModel {
+  return {
+    provider,
+    id: model.baseId,
+    name: model.displayName,
+    ...(model.description === undefined ? {} : { description: model.description }),
+    ...(model.efforts === undefined
+      ? {}
+      : { reasoning: { efforts: model.efforts.map(effort => ({ id: effort.id, name: effort.name })) } }),
+  }
+}
+
+/** One selectable reasoning effort, as a model the agent offers it. */
+export type CatalogEffort = {
+  /** The wire value the agent selects on — the `[suffix]` after the base id. */
+  readonly id: string
+  /** Human label, as the agent reported the suffixed entry. */
+  readonly name: string
+  /** The full wire id this effort stands for (`base[id]`), so a selection re-attaches it verbatim. */
+  readonly wireId: string
+}
+
+/** A model after collapsing same-base entries: one base, its efforts (absent when the agent offers none). */
+export type CollapsedModel = {
+  /** The base wire id, with any `[effort]` suffix stripped. */
+  readonly baseId: string
+  /** The display name for the single base entry. */
+  readonly displayName: string
+  /** The declared description from the agent's report, or undefined. */
+  readonly description?: string
+  /** The efforts this model offers, or undefined when the agent publishes bare ids. */
+  readonly efforts: readonly CatalogEffort[] | undefined
+}
+
+/**
+ * Split a model id into its base and reasoning-effort suffix.
+ *
+ * Some agents (codex-acp, confirmed on a live `session/new` 2026-10-12) publish
+ * one model per effort as `base[effort]` — six genuinely distinct wire ids, not a
+ * display label. Others (claude, grok) publish bare ids with no suffix. This
+ * returns the split for a suffixed id and `undefined` effort for a bare one, so
+ * the caller can collapse same-base entries without assuming a fixed vocabulary.
+ */
+function splitEffort(id: string): { base: string; effort: string } | undefined {
+  const open = id.lastIndexOf('[')
+  if (open === -1 || !id.endsWith(']')) return undefined
+  const base = id.slice(0, open)
+  const effort = id.slice(open + 1, -1)
+  if (base === '' || effort === '' || effort.includes(']') || effort.includes('[')) return undefined
+  return { base, effort }
+}
+
+/**
+ * Collapse same-base models into one entry and collect their efforts.
+ *
+ * This is what makes "reasoning effort its own choice" and "no duplicate models"
+ * hold at once: a model published as `base[low]`…`base[ultra]` becomes a single
+ * `base` entry carrying every effort, so DSH's picker shows the model once and
+ * offers the effort as a separate axis (it renders a reasoning sub-control
+ * exactly when the model advertises `reasoning.efforts`). A bare-id agent is
+ * returned unchanged — no invented efforts, no collapsed rows.
+ *
+ * The base display name and the efforts keep whatever the agent reported; the
+ * base id is the most common spelling among a model's entries (first wins ties),
+ * which is stable because a model's entries share one spelling in practice.
+ * @param models - The models one preset's agent offers, possibly with `[effort]` suffixes.
+ * @returns One entry per base model, in first-seen order, efforts in first-seen order.
+ */
+export function collapseEffortModels(models: readonly { id: string; name: string; description?: string }[]): CollapsedModel[] {
+  const order: string[] = []
+  const byBase = new Map<string, { displayName: string; description?: string; count: number; efforts: CatalogEffort[] }>()
+  for (const model of models) {
+    const split = splitEffort(model.id)
+    if (split === undefined) {
+      if (!byBase.has(model.id)) {
+        order.push(model.id)
+        byBase.set(model.id, bareEntry(model.name, model.description))
+      }
+      continue
+    }
+    const existing = byBase.get(split.base)
+    if (existing === undefined) {
+      order.push(split.base)
+      byBase.set(split.base, { ...bareEntry(baseName(model.name, split.effort), model.description), efforts: [{ id: split.effort, name: model.name, wireId: model.id }] })
+      continue
+    }
+    existing.count += 1
+    if (existing.description === undefined && model.description !== undefined) existing.description = model.description
+    if (existing.efforts !== undefined && !existing.efforts.some(effort => effort.id === split.effort)) {
+      existing.efforts.push({ id: split.effort, name: model.name, wireId: model.id })
+    }
+  }
+  return order.map(base => {
+    const entry = byBase.get(base) as { displayName: string; description?: string; count: number; efforts: CatalogEffort[] | undefined }
+    return { baseId: base, displayName: entry.displayName, ...(entry.description === undefined ? {} : { description: entry.description }), efforts: entry.efforts }
+  })
+}
+
+/**
+ * The accumulator entry for one base model, with `description` omitted entirely
+ * when the agent reported none — `exactOptionalPropertyTypes` rejects an explicit
+ * `undefined` for an optional property, so the field is left off rather than set.
+ */
+function bareEntry(name: string, description: string | undefined): { displayName: string; description?: string; count: number; efforts: CatalogEffort[] } {
+  return { displayName: name, ...(description === undefined ? {} : { description }), count: 1, efforts: undefined as unknown as CatalogEffort[] }
+}
+
+/** Strip a trailing ` (effort)` from a display name, leaving the base model's label. */
+function baseName(name: string, effort: string): string {
+  const suffix = `(${effort})`
+  return name.endsWith(suffix) ? name.slice(0, -suffix.length).trim() : name
+}
+
 
 /** What the adapter needs from the outside world. */
 export type CatalogDeps = {
@@ -108,12 +244,10 @@ export function catalogAdapter(config: PresetConfig, deps: CatalogDeps): Catalog
       const presetId = presetOfRoute(provider)
       if (presetId === undefined) return []
       if (config.presets[presetId] === undefined) return []
-      return deps.modelsOf(presetId).map(model => ({
-        provider,
-        id: model.id,
-        name: model.name,
-        ...(model.description === undefined ? {} : { description: model.description }),
-      }))
+      // Collapse same-base entries (one model published as base[low]…base[ultra])
+      // into a single row carrying its efforts, so the picker shows the model
+      // once and reasoning effort becomes a separate axis rather than N rows.
+      return collapseEffortModels(deps.modelsOf(presetId)).map(model => collapsedToCatalog(provider, model))
     },
 
     // The catalog resolves every advertised model once at build time, and the
@@ -127,13 +261,23 @@ export function catalogAdapter(config: PresetConfig, deps: CatalogDeps): Catalog
       const declared = presetId === undefined
         ? undefined
         : deps.modelsOf(presetId).find(candidate => candidate.id === model)
-      if (declared === undefined) return { provider, id: model, name: model }
-      return {
-        provider,
-        id: declared.id,
-        name: declared.name,
-        ...(declared.description === undefined ? {} : { description: declared.description }),
+      if (declared !== undefined) {
+        return {
+          provider,
+          id: declared.id,
+          name: declared.name,
+          ...(declared.description === undefined ? {} : { description: declared.description }),
+        }
       }
+      // The id may be a base the catalog collapsed (the picker selects the base
+      // and rides effort separately) or a bare id an older session carries.
+      // Resolve it against the collapsed list so metadata and reasoning stay
+      // aligned with what the picker advertised.
+      const collapsed = presetId === undefined
+        ? undefined
+        : collapseEffortModels(deps.modelsOf(presetId)).find(entry => entry.baseId === model)
+      if (collapsed === undefined) return { provider, id: model, name: model }
+      return collapsedToCatalog(provider, collapsed)
     },
 
     // An async generator rather than a synchronous throw: the switch hook is

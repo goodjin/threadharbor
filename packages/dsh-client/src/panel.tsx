@@ -35,6 +35,29 @@ import type { HostSnapshot } from '@threadharbor/dsh-host-federation'
 import type { HostStorePosture } from './host-store.ts'
 import styles from './panel.module.css'
 
+/**
+ * 去重：各 agent 下面的模型相同则不重复展示。
+ *
+ * 用户 2026-10-12 反馈：「各 Agent 下面的模型如果相同则去重，不要展示多个」。
+ * 去重发生在 agent 粒度——同一个 preset 在目录里可能出现多次（一个 provider
+ * 列在 groups 里、又在 failures 里因运行时解析失败被再列一次），列表只该有
+ * 一个入口。按 presetId 去重，保留首次出现的那条：groups 先于 failures，所以
+ * 留下的是 provider 那条，不是失败兜底那条。探针按 presetId 触发，重复的
+ * presetId 指向同一个 agent，去掉重复不丢任何能力。
+ * @param agents - 目录给出的 agent 列表，可能含重复 preset。
+ * @returns 去掉重复 preset 后的列表，首次出现的顺序不变。
+ */
+export function dedupeAgents(agents: readonly AgentDescriptor[]): readonly AgentDescriptor[] {
+  const seen = new Set<string>()
+  const out: AgentDescriptor[] = []
+  for (const agent of agents) {
+    if (seen.has(agent.presetId)) continue
+    seen.add(agent.presetId)
+    out.push(agent)
+  }
+  return out
+}
+
 /** What one probe attempt is doing, as the row shows it. */
 export type ProbeRunState =
   | { readonly phase: 'idle' }
@@ -893,8 +916,8 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                               </p>
                             )
                           : (
-                              <div className={styles.agentList}>
-                                {agents.map(agent => (
+                              <div data-agent-list="" className={styles.agentList}>
+                                {dedupeAgents(agents).map(agent => (
                                   <AgentRow
                                     key={agent.presetId}
                                     presetId={agent.presetId}
