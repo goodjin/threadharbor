@@ -971,6 +971,9 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
         </div>
         <StoragePostureLine posture={props.hostStore?.posture()} />
         <div data-host-list="" className={styles.hostList}>
+          <div data-host-list-head="" className={styles.hostListHead} aria-hidden="true">
+            <span className={styles.hostListHeadLabel}>主机</span>
+          </div>
           {hostRows.map(row => (
             <HostRow
               key={row.hostId}

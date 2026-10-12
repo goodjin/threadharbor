@@ -15,12 +15,12 @@
   color: var(--dsw-alias-label-primary);
   font-size: 13px;
   line-height: 1.6;
-  /* 宽度固定：框不随里面的文字长度变化，短内容也不缩。 */
+  /* 宽度跟随挂载它的 DSH 槽（main 全宽），不再固定 640px 居中——
+     用户反馈：挤在页面中间一小块。 */
   width: 100%;
   height: auto;
   max-height: 100%;
-  max-width: 640px;
-  margin: 0 auto;
+  margin: 0;
   padding: 16px 4px 24px;
   box-sizing: border-box;
   display: flex;
@@ -338,13 +338,37 @@
 }
 
 /*
- * The host list: one row per machine. The row is a summary — name, the
- * (CSS-truncated) id, the badge — and the whole row is the button that opens
- * the host's detail page. Width comes from the frame, never from the text.
+ * The host list as a table: one row per machine. The row is a summary —
+ * name, the (CSS-truncated) id, the badge — and the whole row is the button
+ * that opens the host's detail page. A header row labels the columns so the
+ * table reads as a table, distinct from the 添加新主机 button above it.
  */
 .hostList {
   display: flex;
   flex-direction: column;
+  border: 1px solid var(--dsw-alias-settings-card-stroke);
+  border-radius: var(--dsh-radius-md);
+  overflow: hidden;
+}
+
+/* Column header: labels the table so it reads as one, not a stack of buttons. */
+.hostListHead {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-caption);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.hostListHeadLabel {
+  /* First column ("主机") spans the name + id; the rest sit at the right. */
+  grid-column: 1;
 }
 
 .hostRow {
