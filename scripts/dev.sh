@@ -124,7 +124,7 @@ web_start() {
   info "starting web (channel=$channel port=$web_port home=$dsh_home)"
   (
     cd "$root"
-    env DSH_HOME="$dsh_home" nohup "$dsh_bin" --profile web "${patch_arg[@]}" --port "$web_port" \
+    env DSH_HOME="$dsh_home" nohup "$dsh_bin" --profile web "${patch_arg[@]+"${patch_arg[@]}"}" --port "$web_port" \
       >>"$web_log" 2>&1 < /dev/null &
     echo $! >"$web_pid"
   )
