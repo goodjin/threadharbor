@@ -53,9 +53,6 @@ importers:
       '@threadharbor/dsh-host-federation':
         specifier: workspace:^
         version: link:../dsh-host-federation
-      '@threadharbor/dsh-preset-dispatch':
-        specifier: workspace:^
-        version: link:../dsh-preset-dispatch
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1

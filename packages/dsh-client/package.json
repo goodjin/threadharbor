@@ -46,8 +46,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@threadharbor/dsh-host-federation": "workspace:^",
-    "@threadharbor/dsh-preset-dispatch": "workspace:^"
+    "@threadharbor/dsh-host-federation": "workspace:^"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

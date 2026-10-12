@@ -1201,3 +1201,35 @@ hostd 时代的「远程主机」假设——而那正是阶段 6 要拿掉的�
 
 非本机（非回环）走内存 + 界面如实说明，为单元级验证（host-store.spec「非本机页面」）；
 真机路径需要服务端放行非回环访问，当前启动器未提供该开关。
+
+### 落地记录：打包陈旧与接线登记（2026-10-12 核对）
+
+围绕「构建会静默打包旧代码」和「接线检查误登记」两处收尾，均已落地并通过
+（typecheck --force + 546 用例 + build 全绿）：
+
+- **打包陈旧防护**：`scripts/build.ts` 驱动 tsdown，其 `entry` 指向编译产物
+  `lib/types/index.js`（client 与 plugin 两个 tsdown 配置皆如此）。正常路径
+  `build.sh` 先 `tsc -b` 再打包，安全；但 `tsc -b` 是增量的——改了 `src/` 文件、
+  而它的 `tsBuildInfoFile` 比产物新时，`tsc` 会跳过重编且不报错，随后 tsdown
+  把旧 `lib/` 照打、退出 0。**实测可复现**：`touch` 一个 client 源文件后跑
+  `tsc -b`（不加 `--force`），产物不更新，源码却比产物新。
+  新增 `scripts/check-freshness.mjs`：从每个打包入口的源码出发，沿相对 import 走
+  可达集，逐个比对 `lib/types/` 下对应 `.js` 的 mtime，比源码旧即**退出 1**，
+  在 `build.sh` 里 `tsc` 之后、tsdown 之前调用。只查入口真正会打进包的文件
+  （plugin 入口是空 `apply()`，几乎不拉 `src/`，按全量 `src` 查会误报）。
+  另一道 `verify-build.mjs` 管的是浏览器产物的**内容**（每个导出名都要在
+  `client.js` 里能找到），这道管的是**新旧**，两者互补。
+- **接线检查认识组合登记**：`tests/wiring.spec.ts` 的可达性根清单原只看代码
+  import，看不见 `cordis.patch.yml` 的组合条目——宿主经 `@threadharbor/...`
+  specifier 加载 `host-store` 半边，于是被误判成「跑不到」。改为从组合文件的
+  `name:` 字段抽出 `@threadharbor/...` specifier，解析到各自导出的文件、作为
+  根种子喂进可达性 walk。`host-store.ts` 因此真正可达，`KNOWN_UNWIRED` 里的
+  误登记随之删除（不再留豁免口子）。真·遗留 `service.ts` 仍登记，清掉条件不变。
+- **删除无用依赖**：`packages/dsh-client/package.json` 声明了
+  `@threadharbor/dsh-preset-dispatch`，但 client 源码只 import
+  `@threadharbor/dsh-host-federation`，preset-dispatch 由宿主侧组合条目加载，
+  与 client 包无关。已删除，lockfile 同步更新（只动这一条 importer 边）。
+- **清理 `undefined/`**：仓库根曾有 `undefined/threadharbor/known_hosts`（空文件，
+  gitignored、未被 git 跟踪，mtime 9 月 1 日，早于 hostd 移除）。全仓检索确认
+  无任何**当前**源码构造 `known_hosts` 路径（仅 `.worktrees/abc` 的旧 hostd
+  gateway 与 `reference/` 里有），属 hostd 时代遗留、不会再生成的死文件，已删除。

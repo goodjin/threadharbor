@@ -35,6 +35,35 @@ const ROOTS = [
 ]
 
 /**
+ * The composition file the profile loads.
+ *
+ * A plugin the host mounts this way is a root the static import walk below
+ * cannot see: the composition row names a package by its `@threadharbor/...`
+ * specifier, not by a relative import, so reachability from `ROOTS` alone
+ * misses it. The host-store half of the federation package is the case that
+ * motivated this — it is loaded only through `cordis.patch.yml`.
+ */
+const COMPOSITION = 'cordis.patch.yml'
+
+/**
+ * Package specifiers named as composition entries.
+ *
+ * Pulled from the `name:` fields of the composition file. Only `@threadharbor/`
+ * specifiers resolve to a package in this repo; everything else (DSH's own
+ * `@deepseek-ai/...` presets) is out of scope. Nested rows are captured too —
+ * the ACP preset bindings point at `@threadharbor/dsh-preset-dispatch`.
+ */
+function compositionSpecifiers(): string[] {
+  if (!existsSync(COMPOSITION)) return []
+  const text = readFileSync(COMPOSITION, 'utf8')
+  const specs = new Set<string>()
+  for (const match of text.matchAll(/name:\s*['"](@threadharbor\/[^'"]+)['"]/g)) {
+    specs.add(match[1] as string)
+  }
+  return [...specs]
+}
+
+/**
  * Code that is written, tested, and deliberately not mounted yet.
  *
  * Each entry has to say what would clear it. An exception with no reason is
@@ -43,8 +72,6 @@ const ROOTS = [
 const KNOWN_UNWIRED: Readonly<Record<string, string>> = {
   'packages/dsh-preset-dispatch/src/service.ts':
     '早期入口，职能与 entry.ts 重叠。模型目录注册已迁到真机路径（plugin.ts 挂载 registerCatalog），此文件只剩 barrel 导出与测试在用；接线检查把它列为配置字段消费方，删它必须先改那道检查。清掉条件：确认没有外部包再调用 attachAcpDispatch，并从配置消费检查的文件清单移除后整体删除。',
-  'packages/dsh-host-federation/src/host-store.ts':
-    '不是未接线：由 cordis.patch.yml 的组合条目 threadharbor-host-store 加载（宿主侧设置存储，浏览器经 remote.settings 读写）。静态可达性分析只扫代码 import，看不见组合登记。真机证据：启动日志出现 [threadharbor] host store mounted 行。清掉条件：组合登记进入本检查的根清单（加载路径可静态追溯）。',
 }
 
 function packageExports(pkg: string): Record<string, unknown> {
@@ -83,6 +110,15 @@ function resolveSpecifier(pkg: string, spec: string, fromDir: string): string | 
 function reachableFromHost(): Set<string> {
   const seen = new Set<string>()
   const queue = [...ROOTS]
+  // Composition entries: the host loads these by package specifier, not by a
+  // relative import, so resolve each to the file the package exports (its main
+  // or the named subpath) and seed that as a root. This is what lets the walk
+  // see a half that no in-repo module imports — the federation package's
+  // host-store entry is loaded only through cordis.patch.yml.
+  for (const spec of compositionSpecifiers()) {
+    const target = resolveSpecifier('@threadharbor/threadharbor', spec, '.')
+    if (target !== null) queue.push(target)
+  }
   const imports = /(?:from|import)\s*\(?\s*['"]([^'"]+)['"]/g
   while (queue.length > 0) {
     const file = queue.pop() as string
