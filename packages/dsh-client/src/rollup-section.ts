@@ -41,6 +41,13 @@ export type RollUpSection = {
   onlineHostIds(): readonly string[]
   /** Save a new identity; an id change re-announces under the new one. */
   setIdentity(value: ConfiguredIdentity): void
+  /**
+   * Re-read the identity from settings without writing. The settings can
+   * change underneath the section — host-side settings hydrate asynchronously
+   * after mount — and the section must take the configured identity the
+   * moment it appears, retiring the derived one it started with.
+   */
+  rereadIdentity(): void
   /** Stop the heartbeat and say goodbye. */
   dispose(): void
 }
@@ -117,18 +124,10 @@ export function startRollUpSection(deps: RollUpSectionDeps): RollUpSection {
     onlineHostIds: () => federation.hosts().map(host => host.hostId),
     setIdentity: value => {
       deps.settings.write(value)
-      const next = resolveIdentity()
-      if (next.hostId === identity.hostId) {
-        // Same machine, same id: re-announcing would churn every other tab.
-        identity = next
-        return
-      }
-      // An id change is a different identity on the channel, so the old one
-      // retires (dispose says bye) before the new one is announced.
-      federation.dispose()
-      identity = next
-      federation = open(identity)
-      federation.start()
+      applyIdentity()
+    },
+    rereadIdentity: () => {
+      applyIdentity()
     },
     dispose: () => {
       // The timer first: a heartbeat left running after the panel is gone
@@ -136,6 +135,31 @@ export function startRollUpSection(deps: RollUpSectionDeps): RollUpSection {
       deps.clearInterval(timer)
       federation.dispose()
     },
+  }
+
+  /**
+   * Take the identity settings now hold, whether because the operator saved
+   * one or because the storage gained one behind the section's back (the
+   * host-side settings hydrate after mount). An id change is a different
+   * identity on the channel, so the old one retires (dispose says bye)
+   * before the new one is announced; a same-id rename re-titles in place.
+   */
+  function applyIdentity(): void {
+    const next = resolveIdentity()
+    if (next.hostId === identity.hostId) {
+      // Same id, new name: re-title in place so the list row (which reads
+      // the presence snapshot) shows the saved name at once, and one
+      // heartbeat tells other tabs — no bye/hello churn.
+      if (next.hostTitle !== identity.hostTitle) {
+        federation.renameSelf(next.hostTitle)
+      }
+      identity = next
+      return
+    }
+    federation.dispose()
+    identity = next
+    federation = open(identity)
+    federation.start()
   }
 }
 

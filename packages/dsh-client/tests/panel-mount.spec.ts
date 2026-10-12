@@ -19,6 +19,7 @@ import { describe, expect, it } from 'vitest'
 import { SlotCore } from '@deepseek-ai/dsh-client-ui-slots'
 import { createElement } from 'react'
 import { apply, type ClientPanelContext, type PanelSlotHost } from '../src/client/index.ts'
+import type { AgentPanelProps } from '../src/panel.tsx'
 
 /**
  * The shell, as the real page builds it: ui-layout's frame owns `root` and
@@ -33,6 +34,9 @@ function shellWith(core: SlotCore): void {
       children: {
         main: { kind: 'keyed', scope: 'root' },
         sidebar: { kind: 'single', scope: 'root' },
+        // The frame's floating layer, where the switch's progress lives: a
+        // bar that dies with the session it belongs to shows nothing at all.
+        'shell.overlay': { kind: 'list', scope: 'root' },
       },
       inject: () => null,
     },
@@ -68,7 +72,7 @@ function slotHost(core: SlotCore): PanelSlotHost {
 type Namespaces = Record<string, unknown>
 
 /** The context apply() runs in, with whatever services the test provides. */
-function fakeCtx(options: { services?: Namespaces } = {}): ClientPanelContext & {
+function fakeCtx(options: { services?: Namespaces; slots?: PanelSlotHost } = {}): ClientPanelContext & {
   core: SlotCore
   warnings: string[]
 } {
@@ -89,7 +93,7 @@ function fakeCtx(options: { services?: Namespaces } = {}): ClientPanelContext & 
       if (name in services) return services[name]
       throw new Error(`property "${name}" does not exist`)
     },
-    slots: slotHost(core),
+    slots: options.slots ?? slotHost(core),
   }
   return { ...ctx, core, warnings }
 }
@@ -143,5 +147,96 @@ describe('面板挂载', () => {
     const core = new SlotCore()
     const host = slotHost(core)
     expect(() => host.inject('sidebar.panellist', () => {})).toThrow(/not declared/)
+  })
+})
+
+/**
+ * 设置通道与主机事实，按真实形状立起来：方法挂在 prototype 上。面板接线
+ * 会从 remote 身上取 `settings.describe` / `$on` 这些方法——拆下来裸调丢
+ * this 的错误必须在这里炸出来，而不是在真机上（先例：gateway 的 lookup）。
+ */
+class FakeSettingsNamespace {
+  mutations: { ns: string; ops: unknown[] }[] = []
+  async describe(): Promise<unknown> {
+    return {
+      namespaces: [{
+        ns: 'threadharbor-host-store',
+        value: { data: { 'dsh.host.registry': '[{"hostId":"bench","hostTitle":"测试机","address":"http://192.168.1.20:3081","createdAt":1}]' } },
+      }],
+    }
+  }
+  async mutate(ns: string, ops: unknown[]): Promise<unknown> {
+    this.mutations.push({ ns, ops })
+    return { ns }
+  }
+}
+
+class FakeRemote {
+  readonly $host = { home: '/tmp/dsh-home', isLoopback: true }
+  readonly settings = new FakeSettingsNamespace()
+  $on(_event: string, _handler: (...args: unknown[]) => void): () => void {
+    return () => {}
+  }
+}
+
+describe('登记与身份的存储接线', () => {
+  /**
+   * A slot host that captures the face exactly as the renderer receives it:
+   * `inject` on the registration options is what hands props over, so the spy
+   * calls it at "render" time. The SlotCore ledger does not keep `inject` on
+   * the entry — reaching the face through entriesOfSlot reads nothing.
+   */
+  function capturingSlots(core: SlotCore): { host: PanelSlotHost; faces: AgentPanelProps[] } {
+    const faces: AgentPanelProps[] = []
+    const host: PanelSlotHost = {
+      inject: (key, callback) => {
+        if (core.spec(key) === undefined) throw new Error(`slot ${key} is not declared`)
+        callback()
+        return () => {}
+      },
+      register: (options, component) => {
+        const face = (options as { inject?: () => AgentPanelProps }).inject?.()
+        if (face !== undefined) faces.push(face)
+        return core.register(options, component)
+      },
+    }
+    return { host, faces }
+  }
+
+  function mountWithRemote(): { ctx: ReturnType<typeof fakeCtx>; faces: AgentPanelProps[] } {
+    const core = new SlotCore()
+    shellWith(core)
+    const { host, faces } = capturingSlots(core)
+    const ctx = fakeCtx({ services: { ...remoteNamespaces(), remote: new FakeRemote() }, slots: host })
+    apply(ctx)
+    return { ctx, faces }
+  }
+
+  const settled = (): Promise<void> => new Promise(resolve => { setTimeout(resolve, 0) })
+
+  it('本机页面：面板拿到主机存储，水合后姿态 host', async () => {
+    const { ctx, faces } = mountWithRemote()
+    expect(() => { void ctx }).not.toThrow()
+    expect(faces[0]?.hostStore).toBeDefined()
+    await settled()
+    expect(faces[0]?.hostStore?.posture()).toEqual({ kind: 'host' })
+  })
+
+  it('登记读取走接线好的存储：水合后 registry.list() 看到机器上的登记', async () => {
+    const { faces } = mountWithRemote()
+    await settled()
+    expect(faces[0]?.registry.list().map(item => item.hostId)).toEqual(['bench'])
+  })
+
+  it('登记写入经 face 落到设置通道：逐键 mutate，命名空间是对的', async () => {
+    const { ctx, faces } = mountWithRemote()
+    await settled()
+    expect(faces[0]?.registry.add({ hostId: 'lab', hostTitle: '实验机', address: 'http://192.168.1.30:3081' }).ok).toBe(true)
+    await settled()
+    const settings = (ctx.get('remote') as FakeRemote).settings
+    expect(settings.mutations.at(-1)?.ns).toBe('threadharbor-host-store')
+    const lastOps = settings.mutations.at(-1)?.ops as { op: string; path: string[] }[]
+    expect(lastOps[0]?.op).toBe('set')
+    expect(lastOps[0]?.path).toEqual(['data', 'dsh.host.registry'])
   })
 })

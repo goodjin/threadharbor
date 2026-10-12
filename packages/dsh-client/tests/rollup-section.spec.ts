@@ -138,12 +138,17 @@ describe('身份变更', () => {
     section.dispose()
   })
 
-  it('只改名字不动 id：不重新报到，免得别的标签页闪烁', () => {
+  it('只改名字不动 id：不退场重报，但在场快照和播报都换新名字', () => {
+    // 列表的行读的是在场快照：快照不换名，编辑保存后主行就永远显示旧名字
+    // （2026-10-12 用户要求编辑要反映到列表）。换名用一次心跳播报出去，
+    // 别的标签页原位改行，不需要 bye/hello 造成的列表闪烁。
     const { bus, section } = setup()
     const before = bus.posted.length
     section.setIdentity({ hostId: 'alpha', hostTitle: '工作室主机' })
-    expect(bus.posted.length).toBe(before)
     expect(section.identity().hostTitle).toBe('工作室主机')
+    expect(section.hosts().find(host => host.self)?.hostTitle).toBe('工作室主机')
+    expect(bus.posted.slice(before).map(message => message.kind)).toEqual(['heartbeat'])
+    expect(bus.posted.at(-1)?.hostTitle).toBe('工作室主机')
     section.dispose()
   })
 
@@ -156,6 +161,29 @@ describe('身份变更', () => {
     const { section } = setup({ settings: broken, report: message => { warnings.push(message) } })
     expect(section.hosts()).toHaveLength(1)
     expect(warnings.some(message => message.includes('host settings'))).toBe(true)
+    section.dispose()
+  })
+
+  it('rereadIdentity：存储在自己脚下变了（水合落地）时重读并换身份', () => {
+    // 登记与默认身份搬到主机侧后，身份是在页面打开之后才异步读回来的。
+    // 读到之前本机先用页面来源派生的身份在场；水合落地时存储里多出了
+    // 配置的身份，section 必须在不写入的前提下重读并换装——id 变了就
+    // 旧的退场、新的报到，和 setIdentity 走同一条路。
+    const lateSettings = fakeSettings()
+    const { bus, section } = setup({ settings: lateSettings })
+    // 开场没有配置身份：派生身份在场。
+    const derivedId = section.identity().hostId
+    expect(section.identity().derived).toBe(true)
+    // 模拟水合：存储里出现了这台机器配置的身份（不经 section 写入）。
+    lateSettings.current.hostId = 'workstation'
+    lateSettings.current.hostTitle = '工作室主机'
+    section.rereadIdentity()
+    expect(section.identity().hostId).toBe('workstation')
+    expect(section.identity().derived).toBe(false)
+    const kinds = bus.posted.map(message => message.kind)
+    // hello（派生身份启动）、bye（派生身份退场）、hello（配置身份报到）。
+    expect(kinds).toEqual(['hello', 'bye', 'hello'])
+    expect(derivedId).not.toBe('workstation')
     section.dispose()
   })
 })

@@ -51,6 +51,20 @@ const CONVERSATION = [
 
 type CreatedRequest = { agentPreset?: string; cwd?: string }
 
+/** The record of a session that has already had one finished turn. */
+const SOURCE_LOG = [
+  { type: 'request/header', data: { header: { config: { provider: 'deepseek', model: 'chat' } }, reason: 'initial' } },
+  { type: 'turn/start', data: { turn: 1 } },
+  { type: 'step/start', data: { turn: 1, step: 1 } },
+  { type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: '第一问' }] } },
+  { type: 'assistant/message', data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: '第一答' }] }, stream: [] } },
+  { type: 'step/end', data: { turn: 1, step: 1 } },
+  { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+  { type: 'turn/start', data: { turn: 2 } },
+  { type: 'step/start', data: { turn: 2, step: 1 } },
+  { type: 'model/selection', data: { provider: 'deepseek', model: 'chat' } },
+]
+
 /** A host context exposing exactly the services named, with recorded effects. */
 function hostWith(over: {
   sessions?: Map<string, unknown>
@@ -59,6 +73,10 @@ function hostWith(over: {
   prompt?: (request: unknown) => Promise<unknown>
   agents?: Map<string, unknown>
   select?: (agent: unknown, presetId: string) => Promise<unknown>
+  /** Per-session logs, as the session query hands them over. */
+  logs?: Map<string, readonly unknown[]>
+  /** `null` for a host that exposes no session query at all. */
+  sessionQuery?: null
 } = {}): {
   ctx: object
   shared: ReturnType<typeof makeSwitchShared>
@@ -67,17 +85,21 @@ function hostWith(over: {
     prompts: unknown[]
     selections: [unknown, string][]
     appended: { type: string; data: unknown }[]
+    /** Every effect in the order it happened, for ordering assertions. */
+    order: string[]
   }
 } {
   const sessions = over.sessions ?? new Map([['s1', { id: 's1', header: { cwd: '/workspace' } }]])
   // The live-agent registry answers for every session on this host, created
   // sessions included; the new session's agent exists by the time select runs.
   const agents = over.agents ?? new Map([['s1', { id: 's1' }]])
+  const logs = over.logs ?? new Map([['s1', SOURCE_LOG]])
   const effects = {
     created: [] as CreatedRequest[],
     prompts: [] as unknown[],
     selections: [] as [unknown, string][],
     appended: [] as { type: string; data: unknown }[],
+    order: [] as string[],
   }
   const projection = over.projection ?? (() => undefined)
   const ctx = {
@@ -85,15 +107,23 @@ function hostWith(over: {
       switch (key) {
         case 'sessions': return { get: (id: string) => sessions.get(id) }
         case 'sessionProjections': return { stateOf: (session: unknown, k: string) => projection(session, k) }
+        case 'sessionQuery': return over.sessionQuery === null ? undefined : {
+          observeSession: async (id: string) => ({
+            events: logs.get(id) ?? [],
+            [Symbol.dispose]: () => {},
+          }),
+        }
         case 'sessionController': return {
           create: over.create ?? (async (request: CreatedRequest) => {
             effects.created.push(request)
+            effects.order.push('create')
             const id = `created-${effects.created.length}`
             sessions.set(id, {
               id,
               header: { cwd: '/workspace' },
               append(type: string, data: unknown): { seq: number } {
                 effects.appended.push({ type, data })
+                effects.order.push(`append:${type}`)
                 return { seq: effects.appended.length }
               },
             })
@@ -102,6 +132,7 @@ function hostWith(over: {
           }),
           prompt: over.prompt ?? (async (request: unknown) => {
             effects.prompts.push(request)
+            effects.order.push('prompt')
             return { accepted: true }
           }),
         }
@@ -109,6 +140,7 @@ function hostWith(over: {
         case 'agentPresets': return {
           select: over.select ?? (async (agent: unknown, presetId: string) => {
             effects.selections.push([agent, presetId])
+            effects.order.push(`select:${presetId}`)
             return presetId
           }),
         }
@@ -186,9 +218,6 @@ describe('mountSwitchOnForeignModelRequest', () => {
     await expect(handler(request)).rejects.toThrow(/新会话 created-1 已带上整段对话历史/)
     expect(effects.created).toEqual([{ agentPreset: 'acp-claude', cwd: '/workspace' }])
     expect(effects.selections).toEqual([])
-    expect(effects.appended).toEqual([
-      { type: 'model/selection', data: { provider: 'acp:acp-claude', model: 'claude-opus-4' } },
-    ])
     // The conversation rides the new session's first model request (the
     // primer), and the question rides the prompt issued to the new session.
     expect(shared.takeHandover('created-1')).toContain('第一问')
@@ -196,6 +225,94 @@ describe('mountSwitchOnForeignModelRequest', () => {
     const prompted = effects.prompts[0] as { sessionId: string; content: readonly { text: string }[] }
     expect(prompted.sessionId).toBe('created-1')
     expect(prompted.content[0]!.text).toBe('现在的问题')
+  })
+
+  it('shows the conversation again in the new session, before it is asked anything', async () => {
+    // The agent reading the history is not the user seeing it: the new session's
+    // own record starts empty, which is what made a switch look like it lost
+    // everything. The finished turns are copied in, ahead of the question.
+    const { ctx, shared, effects } = hostWith({
+      projection: (_session, key) => key === 'agentPreset' ? 'acp-grok' : switchedBoundary,
+    })
+    const handler = mountSwitchOnForeignModelRequest(ctx, CONFIG, deps, shared, () => {})
+    await expect(handler(request)).rejects.toThrow(/新会话 created-1/)
+
+    expect(effects.appended.map(entry => entry.type)).toEqual([
+      'model/selection',
+      'turn/start',
+      'step/start',
+      'user/message',
+      'assistant/message',
+      'step/end',
+      'turn/end',
+    ])
+    // What was copied is the record the user already read — the old agent's
+    // header and the switching turn's own start stay behind.
+    expect(effects.appended[3]?.data).toEqual({ role: 'user', content: [{ type: 'text', text: '第一问' }] })
+    expect(effects.order.indexOf('append:user/message')).toBeLessThan(effects.order.indexOf('prompt'))
+  })
+
+  it('switches without the visible copy when the host cannot read the old record, and says so', async () => {
+    // Losing the display is not losing the conversation: the agent still reads
+    // the whole history through the primer. Saying it out loud is what keeps
+    // the degraded switch from reading as a successful one.
+    const lines: string[] = []
+    const { ctx, shared, effects } = hostWith({
+      projection: (_session, key) => key === 'agentPreset' ? 'acp-grok' : switchedBoundary,
+      sessionQuery: null,
+    })
+    const handler = mountSwitchOnForeignModelRequest(ctx, CONFIG, deps, shared, message => lines.push(message))
+    await expect(handler(request)).rejects.toThrow(/新会话 created-1/)
+
+    expect(effects.appended.map(entry => entry.type)).toEqual(['model/selection'])
+    expect(lines.join('\n')).toMatch(/sessionQuery[\s\S]*created-1/)
+  })
+
+  it('names the created session when the copy is refused half-way', async () => {
+    // Half a conversation is the quiet truncation this chain exists to
+    // prevent: the session is named, and the question is never asked of a
+    // record that is missing its own earlier turns.
+    let written = 0
+    const { ctx, shared, effects } = hostWith({
+      projection: (_session, key) => key === 'agentPreset' ? 'acp-grok' : switchedBoundary,
+      create: async () => {
+        written = 0
+        return { sessionId: 'created-1' }
+      },
+      sessions: new Map<string, unknown>([
+        ['s1', { id: 's1', header: { cwd: '/workspace' } }],
+        ['created-1', {
+          id: 'created-1',
+          header: { cwd: '/workspace' },
+          append(): { seq: number } {
+            written += 1
+            if (written === 4) throw new Error('this session will not take that event')
+            return { seq: written }
+          },
+        }],
+      ]),
+    })
+    const handler = mountSwitchOnForeignModelRequest(ctx, CONFIG, deps, shared, () => {})
+    await expect(handler(request)).rejects.toThrow(/created-1.*2 of 6 events.*will not take that event/)
+    expect(effects.prompts).toEqual([])
+  })
+
+  it('keeps switching, and says so, when the new session has nowhere to keep the copy', async () => {
+    // No log is not a lost conversation: the agent still reads the whole
+    // history. Stopping here would cost the user the answer as well.
+    const lines: string[] = []
+    const { ctx, shared, effects } = hostWith({
+      projection: (_session, key) => key === 'agentPreset' ? 'acp-grok' : switchedBoundary,
+      create: async () => ({ sessionId: 'created-1' }),
+      sessions: new Map<string, unknown>([
+        ['s1', { id: 's1', header: { cwd: '/workspace' } }],
+        ['created-1', { id: 'created-1', header: { cwd: '/workspace' } }],
+      ]),
+    })
+    const handler = mountSwitchOnForeignModelRequest(ctx, CONFIG, deps, shared, message => lines.push(message))
+    await expect(handler(request)).rejects.toThrow(/新会话 created-1/)
+    expect(effects.prompts).toHaveLength(1)
+    expect(lines.join('\n')).toMatch(/created-1[\s\S]*no log to write to/)
   })
 
   it('points at the existing new session instead of duplicating the switch', async () => {

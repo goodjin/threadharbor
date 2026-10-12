@@ -26,6 +26,9 @@ function shellWith(core: SlotCore): void {
         main: { kind: 'keyed', scope: 'root' },
         sidebar: { kind: 'single', scope: 'root' },
         'conversation.chat.node': { kind: 'keyed', scope: 'session' },
+        // The frame's floating layer, where the switch's progress lives: a bar
+        // that dies with the session it belongs to shows nothing at all.
+        'shell.overlay': { kind: 'list', scope: 'root' },
       },
       inject: () => null,
     },

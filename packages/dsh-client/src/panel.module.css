@@ -1,10 +1,10 @@
 /*
  * The 各主机 panel's skin.
  *
- * Hierarchy first: the host name and its badge are the loudest things in the
- * first card, the verdict word and its measured number the loudest in the
- * second, everything explanatory is folded into a <details>, and each section
- * is one card so the page reads as three groups instead of one long column.
+ * 2026-10-12 用户反馈定下的形状：面板是三个界面——列表页（固定宽度的框，
+ * 只有添加按钮和主机行）、详情页和添加页（同一套表单的两种模式）。行的
+ * 名字和徽标是列表页最响的东西；事实区、说明、建议全部折进 details 或
+ * 收进各自的页面，不占列表页。
  * Built only from DSH's own design tokens (--dsw-*): the panel sits inside
  * DSH's shell, so hard-coded colors would disagree with whatever theme the
  * shell is in. Class names are CSS modules.
@@ -15,8 +15,8 @@
   color: var(--dsw-alias-label-primary);
   font-size: 13px;
   line-height: 1.6;
-  /* Content-adaptive: as tall as its content, never stretched over the whole
-     main area; the scroll only engages when the shell really constrains. */
+  /* 宽度固定：框不随里面的文字长度变化，短内容也不缩。 */
+  width: 100%;
   height: auto;
   max-height: 100%;
   max-width: 640px;
@@ -29,7 +29,7 @@
   overflow: auto;
 }
 
-/* One card per section: the group boundary the page used to lack. */
+/* One card per page: the frame the list, the detail and the add form share. */
 .card {
   border: 1px solid var(--dsw-alias-settings-card-stroke);
   border-radius: var(--dsw-radius-md);
@@ -52,6 +52,20 @@
   font-size: 14px;
   font-weight: 600;
   line-height: 1.4;
+}
+
+.sectionHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  margin-top: 6px;
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .note {
@@ -78,6 +92,15 @@
 
 .summary:hover {
   color: var(--dsw-alias-label-secondary);
+}
+
+.agentSection {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  margin-top: 10px;
+  padding-top: 8px;
 }
 
 .agentList {
@@ -208,20 +231,16 @@
   max-width: 52ch;
 }
 
-.identityLine {
-  color: var(--dsw-alias-label-caption);
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.identityForm {
-  display: grid;
-  grid-template-columns: minmax(150px, 200px) minmax(150px, 200px) auto;
+/*
+ * The form page's fields: label over control, one column, so the add page and
+ * the detail page read the same. Read-only values keep the field's place.
+ */
+.formGrid {
+  display: flex;
+  flex-direction: column;
   gap: 10px;
-  align-items: end;
-  margin-top: 10px;
+  margin-top: 4px;
+  max-width: 420px;
 }
 
 .field {
@@ -248,6 +267,54 @@
   border-color: var(--dsw-alias-brand-primary);
 }
 
+.readonlyValue {
+  font-size: 13px;
+  color: var(--dsw-alias-label-secondary);
+  padding: 5px 0;
+  overflow-wrap: anywhere;
+}
+
+.formActions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+/*
+ * The detail page's facts block: what the host itself reports, kept visually
+ * apart from what the operator filled in. Mismatches are said out loud.
+ */
+.reportedFacts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-layer-2);
+  padding: 8px 10px;
+}
+
+.mismatch {
+  color: var(--dsw-alias-state-warn-label);
+}
+
+.registryActions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px dashed var(--dsw-alias-border-l2);
+  padding-top: 8px;
+}
+
+.addNotes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px dashed var(--dsw-alias-border-l2);
+  padding-top: 8px;
+  margin-top: 8px;
+}
+
 .notices {
   margin: 0;
   padding-left: 18px;
@@ -259,9 +326,9 @@
 }
 
 /*
- * The host list: one row per machine — name and id leading, the badge beside
- * them, the quiet second line (address, heartbeat age) under. Two hosts read
- * as two rows, never as one stretched table.
+ * The host list: one row per machine. The row is a summary — name, the
+ * (CSS-truncated) id, the badge — and the whole row is the button that opens
+ * the host's detail page. Width comes from the frame, never from the text.
  */
 .hostList {
   display: flex;
@@ -271,19 +338,30 @@
 .hostRow {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 10px 0;
 }
 
 .hostRow + .hostRow {
   border-top: 1px solid var(--dsw-alias-border-l2);
 }
 
-.hostHead {
+.hostRowButton {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
+  min-width: 0;
+  width: 100%;
+  padding: 10px 0;
+  cursor: pointer;
+}
+
+.hostRowButton:hover .hostName {
+  color: var(--dsw-alias-label-secondary);
 }
 
 .hostName {
@@ -291,11 +369,26 @@
   font-size: 13px;
 }
 
+.hostIdShort {
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chevron {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+}
+
 .hostBadge {
   font-size: 11px;
   font-weight: 600;
   border-radius: 999px;
   padding: 1px 8px;
+  flex: none;
 }
 
 .hostBadge[data-host-badge='self'] {
@@ -314,64 +407,17 @@
   border: 1px solid var(--dsw-alias-border-l3);
 }
 
-.hostRow [data-host-heartbeat] {
-  font-variant-numeric: tabular-nums;
-}
-
 /*
- * The host registry: one row per registered machine — identity, honest status,
- * and the destructive action folded behind a confirm.
+ * The registration actions live on the detail page; the destructive one folds
+ * behind a confirm.
  */
-.registryList {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-}
-
-.registryRow {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 10px 0;
-}
-
-.registryRow + .registryRow {
-  border-top: 1px solid var(--dsw-alias-border-l2);
-}
-
-.registryHead {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.registryStatus {
-  font-size: 11px;
-  font-weight: 600;
-  border-radius: 999px;
-  padding: 1px 8px;
-}
-
-.registryStatus[data-tone='ok'] {
-  background: var(--dsw-static-green-500);
-  color: var(--dsw-alias-label-primary-inverted);
-}
-
-.registryStatus[data-tone='bad'] {
-  background: var(--dsw-alias-bg-layer-2);
-  color: var(--dsw-alias-label-caption);
-  border: 1px solid var(--dsw-alias-border-l3);
-}
-
 .confirmBox {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   font-size: 12px;
   color: var(--dsw-alias-state-error-primary);
+  flex-wrap: wrap;
 }
 
 .steps {

@@ -37,6 +37,8 @@ import type { AgentLike, TurnModelDecision } from './dispatch.ts'
 import { planSwitch } from './switch-plan.ts'
 import { assembleHandover, messagesOf } from './handover.ts'
 import type { HandoverMessage } from './handover.ts'
+import { hasLog, planReplay, replayInto } from './replay.ts'
+import type { LoggedEvent } from './replay.ts'
 import type { SwitchShared } from './switch-shared.ts'
 import type { CatalogDeps } from './catalog.ts'
 import type { ForeignModelRequest } from './catalog.ts'
@@ -73,6 +75,20 @@ export type HostServices = {
   readonly presets?: ((agent: unknown, presetId: string) => Promise<unknown>) | undefined
   /** The preset registry's own `list`, bound to the registry. */
   readonly presetList?: (() => Promise<unknown>) | undefined
+  /**
+   * The host's session query: one session's record, read as a lease.
+   *
+   * The switch needs the old session's events to put the conversation back on
+   * the new session's own record — the agent reading a handover and the user
+   * seeing one are two different facts.
+   */
+  readonly observeSession?: ((sessionId: string) => Promise<SessionRecord>) | undefined
+}
+
+/** One session's record as the session query hands it over, and then lets go. */
+type SessionRecord = {
+  readonly events?: readonly unknown[]
+  readonly [Symbol.dispose]?: () => void
 }
 
 /** The services a switch needs, read off the context and validated. */
@@ -100,6 +116,7 @@ export function servicesOf(ctx: object): HostServices {
     agents: method('agents', 'get') as ((id: string) => unknown) | undefined,
     presets: method('agentPresets', 'select') as ((agent: unknown, presetId: string) => Promise<unknown>) | undefined,
     presetList: method('agentPresets', 'list') as (() => Promise<unknown>) | undefined,
+    observeSession: method('sessionQuery', 'observeSession') as HostServices['observeSession'],
   }
 }
 
@@ -123,12 +140,17 @@ function cwdOf(session: unknown): string | undefined {
  * switch fabric.
  *
  * The fork port is where the switch's real work lives: it creates the blank
- * session on the target preset, records the model pick on it, primes its first
- * model request with the assembled conversation, and puts the pending question
- * to it — one act, so a failure part-way names the session it created rather
- * than leaving the user to find a stray half-made session.
+ * session on the target preset, puts the conversation back on its record,
+ * records the model pick on it, primes its first model request with the same
+ * conversation for the agent to read, and puts the pending question to it — one
+ * act, so a failure part-way names the session it created rather than leaving
+ * the user to find a stray half-made session.
  */
-export function switchPortsOf(services: HostServices, shared: SwitchShared): SwitchPorts {
+export function switchPortsOf(
+  services: HostServices,
+  shared: SwitchShared,
+  report: (message: string) => void = () => {},
+): SwitchPorts {
   const sessions = present(services.sessions, 'sessions')
   const create = present(services.createSession, 'sessionController.create')
   const prompt = present(services.promptSession, 'sessionController.prompt')
@@ -169,6 +191,10 @@ export function switchPortsOf(services: HostServices, shared: SwitchShared): Swi
             append('model/selection', { provider: request.selection.provider, model: request.selection.model })
           }
         }
+        // The conversation goes onto the new session's own record before
+        // anything is asked of it: the user opens the new session and reads
+        // the thread they were just in, with this turn's answer under it.
+        await copyConversation(services, report, request.sessionId, newSession, newSessionId)
         // The conversation rides the new session's first model request; the
         // priming is consumed there, and until then it survives restarts of
         // nothing — a host restart loses it, which is why the switch also
@@ -205,6 +231,57 @@ function appendOf(session: unknown): ((type: string, data: unknown) => { seq: nu
   const holder = session as { append?: unknown } | undefined
   if (typeof holder?.append !== 'function') return undefined
   return (type: string, data: unknown) => (holder.append as (t: string, d: unknown) => { seq: number }).call(holder, type, data)
+}
+
+/**
+ * Put the old session's conversation on the new session's record.
+ *
+ * Two absences are reported and stepped over — a host with no session query, a
+ * created session with no log — because the agent still reads the whole
+ * conversation through the primer, and a switch that stopped dead over a
+ * missing display would cost the user their answer as well. A session that
+ * refuses an event part-way is the opposite case: half a conversation is the
+ * quiet truncation this chain exists to prevent, so that throws.
+ * @param sourceSessionId - the session being left; its finished turns are the copy.
+ * @param target - the created session the conversation is written into.
+ * @param targetSessionId - named in what is reported, so the user can go there.
+ */
+async function copyConversation(
+  services: HostServices,
+  report: (message: string) => void,
+  sourceSessionId: string,
+  target: unknown,
+  targetSessionId: string,
+): Promise<void> {
+  const observe = services.observeSession
+  if (observe === undefined) {
+    report(`acp switch: session ${targetSessionId} cannot show session ${sourceSessionId}'s conversation — this host exposes no sessionQuery; the agent still reads the whole history`)
+    return
+  }
+  if (!hasLog(target)) {
+    report(`acp switch: session ${targetSessionId} cannot show session ${sourceSessionId}'s conversation — the created session has no log to write to; the agent still reads the whole history`)
+    return
+  }
+  const events = await eventsOf(observe, sourceSessionId)
+  const plan = planReplay(events)
+  if (plan.steps.length === 0) return
+  replayInto(target, plan.steps)
+  report(`acp switch: session ${targetSessionId} reopened with the ${plan.turns} finished turn(s) of session ${sourceSessionId} on its own record`)
+}
+
+/** One session's events, read through the lease the session query hands back. */
+async function eventsOf(observe: NonNullable<HostServices['observeSession']>, sessionId: string): Promise<readonly LoggedEvent[]> {
+  const observed = await observe(sessionId)
+  try {
+    return Array.isArray(observed.events) ? observed.events.filter(isLoggedEvent) : []
+  } finally {
+    observed[Symbol.dispose]?.()
+  }
+}
+
+/** Narrow one read event to the fields the replay reads. */
+function isLoggedEvent(value: unknown): value is LoggedEvent {
+  return typeof (value as { type?: unknown } | undefined)?.type === 'string'
 }
 
 /** Whether the session has produced any turn yet, per its own projection. */
@@ -355,7 +432,7 @@ export async function switchDrivenSession(params: {
     }
   }
 
-  const ports = switchPortsOf(services, params.shared)
+  const ports = switchPortsOf(services, params.shared, params.report)
   try {
     const result = await applySwitchPlan(plan, sessionId, ports, {
       history: carried,
@@ -378,6 +455,7 @@ export async function switchDrivenSession(params: {
       sessionId: result.sessionId,
       note: `已按新会话切换到 ${params.selection.provider}/${params.selection.model}：新会话 ${result.sessionId} `
         + `已带上${result.droppedTokens === undefined ? '整段' : '部分'}对话历史`
+        + `，界面上此前的对话原样保留`
         + `${question === '' ? '' : '，并已把这条消息提交给它'}。请到新会话继续。`,
     }
   } catch (error) {
@@ -497,7 +575,7 @@ export function mountSwitchOnForeignModelRequest(
       )
     }
 
-    const ports: SwitchPorts = switchPortsOf(services, shared)
+    const ports: SwitchPorts = switchPortsOf(services, shared, report)
 
     const result = await applySwitchPlan(plan, request.sessionId, ports, {
       history: carried,
@@ -516,6 +594,7 @@ export function mountSwitchOnForeignModelRequest(
     report(`acp switch: session ${request.sessionId} switched for ${request.provider}/${request.model}; ${carriedNote}; continue in session ${result.sessionId}.`)
     throw plan.kind === 'fork'
       ? `已按新会话切换到 ${request.provider}/${request.model}：新会话 ${result.sessionId} 已带上${result.droppedTokens === undefined ? '整段' : '部分'}对话历史`
+        + `，界面上此前的对话原样保留`
         + `${question === '' ? '' : '，并已把这条消息提交给它'}。请到新会话继续。`
       : `已就地切换到 ${request.provider}/${request.model}：这个会话还没有开始对话，预设已换，直接在这里继续即可。`
   }

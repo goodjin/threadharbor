@@ -26,6 +26,7 @@ import type { ChatNodeDataMap } from '@deepseek-ai/dsh-client-ui-chat/client'
 import type { TurnEndReasonMap } from '@deepseek-ai/dsh-session/types'
 import type { PropsRuntime, SlotCore } from '@deepseek-ai/dsh-client-ui-slots'
 import { createElement, useEffect } from 'react'
+import type { SwitchProgressSurface } from './switch-progress.ts'
 import styles from './handover.module.css'
 
 /** The ending this plugin owns, merged into the host's ending union. */
@@ -136,7 +137,15 @@ const followedHandovers = new Set<string>()
 
 /** Component props: the framework runtime share plus the navigation callback. */
 export type HandoverCardProps = PropsRuntime<'conversation.chat.node', 'agent-switch-handover'>
-  & { openSession: ((sessionId: string) => void) | undefined }
+  & {
+    openSession: ((sessionId: string) => void) | undefined
+    /**
+     * Put the switch's progress on screen and load the new session's first
+     * page. Absent when the page has no preload to offer; the jump then runs
+     * on its own settle delay alone.
+     */
+    prepare: (((target: { readonly sessionId: string; readonly target: string }) => Promise<void>) | undefined)
+  }
 
 /**
  * The neutral notice a switched-away turn shows. Not an error row — the
@@ -145,25 +154,36 @@ export type HandoverCardProps = PropsRuntime<'conversation.chat.node', 'agent-sw
 export function AgentSwitchHandoverCard(props: HandoverCardProps): ReturnType<typeof createElement> {
   const data = props.node.data
   const open = props.openSession
+  const prepare = props.prepare
   useEffect(() => {
     if (open === undefined) return
     const key = `${data.time}:${data.seq}`
     if (followedHandovers.has(key)) return
     followedHandovers.add(key)
+    // The progress and the new session's first page start now, while this
+    // ending is still settling: they are the slow half of the switch, and the
+    // jump is going to wait for them anyway.
+    const loaded = prepare === undefined
+      ? Promise.resolve()
+      : prepare({ sessionId: data.sessionId, target: data.target })
     // Navigate after the switched-away turn has settled: the switch just wrote
     // this session's ending, and the workspace is still committing the state
     // that ending produced. Leaving through the workspace in the same tick
     // tears down this session's views while that commit is in flight, and the
-    // session's reference is then found released by every later open. A short
-    // settle delay keeps the follow navigation, loses the race.
-    const timer = setTimeout(() => { open(data.sessionId) }, 1200)
+    // session's reference is then found released by every later open. The jump
+    // waits for that settle AND for the new session's first page, so the panel
+    // swaps onto content that is already there.
+    const timer = setTimeout(() => {
+      const jump = (): void => { open(data.sessionId) }
+      void loaded.then(jump, jump)
+    }, 1200)
     return () => {
       // Re-arm on unmount: a settled view that remounts this card must still
       // follow; the guard only stops repeats within one mounted life.
       clearTimeout(timer)
       followedHandovers.delete(key)
     }
-  }, [open, data.time, data.seq, data.sessionId])
+  }, [open, prepare, data.time, data.seq, data.sessionId, data.target])
   return createElement(
     'div',
     { className: styles.handoverRow, role: 'status' },
@@ -263,6 +283,7 @@ function install(
   ctx: HandoverSurfaceContext,
   uiWorkspace: Record<string, unknown>,
   register: (definition: unknown) => () => void,
+  prepare: SwitchProgressSurface['prepare'] | undefined,
 ): void {
   const openSession = openSessionFaceOf(uiWorkspace)
   if (openSession === undefined) {
@@ -272,7 +293,7 @@ function install(
   // as ui-user-questions registers its Definition: one call, no extra wrap.
   register(agentSwitchHandoverDefinition)
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register(
-    { name: 'conversation.chat.node', key: 'agent-switch-handover', inject: () => ({ openSession }) },
+    { name: 'conversation.chat.node', key: 'agent-switch-handover', inject: () => ({ openSession, prepare }) },
     AgentSwitchHandoverCard,
   ))
 }
@@ -287,8 +308,14 @@ function install(
  * the panel mount waits for its slots. A service that arrives shaped
  * differently than expected degrades to one log line, never a failed fiber.
  * @param ctx - the browser plugin context.
+ * @param progress - the switch's progress surface; its `prepare` loads the new
+ *   session before the card jumps, and is absent only when the page never
+ *   started one.
  */
-export function registerAgentSwitchHandoverSurface(ctx: HandoverSurfaceContext): void {
+export function registerAgentSwitchHandoverSurface(
+  ctx: HandoverSurfaceContext,
+  progress?: SwitchProgressSurface | undefined,
+): void {
   const uiWorkspace = serviceNow(ctx, 'uiWorkspace')
   const uiConversation = serviceNow(ctx, 'uiConversation')
   const register = uiConversation !== undefined && isRecord(uiConversation)
@@ -298,5 +325,5 @@ export function registerAgentSwitchHandoverSurface(ctx: HandoverSurfaceContext):
     ctx.logger('threadharbor-client').warn('agent-switch handover: uiConversation/uiWorkspace unavailable — switched-away turns keep their ending visible only as data; no notice, no automatic jump')
     return
   }
-  install(ctx, uiWorkspace, register)
+  install(ctx, uiWorkspace, register, progress?.prepare)
 }

@@ -43,6 +43,8 @@ const ROOTS = [
 const KNOWN_UNWIRED: Readonly<Record<string, string>> = {
   'packages/dsh-preset-dispatch/src/service.ts':
     '早期入口，职能与 entry.ts 重叠。模型目录注册已迁到真机路径（plugin.ts 挂载 registerCatalog），此文件只剩 barrel 导出与测试在用；接线检查把它列为配置字段消费方，删它必须先改那道检查。清掉条件：确认没有外部包再调用 attachAcpDispatch，并从配置消费检查的文件清单移除后整体删除。',
+  'packages/dsh-host-federation/src/host-store.ts':
+    '不是未接线：由 cordis.patch.yml 的组合条目 threadharbor-host-store 加载（宿主侧设置存储，浏览器经 remote.settings 读写）。静态可达性分析只扫代码 import，看不见组合登记。真机证据：启动日志出现 [threadharbor] host store mounted 行。清掉条件：组合登记进入本检查的根清单（加载路径可静态追溯）。',
 }
 
 function packageExports(pkg: string): Record<string, unknown> {
