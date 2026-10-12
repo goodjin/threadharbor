@@ -17,6 +17,11 @@
 - insert:
     - id: threadharbor-client
       name: '@threadharbor/dsh-client'
+    # 主机侧的设置槽：登记簿与本机默认身份经 remote.settings 存进这份
+    # profile 文档（设置跟机器走，不跟浏览器走）。浏览器侧的入口在
+    # dsh-client 的 host-store.ts，写的是同一个 id 的命名空间。
+    - id: threadharbor-host-store
+      name: '@threadharbor/dsh-host-federation/host-store'
     - id: acp-codex
       name: '@deepseek-ai/dsh-agent-preset'
       config:

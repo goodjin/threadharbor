@@ -10,6 +10,13 @@
       "types": "./src/index.ts",
       "default": "./src/index.ts"
     },
+    "./host-store": {
+      "types": "./src/host-store.ts",
+      "default": "./src/host-store.ts"
+    },
     "./package.json": "./package.json"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.4"
   }
 }

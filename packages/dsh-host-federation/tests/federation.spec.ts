@@ -21,8 +21,18 @@ const THEM: HostIdentity = { hostId: 'beta', hostTitle: 'Beta box', derived: fal
 function fakeBus() {
   const listeners = new Set<(message: unknown) => void>()
   let tick = 0
-  const bus: FederationBus & { deliver(message: unknown): void; tick(): number } = {
-    post: message => { for (const listener of listeners) listener(message) },
+  // 发出去的报文按实际内容记录（announce 只发普通对象），测试直接读字段。
+  const posted: { kind: string; hostId: string; hostTitle: string; at: number }[] = []
+  const bus: FederationBus & {
+    deliver(message: unknown): void
+    tick(): number
+    posted: { kind: string; hostId: string; hostTitle: string; at: number }[]
+  } = {
+    posted,
+    post: message => {
+      posted.push(JSON.parse(JSON.stringify(message)))
+      for (const listener of listeners) listener(message)
+    },
     subscribe: listener => { listeners.add(listener) },
     deliver: message => { for (const listener of listeners) listener(message) },
     tick: () => ++tick,
@@ -140,5 +150,29 @@ describe('HostFederation presence', () => {
     fed.start()
     fed.receive({ kind: 'sessions', ...THEM, at: 0, sessions: [{ projectId: 'p1', sessionId: 's1', title: 'x' }] })
     expect(fed.hosts().map(h => h.hostId)).toEqual(['alpha'])
+  })
+})
+
+describe('HostFederation renameSelf', () => {
+  it('改名：本机在场快照立刻换新名字，且播报带新名字出去', () => {
+    // 面板改名保存后主行要立刻变：行读的是在场快照，快照不动名字就永远
+    // 是旧的（这曾是真 bug——头部换了名，列表行不改）。
+    const { fed, bus } = setup()
+    fed.start()
+    const before = bus.posted.length
+    fed.renameSelf('Alpha 新名字')
+    expect(fed.hosts()[0]?.hostTitle).toBe('Alpha 新名字')
+    expect(bus.posted.at(-1)?.kind).toBe('heartbeat')
+    expect(bus.posted.at(-1)?.hostTitle).toBe('Alpha 新名字')
+    expect(bus.posted).toHaveLength(before + 1)
+  })
+
+  it('改名不退场：频道上没有 bye，别的标签页看到的是同一个 id 的新名字', () => {
+    const { fed, bus } = setup()
+    fed.start()
+    fed.receive({ kind: 'hello', ...THEM, at: 0 })
+    fed.renameSelf('Renamed')
+    expect(bus.posted.some(message => message.kind === 'bye')).toBe(false)
+    expect(fed.hosts().map(h => h.hostId)).toEqual(['alpha', 'beta'])
   })
 })

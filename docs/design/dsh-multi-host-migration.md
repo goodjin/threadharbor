@@ -1031,6 +1031,25 @@ hostd 时代的「远程主机」假设——而那正是阶段 6 要拿掉的�
 原先那四步的意图仍然成立：读完整 transcript、目标上选 preset（+模型）、
 新会话完整交接、承担不了就如实报错——全部发生在这台主机之内。
 
+**记录回填（2026-10-12 补充）**：上面三步做完，界面上历史仍然是空的。
+新会话是空的，整段对话只是作为「预热文本」交给新 agent 读——那是 agent 的
+上下文，不是用户看的记录。于是补上第四步：把旧会话**已结束的那些回合**
+按事件逐条写进新会话自己的记录（`planReplay` / `replayInto`），写在提问
+之前，新会话打开就是刚才那段对话，底下接新内容。搬的是问答、工具调用与
+结果，以及分组要用的 turn/step 边界；不搬旧 agent 自己的东西（请求头、
+系统提示、重试记录、种子标记），也不搬压缩检查点那类按序号替换的事件。
+正在切换的这一回合不搬——它的提问正要交到新会话去。
+
+**切换过程可见（2026-10-12 补充）**：回填之后面板里仍然是整块换新内容，
+中间那段空白没有任何交代。补上第五步：交接提示一挂上就开始走进度——
+挂在**窗口浮层** `shell.overlay`（不是会话内，会话一换就跟着消失的进度条
+等于没有），同时用 `ctx.sessions.retain` 把新会话的首屏先读出来（`ready`
+是那次读取落定的那一刻），读完才跳；首屏读失败或一直没读完都不卡跳转，
+最多等 `PRELOAD_TIMEOUT_MS`（4 秒）。读出来的那份 reference 跨过跳转再归还
+（`HOLD_MS`），早还手会把刚读好的窗口拆掉，用户看到的正是预加载想避免的
+加载态。历史长短与这条进度无关：首屏走 DSH 自带的分页（`PAGE_MESSAGES=50`
+起，`hasMore` 时界面给「加载更早」），回填只决定记录里有没有那些事件。
+
 ### 9.3 与「重新选择 preset」的区别
 
 - **第一个回合之前**：DSH 原生支持改 preset（`select()`），可直接改
@@ -1147,3 +1166,38 @@ hostd 时代的「远程主机」假设——而那正是阶段 6 要拿掉的�
 三家已实现的差异对照表、以及接新 agent 要改的地方，在 [README.md](../agent-acp/README.md) 里。
 
 **接 Cursor 前必读的两条**：它的安装脚本会覆盖 `~/.local/bin/agent`（本项目 grok 正在用的链接）；且它是唯一握手后还有鉴权硬门槛的一家。
+
+---
+
+## 十三、主机侧存储落地记录（2025-07-09 核对）
+
+按 §「现成的缝」的 `isLoopback ? 'host' : 'memory'` 决策落地。主机登记簿与本机默认身份
+不再存浏览器 localStorage，改走本机设置通道（`ctx.remote.settings` 的
+`threadharbor-host-store` 命名空间，宿主组合条目 `@threadharbor/dsh-host-federation/host-store`
+的 volatile 配置段）；单标签页身份覆盖（sessionStorage）保持原样不动。
+
+已真机验证（playwright-core + 独立 Chromium，DSH_HOME=/tmp/dsh-verify，端口 3081）：
+
+1. 登记跨浏览器上下文存活；新上下文姿态为 host，界面如实说明数据存在「这台机器上」。
+2. 本机改名与登记改名跨上下文都在。
+3. 双标签页各自声明不同主机：各保存过一次后，tab 层声明互不覆盖；新标签页继承
+   最近一次保存（分层写约定：一次保存同时记录 tab 层与默认层）。
+4. 旧 localStorage 数据迁移：文档为空的机器上启动，旧登记与本机名搬入主机文档，
+   旧拷贝保留；文档已有数据时不覆盖。
+5. 硬证据：实例 profile 的 cordis.patch.yml 出现 `threadharbor-host-store` 用户段，
+   含 `dsh.host.registry` / `dsh.host.identity` 数据。
+
+落地中确认的三个坑（后来者必读）：
+
+- **浏览器端读 `remote.settings` 必须在插件代码里写 literals `inject`**（`export const inject`
+  含 `'remote.settings'`）；package.json 的 dsh.client.inject 只服务模块图。官方先例：
+  dsh-client-ui-settings-models。
+- **宿主组合条目不能带模块级 `inject`**：会让条目 fiber 永远 pending，settings 的
+  describe 不再收录它，命名空间凭空消失。要读 settings 就在 apply 里用
+  `ctx.inject(['settings'], child => …)` 子作用域读取。
+- **表单组件的 React key 不要带「后台刷新计数」**：详情表单 key 里含 identityRevision 时，
+  登记写入触发的存储通知 → 身份重读 → 表单重挂载，把用户正在输入的草稿冲回旧值
+  （真机表现为改名偶尔不生效，保存的是旧标题）。key 只随数据身份（hostId）变化。
+
+非本机（非回环）走内存 + 界面如实说明，为单元级验证（host-store.spec「非本机页面」）；
+真机路径需要服务端放行非回环访问，当前启动器未提供该开关。

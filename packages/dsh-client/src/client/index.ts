@@ -47,21 +47,31 @@ import type { GatewayOpening } from '../gateway.ts'
 import type { AgentDescriptor, GatewayResult, SessionGateway } from '../gateway.ts'
 import { runSessionProbe } from '../probe.ts'
 import type { ProbeOutcome } from '../probe.ts'
-import { layeredIdentitySettings } from '../settings-source.ts'
-import { hostRegistry } from '@threadharbor/dsh-host-federation'
+import { layeredIdentitySettings, IDENTITY_STORAGE_KEY } from '../settings-source.ts'
+import { HOST_REGISTRY_KEY, HOST_STORE_ENTRY_ID, hostRegistry } from '@threadharbor/dsh-host-federation'
+import { startHostStore } from '../host-store.ts'
+import type { HostStoreChannel, HostStoreDeps, StoreOp } from '../host-store.ts'
 import { startRollUpSection } from '../rollup-section.ts'
 import { AgentPanel } from '../panel.tsx'
 import type { AgentListPort, AgentPanelProps, ProbeStarter } from '../panel.tsx'
 import { registerAgentSwitchHandoverSurface } from '../handover-card.ts'
+import { createSwitchProgressStore, startSwitchProgressSurface } from '../switch-progress.ts'
 import { createElement } from 'react'
 
 /** Required browser services. The remote namespace is the gateway's whole door
  *  to the host: without declaring it here, the context refuses every read of it
  *  with 「cannot get property without inject」, and the panel reports the host
- *  as having no remote services at all. `uiConversation` and `uiWorkspace`
- *  feed the switched-turn notice: the conversation events register its Chat
- *  Definition, the workspace service is the stock jump-to-session action. */
-export const inject = ['slots', 'remote', 'uiConversation', 'uiWorkspace']
+ *  as having no remote services at all. `remote.settings` is declared the same
+ *  way and for the same reason — the settings channel this panel's registry and
+ *  default identity persist through — and declaring it also makes activation
+ *  WAIT until api-remotes has mounted that namespace asynchronously, so the
+ *  store never comes up memory-only merely for having applied too early.
+ *  `uiConversation` and `uiWorkspace` feed the switched-turn notice: the
+ *  conversation events register its Chat Definition, the workspace service is
+ *  the stock jump-to-session action. `sessions` is the session object layer:
+ *  the switch's progress reads the new session's first page through it, so
+ *  the panel swaps onto content that is already there. */
+export const inject = ['slots', 'remote', 'remote.settings', 'uiConversation', 'uiWorkspace', 'sessions']
 
 // The panel's pieces are one published surface: the verify-build step reads
 // every export under src/client and requires it in the built artifact, and a
@@ -96,6 +106,22 @@ export type {
   HandoverSlotHost,
   HandoverSurfaceContext,
 } from '../handover-card.ts'
+export {
+  SwitchProgressLayer,
+  createSwitchProgressStore,
+  startSwitchProgressSurface,
+} from '../switch-progress.ts'
+export type {
+  SwitchProgress,
+  SwitchProgressActions,
+  SwitchProgressContext,
+  SwitchProgressLayerProps,
+  SwitchProgressPhase,
+  SwitchProgressSlotHost,
+  SwitchProgressState,
+  SwitchProgressStore,
+  SwitchProgressSurface,
+} from '../switch-progress.ts'
 
 /** Shared identity of the sidebar entry and the body it mounts. */
 const PANEL_ID = 'threadharbor-rollup'
@@ -252,10 +278,14 @@ export function apply(ctx: ClientContext): void {
 /** The same wiring, typed by the narrow face the panel actually uses. */
 function applyToClientPanel(ctx: ClientPanelContext): void {
   const log = ctx.logger('threadharbor-client')
-  // Identity is layered: this tab's claim (sessionStorage) outranks the
-  // origin's default (localStorage), so two tabs of one DSH can claim two
-  // hosts without collapsing on the next reload.
-  const settings = layeredIdentitySettings(window.sessionStorage, window.localStorage)
+  // The registry and the default identity follow the machine (2026-10-12
+  // 用户要求：名单当然应该跟着本机的设置走): both go through ONE host-backed
+  // storage — `isLoopback ? 'host' : 'memory'`, per the design doc — so the
+  // two can never drift apart again. This tab's own claim stays in
+  // sessionStorage: that per-tab override is what lets two tabs of one DSH
+  // claim two hosts, and it is not a bug to fix.
+  const hostStore = startHostStore(hostStoreDeps(ctx, message => { log.warn(message) }))
+  const settings = layeredIdentitySettings(window.sessionStorage, hostStore.storage)
   const section = startRollUpSection({
     settings,
     setInterval: (handler, ms) => window.setInterval(handler, ms),
@@ -268,6 +298,17 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // while the panel is open: a tab that never opens the panel would otherwise
   // leave its own row empty in every other tab.
   ctx.effect(() => () => { section.dispose() }, 'threadharbor: roll-up section')
+  // The machine's document lands after mount; the section took its identity
+  // from an empty storage and must take the configured one the moment it
+  // appears (same path as an explicit save).
+  ctx.effect(() => hostStore.subscribe(() => { section.rereadIdentity() }), 'threadharbor: identity re-read on host storage hydration')
+  // Another tab of this host writing the document says so on the settings
+  // channel; re-read so this tab's list and names follow.
+  ctx.effect(() => settingsInvalidation(ctx, () => { hostStore.refresh() }), 'threadharbor: host storage invalidation')
+  // Self-report where settings actually stand once the first read settled.
+  void hostStore.settled().then(() => {
+    log.info(`host store posture: ${JSON.stringify(hostStore.posture())}`)
+  })
 
   const openGateway = (): GatewayOpening => openSessionGateway(ctx)
   // A mount-time read, purely for the self-report: what the host provides may
@@ -280,7 +321,11 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
     agents: agentListPort(openGateway),
     probe: panelProbe(openGateway),
     rollUp: section,
-    registry: hostRegistry(browserJsonStorage()),
+    registry: hostRegistry(hostStore.storage),
+    hostStore: {
+      posture: () => hostStore.posture(),
+      subscribe: hostStore.subscribe,
+    },
     listenStorage: handler => {
       window.addEventListener('storage', handler)
       return () => { window.removeEventListener('storage', handler) }
@@ -291,8 +336,17 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // A switched-away turn ends by naming the session that took over. This is
   // what turns that ending into the on-page behavior the user asked for: a
   // neutral notice where the error row used to be, and the view following the
-  // conversation into the new session.
-  registerAgentSwitchHandoverSurface(ctx)
+  // conversation into the new session. The progress surface rides along: the
+  // switch replaces the whole conversation panel, so it says so and loads the
+  // new session's first page before the notice jumps.
+  registerAgentSwitchHandoverSurface(
+    ctx,
+    startSwitchProgressSurface({
+      ctx,
+      store: createSwitchProgressStore(),
+      slots: ctx.slots,
+    }),
+  )
 
   // Self-report at mount. This panel is easy to mistake for a plugin that
   // never loaded; these lines are how anyone can tell the difference.
@@ -319,8 +373,58 @@ function PanelIcon(props: PropsRuntime<'sidebar.panellist'>): ReturnType<typeof 
   )
 }
 
-/** localStorage behind the registry's read/write face. */
-function browserJsonStorage(): { getItem(key: string): string | null; setItem(key: string, value: string): void } {
+/** Whatever `ctx.get(name)` yields, without ever throwing or inventing one. */
+function readService(ctx: ClientPanelContext, name: string): unknown {
+  try {
+    const service = ctx.get(name)
+    if (service !== undefined) return service
+  } catch {
+    // A context that refuses undeclared reads lands here; the property walk
+    // below is how gateway.ts reaches the same service.
+  }
+  return (ctx as unknown as Record<string, unknown>)[name]
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null
+
+const isFunction = (value: unknown): value is (...args: unknown[]) => unknown =>
+  typeof value === 'function'
+
+/** A property read that survives a context proxy refusing an undeclared path. */
+function propertyOf(holder: unknown, name: string): unknown {
+  if (!isRecord(holder)) return undefined
+  try {
+    return holder[name]
+  } catch {
+    return undefined
+  }
+}
+
+/** A named method of a holder, bound to it — detached calls die on `this`. */
+function boundMethod(holder: unknown, name: string): ((...args: unknown[]) => unknown) | undefined {
+  const value = propertyOf(holder, name)
+  return isFunction(value) ? value.bind(holder) : undefined
+}
+
+/** Whether a value is a plain record whose every value is a string. */
+function stringRecord(value: unknown): Record<string, string> | undefined {
+  if (!isRecord(value)) return undefined
+  for (const entry of Object.values(value)) {
+    if (typeof entry !== 'string') return undefined
+  }
+  return value as Record<string, string>
+}
+
+/** The registry entry id a stored list entry merges by. */
+function hostIdOfEntry(entry: unknown): string | undefined {
+  if (!isRecord(entry)) return undefined
+  const hostId = entry['hostId']
+  return typeof hostId === 'string' ? hostId : undefined
+}
+
+/** The localStorage the data used to live in, read-only and failure-tolerant. */
+function legacyBrowserStorage(): { getItem(key: string): string | null } {
   return {
     getItem: key => {
       try {
@@ -329,13 +433,75 @@ function browserJsonStorage(): { getItem(key: string): string | null; setItem(ke
         return null
       }
     },
-    setItem: (key, value) => {
-      try {
-        window.localStorage.setItem(key, value)
-      } catch {
-        // A full or blocked storage must not stop the panel; the registry
-        // re-reads on the next action.
-      }
-    },
   }
+}
+
+/**
+ * The settings-channel face the host-backed storage drives, read off the
+ * context structurally: `remote.$host` for the loopback fact, and the
+ * `remote.settings` namespace for the document reads and per-key edits. Both
+ * methods are bound before use — a method called detached from its namespace
+ * dies on `this`, which is how a whole page once went down.
+ */
+function hostStoreDeps(ctx: ClientPanelContext, log: (message: string) => void): HostStoreDeps {
+  const remote = readService(ctx, 'remote')
+  const host = propertyOf(remote, '$host')
+  const loopback = isRecord(host) && host['isLoopback'] === true
+  const settingsNamespace = propertyOf(remote, 'settings')
+  const describe = boundMethod(settingsNamespace, 'describe')
+  const mutate = boundMethod(settingsNamespace, 'mutate')
+  const channel: HostStoreChannel | undefined = describe !== undefined && mutate !== undefined
+    ? {
+        // The remote channel wraps results as { ok, value }; the value is
+        // either the bare descriptor list (what the settings service returns)
+        // or a view wrapping it under `namespaces`. Accept both shapes.
+        async loadDocument() {
+          const described: unknown = await describe()
+          const answered = isRecord(described) && typeof described['ok'] === 'boolean' ? described['value'] : described
+          const namespaces = Array.isArray(answered)
+            ? answered as unknown[]
+            : isRecord(answered) && Array.isArray(answered['namespaces'])
+              ? answered['namespaces'] as unknown[]
+              : []
+          const view = namespaces.find(entry => isRecord(entry) && entry['ns'] === HOST_STORE_ENTRY_ID)
+          if (!isRecord(view)) return undefined
+          const data = isRecord(view['value']) ? view['value']['data'] : undefined
+          return stringRecord(data)
+        },
+        // A refused write must read as a failure here, or the storage would
+        // believe a key landed that the machine never accepted.
+        async mutateDocument(ops: readonly StoreOp[]) {
+          const response: unknown = await mutate(HOST_STORE_ENTRY_ID, ops.map(op => op.kind === 'set'
+            ? { op: 'set', path: ['data', op.key], value: op.value }
+            : { op: 'unset', path: ['data', op.key] }), undefined)
+          const answered = isRecord(response) && typeof response['ok'] === 'boolean' ? response : undefined
+          if (answered !== undefined && !answered.ok) {
+            const error = isRecord(answered['error']) ? answered['error'] : undefined
+            const message = isRecord(error) && typeof error['message'] === 'string' ? error['message'] : 'settings channel refused the write'
+            throw new Error(message)
+          }
+        },
+      }
+    : undefined
+  if (loopback && channel === undefined) {
+    log('host store: this page is on the serving machine but remote.settings is missing — the registry cannot persist')
+  }
+  return {
+    loopback: () => loopback,
+    channel,
+    listKeys: [{ key: HOST_REGISTRY_KEY, idOf: hostIdOfEntry }],
+    migrateFrom: legacyBrowserStorage(),
+    migrateKeys: [HOST_REGISTRY_KEY, IDENTITY_STORAGE_KEY],
+    log,
+  }
+}
+
+/** Re-read the host storage when this document changes elsewhere (another tab). */
+function settingsInvalidation(ctx: ClientPanelContext, refresh: () => void): () => void {
+  const remote = readService(ctx, 'remote')
+  const $on = boundMethod(remote, '$on')
+  if ($on === undefined) return () => {}
+  return $on('settings/document-updated', (...args: unknown[]) => {
+    if (args[0] === HOST_STORE_ENTRY_ID) refresh()
+  }) as () => void
 }

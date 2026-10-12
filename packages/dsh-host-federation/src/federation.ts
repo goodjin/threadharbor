@@ -51,11 +51,19 @@ export class HostFederation {
   /** Named `presence`, not `hosts`: a field of that name would shadow the method. */
   private readonly presence = new Map<string, HostSnapshot>()
 
+  /**
+   * Not readonly: a rename swaps the title in place (see {@link renameSelf}).
+   * The id never changes here — an id change is a different identity and goes
+   * through dispose + a new federation, owned by the caller.
+   */
+  private identity: HostIdentity
+
   constructor(
-    private readonly identity: HostIdentity,
+    identity: HostIdentity,
     private readonly bus: FederationBus,
     private readonly options: FederationOptions,
   ) {
+    this.identity = identity
     this.presence.set(identity.hostId, {
       hostId: identity.hostId,
       hostTitle: identity.hostTitle,
@@ -70,6 +78,23 @@ export class HostFederation {
     if (this.running) return
     this.running = true
     this.announce('hello')
+  }
+
+  /**
+   * Re-title this host in place: the presence entry and the announcement
+   * source change together, and one heartbeat carries the new name out.
+   * A rename must not leave the list row stale (the panel's rows read the
+   * presence snapshot, not the identity), and must not leave other tabs
+   * announcing the old name either — but it also must not churn the list
+   * with a bye/hello pair, so this is an in-place update, not a restart.
+   */
+  renameSelf(hostTitle: string): void {
+    this.identity = { ...this.identity, hostTitle }
+    const self = this.presence.get(this.identity.hostId)
+    if (self !== undefined) {
+      this.presence.set(self.hostId, { ...self, hostTitle })
+    }
+    this.emitHeartbeat()
   }
 
   /** Say goodbye, so other pages drop this host at once. Releases this host. */
