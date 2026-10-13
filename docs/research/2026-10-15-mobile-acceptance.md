@@ -16,7 +16,7 @@
 | V3 | 电脑重启后 serve 配置自动恢复 | ⏳ 待用户补验（命令见 §5） | — |
 | V4 | DSH 重启后 cookie 仍有效 | ✅ 机器侧通过（手机侧刷新确认待用户） | 线上实测 |
 | V5 | 安卓 Chrome 信任 ts.net 证书 | ⏳ 待用户执行（机器侧已证证书链为 Let's Encrypt 且本机校验通过） | 机器半实测 |
-| V6 | 审批与停止端点形状（代码核对） | ✅ Task 6 已闭（四端点全部存在且实测） | 线上实测 + 源码钉死 |
+| V6 | 审批与停止端点形状（代码核对） | ✅ Task 6 已闭（四端点全部存在且实测） | 源码钉死（Task 6，gateway/src/index.ts:602-668）；真实回路待 R9 用户步骤 |
 | V7 | 扫码 → 303 落回手机页 → cookie 生效 | ✅ 机器侧半程通过；扫码本身待用户执行 | 机器半实测 |
 | R9 | 真实审批回路（答→了结→另一端收 cancel） | ⏳ 待用户执行（既有证据见 §6） | 源码钉死 + 单测覆盖 |
 
@@ -50,7 +50,10 @@
    语义，不是失效。机器侧复现 V4 时注意「在哪签就在哪打」。
 6. **留下的配置**：探针 home 的 `cordis.patch.yml` 新增 mobileOrigin 覆盖行
    （按 docs/install.zh.md 教的 id 定向写法，`--dump-config` 已核对生效），保留
-   不撤——用户手机侧验收直接复用。worktree 的 `scripts/dsh-wrapper.sh`
+   不撤——用户手机侧验收直接复用。要撤销就把
+   `~/.dsh-threadharbor-probe/profiles/web/cordis.patch.yml` 里
+   `threadharbor-mobile-entry` 那两行（config 与 mobileOrigin）删去或注释，再重启
+   dsh 生效。worktree 的 `scripts/dsh-wrapper.sh`
    （gitignore，机器本地的全局 dsh 启动器，与主 checkout 同文）是本次为让
    dev.sh 走默认启动器而补的，不入库。
 
@@ -197,7 +200,7 @@ downlink {"type":"item","streamId":"ee43ca32-…","value":{"type":"ready","clien
     `Max-Age=2592000`），跨 DSH 重启有效；换手机、过期、清 cookie 后重新扫码即可。
 
 12. 【待用户执行·收尾可选项】若不留常驻手机通道：
-    `tailscale serve --https=443 off`，再 `THREADHARBOR_DSH_HOME=… THREADHARBOR_WEB_PORT=3091 scripts/dev.sh stop web`。
+    `tailscale serve --https=443 off`，再 `THREADHARBOR_DSH_HOME=~/.dsh-threadharbor-probe THREADHARBOR_WEB_PORT=3091 scripts/dev.sh stop web`。
 
 ## 5. V3（整机重启）——待用户补验
 
