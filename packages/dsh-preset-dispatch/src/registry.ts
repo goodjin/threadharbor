@@ -159,6 +159,10 @@ export function buildPresetTable(
     const dialect = factory.dialectFor(presetId, preset)
     // Not an agent we drive: leave whatever that preset is entirely alone.
     if (dialect === undefined) continue
+    // The capability table decides whether this agent can be stopped at all:
+    // a dialect that does not declare `cancelsTurns` gets no cancel notice,
+    // keeping the table the single source of truth for what an agent can do.
+    const stopsTurns = dialect.capabilities?.cancelsTurns === true
     // One external conversation per DSH session, not per preset.
     //
     // Sharing one across sessions is the original bug: two conversations in
@@ -177,11 +181,12 @@ export function buildPresetTable(
             ...(preset.model === undefined ? {} : { modelId: preset.model }),
             ...(preset.mode === undefined ? {} : { modeId: preset.mode }),
             ...(options.primer === undefined ? {} : { primer: options.primer }),
-            // The turn's stop signal, as a getter the runner consults per turn.
-            // It closes over the agent, not over this turn, so the one getter
+            // The turn's stop signal, as a getter the runner consults per turn,
+            // and only when the dialect claims the capability. The getter
+            // closes over the agent, not over this turn, so the one entry
             // stored here at open stays correct for every later turn of the
             // session — each turn's signal is read live, when the turn runs.
-            ...(turn.abort === undefined ? {} : { abort: turn.abort }),
+            ...(stopsTurns && turn.abort !== undefined ? { abort: turn.abort } : {}),
           })
           const sessionId = turn.sessionId
           session.onDead(reason => {

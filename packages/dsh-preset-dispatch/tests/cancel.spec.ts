@@ -16,6 +16,15 @@ import type { AcpClientPort } from '../src/runner.ts'
 import { buildPresetTable, sessionsRegistry } from '../src/registry.ts'
 import type { AcpSessionFactory } from '../src/registry.ts'
 
+/** Capabilities of a stand-in dialect, shaped as `AcpDialect['capabilities']`; the wiring tests flip `cancelsTurns`. */
+const FAKE_CAPABILITIES = {
+  cancelsTurns: true,
+  acceptsImageContent: false,
+  toolFrameShape: 'two_frame',
+  commandVia: 'tool_frame',
+  toolNameMap: {},
+} as const
+
 const DECISION: StepDecisionLike = {
   kind: 'enter',
   messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
@@ -110,10 +119,17 @@ describe('AcpTurnRunner — stop signal', () => {
 })
 
 describe('stop wiring — dispatch to runner', () => {
-  it('carries the host’s stop from the agent’s cancel to the external agent', async () => {
-    // The whole chain, hermetically: the patched step captures the turn's
-    // signal, the table hands it to the runner at open, the runner listens,
-    // and a stop mid-turn tells the agent and ends the turn aborted.
+  /**
+   * The whole chain, hermetically: the patched step captures the turn's
+   * signal, the table hands it to the runner at open, the runner listens, and
+   * a stop mid-turn reaches the external agent. The factory is fake, the
+   * runner is the real one — assembled the way the real factory assembles it,
+   * options passed through untouched.
+   */
+  function wiredStopChain(capabilities: AcpDialect['capabilities']): {
+    agent: { cancel(): void; step(decision: StepDecisionLike): Promise<{ kind: string }> }
+    client: AcpClientPort & { cancelled: { method: string; params: unknown }[] }
+  } {
     const client = slowClient(50, 'end_turn')
     const abort = new AbortController()
 
@@ -124,16 +140,14 @@ describe('stop wiring — dispatch to runner', () => {
       cancel(): void {
         abort.abort('user')
       }
-      async step(_decision: StepDecisionLike): Promise<unknown> {
+      async step(_decision: StepDecisionLike): Promise<{ kind: string }> {
         return { kind: 'completed' }
       }
     }
     const agent = new StoppableAgent()
 
-    // The factory is fake, the runner is the real one — assembled the way the
-    // real factory assembles it, options passed through untouched.
     const factory: AcpSessionFactory = {
-      dialectFor: () => ({ id: 'fake' }) as AcpDialect,
+      dialectFor: () => ({ id: 'fake', capabilities }) as AcpDialect,
       open: async (_presetId, options) => {
         const runner = new AcpTurnRunner(client, options)
         return {
@@ -145,12 +159,29 @@ describe('stop wiring — dispatch to runner', () => {
     }
     const table = buildPresetTable({ presets: { 'acp-grok': { agent: 'fake' } } }, factory, sessionsRegistry())
     installAcpDispatch(agent, table, { produce: () => [], write: () => undefined, positionOf: () => ({ turn: 1, step: 1 }) })
+    return { agent, client }
+  }
 
-    const p = (agent as { step(decision: StepDecisionLike): Promise<{ kind: string }> }).step(DECISION)
+  it('carries the host’s stop from the agent’s cancel to the external agent', async () => {
+    const { agent, client } = wiredStopChain(FAKE_CAPABILITIES)
+    const p = agent.step(DECISION)
     // The host's stop, the way the loop makes it: a method call on the agent.
     setTimeout(() => agent.cancel(), 10)
     const end = await p
     expect(end.kind).toBe('aborted')
     expect(client.cancelled).toEqual([{ method: 'session/cancel', params: { sessionId: 's1' } }])
+  })
+
+  it('does not wire the stop for a dialect that declares it cannot cancel turns', async () => {
+    // The capability table is the single source of truth: a dialect without
+    // `cancelsTurns` gets no cancel notice at all, even though the host's own
+    // signal still fires — the turn runs to its ordinary end, exactly as
+    // before the stop wiring existed.
+    const { agent, client } = wiredStopChain({ ...FAKE_CAPABILITIES, cancelsTurns: false })
+    const p = agent.step(DECISION)
+    setTimeout(() => agent.cancel(), 10)
+    const end = await p
+    expect(client.cancelled).toEqual([])
+    expect(end.kind).toBe('completed')
   })
 })
