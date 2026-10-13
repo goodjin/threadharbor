@@ -34,6 +34,7 @@ import { applySwitchPlan } from './apply-plan.ts'
 import type { SwitchPorts, ForkRequest } from './apply-plan.ts'
 import { presetOfState } from './dispatch.ts'
 import type { AgentLike, TurnModelDecision } from './dispatch.ts'
+import { baseIdOf } from './selection.ts'
 import { planSwitch } from './switch-plan.ts'
 import { assembleHandover, messagesOf } from './handover.ts'
 import type { HandoverMessage } from './handover.ts'
@@ -318,7 +319,10 @@ export function declaredContextWindow(
   const presetId = provider.startsWith('acp:') ? provider.slice('acp:'.length) : undefined
   if (presetId === undefined) return undefined
   const preset = config.presets[presetId]
-  const found = preset?.models?.find(entry => entry.id === model)
+  // Base-to-base: the pick names the collapsed base while the declaration
+  // lists base[effort]; an exact comparison would read "no window declared"
+  // for every effort-published model and skip the too-long check.
+  const found = preset?.models?.find(entry => baseIdOf(entry.id) === baseIdOf(model))
   const window = found?.contextWindow
   return typeof window === 'number' && Number.isFinite(window) && window > 0 ? window : undefined
 }

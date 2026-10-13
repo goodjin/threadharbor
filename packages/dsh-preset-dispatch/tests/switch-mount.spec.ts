@@ -17,7 +17,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { estimateTokens, mountSwitchOnForeignModelRequest, splitQuestion, switchDrivenSession } from '../src/switch-mount.ts'
+import { declaredContextWindow, estimateTokens, mountSwitchOnForeignModelRequest, splitQuestion, switchDrivenSession } from '../src/switch-mount.ts'
 import type { AgentLike } from '../src/dispatch.ts'
 import { providerRoute } from '../src/catalog.ts'
 import type { CatalogDeps } from '../src/catalog.ts'
@@ -160,6 +160,25 @@ const request = {
 
 const switchedBoundary = { openTurnStartSeq: 12, lastTurn: 1 }
 const untouchedBoundary = { openTurnStartSeq: null, lastTurn: 0 }
+
+describe('declaredContextWindow', () => {
+  it('finds the window for a collapsed base pick', () => {
+    // The picker collapses base[effort] rows to the base; the window check has
+    // to see through the same collapsing or every effort-published model
+    // counts as "no window declared" and the too-long refusal never fires.
+    const codex: PresetConfig = {
+      presets: {
+        'acp-codex': {
+          agent: 'codex',
+          command: 'codex-acp',
+          models: [{ id: 'gpt-6-astra[low]', name: 'low', contextWindow: 400_000 }],
+        },
+      },
+    }
+    expect(declaredContextWindow(codex, providerRoute('acp-codex'), 'gpt-6-astra')).toBe(400_000)
+    expect(declaredContextWindow(codex, providerRoute('acp-codex'), 'gpt-6-astra[low]')).toBe(400_000)
+  })
+})
 
 describe('mountSwitchOnForeignModelRequest', () => {
   it('refuses by name when the host does not expose the switch services', async () => {

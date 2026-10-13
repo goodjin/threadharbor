@@ -14,6 +14,7 @@
 
 import type { AcpDialect } from '@threadharbor/dsh-acp-agent'
 import type { PresetConfig } from './registry.ts'
+import { baseIdOf } from './selection.ts'
 
 /** One model as the catalog publishes it. */
 export type CatalogModel = {
@@ -224,7 +225,13 @@ export function presetForModel(
   const presetId = presetOfRoute(route)
   if (presetId === undefined) return undefined
   if (config.presets[presetId] === undefined) return undefined
-  return (deps.runtimeModelsOf?.(presetId) ?? deps.modelsOf(presetId)).some(model => model.id === modelId)
+  // Base-to-base: effort publishers declare `base[effort]` while the picker
+  // collapses to the base, so a pick that arrives here names the bare base —
+  // an exact comparison would call the row's own collapsed pick unserved and
+  // the switch chain would die as "the takeover did not happen" before it
+  // could plan anything.
+  const base = baseIdOf(modelId)
+  return (deps.runtimeModelsOf?.(presetId) ?? deps.modelsOf(presetId)).some(model => baseIdOf(model.id) === base)
     ? presetId
     : undefined
 }
@@ -317,8 +324,22 @@ export function catalogAdapter(config: PresetConfig, deps: CatalogDeps): Catalog
     // async, and the generator's rejection surfaces to the loop as the turn's
     // error — loud, and never a silently empty answer.
     providerRetryPolicy: (): undefined => undefined,
-    stream: function stream(options: { provider: string; model: string; sessionId?: unknown; messages?: readonly unknown[] }): AsyncIterable<never> {
+    stream: function stream(options: { provider: string; model: string; sessionId?: unknown; messages?: readonly unknown[]; purpose?: unknown }): AsyncIterable<never> {
       return (async function* foreignModelRequest(): AsyncIterable<never> {
+        // Background housekeeping (session titles, compaction) borrows the
+        // session's route but is not a conversation turn. Only a turn may
+        // switch agents: a housekeeping request that reached the switch chain
+        // would race the turn's own switch, or fork a session whose first
+        // prompt is the title question. It refuses by name instead — the
+        // title then falls back to the first-prompt text, exactly as it
+        // already does for sessions our rows drive (verified against the
+        // reference: only these two purposes exist, and the turn's own
+        // request never sets one).
+        if (typeof options.purpose === 'string' && options.purpose !== '') {
+          throw new Error(
+            `acp catalog: ${options.provider}/${options.model} does not serve background ${options.purpose} requests — only a conversation turn can switch agents`,
+          )
+        }
         if (deps.onForeignModelRequest === undefined || typeof options.sessionId !== 'string') {
           throw new Error(
             `acp catalog: ${options.provider}/${options.model} never streams — an external turn is driven by the replaced step, so reaching the model request means the takeover did not happen`,
@@ -377,9 +398,9 @@ export type CatalogAdapterLike = {
    */
   prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<{
     model: CatalogModel
-    stream(options: { provider: string; model: string; sessionId?: unknown; messages?: readonly unknown[] }): AsyncIterable<never>
+    stream(options: { provider: string; model: string; sessionId?: unknown; messages?: readonly unknown[]; purpose?: unknown }): AsyncIterable<never>
   }>
-  stream(options: { provider: string; model: string; sessionId?: unknown; messages?: readonly unknown[] }): AsyncIterable<never>
+  stream(options: { provider: string; model: string; sessionId?: unknown; messages?: readonly unknown[]; purpose?: unknown }): AsyncIterable<never>
   /**
    * The runtime asks every registered adapter for this, without checking that
    * it exists — an adapter that omits it takes down every route, not just its

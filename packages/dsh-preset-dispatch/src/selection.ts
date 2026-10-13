@@ -40,8 +40,12 @@ const ROUTE_PREFIX = 'acp:'
  * arrives as the bare base. The preset's declared list still carries the
  * suffixed ids, so matching compares base-to-base — a `base` pick is served
  * when the preset advertises `base` at any effort.
+ *
+ * Shared by everything that matches a pick against a declared model list
+ * (the takeover's own check, the switch chain's preset lookup, the follow
+ * rules, the context-window lookup) so they cannot drift apart again.
  */
-function baseIdOf(id: string): string {
+export function baseIdOf(id: string): string {
   const open = id.lastIndexOf('[')
   if (open === -1 || !id.endsWith(']')) return id
   const base = id.slice(0, open)

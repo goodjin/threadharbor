@@ -29,6 +29,14 @@ describe('decidePresetFollow — a preset pick selects its first model', () => {
     expect(decidePresetFollow(GROK, pending)).toEqual({ kind: 'keep' })
   })
 
+  it('keeps a pending collapsed base pick the preset serves at any effort', () => {
+    // Effort publishers declare base[effort] ids while the picker collapses
+    // them to the base; overwriting the user's own base pick with the first
+    // suffixed id would silently change the effort they meant to leave open.
+    const CODEX = { presetId: 'acp-codex', models: [{ id: 'gpt-6-astra[low]' }, { id: 'gpt-6-astra[high]' }] }
+    expect(decidePresetFollow(CODEX, { provider: 'acp:acp-codex', model: 'gpt-6-astra' })).toEqual({ kind: 'keep' })
+  })
+
   it('overwrites a pending pick the preset cannot serve', () => {
     // A native pick, or another preset's model, older than the preset choice:
     // the preset pick is the newer intent, and leaving the stale one pending

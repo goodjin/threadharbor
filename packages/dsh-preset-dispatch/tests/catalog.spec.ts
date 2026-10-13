@@ -147,6 +147,30 @@ describe('catalogAdapter', () => {
     }))).rejects.toThrow(/takeover did not happen/)
   })
 
+  it('refuses background housekeeping requests without touching the switch hook', async () => {
+    // Title generation and compaction borrow the session's route but are not
+    // conversation turns: letting them reach the switch chain would race the
+    // turn's own switch — or fork a session whose first prompt is the title
+    // question. They refuse by name instead; the title falls back to the
+    // first-prompt text exactly as it already does for driven sessions.
+    const seen: unknown[] = []
+    const hooked = catalogAdapter(CONFIG, {
+      modelsOf,
+      dialectOf: () => grokDialect,
+      onForeignModelRequest: async request => {
+        seen.push(request)
+        throw new Error('should not be reached')
+      },
+    })
+    await expect(failToStream(hooked.stream({
+      provider: providerRoute('acp-grok'), model: 'grok-4.7', sessionId: 's1', purpose: 'session-title',
+    }))).rejects.toThrow(/background session-title request/)
+    await expect(failToStream(hooked.stream({
+      provider: providerRoute('acp-grok'), model: 'grok-4.7', sessionId: 's1', purpose: 'compaction',
+    }))).rejects.toThrow(/background compaction request/)
+    expect(seen).toEqual([])
+  })
+
   it('answers the per-step preparation the loop makes before any dispatch', async () => {
     // The loop resolves every native step through `llm.prepareCall()` before
     // the request is admitted (reference agent-loop `prepareRequest`), and the
@@ -301,5 +325,27 @@ describe('presetForModel', () => {
 
   it('returns nothing for a native provider', () => {
     expect(presetForModel(CONFIG, deps, 'deepseek', 'deepseek-chat')).toBeUndefined()
+  })
+
+  // Effort publishers (codex) declare base[effort] ids; the picker collapses
+  // them to the base and rides effort separately, so the pick that arrives at
+  // the switch chain names the bare base. Mapping that pick back to a preset
+  // is what makes "pick a model, switch agent" fire at all for these agents.
+  const CODEX: PresetConfig = { presets: { 'acp-codex': { agent: 'codex', command: 'codex-acp' } } }
+  const codexDeps = {
+    modelsOf: () => [{ id: 'gpt-6-astra[low]', name: 'low' }, { id: 'gpt-6-astra[high]', name: 'high' }],
+    dialectOf: () => grokDialect,
+  }
+
+  it('maps a collapsed base pick to the preset that serves it at any effort', () => {
+    expect(presetForModel(CODEX, codexDeps, providerRoute('acp-codex'), 'gpt-6-astra')).toBe('acp-codex')
+  })
+
+  it('still maps an exact suffixed id', () => {
+    expect(presetForModel(CODEX, codexDeps, providerRoute('acp-codex'), 'gpt-6-astra[low]')).toBe('acp-codex')
+  })
+
+  it('returns nothing for a base the preset serves at no effort', () => {
+    expect(presetForModel(CODEX, codexDeps, providerRoute('acp-codex'), 'gpt-5')).toBeUndefined()
   })
 })

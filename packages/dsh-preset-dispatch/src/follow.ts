@@ -31,7 +31,7 @@
  */
 
 import { presetOfState } from './dispatch.ts'
-import { pendingSelectionOf, selectionOf } from './selection.ts'
+import { baseIdOf, pendingSelectionOf, selectionOf } from './selection.ts'
 import type { SelectionLike } from './selection.ts'
 import { servicesOf, startedOf } from './switch-mount.ts'
 import type { HostServices } from './switch-mount.ts'
@@ -54,9 +54,12 @@ export type PresetFollowDecision =
  * should the freshly taken-over session's model chip say?
  */
 export function decidePresetFollow(config: FollowConfig, pending: SelectionLike | undefined): PresetFollowDecision {
+  // Base-to-base, same as everywhere a pick meets a declared list: the
+  // picker's collapsed base pick is the user's own choice of this preset's
+  // model, not a pick to overwrite with the first suffixed id.
   if (pending !== undefined
     && pending.provider === `acp:${config.presetId}`
-    && config.models.some(model => model.id === pending.model)) {
+    && config.models.some(model => baseIdOf(model.id) === baseIdOf(pending.model))) {
     return { kind: 'keep' }
   }
   const first = config.models[0]
