@@ -209,7 +209,9 @@ describe('mid-turn tool-card writing', () => {
     turn1.push([openFrame, answerFrame])
     turn1.release()
     await turn1.run()
-    expect(turn1.appends[0]!.payload).toMatchObject({ turn: 4, step: 2, callId: 't1', name: 'Bash' })
+    // The card name goes through toolNameMap ("Bash" → DSH "bash"), same as
+    // the end-of-turn projection writes it.
+    expect(turn1.appends[0]!.payload).toMatchObject({ turn: 4, step: 2, callId: 't1', name: 'bash' })
   })
 
   it('mid-turn card payload is identical to the end-of-turn projection’s own card', async () => {

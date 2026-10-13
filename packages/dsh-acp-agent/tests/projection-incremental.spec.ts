@@ -69,7 +69,8 @@ describe('projectTurnIncremental', () => {
     const events = projectTurnIncremental(captured['grok']!['tool'] as AcpFrame[], { turn: 1, dialect: grokDialect })
     expect(events.map(event => event.type)).toEqual(['tool/call', 'tool/result'])
     const call = events[0]!.payload as { name: string }
-    expect(call.name).toBe('run_terminal_command')
+    // The latched opening name, as the card carries it after toolNameMap.
+    expect(call.name).toBe('bash')
     const result = events[1]!.payload as { message: { content: { text: string }[] } }
     expect(result.message.content.map(part => part.text).join('')).toContain('THREADHARBOR_TOOL_OK')
   })
@@ -78,7 +79,7 @@ describe('projectTurnIncremental', () => {
     // Same payload contracts as contentEvents, so one writer serves both
     // paths: the call log-only, the result a message pointing back at it.
     const events = projectTurnIncremental(claudeFrames, { turn: 1, dialect: claudeDialect })
-    expect(events[0]!.payload).toMatchObject({ turn: 1, step: 1, callId: 't1', name: 'Bash' })
+    expect(events[0]!.payload).toMatchObject({ turn: 1, step: 1, callId: 't1', name: 'bash' })
     const payload = events[1]!.payload as {
       turn: number
       step: number

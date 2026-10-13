@@ -257,7 +257,7 @@ export function projectTurnIncremental(
     tools.set(call.callId, call)
     if (!opened.has(call.callId)) {
       opened.add(call.callId)
-      events.push(toolCallEvent(call, turn, step))
+      events.push(toolCallEvent(dialect, call, turn, step))
     }
     if ((call.status === 'completed' || call.status === 'failed') && !settled.has(call.callId)) {
       settled.add(call.callId)
@@ -267,11 +267,28 @@ export function projectTurnIncremental(
   return events
 }
 
+/**
+ * The name a tool/call card carries, as the DSH client renders it.
+ *
+ * The agent reports its own native names — claude's Anthropic names ("Bash"),
+ * codex/cursor's `kind` ("execute"), grok's first-frame title
+ * ("run_terminal_command") — but the DSH client picks a card's view by matching
+ * the event `name` against ITS known tool names (`classifyTool` and the keyed
+ * `tool.call.toolview` registry). A name it does not know degrades to the
+ * generic card. The dialect's `toolNameMap` (AcpCapabilities) carries the
+ * measured translations, every value verified to be a name the reference DSH
+ * client actually recognizes; a name with no entry passes through unchanged —
+ * the generic card is the honest fallback, a made-up one renders nothing.
+ */
+export function mapToolName(dialect: AcpDialect, rawName: string): string {
+  return dialect.capabilities.toolNameMap[rawName] ?? rawName
+}
+
 /** The log-only call card, the one shape `contentEvents` has always written. */
-function toolCallEvent(tool: ToolCall, turn: number, step: number): ProjectionEvent {
+function toolCallEvent(dialect: AcpDialect, tool: ToolCall, turn: number, step: number): ProjectionEvent {
   return {
     type: 'tool/call',
-    payload: withoutNonFinite({ turn, step, callId: tool.callId, name: tool.name, arguments: JSON.stringify(tool.arguments) }),
+    payload: withoutNonFinite({ turn, step, callId: tool.callId, name: mapToolName(dialect, tool.name), arguments: JSON.stringify(tool.arguments) }),
   }
 }
 
@@ -316,7 +333,7 @@ export function projectToolCallFrame(
   const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
   if (kind !== 'tool_call' && kind !== 'tool_call_update') return undefined
   const call = options.dialect.foldTool(undefined, update)
-  return toolCallEvent(call, options.turn, options.step)
+  return toolCallEvent(options.dialect, call, options.turn, options.step)
 }
 
 function accumulate(frames: readonly AcpFrame[], dialect: AcpDialect): Accumulator {
@@ -375,7 +392,7 @@ function contentEvents(
   ]
   if (content.length > 0) events.push(assistantEvent(dialect, acc, content, turn, step))
   for (const tool of tools.values()) {
-    events.push(toolCallEvent(tool, turn, step))
+    events.push(toolCallEvent(dialect, tool, turn, step))
     events.push(toolResultEvent(tool, turn, step))
   }
   return events

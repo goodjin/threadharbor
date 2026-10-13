@@ -30,7 +30,9 @@ describe('projectTurn with the claude dialect', () => {
   it("takes the tool name from _meta.claudeCode.toolName, not the human title", () => {
     const events = projectTurn(claudeTool, { turn: 1, dialect: claudeDialect })
     const call = events.find(event => event.type === 'tool/call')!
-    expect((call.payload as { name: string }).name).toBe('Bash')
+    // The card name goes through toolNameMap (Anthropic "Bash" → DSH "bash");
+    // either way it is the _meta name, never the human title ("Terminal").
+    expect((call.payload as { name: string }).name).toBe('bash')
   })
 })
 

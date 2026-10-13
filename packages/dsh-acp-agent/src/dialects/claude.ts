@@ -66,6 +66,12 @@ export const claudeDialect: AcpDialect = {
     acceptsImageContent: false,
     toolFrameShape: 'in_progress',
     commandVia: 'tool_frame',
+    // Anthropic tool names (the `_meta.claudeCode.toolName` values) translated
+    // onto the names DSH renders. Every VALUE was checked against the reference
+    // DSH client (2026-10-13): the `classifyTool` table in
+    // ui-tool/.../tool-call-model.ts and the keyed `tool.call.toolview`
+    // registrations. `todo_write` — not `todo` — is the key the todo row
+    // registers; `read`/`bash`/... are both classified and keyed.
     toolNameMap: {
       Read: 'read',
       Edit: 'edit',
@@ -73,7 +79,10 @@ export const claudeDialect: AcpDialect = {
       Write: 'write',
       Grep: 'grep',
       Glob: 'glob',
-      TodoWrite: 'todo',
+      TodoWrite: 'todo_write',
+      WebFetch: 'web_fetch',
+      WebSearch: 'web_search',
+      Skill: 'skill',
     },
   },
 

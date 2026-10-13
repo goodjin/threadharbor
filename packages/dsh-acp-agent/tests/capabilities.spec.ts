@@ -43,6 +43,9 @@ describe('capabilities', () => {
   })
 
   it('claude maps its tool names onto the short names DSH uses', () => {
+    // Values verified 2026-10-13 against the reference DSH client: the
+    // `classifyTool` table and the keyed `tool.call.toolview` registrations.
+    // The todo row registers key `todo_write`; `todo` is registered nowhere.
     expect(claudeDialect.capabilities.toolNameMap).toEqual({
       Read: 'read',
       Edit: 'edit',
@@ -50,7 +53,16 @@ describe('capabilities', () => {
       Write: 'write',
       Grep: 'grep',
       Glob: 'glob',
-      TodoWrite: 'todo',
+      TodoWrite: 'todo_write',
+      WebFetch: 'web_fetch',
+      WebSearch: 'web_search',
+      Skill: 'skill',
     })
+  })
+
+  it('codex/cursor 名字只有 kind execute，映射成 bash；grok 的标题同理', () => {
+    expect(codexDialect.capabilities.toolNameMap).toEqual({ execute: 'bash' })
+    expect(cursorDialect.capabilities.toolNameMap).toEqual({ execute: 'bash' })
+    expect(grokDialect.capabilities.toolNameMap).toEqual({ run_terminal_command: 'bash' })
   })
 })

@@ -54,9 +54,14 @@ export const grokDialect: AcpDialect = {
     // in-progress status in between.
     toolFrameShape: 'two_frame',
     commandVia: 'tool_frame',
-    // Filled from actual grok frames by the tool-naming task; nothing to
-    // translate yet.
-    toolNameMap: {},
+    // The latched first-frame `title` is grok's tool identity. The one tool
+    // observed live (2026-10-09 capture, `tests/live.spec.ts`) is the terminal
+    // command tool; DSH's bash card is the matching view (value verified
+    // against the reference client's `classifyTool`, 2026-10-13). Any other
+    // title stays itself and degrades to the generic card.
+    toolNameMap: {
+      run_terminal_command: 'bash',
+    },
   },
 
   foldTool(carried, update) {

@@ -62,9 +62,10 @@ describe('grok turns over captured frames', () => {
 
   it('keeps the tool name from the opening call, not the human title of an update', () => {
     // grok puts the tool's name in `title` only on the opening frame; every
-    // later update overwrites it with a human activity line.
+    // later update overwrites it with a human activity line. The card carries
+    // the latched name after toolNameMap (run_terminal_command → bash).
     const call = turn(toolFrames).find(e => e.type === 'tool/call')!
-    expect((call.payload as { name: string }).name).toBe('run_terminal_command')
+    expect((call.payload as { name: string }).name).toBe('bash')
   })
 
   it('captures the tool output from the nested ACP content shape', () => {

@@ -32,7 +32,8 @@ describe('projectTurn with the grok dialect', () => {
   it('keeps the tool name from the opening frame, not the human title of an update', () => {
     const events = projectTurn(grokTool, { turn: 1, dialect: grokDialect })
     const call = events.find(event => event.type === 'tool/call')!
-    expect((call.payload as { name: string }).name).toBe('run_terminal_command')
+    // The latched opening name, as the card carries it after toolNameMap.
+    expect((call.payload as { name: string }).name).toBe('bash')
   })
 
   it('unwraps grok’s nested output shape', () => {

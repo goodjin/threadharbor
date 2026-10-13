@@ -60,9 +60,14 @@ export const cursorDialect: AcpDialect = {
     // cursor's tool frames carry a live in-progress status, like claude's.
     toolFrameShape: 'in_progress',
     commandVia: 'tool_frame',
-    // Filled from actual cursor frames by the tool-naming task; nothing to
-    // translate yet.
-    toolNameMap: {},
+    // foldTool names a call after `kind`, as codex does (`toolCall` carries no
+    // `name`; the docs' 工具名 row and the 2026-09-14 capture both say `kind`).
+    // The only kind observed is `execute` — a shell command — and DSH's bash
+    // card is the matching view (value verified against the reference client's
+    // `classifyTool`, 2026-10-13). Other kinds stay unmapped until measured.
+    toolNameMap: {
+      execute: 'bash',
+    },
   },
 
   foldTool(carried, update) {

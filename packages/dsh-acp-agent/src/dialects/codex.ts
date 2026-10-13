@@ -46,9 +46,16 @@ export const codexDialect: AcpDialect = {
     // in-progress status in between.
     toolFrameShape: 'two_frame',
     commandVia: 'tool_frame',
-    // Filled from actual codex frames by the tool-naming task; nothing to
-    // translate yet.
-    toolNameMap: {},
+    // foldTool names a call after `kind`, the only identity codex offers. The
+    // one kind observed live (2026-10-09 capture) is `execute` — a shell
+    // command on `rawInput.command` — and DSH's bash card is the matching view
+    // (value verified against the reference client's `classifyTool`, 2026-10-13).
+    // The other ACP kinds (read/edit/search/…) are unmeasured and stay
+    // unmapped: they degrade to the generic card instead of risking a wrong
+    // dedicated one.
+    toolNameMap: {
+      execute: 'bash',
+    },
   },
 
   foldTool(carried, update) {
