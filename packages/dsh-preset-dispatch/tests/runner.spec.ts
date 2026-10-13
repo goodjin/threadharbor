@@ -196,12 +196,12 @@ describe('AcpTurnRunner', () => {
     const client = fakeClient()
     client.request = async (method, params) => {
       client.calls.push({ method, params })
-      if (method === 'session/new') throw new Error('agent binary missing')
+      if (method === 'session/new') throw new Error('acp agent grok-4.7 could not run: spawn ENOENT')
       return {}
     }
     const result = await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
     expect(result.end).toMatchObject({ kind: 'error', error: { code: 'ACP_CONNECTION' } })
-    expect((result.end as { error: { message: string } }).error.message).toContain('agent binary missing')
+    expect((result.end as { error: { message: string } }).error.message).toContain('could not run')
   })
 
   it('feeds text to the stream as frames arrive, not after the turn ends', async () => {
@@ -270,8 +270,10 @@ describe('AcpTurnRunner', () => {
     const second = await runner.run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
     // Both failures end as classified errors — and the external conversation
     // still opened only once, so the failure did not turn into re-open churn.
-    expect(first.end).toMatchObject({ kind: 'error', error: { code: 'ACP_CONNECTION' } })
-    expect(second.end).toMatchObject({ kind: 'error', error: { code: 'ACP_CONNECTION' } })
+    // The thrown text is not `acp `-shaped, so it is an internal failure, not
+    // a connection one: the label says so instead of borrowing the hint.
+    expect(first.end).toMatchObject({ kind: 'error', error: { code: 'ACP_INTERNAL' } })
+    expect(second.end).toMatchObject({ kind: 'error', error: { code: 'ACP_INTERNAL' } })
     expect(client.calls.filter(call => call.method === 'session/new')).toHaveLength(1)
     expect(attempts).toBe(2)
   })
@@ -416,17 +418,37 @@ describe('AcpTurnRunner — failed turns end with actionable error rows', () => 
   })
 
   it('ends a failed session open as a connection error too', async () => {
-    // An agent that never opened (binary missing, handshake timeout) is the
-    // reconnect case just as much as one that died mid-turn.
+    // An agent that never opened (spawn failure, handshake timeout) is the
+    // reconnect case just as much as one that died mid-turn. The shape here is
+    // the transport's own spawn line, which carries the `acp ` marker.
     const client = fakeClient()
     client.request = async (method, params) => {
       client.calls.push({ method, params })
-      if (method === 'session/new') throw new Error('agent binary missing')
+      if (method === 'session/new') throw new Error('acp agent grok-4.7 could not run: spawn ENOENT')
       return {}
     }
     const result = await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, TURN_OF('s1'))
     expect(result.end).toMatchObject({ kind: 'error', error: { code: 'ACP_CONNECTION' } })
-    expect(((result.end as { error: { message: string } }).error.message)).toContain('agent binary missing')
+    expect(((result.end as { error: { message: string } }).error.message)).toContain('could not run')
+  })
+
+  it('does not dress an internal failure up as a connection problem', async () => {
+    // A bug inside the turn's own handling (a TypeError anywhere around open,
+    // set_mode or the prompt plumbing) is not the agent's connection dying.
+    // Labeling it ACP_CONNECTION would tell the user to resend and reconnect —
+    // advice that cannot help — so a non-`acp `-shaped error gets the neutral
+    // internal label, with the detail kept for whoever diagnoses it.
+    const client = fakeClient()
+    client.request = async method => {
+      if (method === 'session/new') return { sessionId: 's1' }
+      if (method === 'session/prompt') throw new TypeError('cannot read properties of undefined (reading sessionId)')
+      return {}
+    }
+    const result = await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, TURN_OF('s1'))
+    expect(result.end).toMatchObject({ kind: 'error', error: { code: 'ACP_INTERNAL' } })
+    const message = (result.end as { error: { message: string } }).error.message
+    expect(message).toContain('cannot read properties of undefined')
+    expect(message).not.toContain('重新发送')
   })
 
   it('writes the frames the agent sent before the connection died', async () => {

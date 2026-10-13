@@ -108,14 +108,16 @@ describe('连接死亡的转播', () => {
 
     // One request in flight: its classified failure proves the client kept its
     // listener (the transport's death reason names the row's reconnect hint).
+    // The reason text is the real stdio transport's exit line — `acp `-prefixed,
+    // which is what keeps it in the connection bucket.
     const pending = session.run(
       { kind: 'enter', messages: [] },
       { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 },
     )
-    transport.die('agent process exited')
+    transport.die('acp agent grok-4.7 exited (code=1 signal=none)')
     const result = await pending
     expect(result.end).toMatchObject({ kind: 'error', error: { code: 'ACP_CONNECTION' } })
-    expect(seenBySession).toEqual(['agent process exited'])
+    expect(seenBySession).toEqual(['acp agent grok-4.7 exited (code=1 signal=none)'])
   })
 
   it('会话自己关掉时不再报告死亡', async () => {

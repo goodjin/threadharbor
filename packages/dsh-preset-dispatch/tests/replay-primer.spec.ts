@@ -114,9 +114,10 @@ describe('AcpTurnRunner — 历史回灌', () => {
   })
 
   it('没有回灌时提问失败按类别收尾，而不是抛原始错误', async () => {
-    // The failure ends the turn as a classified error row ('agent died' is a
-    // transport death → reconnect hint), the same seam every other failed
-    // turn takes; the replay path alone keeps its own named ending.
+    // The failure ends the turn as a classified error row, the same seam every
+    // other failed turn takes; the replay path alone keeps its own named
+    // ending. The fake's text is not `acp `-shaped, so it classifies as the
+    // neutral internal bucket, not a connection failure.
     const client = fakeClient()
     client.request = async (method, params) => {
       client.calls.push({ method, params })
@@ -127,7 +128,7 @@ describe('AcpTurnRunner — 历史回灌', () => {
     const runner = new AcpTurnRunner(client, { cwd: '/tmp', replay: { take: () => undefined } })
 
     const result = await runner.run(decision('继续'), TURN)
-    expect(result.end).toMatchObject({ kind: 'error', error: { code: 'ACP_CONNECTION' } })
+    expect(result.end).toMatchObject({ kind: 'error', error: { code: 'ACP_INTERNAL' } })
   })
 
   it('移交优先：有移交的回合不再取回灌', async () => {

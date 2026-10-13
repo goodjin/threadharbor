@@ -264,6 +264,13 @@ function toEndReason(stopReason: unknown): StepEndReason {
 
 /** The prefix the client puts on every JSON-RPC error reply before it reaches here. */
 const ACP_ERROR_PREFIX = 'acp error: '
+/**
+ * The marker every connection-family failure carries: our transports, client
+ * and handshake all phrase their reasons with the `acp ` prefix (see
+ * `failureEndOf` for the inventory). An error without it is not about the
+ * connection, and must not borrow its reconnect advice.
+ */
+const CONNECTION_PREFIX = 'acp '
 
 /**
  * An agent refusal about authorization, not about the transport.
@@ -302,11 +309,29 @@ export function failureEndOf(error: unknown): StepEndReason {
     }
     return { kind: 'error', error: { code: 'ACP_ERROR', message: detail } }
   }
+  // Every connection-family failure our own stack raises names itself with the
+  // `acp ` prefix — the spawn/exit lines (`acp agent … could not run / exited`),
+  // the socket close text (`acp agent connection closed: …`), the client's own
+  // close (`acp connection closed`), the handshake deadline (`acp agent did
+  // not answer within …`) and the missing session id (`acp session/new
+  // returned no sessionId`). Anything else reaching this point is not a
+  // connection failure at all — a bug inside the turn's own handling — and
+  // must not wear the reconnect hint: the label has to tell the truth about
+  // the cause even when the detail already would let someone diagnose it.
+  if (detail.startsWith(CONNECTION_PREFIX)) {
+    return {
+      kind: 'error',
+      error: {
+        code: 'ACP_CONNECTION',
+        message: `外部 agent 连接已断开：${detail}。重新发送这条消息即可重试，下一次会自动连接新的外部会话。`,
+      },
+    }
+  }
   return {
     kind: 'error',
     error: {
-      code: 'ACP_CONNECTION',
-      message: `外部 agent 连接已断开：${detail}。重新发送这条消息即可重试，下一次会自动连接新的外部会话。`,
+      code: 'ACP_INTERNAL',
+      message: `回合处理出错：${detail}`,
     },
   }
 }

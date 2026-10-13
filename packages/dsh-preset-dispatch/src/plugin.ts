@@ -125,6 +125,13 @@ export function applyAcpPlugin(
   deps: AcpPluginDeps,
 ): void {
   const presets: PresetConfig = { presets: { [presetId]: config } }
+  // The ledger the factory feeds and the catalog reads, created BEFORE the
+  // factory so the wiring below can hand both ends the same object. Created
+  // here rather than left to the standalone entry because this is the function
+  // the loaded entry actually calls — a report recorded anywhere else is the
+  // catalogue bug again: the runner would drop every `session/new` model list
+  // and `listModels` would silently degrade to the configured list forever.
+  const runtimeModelReports = runtimeModels()
   const factory = makeSessionFactory(presets, {
     // Refusing without asking is the safe default and the honest one when there
     // is nowhere to ask. Where there IS a host that answers, use it — a row
@@ -135,6 +142,7 @@ export function applyAcpPlugin(
       : deps.answerPermission(request)),
     ...(deps.answerAskQuestion === undefined ? {} : { answerAskQuestion: deps.answerAskQuestion }),
     ...(deps.transport === undefined ? {} : { transport: deps.transport }),
+    onRuntimeModels: (reportedPresetId, models) => { runtimeModelReports.record(reportedPresetId, models) },
   })
   const dialect = factory.dialectFor(presetId, config)
   // An unknown agent is a configuration mistake. Taking sessions over anyway
@@ -191,10 +199,10 @@ export function applyAcpPlugin(
   // picker then simply shows nothing of ours.
   //
   // The picker's list reads the agent's own `session/new` report once a
-  // session has opened (the runner feeds `runtimeModels` through the factory);
-  // until then it degrades to the configured list, so a working agent never
-  // shows an empty group just because nobody has asked it a question yet.
-  const runtimeModelReports = runtimeModels()
+  // session has opened (the runner feeds the ledger above through the
+  // factory); until then it degrades to the configured list, so a working
+  // agent never shows an empty group just because nobody has asked it a
+  // question yet.
   const catalogDeps: CatalogDeps = {
     modelsOf: presetId => modelsOfPreset(presets, factory, presetId),
     runtimeModelsOf: presetId => runtimeModelReports.modelsOf(presetId),
