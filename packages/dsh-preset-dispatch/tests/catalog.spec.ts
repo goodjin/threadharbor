@@ -146,6 +146,51 @@ describe('catalogAdapter', () => {
       provider: providerRoute('acp-grok'), model: 'grok-4.7',
     }))).rejects.toThrow(/takeover did not happen/)
   })
+
+  it('answers the per-step preparation the loop makes before any dispatch', async () => {
+    // The loop resolves every native step through `llm.prepareCall()` before
+    // the request is admitted (reference agent-loop `prepareRequest`), and the
+    // runtime forwards that to the adapter unconditionally. The base class a
+    // class-based adapter would inherit composes `resolveModel` + `stream`;
+    // this is a plain object, so the method has to exist here or every step
+    // on one of our routes dies as a TypeError before `stream` — and the
+    // switch chain behind it — is ever reached.
+    const prepared = await adapter.prepareCall(providerRoute('acp-claude'), 'claude-opus-4')
+    expect(prepared.model).toEqual(await adapter.resolveModel(providerRoute('acp-claude'), 'claude-opus-4'))
+    expect(typeof prepared.stream).toBe('function')
+  })
+
+  it('dispatches a prepared call with a session into the switch hook', async () => {
+    // Picking one of our models in a started session is carried out at that
+    // session's next turn: the native step prepares, then dispatches through
+    // the prepared stream. The switch hook must sit at the end of that path,
+    // not only on the bare `stream` method.
+    const seen: unknown[] = []
+    const hooked = catalogAdapter(CONFIG, {
+      modelsOf,
+      dialectOf: () => grokDialect,
+      onForeignModelRequest: async request => {
+        seen.push(request)
+        throw new Error('switched by forking: continue in session s2')
+      },
+    })
+    const prepared = await hooked.prepareCall(providerRoute('acp-grok'), 'grok-4.7')
+    await expect(failToStream(prepared.stream({
+      provider: providerRoute('acp-grok'), model: 'grok-4.7', sessionId: 's1',
+    }))).rejects.toThrow(/continue in session s2/)
+    expect(seen).toEqual([{
+      provider: providerRoute('acp-grok'),
+      model: 'grok-4.7',
+      sessionId: 's1',
+    }])
+  })
+
+  it('keeps the takeover diagnostic when a prepared call has no session to switch', async () => {
+    const prepared = await adapter.prepareCall(providerRoute('acp-grok'), 'grok-4.7')
+    await expect(failToStream(prepared.stream({
+      provider: providerRoute('acp-grok'), model: 'grok-4.7',
+    }))).rejects.toThrow(/takeover did not happen/)
+  })
 })
 
 /**

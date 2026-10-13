@@ -255,7 +255,7 @@ export function catalogAdapter(config: PresetConfig, deps: CatalogDeps): Catalog
   // selection can advertise from one list and route against another.
   const modelsFor = (presetId: string): readonly { readonly id: string; readonly name: string; readonly description?: string }[] =>
     deps.runtimeModelsOf?.(presetId) ?? deps.modelsOf(presetId)
-  return {
+  const adapter: CatalogAdapterLike = {
     providerInfo: (provider: string) => {
       const presetId = presetOfRoute(provider) ?? ''
       const agent = config.presets[presetId]?.agent
@@ -339,7 +339,22 @@ export function catalogAdapter(config: PresetConfig, deps: CatalogDeps): Catalog
         )
       })()
     },
+
+    // The loop resolves every native step through `llm.prepareCall()` before
+    // the request is admitted (reference agent-loop `prepareRequest`, which
+    // tolerates only a missing adapter — not a broken one), and the runtime
+    // forwards that to the adapter unconditionally. A class-based adapter
+    // inherits a default that composes `resolveModel` + `stream`; the runtime
+    // packages cannot be imported here (see `dispatch.ts` for why), so the
+    // same composition is stated on the object. Without it, a pick of one of
+    // our models in a session that still runs its native step dies as a
+    // TypeError before `stream` — and the switch chain behind it — runs.
+    prepareCall: async (provider: string, model: string) => ({
+      model: await adapter.resolveModel(provider, model),
+      stream: (options: Parameters<CatalogAdapterLike['stream']>[0]) => adapter.stream(options),
+    }),
   }
+  return adapter
 }
 
 /** The adapter surface the runtime consumes, stated here so this compiles alone. */
@@ -353,6 +368,17 @@ export type CatalogAdapterLike = {
    * failure, which the picker then silently drops.
    */
   resolveModel(provider: string, model: string, signal?: AbortSignal): Promise<CatalogModel>
+  /**
+   * The loop's per-step preparation entry: the runtime calls this on the
+   * adapter for every native step on one of our routes, before the request is
+   * admitted or dispatched. The base class a class-based adapter inherits
+   * composes `resolveModel` + `stream`; an object adapter states the same
+   * composition or the step dies as a TypeError before the switch chain runs.
+   */
+  prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<{
+    model: CatalogModel
+    stream(options: { provider: string; model: string; sessionId?: unknown; messages?: readonly unknown[] }): AsyncIterable<never>
+  }>
   stream(options: { provider: string; model: string; sessionId?: unknown; messages?: readonly unknown[] }): AsyncIterable<never>
   /**
    * The runtime asks every registered adapter for this, without checking that
