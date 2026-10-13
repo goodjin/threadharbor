@@ -29,6 +29,20 @@
     # volatile 字段，就不会多出一个设置页；刷新走 data.dsh.tailscale.refresh。
     - id: threadharbor-tailscale
       name: '@threadharbor/dsh-host-federation/tailscale'
+    # 名册过滤器:下面四个 agent 仍然注册成 preset——急切装载让它们的模型
+    # 进全局目录(模型列表可切换),model→preset 跟随、会话交接也都靠注册。
+    # 但注册同时会把它们列进 preset 选择器,和模型列表重复。这行在名册的
+    # 客户端出口(remoteExportList)把点名的 id 滤掉:选择器与设置页不再
+    # 显示,内部 list() 不动,切换行为不受影响。副作用:正在跑这些 agent
+    # 的会话,头部 preset 标签会兜底显示原始 id(如 acp-grok)。
+    - id: threadharbor-roster-filter
+      name: '@threadharbor/dsh-preset-dispatch/roster-filter'
+      config:
+        hide:
+          - acp-codex
+          - acp-claude
+          - acp-grok
+          - acp-cursor
     - id: acp-codex
       name: '@deepseek-ai/dsh-agent-preset'
       config:

@@ -11,6 +11,12 @@ importers:
       '@threadharbor/dsh-client':
         specifier: workspace:^
         version: link:packages/dsh-client
+      '@threadharbor/dsh-host-federation':
+        specifier: workspace:^
+        version: link:packages/dsh-host-federation
+      '@threadharbor/dsh-preset-dispatch':
+        specifier: workspace:^
+        version: link:packages/dsh-preset-dispatch
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1

@@ -96,6 +96,26 @@ DSH 的 agent preset 本身**就是一个组合**（一组插件行）：
 
 **只想要一个？删掉另外两段即可。** 三段之间没有依赖。
 
+### preset 行还在，但选择器里看不到（2026-10-13）
+
+装好后 agent 会出现在两个地方：模型列表（composer 的 provider 列）和 preset
+选择器（新建会话的芯片）。两者指向同一批注册：DSH 的注册表激活 preset 时是
+**急切挂载**（`agent-preset-registry/src/index.ts` 的 `register()` 一进来就
+`mountPreset`），所以四行 dispatch 一直在跑、各自的模型一直躺在全局目录里——
+这就是「模型列表可切换」的来源；而选择器读的是同一个注册表的名册。
+
+模型列表已经是完整的切换入口（空会话选 `acp:` 模型会原地切到对应 preset，
+已开场的会话走交接），preset 选择器里的同名条目就是重复的门。DSH 没有
+「注册但不上名册」的开关，所以补丁里加了一行 `threadharbor-roster-filter`
+（`@threadharbor/dsh-preset-dispatch/roster-filter`）：在名册的**客户端出口**
+`remoteExportList` 上包一层，把 `hide` 点名的 preset id 从返回里去掉。网关是
+调用时在实例上按名字取方法的（`dsh-api-gateway` 的 `prepareInvocation` 用
+`Reflect.get`），所以实例级包裹能拦到；注册表内部的 `list()` 不动——模型→preset
+跟随、会话内切换、交接都靠它，滤掉会把切换整个拒掉。
+
+已知代价：正在跑这些 agent 的会话，头部 preset 标签会兜底显示原始 id（如
+`acp-grok`）——名册里没这条，标签只能用 id；旁边模型芯片仍显示 Grok。
+
 ### 各家 agent 需要的配置
 
 | agent | 方言 | 连接方式 | 必须写的 | `mode` 取值（实测自各家 `session/new` 返回） |

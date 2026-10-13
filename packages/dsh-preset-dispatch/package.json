@@ -5,6 +5,17 @@
   "type": "module",
   "main": "./src/entry.ts",
   "types": "./src/entry.ts",
+  "exports": {
+    ".": {
+      "types": "./src/entry.ts",
+      "default": "./src/entry.ts"
+    },
+    "./roster-filter": {
+      "types": "./src/roster-filter.ts",
+      "default": "./src/roster-filter.ts"
+    },
+    "./package.json": "./package.json"
+  },
   "dependencies": {
     "@threadharbor/dsh-acp-agent": "workspace:^",
     "@deepseek-ai/schemastery": "^3.18.1"
