@@ -47,6 +47,18 @@ const CHATTER = new Set(['available_commands_update', 'usage_update', 'session_i
 export const grokDialect: AcpDialect = {
   id: 'grok',
 
+  capabilities: {
+    cancelsTurns: true,
+    acceptsImageContent: true,
+    // grok emits an opening frame and a completed frame per call — no
+    // in-progress status in between.
+    toolFrameShape: 'two_frame',
+    commandVia: 'tool_frame',
+    // Filled from actual grok frames by the tool-naming task; nothing to
+    // translate yet.
+    toolNameMap: {},
+  },
+
   foldTool(carried, update) {
     const toolCallId = typeof update['toolCallId'] === 'string' ? update['toolCallId'] : randomUUID()
     // Latch the name: later updates replace `title` with a human line.

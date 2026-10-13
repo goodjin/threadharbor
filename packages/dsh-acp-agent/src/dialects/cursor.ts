@@ -54,6 +54,17 @@ export const cursorDialect: AcpDialect = {
   // `initialized` and before `session/new`. Without it session/new fails.
   authenticateMethodId: 'cursor_login',
 
+  capabilities: {
+    cancelsTurns: true,
+    acceptsImageContent: true,
+    // cursor's tool frames carry a live in-progress status, like claude's.
+    toolFrameShape: 'in_progress',
+    commandVia: 'tool_frame',
+    // Filled from actual cursor frames by the tool-naming task; nothing to
+    // translate yet.
+    toolNameMap: {},
+  },
+
   foldTool(carried, update) {
     const rawId = typeof update['toolCallId'] === 'string' ? update['toolCallId'] : randomUUID()
     const toolCallId = singleLineId(rawId)

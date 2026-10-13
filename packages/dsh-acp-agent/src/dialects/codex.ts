@@ -39,6 +39,18 @@ const CHATTER = new Set([
 export const codexDialect: AcpDialect = {
   id: 'codex',
 
+  capabilities: {
+    cancelsTurns: true,
+    acceptsImageContent: true,
+    // codex emits an opening frame and a completed frame per call — no
+    // in-progress status in between.
+    toolFrameShape: 'two_frame',
+    commandVia: 'tool_frame',
+    // Filled from actual codex frames by the tool-naming task; nothing to
+    // translate yet.
+    toolNameMap: {},
+  },
+
   foldTool(carried, update) {
     const toolCallId = typeof update['toolCallId'] === 'string' ? update['toolCallId'] : randomUUID()
     // `kind` is the tool category ("execute"), which is the only identity codex

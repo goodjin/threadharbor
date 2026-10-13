@@ -50,9 +50,38 @@ export type TurnUsage = {
   readonly totalTokens?: number
 }
 
+/**
+ * What one agent can do, declared up front instead of re-derived from frames.
+ *
+ * Each field is a measured fact about that agent (live captures 2026-09/10),
+ * read by the stop, visibility, reply-replay and attachment work rather than
+ * guessed at again:
+ *
+ *   cancelsTurns         the agent honors a `session/cancel` mid-turn
+ *   acceptsImageContent  `session/prompt` accepts an image content block
+ *   toolFrameShape       'in_progress' — one `tool_call_update` carries a
+ *                        live status while the call runs (claude, cursor);
+ *                        'two_frame' — an opening frame plus a completed
+ *                        one, no progress in between (codex, grok)
+ *   commandVia           how the agent's own slash commands reach us;
+ *                        every ACP agent pushes them as a `tool_frame`
+ *   toolNameMap          the agent's native tool names translated onto the
+ *                        short names DSH renders, e.g. `Read → read`
+ */
+export type AcpCapabilities = {
+  readonly cancelsTurns: boolean
+  readonly acceptsImageContent: boolean
+  readonly toolFrameShape: 'in_progress' | 'two_frame'
+  readonly commandVia: 'tool_frame'
+  readonly toolNameMap: Readonly<Record<string, string>>
+}
+
 export interface AcpDialect {
   /** Stable id, used in logs and tests. */
   readonly id: string
+
+  /** What this agent can do — see `AcpCapabilities`. Required: every dialect declares its own. */
+  readonly capabilities: AcpCapabilities
 
   /**
    * The `authenticate` method to call between `initialize` and `session/new`.

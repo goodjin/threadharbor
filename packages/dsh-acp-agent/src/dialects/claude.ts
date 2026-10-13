@@ -59,6 +59,24 @@ const CHATTER = new Set([
 export const claudeDialect: AcpDialect = {
   id: 'claude',
 
+  capabilities: {
+    cancelsTurns: true,
+    // claude renders image blocks as text placeholders, so prompts must not
+    // attach images to it; its tool frames do carry a live in-progress status.
+    acceptsImageContent: false,
+    toolFrameShape: 'in_progress',
+    commandVia: 'tool_frame',
+    toolNameMap: {
+      Read: 'read',
+      Edit: 'edit',
+      Bash: 'bash',
+      Write: 'write',
+      Grep: 'grep',
+      Glob: 'glob',
+      TodoWrite: 'todo',
+    },
+  },
+
   foldTool(carried, update) {
     const toolCallId = typeof update['toolCallId'] === 'string' ? update['toolCallId'] : randomUUID()
     const meta = record(record(update['_meta'])['claudeCode'])
