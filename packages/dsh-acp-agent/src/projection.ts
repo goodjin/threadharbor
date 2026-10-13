@@ -217,6 +217,85 @@ export function projectStepContent(
   })
 }
 
+/**
+ * The tool events of one turn, in frame order.
+ *
+ * `projectTurn`/`projectStepContent` fold a whole turn first and write every
+ * tool card when the turn is over, so nothing shows while a tool still runs.
+ * This walk emits as the frames arrive instead: the FIRST frame seen for a
+ * call id — whichever of `tool_call`/`tool_call_update` it is — opens the
+ * card, the terminal frame (`completed`/`failed`) closes it with its result,
+ * and the non-terminal updates in between fold into the accumulated call
+ * without emitting (their state reaches the log through that result).
+ *
+ * One call, one result: a terminal frame already seen for the id never emits
+ * a second one, matching the end-of-turn shape of exactly one result per
+ * call. Call ids pair with their results downstream by the writer's
+ * `turn:callId` key, so a call id reused in a later turn stays on its own
+ * turn — this function is per-turn, and every payload carries its turn.
+ */
+export function projectTurnIncremental(
+  frames: readonly AcpFrame[],
+  options: { readonly turn: number; readonly dialect: AcpDialect },
+): ProjectionEvent[] {
+  const { dialect, turn } = options
+  // Same numbering as `projectTurn`: one step per turn, announced by the loop.
+  const step = 1
+  const tools = new Map<string, ToolCall>()
+  const opened = new Set<string>()
+  const settled = new Set<string>()
+  const events: ProjectionEvent[] = []
+
+  for (const frame of frames) {
+    if (frame.method !== 'session/update') continue
+    const update = recordOf(recordOf(frame.params)['update'])
+    const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
+    if (kind !== 'tool_call' && kind !== 'tool_call_update') continue
+    const id = typeof update['toolCallId'] === 'string' ? update['toolCallId'] : undefined
+    const carried = id === undefined ? undefined : tools.get(id)
+    const call = dialect.foldTool(carried, update)
+    tools.set(call.callId, call)
+    if (!opened.has(call.callId)) {
+      opened.add(call.callId)
+      events.push(toolCallEvent(call, turn, step))
+    }
+    if ((call.status === 'completed' || call.status === 'failed') && !settled.has(call.callId)) {
+      settled.add(call.callId)
+      events.push(toolResultEvent(call, turn, step))
+    }
+  }
+  return events
+}
+
+/** The log-only call card, the one shape `contentEvents` has always written. */
+function toolCallEvent(tool: ToolCall, turn: number, step: number): ProjectionEvent {
+  return {
+    type: 'tool/call',
+    payload: withoutNonFinite({ turn, step, callId: tool.callId, name: tool.name, arguments: JSON.stringify(tool.arguments) }),
+  }
+}
+
+/** The result message answering a call — identical from both projections. */
+function toolResultEvent(tool: ToolCall, turn: number, step: number): ProjectionEvent {
+  const isError = tool.status === 'failed'
+  return {
+    type: 'tool/result',
+    payload: withoutNonFinite({
+      turn,
+      step,
+      message: {
+        id: randomUUID(),
+        role: 'tool',
+        content: tool.output.length > 0 ? [{ type: 'text', text: tool.output }] : [],
+        source: { kind: 'tool', callId: tool.callId },
+        toolCallId: tool.callId,
+        isError,
+      },
+      ...(isError ? { error: { name: 'tool', code: tool.status ?? 'failed', reason: tool.title } } : {}),
+    }),
+  }
+}
+
 function accumulate(frames: readonly AcpFrame[], dialect: AcpDialect): Accumulator {
   const thought: string[] = []
   const text: string[] = []
@@ -273,27 +352,8 @@ function contentEvents(
   ]
   if (content.length > 0) events.push(assistantEvent(dialect, acc, content, turn, step))
   for (const tool of tools.values()) {
-    events.push({
-      type: 'tool/call',
-      payload: withoutNonFinite({ turn, step, callId: tool.callId, name: tool.name, arguments: JSON.stringify(tool.arguments) }),
-    })
-    const isError = tool.status === 'failed'
-    events.push({
-      type: 'tool/result',
-      payload: withoutNonFinite({
-        turn,
-        step,
-        message: {
-          id: randomUUID(),
-          role: 'tool',
-          content: tool.output.length > 0 ? [{ type: 'text', text: tool.output }] : [],
-          source: { kind: 'tool', callId: tool.callId },
-          toolCallId: tool.callId,
-          isError,
-        },
-        ...(isError ? { error: { name: 'tool', code: tool.status ?? 'failed', reason: tool.title } } : {}),
-      }),
-    })
+    events.push(toolCallEvent(tool, turn, step))
+    events.push(toolResultEvent(tool, turn, step))
   }
   return events
 }
