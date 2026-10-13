@@ -207,7 +207,7 @@ describe('peers 应答：tailnet 清单 + dsh 并发探测', () => {
   it('注入 run → 两台 peer 各带 dsh；一台 200 一台悬挂，总耗时不落到串行（并发 + 2s 超时）', async () => {
     const commands: string[] = []
     const { probe, urls } = fakeProbe({
-      'alive.tail-scale.ts.net': delay200(300),
+      'alive.tail-scale.ts.net': delay200(800),
       'dead.tail-scale.ts.net': hangs,
     })
     swapProbeFetch(probe)
@@ -231,9 +231,10 @@ describe('peers 应答：tailnet 清单 + dsh 并发探测', () => {
     expect([...urls].sort()).toEqual(
       [HELLO_OF('alive.tail-scale.ts.net'), HELLO_OF('dead.tail-scale.ts.net')].sort(),
     )
-    // 并发钉死：悬挂那台 2s 超时封顶 ≈ 2000ms；若串行则至少 300 + 2000 = 2300ms。
+    // 并发钉死：悬挂那台 2s 超时封顶 ≈ 2000ms，下限 1950 钉死超时真的到点；
+    // 若串行则至少 800 + 2000 = 2800ms——上限留 ~800ms 裕量，慢机也不抖。
     expect(elapsed).toBeGreaterThanOrEqual(1950)
-    expect(elapsed).toBeLessThan(2300)
+    expect(elapsed).toBeLessThan(2800)
   }, 15_000)
 
   it('run 抛错（tailscale 缺失）→ 200 + 非空 error + 空 peers，且不做任何探测', async () => {
