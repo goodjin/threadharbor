@@ -27,22 +27,20 @@
  */
 
 import Schema from '@deepseek-ai/schemastery'
+import { markedRosterIds } from './roster-marks.ts'
 
 export const name = 'threadharbor-roster-filter'
 
 /**
- * The preset ids to keep out of the picker, as the composition declares them.
- *
- * Required: a filter row that names nothing hides nothing, and a silent no-op
- * row is exactly the "loaded but did it?" ambiguity the self-report exists to
- * answer.
+ * Optional extra ids. The normal path is the `hideFromRoster` mark on each
+ * binding: a new agent is hidden by setting that flag, not by editing this list.
  */
 export const Config: Schema<Config> = Schema.object({
-  hide: Schema.array(Schema.string()).required(),
+  hide: Schema.array(Schema.string()),
 })
 
 export type Config = {
-  hide: string[]
+  hide?: string[]
 }
 
 /** One roster row as this filter reads it — the id, plus whatever survives. */
@@ -82,7 +80,9 @@ export function visibleRoster<T extends Roster>(roster: T, hide: readonly string
 
 function isHidden(row: unknown, hidden: ReadonlySet<string>): boolean {
   if (typeof row !== 'object' || row === null) return false
-  const id = (row as RosterRow).id
+  const record = row as RosterRow & { readonly hideFromRoster?: unknown }
+  if (record.hideFromRoster === true) return true
+  const id = record.id
   return typeof id === 'string' && hidden.has(id)
 }
 
@@ -115,7 +115,8 @@ export function hideFromRoster(
       report(`roster filter: the roster answer has no presets list — passing it through unfiltered`)
       return roster
     }
-    return visibleRoster(roster, hide)
+    // Marks are read at call time: bindings may register after this wrap mounts.
+    return visibleRoster(roster, [...hide, ...markedRosterIds()])
   }
   originals.set(service, original as () => Promise<Roster>)
   return true
@@ -140,9 +141,9 @@ export function apply(ctx: unknown, config: Config): void {
       report('roster filter: the agentPresets service is not an object — nothing to filter')
       return
     }
-    const done = hideFromRoster(service, config.hide, report)
+    const done = hideFromRoster(service, config.hide ?? [], report)
     if (done) {
-      report(`roster filter mounted: [${config.hide.join(', ')}] stay out of the preset picker; model-list switching is untouched`)
+      report('roster filter mounted: presets marked hideFromRoster stay out of the picker; model-list switching is untouched')
     }
   }
   const injector = (ctx as { inject?(deps: string[], body: (child: unknown) => void): unknown } | null)?.inject

@@ -14,6 +14,7 @@ import { deploymentChannel, destination, parseSshInput, shellQuote } from './par
 import { readReleaseVersion, resolveReleaseDirectory } from './release.ts'
 import { DEFAULT_REMOTE_DSH_PLUGINS } from './deploy-plugins.ts'
 import { buildRemoteAgentsPatchYaml } from './remote-agents.ts'
+import { parsePeerStatus, type PeerStatus } from './peer-status.ts'
 
 export type SshManagerOptions = {
   readonly knownHostsPath: string
@@ -64,6 +65,36 @@ export class DshSshManager {
 
   async inspectAll(config: SshConnectionConfig): Promise<readonly SshHostKeyCandidate[]> {
     return await this.scan(config)
+  }
+
+  /**
+   * Read the peer record another host wrote for itself.
+   *
+   * Any machine with SSH credentials can do this; the file says whether
+   * ThreadHarbor is installed and which URL / listen mode to use.
+   */
+  async readPeer(config: SshConnectionConfig): Promise<PeerStatus> {
+    if (config.hostKeyFingerprint === 'unapproved') throw new Error('hostKeyFingerprint is required')
+    const approved = config
+    const scans = await this.scan(approved)
+    const scan = scans.find(candidate => candidate.hostKeyFingerprint === approved.hostKeyFingerprint)
+    if (scan === undefined) throw new Error('SSH host key changed or does not match the approved fingerprint')
+    this.persistKnownHost(approved, scan.knownHostLine)
+    const materialized = await this.materializeAuth(approved)
+    try {
+      const probe = await this.remoteExec(
+        materialized,
+        'cat "$HOME/.local/state/threadharbor/peer.json" 2>/dev/null || true',
+        this.handshakeBudgetMs(),
+      )
+      if (probe.code === 255) {
+        throw new Error(`无法使用当前 SSH 凭据连接目标主机：${probe.stderr.trim() || 'ssh 退出码 255'}`)
+      }
+      if (probe.code !== 0) return { pluginsInstalled: false }
+      return parsePeerStatus(probe.stdout)
+    } finally {
+      this.cleanupTempKeys()
+    }
   }
 
   async deploy(
@@ -552,6 +583,8 @@ function buildInstallScript(input: {
     '  if [ -z "$url" ]; then echo "missing launch url in log" >&2; exit 1; fi',
     '  echo "BIND_HOST=$bind_host"',
     '  echo "LAUNCH_URL=$url"',
+    '  mkdir -p "$HOME/.local/state/threadharbor"',
+    '  PEER_URL="$url" PEER_BIND="$bind_host" PEER_PORT="$port" PEER_MODE="$access_mode" "$node" -e \'const fs=require("fs");const os=require("os");const path=require("path");const listen=process.env.PEER_MODE==="tunnel"?"loopback":"tailscale";const body={pluginsInstalled:true,listen,port:Number(process.env.PEER_PORT),bindHost:process.env.PEER_BIND,launchUrl:process.env.PEER_URL};const file=path.join(os.homedir(),".local/state/threadharbor/peer.json");fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,JSON.stringify(body),{mode:384});\'',
     '  exit 0',
     '}',
     'already=0',

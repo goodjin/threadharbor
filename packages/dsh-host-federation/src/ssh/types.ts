@@ -70,9 +70,9 @@ export type SshDeployRequest = {
   /** When true, replace an existing release and restart the service. */
   readonly upgrade?: boolean
   /**
-   * `host-ip` — bind remote DSH to a concrete host IP (auto-detect on remote; default).
-   * `tunnel` — remote listens on 127.0.0.1 and the manager opens SSH -L.
-   * `tailscale` / `custom` — legacy explicit bind modes.
+   * `tunnel` — remote listens on 127.0.0.1; the connecting peer opens SSH -L (default for new deploys).
+   * `tailscale` — remote listens on its Tailscale address; peers open that URL directly.
+   * `host-ip` / `custom` — explicit bind address.
    */
   readonly accessMode?: SshAccessMode
   /** Override bind address for tailscale/custom (MagicDNS name or IP). */

@@ -25,6 +25,7 @@ describe('remote agent deploy selection', () => {
     expect(yaml).toContain('- id: acp-claude')
     expect(yaml).toContain('disabled: true')
     expect(yaml).toContain('command: codex-acp')
+    expect(yaml).toContain('hideFromRoster: true')
     expect(yaml).toContain('command: cursor-agent')
     expect(yaml).not.toContain('command: claude-agent-acp')
   })

@@ -28,6 +28,7 @@ export const ROUTE_INSPECT = '/api/threadharbor.host-ssh.inspect'
 export const ROUTE_DEPLOY = '/api/threadharbor.host-ssh.deploy'
 export const ROUTE_OPERATION = '/api/threadharbor.host-ssh.operation'
 export const ROUTE_REMOTE_SESSIONS = '/api/threadharbor.host-remote.sessions'
+export const ROUTE_PEER = '/api/threadharbor.host-ssh.peer'
 
 export type Config = {
   knownHostsPath?: string
@@ -136,6 +137,13 @@ export function apply(ctx: unknown, config: Config = {}): void {
       },
     }))
   }
+
+  register(ROUTE_PEER, async body => {
+    const ssh = manager.parseApprovedConfig((body as Record<string, unknown>)['ssh'])
+    const peer = await manager.readPeer(ssh)
+    log.info('ssh peer status', { target: ssh.target, pluginsInstalled: peer.pluginsInstalled, listen: peer.listen })
+    return peer
+  })
 
   register(ROUTE_INSPECT, async body => {
     const ssh = manager.parseInspectionConfig((body as Record<string, unknown>)['ssh'])

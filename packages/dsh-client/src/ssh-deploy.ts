@@ -2,12 +2,13 @@
  * Browser client for ThreadHarbor SSH auto-deploy routes on the serving host.
  */
 
-import type { SshConnectionInput, SshDeployOperationView, SshDeployRequest, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
+import type { PeerStatus, SshConnectionInput, SshDeployOperationView, SshDeployRequest, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
 
 export const ROUTE_INSPECT = '/api/threadharbor.host-ssh.inspect'
 export const ROUTE_DEPLOY = '/api/threadharbor.host-ssh.deploy'
 export const ROUTE_OPERATION = '/api/threadharbor.host-ssh.operation'
 export const ROUTE_REMOTE_SESSIONS = '/api/threadharbor.host-remote.sessions'
+export const ROUTE_PEER = '/api/threadharbor.host-ssh.peer'
 
 type ApiResult<T> =
   | { readonly ok: true; readonly value: T }
@@ -37,6 +38,12 @@ async function getJson<T>(path: string): Promise<ApiResult<T>> {
 
 export async function inspectSshHost(ssh: SshConnectionInput): Promise<ApiResult<{ readonly keys: readonly SshHostKeyCandidate[] }>> {
   return await postJson(ROUTE_INSPECT, { ssh })
+}
+
+export async function readRemotePeer(
+  ssh: SshConnectionInput & { readonly hostKeyFingerprint: string },
+): Promise<ApiResult<PeerStatus>> {
+  return await postJson(ROUTE_PEER, { ssh })
 }
 
 export async function startSshDeploy(request: SshDeployRequest): Promise<ApiResult<{ readonly operationId: string }>> {

@@ -30,6 +30,7 @@ import type { AgentLike, AcpPresetBinding, ContentEvent, StepPosition, TurnModel
 import { makeApprovalBridge } from './approval-bridge.ts'
 import { makeQuestionBridge } from './question-bridge.ts'
 import { presetsForHost } from './host-filter.ts'
+import { markRosterHidden } from './roster-marks.ts'
 import { makeContentWriter } from './content-writer.ts'
 import { decideSelection, pendingSelectionOf, selectionOf } from './selection.ts'
 import type { SelectionSource } from './selection.ts'
@@ -84,6 +85,13 @@ export const Config: Schema<Config> = Schema.object({
    */
   hosts: Schema.array(Schema.string()),
   /**
+   * Keep this preset out of the preset picker.
+   *
+   * The models still register and model-list switching still works. A new
+   * agent sets this flag; the roster filter does not keep a name list.
+   */
+  hideFromRoster: Schema.boolean(),
+  /**
    * Which host this row is on, as named by the `hosts` filter.
    *
    * A row can only evaluate its own `hosts` list against an identity, and the
@@ -105,6 +113,8 @@ export type Config = {
   models?: { id: string; name: string; description?: string; contextWindow?: number }[]
   hosts?: string[]
   hostId?: string
+  /** When true, the roster filter omits this preset id from the picker. */
+  hideFromRoster?: boolean
 }
 
 /**
@@ -116,6 +126,7 @@ export type Config = {
  * run before the rest of the host has settled.
  */
 export function apply(ctx: unknown, config: Config): void {
+  if (config.hideFromRoster === true) markRosterHidden(config.presetId)
   const host = ctx as {
     on(event: 'agent/created', handler: (payload: { agent: unknown }) => void): unknown
     /**

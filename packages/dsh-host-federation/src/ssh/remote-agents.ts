@@ -90,6 +90,7 @@ export function buildRemoteAgentsPatchYaml(selection?: RemoteAgentDeploySelectio
     lines.push(`          - id: ${bindingId(spec.presetId)}`)
     lines.push('            config:')
     lines.push(`              command: ${spec.command}`)
+    lines.push('              hideFromRoster: true')
   }
   return `${lines.join('\n')}\n`
 }
