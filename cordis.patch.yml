@@ -31,21 +31,11 @@
       name: '@threadharbor/dsh-host-federation/tailscale'
     - id: threadharbor-ssh-deploy
       name: '@threadharbor/dsh-host-federation/ssh-deploy'
-    # 名册过滤器:下面五个 agent 仍然注册成 preset——急切装载让它们的模型
-    # 进全局目录(模型列表可切换),model→preset 跟随、会话交接也都靠注册。
-    # 但注册同时会把它们列进 preset 选择器,和模型列表重复。这行在名册的
-    # 客户端出口(remoteExportList)把点名的 id 滤掉:选择器与设置页不再
-    # 显示,内部 list() 不动,切换行为不受影响。副作用:正在跑这些 agent
-    # 的会话,头部 preset 标签会兜底显示原始 id(如 acp-grok)。
+    # 名册过滤器不点名。每个要藏起的 preset 在自己的 binding 上打
+    # hideFromRoster: true；过滤器只认这个标记（以及行上的同名字段）。
+    # 新增 agent 只要打标记，不必改过滤器配置。内部 list() 仍不过滤。
     - id: threadharbor-roster-filter
       name: '@threadharbor/dsh-preset-dispatch/roster-filter'
-      config:
-        hide:
-          - acp-codex
-          - acp-claude
-          - acp-grok
-          - acp-cursor
-          - acp-zcode
     - id: acp-codex
       name: '@deepseek-ai/dsh-agent-preset'
       config:
@@ -58,6 +48,7 @@
             config:
               presetId: acp-codex
               agent: codex
+              hideFromRoster: true
               command: /Users/good/.local/bin/codex-acp
               cwd: /Users/good/Documents/deepseek-harness
               # mode 留空 = 该构建的默认 agent（"Approve for me"）。
@@ -146,6 +137,7 @@
             config:
               presetId: acp-claude
               agent: claude
+              hideFromRoster: true
               command: /Users/good/.local/bin/claude-agent-acp
               cwd: /Users/good/Documents/deepseek-harness
               # claude 默认 bypassPermissions，不显式写 default 它永远不问。
@@ -181,6 +173,7 @@
             config:
               presetId: acp-grok
               agent: grok
+              hideFromRoster: true
               # grok 不是 stdio 子进程，而是一个 WebSocket 服务：preset-dispatch
               # 会先拉起 `grok agent serve`（随机端口 + 密钥、等它就绪、关闭时
               # 回收），再连上它返回的 ws url。command 指向 grok 二进制本身。
@@ -203,6 +196,7 @@
             config:
               presetId: acp-cursor
               agent: cursor
+              hideFromRoster: true
               # cursor 的 ACP 走 stdio：`agent ... acp` 一配就自启动。
               # 注意：cursor 的二进制也叫 agent，但 ~/.local/bin/agent 是 grok
               # 的（会冲突）——这里必须指向 cursor 自己的 agent 二进制。本机
@@ -232,6 +226,7 @@
             config:
               presetId: acp-zcode
               agent: zcode
+              hideFromRoster: true
               # zcode 与其余四家不同：它的 ACP 侧是我们自己的适配器
               # （packages/zcode-acp）。stdio 拉起这个单文件可执行，由它
               # 再去 spawn 本机 ZCode 桌面版自带的 app-server（ZCode

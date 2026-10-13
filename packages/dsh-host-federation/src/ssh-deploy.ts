@@ -17,6 +17,7 @@ import { isValidHostId } from './identity.ts'
 import { optionalHost, parseAccessMode, validateBindHost } from './ssh/access.ts'
 import { fetchRemoteSessions } from './host-remote-sessions.ts'
 import { DEFAULT_REMOTE_DSH_PLUGINS, normalizePluginSpecs } from './ssh/deploy-plugins.ts'
+import { parseRemoteAgentSelection } from './ssh/remote-agents.ts'
 
 export const SSH_DEPLOY_ENTRY_ID = 'threadharbor-ssh-deploy'
 
@@ -27,6 +28,7 @@ export const ROUTE_INSPECT = '/api/threadharbor.host-ssh.inspect'
 export const ROUTE_DEPLOY = '/api/threadharbor.host-ssh.deploy'
 export const ROUTE_OPERATION = '/api/threadharbor.host-ssh.operation'
 export const ROUTE_REMOTE_SESSIONS = '/api/threadharbor.host-remote.sessions'
+export const ROUTE_PEER = '/api/threadharbor.host-ssh.peer'
 
 export type Config = {
   knownHostsPath?: string
@@ -136,6 +138,13 @@ export function apply(ctx: unknown, config: Config = {}): void {
     }))
   }
 
+  register(ROUTE_PEER, async body => {
+    const ssh = manager.parseApprovedConfig((body as Record<string, unknown>)['ssh'])
+    const peer = await manager.readPeer(ssh)
+    log.info('ssh peer status', { target: ssh.target, pluginsInstalled: peer.pluginsInstalled, listen: peer.listen })
+    return peer
+  })
+
   register(ROUTE_INSPECT, async body => {
     const ssh = manager.parseInspectionConfig((body as Record<string, unknown>)['ssh'])
     const keys = await manager.inspectAll(ssh)
@@ -202,6 +211,7 @@ function parseDeployRequest(record: Record<string, unknown>): SshDeployRequest {
   }
   if (bindHost !== undefined) validateBindHost(bindHost)
   const ssh = record['ssh']
+  const remoteAgents = parseRemoteAgentSelection(record['remoteAgents'])
   return {
     hostId,
     hostTitle: hostTitle === '' ? hostId : hostTitle,
@@ -210,6 +220,7 @@ function parseDeployRequest(record: Record<string, unknown>): SshDeployRequest {
     accessMode,
     ...(bindHost === undefined ? {} : { bindHost }),
     ...(trustedHost === undefined ? {} : { trustedHost }),
+    ...(remoteAgents === undefined ? {} : { remoteAgents }),
     ssh: ssh as SshDeployRequest['ssh'],
   }
 }

@@ -470,7 +470,7 @@ describe('面板三个界面', () => {
     expect(html).not.toContain('data-host-details')
   })
 
-  it('列表页的主行是三列：状态圆点+名称、IP、设置按钮；完整地址不出现', () => {
+  it('列表页的主行是四列：状态圆点+名称、状态文字、IP、设置按钮；完整地址不出现', () => {
     const html = renderToString(createElement(HostRow, {
       row: { hostId: 'bench', name: '测试机', self: false, online: false, connection: 'disconnected', address: 'http://192.168.1.20:3081' },
       onOpen: () => {},
@@ -478,6 +478,8 @@ describe('面板三个界面', () => {
     expect(html).toContain('data-host-open="bench"')
     expect(html).toContain('data-host-name=""')
     expect(html).toContain('data-host-status="offline"')
+    expect(html).toContain('data-host-connection=""')
+    expect(html).toContain('未连接')
     expect(html).toContain('data-host-ip=""')
     expect(html).toContain('192.168.1.20')
     expect(html).toContain('data-host-settings=""')

@@ -13,6 +13,8 @@ import { freePort, portListening } from './port.ts'
 import { deploymentChannel, destination, parseSshInput, shellQuote } from './parse.ts'
 import { readReleaseVersion, resolveReleaseDirectory } from './release.ts'
 import { DEFAULT_REMOTE_DSH_PLUGINS } from './deploy-plugins.ts'
+import { buildRemoteAgentsPatchYaml } from './remote-agents.ts'
+import { parsePeerStatus, type PeerStatus } from './peer-status.ts'
 
 export type SshManagerOptions = {
   readonly knownHostsPath: string
@@ -63,6 +65,36 @@ export class DshSshManager {
 
   async inspectAll(config: SshConnectionConfig): Promise<readonly SshHostKeyCandidate[]> {
     return await this.scan(config)
+  }
+
+  /**
+   * Read the peer record another host wrote for itself.
+   *
+   * Any machine with SSH credentials can do this; the file says whether
+   * ThreadHarbor is installed and which URL / listen mode to use.
+   */
+  async readPeer(config: SshConnectionConfig): Promise<PeerStatus> {
+    if (config.hostKeyFingerprint === 'unapproved') throw new Error('hostKeyFingerprint is required')
+    const approved = config
+    const scans = await this.scan(approved)
+    const scan = scans.find(candidate => candidate.hostKeyFingerprint === approved.hostKeyFingerprint)
+    if (scan === undefined) throw new Error('SSH host key changed or does not match the approved fingerprint')
+    this.persistKnownHost(approved, scan.knownHostLine)
+    const materialized = await this.materializeAuth(approved)
+    try {
+      const probe = await this.remoteExec(
+        materialized,
+        'cat "$HOME/.local/state/threadharbor/peer.json" 2>/dev/null || true',
+        this.handshakeBudgetMs(),
+      )
+      if (probe.code === 255) {
+        throw new Error(`无法使用当前 SSH 凭据连接目标主机：${probe.stderr.trim() || 'ssh 退出码 255'}`)
+      }
+      if (probe.code !== 0) return { pluginsInstalled: false }
+      return parsePeerStatus(probe.stdout)
+    } finally {
+      this.cleanupTempKeys()
+    }
   }
 
   async deploy(
@@ -158,6 +190,7 @@ export class DshSshManager {
         accessMode,
         installFromGithub,
         remotePlugins,
+        remoteAgentsPatch: buildRemoteAgentsPatchYaml(request.remoteAgents),
         ...(bindOverride === undefined ? {} : { bindOverride }),
         ...(trustedHost === undefined ? {} : { trustedHost }),
       })
@@ -467,14 +500,16 @@ function buildInstallScript(input: {
   readonly accessMode: SshAccessMode
   readonly installFromGithub: boolean
   readonly remotePlugins: readonly string[]
+  readonly remoteAgentsPatch: string
   readonly bindOverride?: string
   readonly trustedHost?: string
 }): string {
   const {
     channel, releaseDir, nodePath, remotePort, hostId, hostTitle, upgrade, accessMode, installFromGithub, remotePlugins,
-    bindOverride, trustedHost,
+    remoteAgentsPatch, bindOverride, trustedHost,
   } = input
   const pluginPayload = shellQuote(remotePlugins.join('\n'))
+  const agentsPatchPayload = shellQuote(remoteAgentsPatch)
   const bindOverrideQ = bindOverride === undefined ? '' : shellQuote(bindOverride)
   const trustedQ = trustedHost === undefined ? '' : shellQuote(trustedHost)
   const accessQ = shellQuote(accessMode)
@@ -506,6 +541,10 @@ function buildInstallScript(input: {
     installFromGithub
       ? 'printf \'%s\\n\' "$plugin_specs" | while IFS= read -r spec; do [ -z "$spec" ] && continue; dsh plugin --profile web add "$spec" || dsh plugin --profile web add "$spec"; done'
       : 'dsh plugin --profile web add "link:$release" || dsh plugin --profile web add "link:$release"',
+    `agents_patch_yaml=${agentsPatchPayload}`,
+    'agents_patch="$dsh_home/profiles/web/threadharbor-remote-agents.patch.yml"',
+    'mkdir -p "$(dirname "$agents_patch")"',
+    'printf \'%s\' "$agents_patch_yaml" > "$agents_patch"',
     'bind_host="127.0.0.1"',
     'if [ "$access_mode" = "tunnel" ]; then',
     '  bind_host="127.0.0.1"',
@@ -523,7 +562,7 @@ function buildInstallScript(input: {
     'printf \'DSH_HOST_ID=%s\\nDSH_HOST_TITLE=%s\\n\' "$host_id" "$host_title" > "$identity_file"',
     'case "$bind_host" in (0.0.0.0|"") echo "refusing wildcard bind" >&2; exit 1;; esac',
     'dsh_bin="$(command -v dsh)"',
-    'dsh_args="--profile web --no-open --port $port --host $bind_host"',
+    'dsh_args="--profile web --no-open --port $port --host $bind_host --patch $agents_patch"',
     'if [ "$bind_host" != "127.0.0.1" ] && [ "$bind_host" != "::1" ]; then',
     '  if [ -n "$trusted_extra" ]; then dsh_args="$dsh_args --trusted-host $trusted_extra"; else dsh_args="$dsh_args --trusted-host $bind_host"; fi',
     'fi',
@@ -544,6 +583,8 @@ function buildInstallScript(input: {
     '  if [ -z "$url" ]; then echo "missing launch url in log" >&2; exit 1; fi',
     '  echo "BIND_HOST=$bind_host"',
     '  echo "LAUNCH_URL=$url"',
+    '  mkdir -p "$HOME/.local/state/threadharbor"',
+    '  PEER_URL="$url" PEER_BIND="$bind_host" PEER_PORT="$port" PEER_MODE="$access_mode" "$node" -e \'const fs=require("fs");const os=require("os");const path=require("path");const listen=process.env.PEER_MODE==="tunnel"?"loopback":"tailscale";const body={pluginsInstalled:true,listen,port:Number(process.env.PEER_PORT),bindHost:process.env.PEER_BIND,launchUrl:process.env.PEER_URL};const file=path.join(os.homedir(),".local/state/threadharbor/peer.json");fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,JSON.stringify(body),{mode:384});\'',
     '  exit 0',
     '}',
     'already=0',

@@ -53,6 +53,14 @@ export type SshDeployProgress = {
 
 export type SshAccessMode = 'host-ip' | 'tunnel' | 'tailscale' | 'custom'
 
+/** Per-agent enable flags for remote DSH presets (omit or leave true = deploy). */
+export type RemoteAgentDeploySelection = {
+  readonly codex?: boolean
+  readonly claude?: boolean
+  readonly grok?: boolean
+  readonly cursor?: boolean
+}
+
 export type SshDeployRequest = {
   readonly ssh: SshConnectionInput & { readonly hostKeyFingerprint: string }
   readonly hostId: string
@@ -62,15 +70,17 @@ export type SshDeployRequest = {
   /** When true, replace an existing release and restart the service. */
   readonly upgrade?: boolean
   /**
-   * `host-ip` — bind remote DSH to a concrete host IP (auto-detect on remote; default).
-   * `tunnel` — remote listens on 127.0.0.1 and the manager opens SSH -L.
-   * `tailscale` / `custom` — legacy explicit bind modes.
+   * `tunnel` — remote listens on 127.0.0.1; the connecting peer opens SSH -L (default for new deploys).
+   * `tailscale` — remote listens on its Tailscale address; peers open that URL directly.
+   * `host-ip` / `custom` — explicit bind address.
    */
   readonly accessMode?: SshAccessMode
   /** Override bind address for tailscale/custom (MagicDNS name or IP). */
   readonly bindHost?: string
   /** Extra `--trusted-host` authority (e.g. MagicDNS) when bind is an IP. */
   readonly trustedHost?: string
+  /** When set, disabled agents are patched off on the remote profile after install. */
+  readonly remoteAgents?: RemoteAgentDeploySelection
 }
 
 export type SshDeployResult = {
