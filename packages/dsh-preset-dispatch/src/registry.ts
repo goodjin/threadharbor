@@ -177,6 +177,11 @@ export function buildPresetTable(
             ...(preset.model === undefined ? {} : { modelId: preset.model }),
             ...(preset.mode === undefined ? {} : { modeId: preset.mode }),
             ...(options.primer === undefined ? {} : { primer: options.primer }),
+            // The turn's stop signal, as a getter the runner consults per turn.
+            // It closes over the agent, not over this turn, so the one getter
+            // stored here at open stays correct for every later turn of the
+            // session — each turn's signal is read live, when the turn runs.
+            ...(turn.abort === undefined ? {} : { abort: turn.abort }),
           })
           const sessionId = turn.sessionId
           session.onDead(reason => {

@@ -175,6 +175,16 @@ export type TurnContext = {
    */
   readonly reasoningEffort?: string
   readonly openStream?: () => TurnStreamHandle | undefined
+  /**
+   * The current turn's stop signal, when the host can stop the turn.
+   *
+   * A live getter on purpose: the runner consults it once per turn, before the
+   * prompt goes out, and the answer must be the signal of the turn in flight
+   * at that moment — the loop's running phase owns a fresh controller per
+   * turn. Absent means this agent has no stop the dispatch can capture, and
+   * the runner runs without abort capability, exactly as before.
+   */
+  readonly abort?: () => AbortSignal | undefined
 }
 
 /**
@@ -321,6 +331,42 @@ function writeStep(
 /** Which agent is held by which binding, for the re-announce check and the caller's log silence. */
 const held = new WeakMap<object, AcpPresetBinding>()
 
+/** Which agent's current turn carries which stop signal, for the runner to listen on. */
+const turnAbortSignals = new WeakMap<object, AbortSignal>()
+
+/**
+ * Record the live turn's stop signal, if this agent's loop has one.
+ *
+ * `phase` is TypeScript-private on the loop agent and a plain property at
+ * runtime (verified against `reference/deepseek-harness` @ 5badb15009,
+ * `agent-loop/src/agent.ts:100,391`): the running phase owns a fresh
+ * controller per turn, and its signal exists before this step is called — so
+ * reading it here is what lets the runner listen *before* the user stops. A
+ * capture only at cancel time would always be too late for the very turn
+ * being stopped. Anything unreadable records nothing: the runner then simply
+ * gets no signal, and behaves as before.
+ */
+function captureTurnAbort(agent: object): void {
+  const signal = (agent as { phase?: { abort?: { signal?: unknown } } }).phase?.abort?.signal
+  if (signal instanceof AbortSignal) turnAbortSignals.set(agent, signal)
+}
+
+/** Read a `cancel` implementation off an instance or its prototype chain. */
+function readCancel(agent: object): ((...args: unknown[]) => unknown) | undefined {
+  const own = (agent as { cancel?: unknown }).cancel
+  if (typeof own === 'function') return own as (...args: unknown[]) => unknown
+  const inherited = (Object.getPrototypeOf(agent) as { cancel?: unknown } | null)?.cancel
+  if (typeof inherited === 'function') {
+    return inherited as (...args: unknown[]) => unknown
+  }
+  return undefined
+}
+
+/** Install `cancel` as an own property, shadowing the prototype's for this agent alone. */
+function writeCancel(agent: object, cancel: (...args: unknown[]) => unknown): void {
+  Object.defineProperty(agent, 'cancel', { value: cancel, writable: true, configurable: true, enumerable: false })
+}
+
 /**
  * Install `step` as an own property, shadowing the prototype's for this agent alone.
  *
@@ -352,6 +398,19 @@ export function installAcpDispatch(
     throw new Error('acp dispatch: this agent has no step to replace')
   }
 
+  // The stop: wrap the instance's `cancel` so every stop records the signal of
+  // the turn it stops. An agent without `cancel` gets no abort wiring at all —
+  // the runner then runs without the capability, exactly as before.
+  const originalCancel = readCancel(agent)
+  if (originalCancel !== undefined) {
+    writeCancel(agent, function acpCancel(this: object, ...args: unknown[]): unknown {
+      // Recorded before the original runs: the original aborts the signal, and
+      // the runner listening on it must already hold it.
+      captureTurnAbort(this)
+      return originalCancel.apply(this, args)
+    })
+  }
+
   const active = new WeakSet<object>()
   writeStep(agent, async function acpStep(
     this: AgentLike,
@@ -376,6 +435,13 @@ export function installAcpDispatch(
     }
     active.add(this)
     try {
+      // The turn's signal exists before this step runs (the loop's running
+      // phase owns a fresh controller per turn), so recording it here is what
+      // lets the runner listen from the turn's first moment. The cancel
+      // wrapper records the same signal again at stop time; both writes are
+      // idempotent. Only an agent with a `cancel` to stop through gets the
+      // wiring — the same gate the abort option below rides on.
+      if (originalCancel !== undefined) captureTurnAbort(this)
       // Decided before anything is written. A refusal still leaves the
       // question on this session's record; a switch must not record it here —
       // the question is asked, with the whole conversation, in the session the
@@ -421,6 +487,7 @@ export function installAcpDispatch(
           ? { modelId: model.modelId, ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort }) }
           : {}),
         ...(options.openStream === undefined ? {} : { openStream: options.openStream(this, position) }),
+        ...(originalCancel === undefined ? {} : { abort: () => turnAbortSignals.get(this) }),
       })
       return result.end
     } finally {

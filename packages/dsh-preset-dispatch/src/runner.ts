@@ -69,6 +69,17 @@ export type RunnerOptions = {
     take(sessionId: string): string | undefined
     restore(sessionId: string, text: string): void
   }
+  /**
+   * The current turn's stop signal, when the host can stop the turn.
+   *
+   * Consulted once per turn, before the prompt goes out — the listener has to
+   * exist before the user can stop. On abort the runner tells the agent
+   * `session/cancel` and discards whatever still arrives; the turn ends
+   * aborted no matter what the agent then replies. Absent (or resolving to
+   * nothing for this turn) means the turn cannot be stopped, and runs exactly
+   * as before.
+   */
+  readonly abort?: () => AbortSignal | undefined
 }
 
 /** Long enough for a cold process to start, short enough to not strand a turn. */
@@ -128,6 +139,8 @@ export class AcpTurnRunner {
   private opening: Promise<string> | undefined
   private turnFrames: AcpFrame[] = []
   private stream: TurnStreamPort | undefined
+  /** Set when this turn's stop signal fired; everything after it is dropped. */
+  private aborted = false
 
   private readonly client: AcpClientPort
   private readonly options: RunnerOptions
@@ -143,6 +156,10 @@ export class AcpTurnRunner {
 
   /** Take one frame: keep it for projection, and stream its text immediately. */
   private observe(frame: AcpFrame): void {
+    // 中止后到达的帧一律丢弃: the agent had not processed the cancel yet and
+    // kept talking. Those frames belong to a turn nobody is reading, and
+    // projecting them would resurrect text under a turn that ended aborted.
+    if (this.aborted) return
     this.turnFrames.push(frame)
     const stream = this.stream
     if (stream === undefined) return
@@ -181,6 +198,10 @@ export class AcpTurnRunner {
   async run(decision: StepDecisionLike, turn: TurnContext): Promise<AcpStepResult> {
     const sessionId = await this.open(turn.sessionId)
     this.turnFrames = []
+    this.aborted = false
+    // Registered before the prompt goes out: the stop lands while the agent is
+    // still working, and a listener added afterwards would never hear it.
+    const detachStop = this.watchStop(sessionId)
     const stream = turn.openStream?.()
     this.stream = stream
     stream?.start()
@@ -211,6 +232,10 @@ export class AcpTurnRunner {
       // Remember it, settle what was streamed, then rethrow: the caller owns the
       // error handling, and a turn that failed must not leave a stream hanging.
       failure = error
+    } finally {
+      // A listener must not outlive its turn, or a later turn would inherit
+      // this one's stop and end aborted before it began.
+      detachStop()
     }
     const stopReason = (reply as { stopReason?: unknown } | null)?.stopReason
 
@@ -226,7 +251,12 @@ export class AcpTurnRunner {
 
     const result: AcpStepResult = {
       frames: [...this.turnFrames],
-      end: toEndReason(stopReason),
+      // The stop outranks whatever the agent replied: once the turn was
+      // stopped and the agent told to cancel, the turn is what the user made
+      // it — stopped — whatever raced out of the agent on the way down.
+      end: this.aborted
+        ? { kind: 'aborted', reason: 'the turn was stopped; the agent was asked to cancel' }
+        : toEndReason(stopReason),
       ...(stream === undefined ? {} : { stream: stream.records() }),
     }
     // Produce after the run, write after that, and only then announce the end:
@@ -237,6 +267,36 @@ export class AcpTurnRunner {
     if (seq === undefined) stream.abandon()
     else stream.settle('assistant/message', () => seq)
     return result
+  }
+
+  /**
+   * Listen for this turn's stop, so the agent is told and its late frames are
+   * discarded.
+   *
+   * Returns the detacher, called when the prompt settles. Absent option, or
+   * one that resolves to nothing for this turn, means no stop wiring — the
+   * turn runs exactly as before.
+   */
+  private watchStop(sessionId: string): () => void {
+    const signal = this.options.abort?.()
+    if (signal === undefined) return () => {}
+    const onStop = (): void => {
+      this.aborted = true
+      // The host's stop does not reach the external process on its own;
+      // without this notice the agent would keep generating into a turn
+      // nobody is reading.
+      try {
+        this.client.notify('session/cancel', { sessionId })
+      } catch {
+        // A connection that died under the stop cannot be told; the turn
+        // still ends aborted, and the next turn opens a fresh session.
+      }
+    }
+    // Stopped before we listened: a turn opened onto a signal that had
+    // already fired counts as stopped from its first moment.
+    if (signal.aborted) onStop()
+    else signal.addEventListener('abort', onStop, { once: true })
+    return () => { signal.removeEventListener('abort', onStop) }
   }
 
   /**
