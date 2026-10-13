@@ -25,8 +25,18 @@ import type { AgentDescriptor, GatewayResult } from '../src/gateway.ts'
 import { hostRegistry } from '@threadharbor/dsh-host-federation'
 import type { HostIdentity, HostSnapshot } from '@threadharbor/dsh-host-federation'
 import type { HostStorePosture } from '../src/host-store.ts'
+import { zh } from '../src/locales.ts'
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+
+/**
+ * The `t` the framework would synthesize, bound to the dictionary's source
+ * language with the documented `{name}` placeholder substitution — the same
+ * copy path the real seat runs, minus the locale registry.
+ */
+function zhT(key: string, params?: Record<string, unknown>): string {
+  return zh[key as keyof typeof zh]!.replace(/\{(\w+)\}/g, (_, name: string) => String(params?.[name] ?? `{${name}}`))
+}
 
 /** 带原型的假 agent 目录：方法挂在 prototype 上，不丢 this。 */
 class FakeAgents implements AgentListPort {
@@ -156,6 +166,7 @@ async function mountPanel(registry: HostRegistryPort, hostStore?: FakeHostStore,
     probe: () => new Promise(() => {}),
     rollUp: rollUp ?? new FakeRollUp([SELF_HOST]),
     registry,
+    t: zhT,
     ...(hostStore === undefined ? {} : { hostStore }),
     ...(tailscale === undefined ? {} : { tailscale }),
   }
@@ -488,6 +499,7 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
       probe: () => Promise.resolve({ verdict: { kind: 'ok', ms: 900 } }),
       rollUp: new FakeRollUp([SELF_HOST]),
       registry: makeRegistry(),
+      t: zhT,
     }
     await act(async () => {
       root.render(createElement(AgentPanel, props))

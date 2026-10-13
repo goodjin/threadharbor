@@ -63,7 +63,7 @@ import type { SectionSession } from '../rollup-section.ts'
 import { startPairingSurface } from '../pairing-panel.ts'
 import { createRemoteSessionStore } from '../remote-session-store.ts'
 import { AgentPanel } from '../panel.tsx'
-import type { AgentListPort, AgentPanelProps, ProbeStarter, TailscalePeersResult, TailscalePort } from '../panel.tsx'
+import type { AgentListPort, AgentPanelBusinessProps, ProbeStarter, TailscalePeersResult, TailscalePort } from '../panel.tsx'
 import { registerAgentSwitchHandoverSurface } from '../handover-card.ts'
 import { createSwitchProgressStore, startSwitchProgressSurface } from '../switch-progress.ts'
 import { NAMESPACE, en, zh } from '../locales.ts'
@@ -110,10 +110,10 @@ export type { SessionRead, SessionListSource, SourceSession, WorkspaceListSource
 export type { RollUpSection, RollUpSectionDeps, SectionSession } from '../rollup-section.ts'
 export { PAIRING_PANEL_ID, PAIRING_PANEL_ORDER, PAIR_URL_PATH, PairingIcon, PairingPanel, createPairingStore, requestPairUrl, startPairingSurface } from '../pairing-panel.ts'
 export type { PairingPanelProps, PairingSlotHost, PairingState, PairingStore, PairingStoreWriter, PairingSurface, PairingSurfaceParams, PairQrRenderer, PairUrlOutcome, SameOriginFetch } from '../pairing-panel.ts'
-export { mergeHostRows, heartbeatWord } from '../panel.tsx'
-export type { HostListRow } from '../panel.tsx'
+export { mergeHostRows, heartbeatWord, richSegments } from '../panel.tsx'
+export type { HostListRow, PanelT } from '../panel.tsx'
 export { AgentPanel, AgentRow, runProbe } from '../panel.tsx'
-export type { AgentListPort, AgentPanelProps, HostRegistryPort, ProbeRunState, ProbeStarter } from '../panel.tsx'
+export type { AgentListPort, AgentPanelBusinessProps, AgentPanelProps, HostRegistryPort, ProbeRunState, ProbeStarter } from '../panel.tsx'
 export {
   registerAgentSwitchHandoverSurface,
   agentSwitchHandoverDefinition,
@@ -188,11 +188,15 @@ export type ClientPanelContext = {
  * @param label - the sidebar row's label, re-read per render so it follows the
  * active locale without re-registering (SlotLabel's thunk form).
  */
-export function registerPanelSlots(slots: PanelSlotHost, face: AgentPanelProps, label: () => string): void {
+export function registerPanelSlots(slots: PanelSlotHost, face: AgentPanelBusinessProps, label: () => string): void {
   // Both registrations share PANEL_ID: the sidebar row resolves its active
   // state and the main slot addresses its occupant by the same id.
   slots.inject('main', () => slots.register(
-    { name: 'main', key: PANEL_ID, inject: () => face },
+    // `locale` puts the framework-synthesized `t` seat on the panel's props —
+    // the same mechanism the progress bar's shell.overlay registration gives
+    // the switch layer; the dictionaries themselves register in the entry
+    // (locales.ts owns them).
+    { name: 'main', key: PANEL_ID, locale: NAMESPACE, inject: () => face },
     AgentPanel,
   ))
   slots.inject('sidebar.panellist', () => slots.register(
@@ -381,7 +385,7 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   if (mountOpening.gateway === undefined) {
     log.warn(`probe unavailable at mount: missing host services [${mountOpening.missing.join(', ')}] — the panel mounts, opens the gateway per use, and says so on screen`)
   }
-  const face: AgentPanelProps = {
+  const face: AgentPanelBusinessProps = {
     agents: agentListPort(openGateway),
     probe: panelProbe(openGateway),
     rollUp: section,

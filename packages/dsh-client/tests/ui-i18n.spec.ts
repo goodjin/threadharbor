@@ -6,10 +6,10 @@
  * owned by the locale dictionary, presentation reads it through `t`. The
  * detection function is vendored verbatim from the reference gate (see
  * ui-i18n-checker.ts for why), and this spec runs it over the sources this
- * plugin's locale work owns: the entry assembly, the switch progress layer and
- * the handover card. The panel body's remaining copy is a separate, counted
- * piece of work (see the task report); it is not asserted here because this
- * task does not own it.
+ * plugin's locale work owns: the entry assembly, the switch progress layer,
+ * the handover card, and (since the panel-i18n effort closed) the panel body —
+ * re-applied on top of main's rewritten panel.tsx, whose new status model and
+ * ssh-deploy UI carried fresh hardcoded strings.
  */
 
 import { readFileSync } from 'node:fs'
@@ -25,13 +25,14 @@ const OWNED_SOURCES = [
   'packages/dsh-client/src/client/index.ts',
   'packages/dsh-client/src/switch-progress.ts',
   'packages/dsh-client/src/handover-card.ts',
+  'packages/dsh-client/src/panel.tsx',
 ] as const
 
 describe('verify-client-ui-i18n over this plugin', () => {
   it('covers the locale-owned surfaces, plus the dictionary owner', () => {
     // The reference gate refuses a narrowed corpus so a discovery bug cannot
     // read as a pass; the same guard applies here at this scope's scale.
-    expect(OWNED_SOURCES).toHaveLength(3)
+    expect(OWNED_SOURCES).toHaveLength(4)
     for (const file of OWNED_SOURCES) {
       expect(() => readFileSync(join(CLIENT_SRC, file.slice('packages/dsh-client/src/'.length)), 'utf8')).not.toThrow()
     }
