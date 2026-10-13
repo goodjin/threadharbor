@@ -1,0 +1,15 @@
+{
+  "name": "@threadharbor/zcode-acp",
+  "version": "0.1.0",
+  "description": "ACP adapter for the ZCode app-server: ACP JSON-RPC on stdio, ZCode Protocol to the spawned child",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/goodjin/threadharbor.git",
+    "directory": "packages/zcode-acp"
+  },
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./package.json": "./package.json"
+  }
+}

@@ -1,6 +1,6 @@
 # ThreadHarbor 的 DSH 插件：安装说明
 
-**核对时间：2026-10-10。** 下面每一处安装形态都对照 `reference/deepseek-harness`
+**核对时间：2026-10-13。** 下面每一处安装形态都对照 `reference/deepseek-harness`
 （master，`5badb15009`）读过，行号在括号里。
 2026-10-10 第二次复核：补齐 codex / claude 示例里同样必填的 `presetId`，
 按实测修正 codex 的 `mode` 取值，并标注 `models` / `hosts` 两个字段目前的实际状态。
@@ -9,7 +9,7 @@
 
 ## 一、先说结论
 
-**三个 agent 各自独立，可以分别装；不装也不影响 DSH 自带的 agent。**
+**五个 agent（grok / codex / claude / cursor / zcode）各自独立，可以分别装；不装也不影响 DSH 自带的 agent。**
 
 不装任何东西 = 纯 DSH，所有会话走原生 agent，行为与没装之前一样。
 
@@ -176,8 +176,10 @@ preset——切走后残留的接管会在下一轮自己让位回原生 step（
 
 **已就绪**
 
-- 三个 agent 的 ACP 接入（帧方言、传输、权限、终端、投影）都在
-  `dsh-preset-dispatch` 与 `dsh-acp-agent` 里，三个 agent 走的是同一套代码；
+- 五个 agent 的 ACP 接入（帧方言、传输、权限、终端、投影）都在
+  `dsh-preset-dispatch` 与 `dsh-acp-agent` 里，五个 agent 走的是同一套代码；
+  zcode 额外多一个适配器进程（`packages/zcode-acp`，对 DSH 说 ACP、
+  对本机 ZCode 桌面版说自有协议，凭证解密注入、密钥不落日志）；
 - 宿主入口 `applyAcpPlugin` 已实现并有测试，作用域过滤、未知 agent 不接管、
   单个会话出错不影响其余，都有覆盖；
 - 真实 agent 端到端跑通：claude、codex、grok 各一轮，外加权限请求应答后回合继续、

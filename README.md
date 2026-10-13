@@ -1,6 +1,6 @@
 # ThreadHarbor
 
-ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 ACP agent（grok、codex、claude code）接进 DSH：每个 agent 是一条 preset 组合行，会话仍是 DSH 原生会话，由原生的侧栏、会话界面和模型基础设施直接呈现。没有独立的 daemon——agent 子进程与连接由提供页面的那台机器上的 DSH 进程持有。
+ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 ACP agent（grok、codex、claude code、cursor、zcode）接进 DSH：每个 agent 是一条 preset 组合行，会话仍是 DSH 原生会话，由原生的侧栏、会话界面和模型基础设施直接呈现。没有独立的 daemon——agent 子进程与连接由提供页面的那台机器上的 DSH 进程持有。
 
 它不是 DeepSeek Harness 的 fork，也不包含 Harness 源码。开发用的 Harness checkout 位于被 Git 忽略的 `reference/deepseek-harness/`。
 
@@ -10,9 +10,9 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 ACP agent（g
 
 ## 当前能力
 
-以下每条都以当前代码为准（核对时间 2026-10-10；「真机可达」按 `tests/wiring.spec.ts` 从宿主加载入口做的传递可达性检查口径）：
+以下每条都以当前代码为准（核对时间 2026-10-13；「真机可达」按 `tests/wiring.spec.ts` 从宿主加载入口做的传递可达性检查口径）：
 
-- 三个 agent 走同一套通用 ACP 接入层（`@threadharbor/dsh-acp-agent`）：stdio 与 WebSocket 两种传输、三家的帧方言（工具名/输出/模型列表位置各家不同，分别实现）、帧到 DSH 会话事件的投影、终端与文件两个子协议的应答。
+- 五个 agent 走同一套通用 ACP 接入层（`@threadharbor/dsh-acp-agent`）：stdio 与 WebSocket 两种传输、各家的帧方言（工具名/输出/模型列表位置各家不同，分别实现）、帧到 DSH 会话事件的投影、终端与文件两个子协议的应答。zcode 说的不是 ACP 而是本机 ZCode 桌面版的自有协议，由适配器包 `packages/zcode-acp` 翻译（凭证解密注入、密钥不落日志）。
 - 权限请求桥接到 DSH 审批服务：请求在回合内发起，应答是回带同一 id 的 JSON-RPC 响应帧；宿主没有审批服务时一律拒绝并在启动自报里写明 `approvals=refuse-all`。
 - 流式：回合进行中经 `agent/assistant-stream` 通道增量下发，回合结束后落一条内嵌压缩流的持久 `assistant/message`；两段靠同一 attemptId 对上。
 - 断连与进程退出会判明并结束回合，不再无限等待；会话按会话 id 隔离外部对话，一个会话一个外部会话。
@@ -20,17 +20,16 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 ACP agent（g
 - 切换过程看得见：面板整个换掉，所以切换一开始就在窗口顶部挂一条进度（准备 → 读新会话的历史 → 就绪），同时先把新会话的首屏读出来，读完才跳过去，跳过去时内容已经在屏幕上。首屏读不出来或迟迟不来都不卡住跳转，最多等 4 秒。历史长不长都只取首屏（DSH 自带的分页，约 50 条消息起），更早的用「加载更早」按页取。
 - 主机侧的 agent 探测（发一条真实小任务看是否回应）与重启已实现，但目前没有界面入口。
 - 原生 dsh preset 的行为不受影响：组合行只认得自己 presetId 下的会话，其余一律不接管。
-- 三个 agent 的端到端活测（建会话 → 提问 → 收到回答 → 工具调用正确投影、权限批准后回合继续）默认跳过，带 `THREADHARBOR_LIVE_ACP=1` 运行；见下文「真机活测」。
+- 各 agent 的端到端活测（建会话 → 提问 → 收到回答 → 工具调用正确投影、权限批准后回合继续）默认跳过，带 `THREADHARBOR_LIVE_ACP=1` 运行；见下文「真机活测」。
 
 **已知未接的部分**（代码与测试都在，但从宿主加载的入口走不到，登记在 `tests/wiring.spec.ts` 的 `KNOWN_UNWIRED`）：
 
-- 模型目录注册：配置里的 `models` 字段目前不会被消费，模型选择器暂时不会显示外部 agent 的模型。
 - 按主机过滤 preset：配置里的 `hosts` 字段目前不生效。
 - 跨主机汇总面板：联邦、分组视图、按主机隔离的设置都已实现并有测试，但面板未挂进侧栏。
 
 ## 安装到 DeepSeek Harness
 
-完整安装、升级、卸载见 [docs/install.zh.md](docs/install.zh.md)；如何把三个 agent 组合成 preset 见 [docs/install-plugins.zh.md](docs/install-plugins.zh.md)。
+完整安装、升级、卸载见 [docs/install.zh.md](docs/install.zh.md)；如何把五个 agent 组合成 preset 见 [docs/install-plugins.zh.md](docs/install-plugins.zh.md)。
 
 npm 包发布后可直接作为标准 DSH bundle 安装：
 

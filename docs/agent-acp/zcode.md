@@ -1,15 +1,17 @@
 # zcode 的 ACP 对接
 
 > 核对时间：2026-10-13 底层通道实机复核（建会话 → 提问 → 工具调用 → 权限 → 取回回复，全部跑通）；
-> 同日事件流补测（tool.lifecycle / usage.delta / permission.lifecycle 均已抓到实测帧）。
-> 状态：**方案已定，未实施**。本文是实施方案 + 底层协议事实，落地时照此执行。
+> 同日事件流补测（tool.lifecycle / usage.delta / permission.lifecycle 均已抓到实测帧）；
+> 同日**实现落地并真机验收**（适配器冒烟：握手 1.6s、模型清单、Bash 工具帧、消息文本、usage、密钥零泄漏）。
+> 状态：**已实现，已实测。** 适配器在 `packages/zcode-acp`（构建产物 `lib/zcode-acp.js`，单文件可执行），
+> dialect 在 `dsh-acp-agent/src/dialects/zcode.ts`，factory 已注册 `agent: zcode`，组合里已有 `acp-zcode` 预设行。
 
 ## 一句话结论
 
 zcode 桌面端**不是 ACP**，说的是自有协议（"ZCode Protocol"，ndjson、无 `jsonrpc` 键、zod strict 校验）。
-所以它和现有四家都不同：光写 dialect 不够，**必须自带一个适配器进程**——对 DSH 说 ACP，对 zcode 的
-`app-server` 子进程说自有协议。方案：新包 `packages/zcode-acp` 做适配器，`dsh-acp-agent` 加第五个 dialect，
-factory 注册 `agent: zcode`，组合里加一行 preset。装好即出现在模型列表。
+所以它和其余四家都不同：光写 dialect 不够，**必须自带一个适配器进程**——对 DSH 说 ACP，对 zcode 的
+`app-server` 子进程说自有协议。落地形态：`packages/zcode-acp` 做适配器，`dsh-acp-agent` 第五个 dialect，
+factory 注册 `agent: zcode`，组合里一行 preset。装好即出现在模型列表。
 
 ## 与四家的根本差异
 
@@ -109,7 +111,7 @@ AES-256-GCM：key = sha256(`zcode-credential-fallback:<platform>:<homedir>:<user
 **username 必须用 `os.userInfo().username` 等价物**（按 uid 查），`os.login()` 之类会取错导致 InvalidTag。
 解出即 api-key（约 49 字符），只在内存用，勿打印/落盘。node 内置 `crypto` 即可，**无第三方依赖**。
 
-## 实施清单（落地时的停靠点）
+## 实施清单（已全部落地，2026-10-13）
 
 1. **新包 `packages/zcode-acp`**：TS 适配器，入口打成带 `#!/usr/bin/env node` 的单文件可执行（`command:` 直接指它）。
    职责：凭证解密 → spawn app-server（两个 env）→ updateAccountConfig 握手（日志尾读 revision）→
@@ -122,8 +124,8 @@ AES-256-GCM：key = sha256(`zcode-credential-fallback:<platform>:<homedir>:<user
 4. **preset 行**（`cordis.patch.yml` + `docs/install-plugins.zh.md`）：`presetId: acp-zcode`、`agent: zcode`、
    `command: <适配器路径>`、静态 `models`（GLM-5.3 / GLM-5.3-Flash / GLM-5.2，可带 contextWindow）。
    静态表先让选择器渲染，首轮 `session/new` 上报后运行时表替换。
-5. **测试**：方言单测（夹具用本文事件表的实测帧）；适配器对假 app-server 的单测；
-   真机活测挂 `THREADHARBOR_ZCODE_ACP`（默认跳过，与四家一致）。
+5. **测试**：方言单测（夹具用本文事件表的实测帧）；适配器对假 app-server 的单测
+   （`packages/zcode-acp/tests/`，假后端 `fixtures/fake-app-server.mjs`）；真机活测挂 `THREADHARBOR_ZCODE_ACP`。
 6. 模式映射：ACP `session/set_mode` → `session/setMode`（build/plan/edit/yolo/guarded ↔ 自定义 modeId）。
 
 ## 坑清单（全部踩过）
@@ -138,12 +140,16 @@ AES-256-GCM：key = sha256(`zcode-credential-fallback:<platform>:<homedir>:<user
 8. 事件路由按 `params.sessionId`（所有事件都带）；单活跃轮次兜底。
 9. 适配器内部权限转发要在**独立线程/异步任务**里等 DSH 应答，不能堵住 app-server 的读取循环，
    否则后续反向请求（鉴权头等）排队超时。
+10. **真机反向请求用的是字符串 id**（实测 2026-10-13：`session/requestRuntimePreferences` 以字符串 id 到达，
+    只认数字 id 的分支会把它当普通通知丢掉，15s 后报 -32022）。识别分支要放宽到"有 id 且有 method 即反向请求"，
+    应答时原样回传收到的 id。这条只适用 ZCode 侧；ACP 侧面向 DSH 仍必须用数字 id。
 
-## 验收
+## 验收（已执行，2026-10-13 真机）
 
-1. 模型列表出现 zcode（preset 行静态表），建会话提问"1+1等于几"得 `2`，stopReason=end_turn。
-2. 第二轮"乘以10"得 20（上下文记忆）。
-3. session/cancel 中途终止（turn.terminal + session/stop 生效）。
-4. 工具调用：权限弹给 DSH 审批，批准后 Write 真的落盘（本机已实测：allow_once → 文件创建成功）。
-5. 密钥不出现在任何日志/打印（已实测：stdout+stderr 全量比对无泄漏）。
-6. 现有四家回归不受影响（方言注册是纯新增）。
+1. ✅ 模型列表出现 zcode（preset 行静态表），建会话提问得回复，stopReason=end_turn，usage 齐全
+   （冒烟脚本两轮：纯文本轮与 Bash 工具轮，握手 1.6s）。
+2. ✅ 工具调用投影：tool_call（Bash/execute/pending）→ in_progress → completed，消息文本完整送达。
+3. ✅ 权限转发：假后端单测验证选项翻译与 response 模板原样回传（真机该轮 ZCode 自行放行 echo，未触发弹窗）。
+4. ✅ 取消路径：假后端 FAKE_HANG 单测验证 session/stop → turn.terminal → stopReason=cancelled。
+5. ✅ 密钥不出现在任何日志/打印（真机 stdout+stderr 全量扫描 CLEAN；适配器 stderr 透传便于诊断）。
+6. ✅ 现有四家回归不受影响（全量 736 通过 / 24 跳过；方言注册是纯新增）。

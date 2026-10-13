@@ -16,6 +16,7 @@ import {
   codexDialect,
   cursorDialect,
   grokDialect,
+  zcodeDialect,
 } from '@threadharbor/dsh-acp-agent'
 import type {
   AcpDialect,
@@ -64,6 +65,9 @@ const DIALECTS: Readonly<Record<string, AcpDialect>> = {
   claude: claudeDialect,
   codex: codexDialect,
   cursor: cursorDialect,
+  // zcode's ACP side is our own adapter (packages/zcode-acp), spawned as the
+  // preset's command; the dialect still reads its frames like any other.
+  zcode: zcodeDialect,
 }
 
 /**

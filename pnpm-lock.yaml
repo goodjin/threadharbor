@@ -112,6 +112,8 @@ importers:
         specifier: workspace:^
         version: link:../dsh-acp-agent
 
+  packages/zcode-acp: {}
+
 packages:
 
   '@asamuzakjp/css-color@7.1.5':

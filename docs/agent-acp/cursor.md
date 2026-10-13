@@ -1,8 +1,8 @@
 # Cursor 的 ACP 对接
 
-> 核对时间：2026-09-14
+> 核对时间：2026-09-14（2026-10-13 复核接入状态）
 > 来源：官方文档 <https://cursor.com/docs/cli/acp.md> + **本机实机探测**（`cursor-agent-sea` 构建 2026.10.01-e373342，已完成登录）
-> 状态：**官方支持，本项目尚未接入。** 握手、鉴权、建会话、工具调用、权限请求**均已实测**。
+> 状态：**已实现，已实测。** cursor dialect（`packages/dsh-acp-agent/src/dialects/cursor.ts`）与 `acp-cursor` 预设行已落地并有测试覆盖；authenticate 前置与权限请求 id=0 两个坑都在客户端里处理掉了。
 
 ## 一句话结论
 

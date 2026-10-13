@@ -1,0 +1,7 @@
+export { ZcodeAcpAgent } from './acp-agent.ts'
+export type { AcpAgentOptions } from './acp-agent.ts'
+export { ZcodeAppServer, PROVIDER, BUILTIN_MODELS } from './app-server.ts'
+export type { ZcodePermissionRequest, ZcodeEvent, AppServerOptions } from './app-server.ts'
+export { decryptCredential, deriveKey, loadApiKey } from './credential.ts'
+export { defaultPaths } from './paths.ts'
+export type { ZcodePaths } from './paths.ts'

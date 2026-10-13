@@ -7,28 +7,28 @@
 | **grok** | ✅ 已实现，已实测 | WebSocket（密钥在查询参数） | [grok.md](./grok.md) |
 | **codex** | ✅ 已实现，已实测 | stdio | [codex.md](./codex.md) |
 | **claude code** | ✅ 已实现，已实测 | stdio | [claude-code.md](./claude-code.md) |
-| **Cursor** | 📄 官方支持，帧形状已实测，未接入 | stdio | [cursor.md](./cursor.md) |
-| **zcode** | 📐 方案已定，未实施 | stdio（自有协议，需自带适配器，见文档） | [zcode.md](./zcode.md) |
+| **Cursor** | ✅ 已实现，已实测 | stdio | [cursor.md](./cursor.md) |
+| **zcode** | ✅ 已实现，已实测 | stdio（自有协议，适配器 `packages/zcode-acp`） | [zcode.md](./zcode.md) |
 
-已实现的三个共用的代码在 `packages/dsh-acp-agent/`：传输、客户端、投影、审批桥接是共用的，**每个 agent 只提供一个 dialect**。
+已实现的五个共用的代码在 `packages/dsh-acp-agent/`：传输、客户端、投影、审批桥接是共用的，**每个 agent 只提供一个 dialect**。
 
-> **zcode 与四家不同**：它不是 ACP，说的是自有协议，所以除了 dialect 还要一个适配器进程（方案里的新包 `packages/zcode-acp`）。协议事实、适配器设计与停靠点清单都在 [zcode.md](./zcode.md)，底层通道 2026-10-13 实机复核通过。
+> **zcode 与其余四家不同**：它说的不是 ACP 而是自有协议，所以除了 dialect 还有一个适配器进程 `packages/zcode-acp`（2026-10-13 实现已实测：真机握手、模型清单、工具帧、消息、usage、密钥零泄漏）。协议事实与适配器设计都在 [zcode.md](./zcode.md)。
 
-## 四家的字段差异对照
+## 五家的字段差异对照
 
 差异都在「读哪个字段」，协议本身一致。这张表是分出 dialect 的全部理由。
 
-| | grok | codex | claude | **Cursor** |
-|---|---|---|---|---|
-| **工具名** | `title`（**仅第一帧**） | `kind`（如 `execute`） | `_meta.claudeCode.toolName` | `kind`（如 `execute`） |
-| **工具输出** | `content`（**双层嵌套**） | `rawOutput.formatted_output` | `content` / `rawOutput` / `_meta…toolResponse.stdout` | `rawOutput.stdout` |
-| **模型列表** | `models.availableModels` | `models.availableModels` | `configOptions[id=model].options` | `models.availableModels` |
-| **token 数** | 更新帧 `params._meta.totalTokens` | `session/prompt` 响应 | `session/prompt` 响应 | **不提供** |
-| **权限请求 id** | 非 0 | 非 0 | 非 0 | **0（假值）** |
-| **终端子协议** | **要**（五个方法全实现） | 未观察到 | 未观察到 | 未观察到 |
-| **额外前置** | — | — | 须切 `default` 模式 | **须先 `authenticate`** |
+| | grok | codex | claude | **Cursor** | **zcode** |
+|---|---|---|---|---|---|
+| **工具名** | `title`（**仅第一帧**） | `kind`（如 `execute`） | `_meta.claudeCode.toolName` | `kind`（如 `execute`） | `title`（适配器每帧都带） |
+| **工具输出** | `content`（**双层嵌套**） | `rawOutput.formatted_output` | `content` / `rawOutput` / `_meta…toolResponse.stdout` | `rawOutput.stdout` | `content`（ZCode 不暴露工具输出，恒为空） |
+| **模型列表** | `models.availableModels` | `models.availableModels` | `configOptions[id=model].options` | `models.availableModels` | `models.availableModels`（适配器自报） |
+| **token 数** | 更新帧 `params._meta.totalTokens` | `session/prompt` 响应 | `session/prompt` 响应 | **不提供** | `session/prompt` 响应（usage.delta 汇总） |
+| **权限请求 id** | 非 0 | 非 0 | 非 0 | **0（假值）** | 非 0 |
+| **终端子协议** | **要**（五个方法全实现） | 未观察到 | 未观察到 | 未观察到 | 未观察到 |
+| **额外前置** | — | — | 须切 `default` 模式 | **须先 `authenticate`** | —（适配器内部消化账号握手） |
 
-**共用的一条铁律**：工具名必须**锁定**——四家都会在后续帧覆写名字或标题，不锁定就会被冲掉。
+**共用的一条铁律**：工具名必须**锁定**——各家都会在后续帧覆写名字或标题，不锁定就会被冲掉。
 
 > **关于「未观察到 terminal/*」**：意思是实测的四轮里没发起过，不等于永远不发起。实机测试里只有 grok 挂载了终端服务，codex/claude 跑的是同一条 shell 提示词且**在没有终端服务的情况下通过**——这是「那次没用到」的证据，不是「用不到」的证明。生产代码目前对所有 preset 都挂载了终端服务（见 `factory.ts`），这个默认是对的，别因为某家「未观察到」就去掉。
 
@@ -44,7 +44,7 @@
 
 ## 公共接口总览
 
-四家共用同一套 ACP 协议，差别在**能力声明**和**帧里的字段名**。以下均为 2026-09-14 实测。
+五家共用同一套 ACP 协议，差别在**能力声明**和**帧里的字段名**。外部四家为 2026-09-14 实测；zcode 的 ACP 侧是自有适配器，2026-10-13 实测。
 
 ### 完整流程
 
@@ -69,7 +69,7 @@ agent  → client:  session/prompt 响应 { stopReason, usage? }
 { "fs": { "readTextFile": true, "writeTextFile": true }, "terminal": true }
 ```
 
-实测四家都接受这一组。声明了 `fs`/`terminal` 意味着客户端**愿意**服务对应的 `fs/*`、`terminal/*` 调用——不声明就不该期待 agent 发起。
+实测各家都接受这一组（zcode 的适配器直接接受）。声明了 `fs`/`terminal` 意味着客户端**愿意**服务对应的 `fs/*`、`terminal/*` 调用——不声明就不该期待 agent 发起。
 
 ### `initialize` 的能力声明（实测，差异很大）
 
@@ -133,6 +133,7 @@ agent 可能发标准之外的方法，本项目的客户端对不认识的会�
 2. `packages/dsh-preset-dispatch/src/factory.ts` — 在 `DIALECTS` 里登记
 3. preset 配置里声明 `agent` / `command`（或 `url`）
 4. **实测抓帧**，存进 `tests/fixtures/captured-frames.json`，补一份本文档式的说明
+5. 若目标说的不是 ACP（如 zcode）：先写适配器包（spawn 子进程 + 协议翻译，参照 `packages/zcode-acp`），preset 的 `command` 指向构建出的可执行文件
 
 第 4 步不能省。四家的差异全都不是从代码或文档里能看出来的——codex 把输出放在 `rawOutput` 里且 `set_model` 是坏的、grok 的工具名只在第一帧、claude 自己跟自己不一致、Cursor 的权限请求 id 是 0——全是跑起来才看见的。
 
