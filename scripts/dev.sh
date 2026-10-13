@@ -121,9 +121,15 @@ web_start() {
   if [[ -f "$patch" ]]; then patch_arg=(--patch "$patch"); fi
   # One repeatable --trusted-host flag per whitespace-separated authority, so a
   # single value and a list go through the same code (the CLI accepts both).
+  # read -ra splits on IFS without glob expansion; an unquoted for-in would let
+  # a '*' in the value expand against the cwd into filenames.
   local trusted_arg=()
+  local -a trusted_hosts=()
+  read -r -a trusted_hosts <<<"${THREADHARBOR_TRUSTED_HOST:-}" || true
   local trusted_host
-  for trusted_host in ${THREADHARBOR_TRUSTED_HOST:-}; do trusted_arg+=(--trusted-host "$trusted_host"); done
+  for trusted_host in ${trusted_hosts[@]+"${trusted_hosts[@]}"}; do
+    trusted_arg+=(--trusted-host "$trusted_host")
+  done
   mkdir -p "$(dirname "$web_log")" "$(dirname "$web_pid")"
   guard_orphan "$web_pid" "$web_port"
   if pid_alive "$web_pid"; then

@@ -36,16 +36,24 @@ esac
 port=$1
 case "$port" in
   ''|*[!0-9]*) die "端口必须是纯数字：$port" ;;
+  # 前导零一律拒绝而不是归一化：这里是会触发真实发布动作的入口，畸形写法
+  # （099）不许被悄悄改写成 99 放行。0 本身落到下面的范围检查里拒绝。
+  # bash 3.2 的坑：$var 紧跟全角字符会被当进变量名吞掉，变量一律加花括号。
+  0[0-9]*)
+    canonical=$((10#$port))
+    die "端口不能带前导零：${port}（要发布 $canonical 号端口就直接写 ${canonical}）"
+    ;;
 esac
-port=$((10#$port))   # 去掉前导零：算术求值会把 08 当八进制报错
 (( port >= 1 && port <= 65535 )) || die "端口超出范围（1-65535）：$port"
 
 # ---- tailscale 可用性 --------------------------------------------------------
 command -v tailscale >/dev/null 2>&1 ||
   die "找不到 tailscale 命令。请先安装 Tailscale 并登录同一 tailnet（https://tailscale.com/download），再运行本脚本。"
 
-# Self.DNSName 的取法分三层：优先 jq，退回 python3，都没有时按行截取兜底。
-# 三层都取不到（tailscaled 没运行、未登录、JSON 缺 Self）才算失败。
+# Self.DNSName 的取法分三层：优先 jq，退回 python3，都没有时用 awk 兜底。
+# 三层都只认 Self 块里的 DNSName——Peer 也带 DNSName，兜底若全文找第一个，
+# 会在本机没名字时错拿别的机器的名字。三层都取不到（tailscaled 没运行、
+# 未登录、JSON 缺 Self）才算失败。
 pick_dns_name() {
   local json=$1 out=""
   if command -v jq >/dev/null 2>&1; then
@@ -60,7 +68,23 @@ except Exception:
     pass' <<<"$json" 2>/dev/null || true)"
     if [[ -n "$out" ]]; then printf '%s' "$out"; return 0; fi
   fi
-  out="$(sed -n 's/.*"DNSName"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' <<<"$json" | head -n 1)"
+  # awk 兜底：把状态折成一行后只看 `"Self":` 之后的片段，再剪掉其后第一个
+  # `"Peer"` 键起的尾巴——Peer 也带 DNSName，不剪会在本机没名字时错拿别的
+  # 机器的名字。找不到（未登录、JSON 缺 Self）就留给上层报错。
+  out="$(printf '%s' "$json" | tr -d '\n' | awk '
+    {
+      if (match($0, /"Self"[[:space:]]*:/)) {
+        rest = substr($0, RSTART + RLENGTH)
+        if (match(rest, /"Peer"/)) rest = substr(rest, 1, RSTART - 1)
+        if (match(rest, /"DNSName"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
+          val = substr(rest, RSTART, RLENGTH)
+          sub(/.*:[[:space:]]*"/, "", val)
+          sub(/"$/, "", val)
+          print val
+        }
+      }
+    }
+  ' 2>/dev/null || true)"
   if [[ -n "$out" ]]; then printf '%s' "$out"; return 0; fi
   return 1
 }
@@ -72,7 +96,7 @@ dns_name="$(pick_dns_name "$status_json")" ||
   die "读不到本机的 ts.net 域名（状态输出里没有 Self.DNSName）。请确认 Tailscale 已登录本机，再重试。"
 dns_name="${dns_name%.}"   # tailscale 给的 DNS 名带结尾点，URL 里不能带
 case "$dns_name" in
-  ''|.*|*[!A-Za-z0-9.-]*) die "本机域名形状不对：$dns_name。请确认 Tailscale 已登录本机；也可以按 docs/install.zh.md「手机通道」一节手工配置。" ;;
+  ''|.*|*[!A-Za-z0-9.-]*) die "本机域名形状不对：${dns_name}。请确认 Tailscale 已登录本机；也可以按 docs/install.zh.md「手机通道」一节手工配置。" ;;
 esac
 
 # ---- 发布端口 ----------------------------------------------------------------
