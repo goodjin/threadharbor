@@ -26,9 +26,10 @@
 ## 使用步骤
 
 1. 侧栏 **各主机** → **添加新主机** → **SSH 自动部署**（默认 **主机 IP**）。
-2. 填写 SSH 与认证，批准主机密钥，点击 **部署 DSH 并登记**。
-3. 使用界面上的 **带 token 链接** 复制或打开；`launchUrl` 写入登记簿。
-4. 左侧会话树会随本机/远端数据刷新；远端约每 30 秒重拉一次。
+2. 填写 SSH 与认证；在 **远端 Agent** 中勾选要在目标机启用的 ACP preset（未勾选的会在部署后写入组合补丁并禁用）。
+3. 批准主机密钥，点击 **部署 DSH 并登记**。
+4. 使用界面上的 **带 token 链接** 复制或打开；`launchUrl` 写入登记簿。
+5. 左侧会话树会随本机/远端数据刷新；远端约每 30 秒重拉一次。
 
 ## 启动 URL / token
 
@@ -46,5 +47,5 @@
 ## 安全与限制
 
 - `launchUrl` 含 launch token，保存在管理机登记数据中。
-- SSH 部署不安装 ACP agent 二进制；插件默认 `github:goodjin/threadharbor#main`（可配置）。
+- SSH 部署不安装 ACP agent 二进制；需在目标机自行安装并在 PATH 上提供 `codex-acp`、`claude-agent-acp`、`grok`、`cursor-agent` 等。部署会写入 `threadharbor-remote-agents.patch.yml` 并用 `dsh web --patch` 启用/禁用各 preset。插件默认 `github:goodjin/threadharbor#main`（可配置）。
 - 主机 IP 模式要求管理机与浏览器能访问登记地址（如局域网或 Tailscale）。

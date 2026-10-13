@@ -53,6 +53,14 @@ export type SshDeployProgress = {
 
 export type SshAccessMode = 'host-ip' | 'tunnel' | 'tailscale' | 'custom'
 
+/** Per-agent enable flags for remote DSH presets (omit or leave true = deploy). */
+export type RemoteAgentDeploySelection = {
+  readonly codex?: boolean
+  readonly claude?: boolean
+  readonly grok?: boolean
+  readonly cursor?: boolean
+}
+
 export type SshDeployRequest = {
   readonly ssh: SshConnectionInput & { readonly hostKeyFingerprint: string }
   readonly hostId: string
@@ -71,6 +79,8 @@ export type SshDeployRequest = {
   readonly bindHost?: string
   /** Extra `--trusted-host` authority (e.g. MagicDNS) when bind is an IP. */
   readonly trustedHost?: string
+  /** When set, disabled agents are patched off on the remote profile after install. */
+  readonly remoteAgents?: RemoteAgentDeploySelection
 }
 
 export type SshDeployResult = {

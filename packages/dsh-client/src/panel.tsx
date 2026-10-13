@@ -4,9 +4,9 @@
  * 2026-10-13 用户反馈定下的形状（覆盖 2026-10-12 的三界面骨架）：三个界面，
  * 列表页之外都是独立的页面——
  *
- * 1. 列表页：一张正常的表。「名称 / IP / 设置」三列表头（第三列留空，按钮
- *    自己说明自己），一行一台主机、行高一致；状态以名称旁的圆点标示，不
- *    单占一列。点行或行尾的设置按钮进那台主机的设置页；上方一个「添加
+ * 1. 列表页：一张正常的表。「名称 / 状态 / IP / 设置」四列，一行一台主机、
+ *    行高一致；名称旁仍保留状态圆点，状态列显示文字。点行或行尾的设置按钮
+ *    进那台主机的设置页；上方一个「添加
  *    新主机」按钮，别的什么都不放。
  * 2. 详情页：与添加页共用同一套表单（HostFormPage 的 view 模式）。主机只有
  *    「名称」「IP」两个字段（显示名撤销：主机标识改名「名称」并兼任显示名，
@@ -35,7 +35,8 @@ import type { AgentDescriptor, GatewayResult } from './gateway.ts'
 import type { ProbeOutcome } from './probe.ts'
 import { probeReach } from './reach.ts'
 import type { ReachOutcome } from './reach.ts'
-import type { HostIdentity, HostRegistration, RegistrationResult, SshAccessMode, SshConnectionInput, SshDeployResult, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
+import type { HostIdentity, HostRegistration, RegistrationResult, RemoteAgentDeploySelection, SshAccessMode, SshConnectionInput, SshDeployResult, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
+import { REMOTE_DEPLOY_AGENT_SPECS } from '@threadharbor/dsh-host-federation'
 import type { HostSnapshot } from '@threadharbor/dsh-host-federation'
 import type { HostStorePosture } from './host-store.ts'
 import {
@@ -540,11 +541,9 @@ function VerdictLine(props: {
 }
 
 /**
- * One host row in the list. The row is a line in a table — name, IP, a
- * settings affordance — and the whole row is the button that opens the
- * host's detail (settings) page; every row is one fixed height so the list
- * reads as a table (2026-10-13 用户反馈：三列＝名称、IP、设置按钮，行高一致).
- * Status rides along as the dot before the name, not a column of its own.
+ * One host row in the list. The row is a line in a table — name, status, IP,
+ * settings — and the whole row is the button that opens the host's detail page;
+ * every row is one fixed height so the list reads as a table.
  * @param props - the merged row and the open handler.
  * @returns the row.
  */
@@ -561,10 +560,11 @@ export function HostRow(props: {
     : row.connection === 'connected'
       ? { word: '已连接', tone: 'online' as const }
       : row.connection === 'reachable'
-        ? { word: '可达', tone: 'online' as const }
+        ? { word: connectionStatusLabel('reachable'), tone: 'online' as const }
         : row.connection === 'checking'
-          ? { word: '检测中', tone: 'offline' as const }
-          : { word: '未连接', tone: 'offline' as const }
+          ? { word: connectionStatusLabel('checking'), tone: 'offline' as const }
+          : { word: connectionStatusLabel('disconnected'), tone: 'offline' as const }
+  const connection = row.self ? '本机' : connectionStatusLabel(row.connection)
   return (
     <div data-host-row={row.hostId} className={styles.hostRow}>
       <button
@@ -583,6 +583,7 @@ export function HostRow(props: {
           />
           <strong data-host-name="" className={styles.hostName}>{row.name}</strong>
         </span>
+        <span data-host-connection="" className={styles.hostConnection} title={status.word}>{connection}</span>
         <span data-host-ip="" className={styles.hostIp} title={ip ?? undefined}>{ip ?? '—'}</span>
         {/* 设置按钮是这一行的动作（打开主机的设置页）。整行都是这个按钮，
             这里的 span 是它的第三列外观，不是又一个独立控件。 */}
@@ -619,6 +620,9 @@ function SshDeploySection(props: {
   const [bindHost, setBindHost] = useState('')
   const [trustedHost, setTrustedHost] = useState('')
   const [deployed, setDeployed] = useState<SshDeployResult | undefined>(undefined)
+  const [remoteAgents, setRemoteAgents] = useState<RemoteAgentDeploySelection>(() => (
+    Object.fromEntries(REMOTE_DEPLOY_AGENT_SPECS.map(spec => [spec.key, true])) as RemoteAgentDeploySelection
+  ))
 
   const sshPayload = (): SshConnectionInput => {
     const base: SshConnectionInput = { target: target.trim() }
@@ -666,6 +670,7 @@ function SshDeploySection(props: {
       accessMode,
       ...(bindHost.trim() === '' ? {} : { bindHost: bindHost.trim() }),
       ...(trustedHost.trim() === '' ? {} : { trustedHost: trustedHost.trim() }),
+      remoteAgents,
     }).then(started => {
       if (!started.ok) {
         setBusy(undefined)
@@ -776,6 +781,22 @@ function SshDeploySection(props: {
           <input className={styles.input} value={remoteWebPort} onChange={event => { setRemoteWebPort(event.target.value) }} />
         </label>
       </div>
+      <fieldset className={styles.accessModes} data-ssh-remote-agents="">
+        <legend className={styles.summary}>远端 Agent（ACP preset）</legend>
+        <p className={styles.note}>
+          勾选的 agent 会在远端 DSH 组合中启用（命令走 PATH，需目标机已安装对应二进制）；未勾选的将在部署后禁用。
+        </p>
+        {REMOTE_DEPLOY_AGENT_SPECS.map(spec => (
+          <label key={spec.key} className={styles.sshKeyRow}>
+            <input
+              type="checkbox"
+              checked={remoteAgents[spec.key] !== false}
+              onChange={event => { setRemoteAgents(prev => ({ ...prev, [spec.key]: event.target.checked })) }}
+            />
+            <span>{spec.label}（<code>{spec.presetId}</code>）</span>
+          </label>
+        ))}
+      </fieldset>
       <div className={styles.formActions}>
         <button type="button" className={styles.action} disabled={busy !== undefined} onClick={runInspect}>
           {busy === 'inspect' ? '正在检查……' : '检查 SSH 主机密钥'}
@@ -1489,6 +1510,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
           <div data-host-list="" className={styles.hostList}>
             <div data-host-list-head="" className={styles.hostListHead} aria-hidden="true">
               <span className={styles.hostListHeadLabel}>名称</span>
+              <span className={styles.hostListHeadLabel}>状态</span>
               <span className={styles.hostListHeadLabel}>IP</span>
               <span className={styles.hostListHeadLabel} />
             </div>

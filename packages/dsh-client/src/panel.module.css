@@ -460,7 +460,7 @@
    difference — shifting the IP label off the IP column it labels. */
 .hostListHead {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 220px) 56px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 96px) minmax(0, 220px) 56px;
   align-items: center;
   gap: 12px;
   height: 32px;
@@ -506,7 +506,7 @@
   font: inherit;
   text-align: left;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 220px) 56px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 96px) minmax(0, 220px) 56px;
   align-items: center;
   gap: 12px;
   min-width: 0;
@@ -521,7 +521,7 @@
   color: var(--dsw-alias-label-secondary);
 }
 
-/* 名称列：状态圆点 + 名字。状态不单占一列，圆点颜色说三态，悬停有词。 */
+/* 名称列：状态圆点 + 名字；状态列单独显示文字标签。 */
 .hostNameCell {
   display: flex;
   align-items: center;
@@ -551,6 +551,14 @@
 .hostName {
   font-weight: 600;
   font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hostConnection {
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

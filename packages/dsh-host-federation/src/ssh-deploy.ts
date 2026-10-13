@@ -17,6 +17,7 @@ import { isValidHostId } from './identity.ts'
 import { optionalHost, parseAccessMode, validateBindHost } from './ssh/access.ts'
 import { fetchRemoteSessions } from './host-remote-sessions.ts'
 import { DEFAULT_REMOTE_DSH_PLUGINS, normalizePluginSpecs } from './ssh/deploy-plugins.ts'
+import { parseRemoteAgentSelection } from './ssh/remote-agents.ts'
 
 export const SSH_DEPLOY_ENTRY_ID = 'threadharbor-ssh-deploy'
 
@@ -202,6 +203,7 @@ function parseDeployRequest(record: Record<string, unknown>): SshDeployRequest {
   }
   if (bindHost !== undefined) validateBindHost(bindHost)
   const ssh = record['ssh']
+  const remoteAgents = parseRemoteAgentSelection(record['remoteAgents'])
   return {
     hostId,
     hostTitle: hostTitle === '' ? hostId : hostTitle,
@@ -210,6 +212,7 @@ function parseDeployRequest(record: Record<string, unknown>): SshDeployRequest {
     accessMode,
     ...(bindHost === undefined ? {} : { bindHost }),
     ...(trustedHost === undefined ? {} : { trustedHost }),
+    ...(remoteAgents === undefined ? {} : { remoteAgents }),
     ssh: ssh as SshDeployRequest['ssh'],
   }
 }

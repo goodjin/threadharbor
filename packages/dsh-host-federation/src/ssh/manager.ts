@@ -13,6 +13,7 @@ import { freePort, portListening } from './port.ts'
 import { deploymentChannel, destination, parseSshInput, shellQuote } from './parse.ts'
 import { readReleaseVersion, resolveReleaseDirectory } from './release.ts'
 import { DEFAULT_REMOTE_DSH_PLUGINS } from './deploy-plugins.ts'
+import { buildRemoteAgentsPatchYaml } from './remote-agents.ts'
 
 export type SshManagerOptions = {
   readonly knownHostsPath: string
@@ -158,6 +159,7 @@ export class DshSshManager {
         accessMode,
         installFromGithub,
         remotePlugins,
+        remoteAgentsPatch: buildRemoteAgentsPatchYaml(request.remoteAgents),
         ...(bindOverride === undefined ? {} : { bindOverride }),
         ...(trustedHost === undefined ? {} : { trustedHost }),
       })
@@ -467,14 +469,16 @@ function buildInstallScript(input: {
   readonly accessMode: SshAccessMode
   readonly installFromGithub: boolean
   readonly remotePlugins: readonly string[]
+  readonly remoteAgentsPatch: string
   readonly bindOverride?: string
   readonly trustedHost?: string
 }): string {
   const {
     channel, releaseDir, nodePath, remotePort, hostId, hostTitle, upgrade, accessMode, installFromGithub, remotePlugins,
-    bindOverride, trustedHost,
+    remoteAgentsPatch, bindOverride, trustedHost,
   } = input
   const pluginPayload = shellQuote(remotePlugins.join('\n'))
+  const agentsPatchPayload = shellQuote(remoteAgentsPatch)
   const bindOverrideQ = bindOverride === undefined ? '' : shellQuote(bindOverride)
   const trustedQ = trustedHost === undefined ? '' : shellQuote(trustedHost)
   const accessQ = shellQuote(accessMode)
@@ -506,6 +510,10 @@ function buildInstallScript(input: {
     installFromGithub
       ? 'printf \'%s\\n\' "$plugin_specs" | while IFS= read -r spec; do [ -z "$spec" ] && continue; dsh plugin --profile web add "$spec" || dsh plugin --profile web add "$spec"; done'
       : 'dsh plugin --profile web add "link:$release" || dsh plugin --profile web add "link:$release"',
+    `agents_patch_yaml=${agentsPatchPayload}`,
+    'agents_patch="$dsh_home/profiles/web/threadharbor-remote-agents.patch.yml"',
+    'mkdir -p "$(dirname "$agents_patch")"',
+    'printf \'%s\' "$agents_patch_yaml" > "$agents_patch"',
     'bind_host="127.0.0.1"',
     'if [ "$access_mode" = "tunnel" ]; then',
     '  bind_host="127.0.0.1"',
@@ -523,7 +531,7 @@ function buildInstallScript(input: {
     'printf \'DSH_HOST_ID=%s\\nDSH_HOST_TITLE=%s\\n\' "$host_id" "$host_title" > "$identity_file"',
     'case "$bind_host" in (0.0.0.0|"") echo "refusing wildcard bind" >&2; exit 1;; esac',
     'dsh_bin="$(command -v dsh)"',
-    'dsh_args="--profile web --no-open --port $port --host $bind_host"',
+    'dsh_args="--profile web --no-open --port $port --host $bind_host --patch $agents_patch"',
     'if [ "$bind_host" != "127.0.0.1" ] && [ "$bind_host" != "::1" ]; then',
     '  if [ -n "$trusted_extra" ]; then dsh_args="$dsh_args --trusted-host $trusted_extra"; else dsh_args="$dsh_args --trusted-host $bind_host"; fi',
     'fi',
