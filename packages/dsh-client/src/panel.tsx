@@ -693,7 +693,7 @@ function SshDeploySection(props: {
 
   const runReadPeer = (): void => {
     if (approvedFingerprint === '') {
-      props.onError('请先检查并批准 SSH 主机密钥指纹')
+      props.onError(props.t('panel.ssh.approveFingerprintFirst'))
       return
     }
     setBusy('peer')
@@ -808,9 +808,9 @@ function SshDeploySection(props: {
         </label>
       </div>
       <fieldset className={styles.accessModes} data-ssh-remote-agents="">
-        <legend className={styles.summary}>远端 Agent（ACP preset）</legend>
+        <legend className={styles.summary}>{props.t('panel.ssh.remoteAgentsLegend')}</legend>
         <p className={styles.note}>
-          勾选的 agent 会在远端 DSH 组合中启用（命令走 PATH，需目标机已安装对应二进制）；未勾选的将在部署后禁用。
+          {props.t('panel.ssh.remoteAgentsNote')}
         </p>
         {REMOTE_DEPLOY_AGENT_SPECS.map(spec => (
           <label key={spec.key} className={styles.sshKeyRow}>
@@ -828,7 +828,7 @@ function SshDeploySection(props: {
           {busy === 'inspect' ? props.t('panel.ssh.inspecting') : props.t('panel.ssh.inspect')}
         </button>
         <button type="button" className={styles.action} disabled={busy !== undefined} onClick={runReadPeer}>
-          {busy === 'peer' ? '正在读取……' : '通过 SSH 读取对方状态'}
+          {busy === 'peer' ? props.t('panel.ssh.readingPeer') : props.t('panel.ssh.readPeer')}
         </button>
         <button type="button" className={styles.actionPrimary} disabled={busy !== undefined} onClick={runDeploy}>
           {busy === 'deploy' ? props.t('panel.ssh.deploying') : props.t('panel.ssh.deploy')}
@@ -857,9 +857,9 @@ function SshDeploySection(props: {
             <p data-ssh-peer="" className={styles.stateLine}>
               {peer.pluginsInstalled
                 ? peer.listen === 'loopback'
-                  ? `对方已安装插件，DSH 听在 127.0.0.1。打开页面会走本机 SSH 隧道。${peer.launchUrl ?? ''}`
-                  : '对方这份记录不是回环监听。重新部署会改成只听 127.0.0.1，并由本机隧道访问。'
-                : '对方还没有 ThreadHarbor 的 peer 记录（尚未安装，或安装后还没成功启动）。可以在这里部署。'}
+                  ? `${props.t('panel.ssh.peerLoopback')}${peer.launchUrl ?? ''}`
+                  : props.t('panel.ssh.peerNotLoopback')
+                : props.t('panel.ssh.peerMissing')}
             </p>
           )
         : undefined}
