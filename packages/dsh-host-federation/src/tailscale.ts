@@ -116,6 +116,21 @@ function textOf(value: unknown): string {
   return typeof value === 'string' ? value : ''
 }
 
+/**
+ * BackendState 不是 Running 时，说清为什么清单是空的。
+ * `tailscale status --json` 在未登录/已停止时照样 exit 0、照样吐 JSON，所以命令层
+ * 看不出坏——只有 BackendState 能分出「空是因为 tailnet 上没有 peer」还是「空是因为
+ * tailnet 根本没起来」。返回 undefined 表示没事，runOnce 照常清掉 error 键。
+ * @param status - 解析后的 status 文档；形状不对就读不到，当没事处理。
+ */
+function backendStateNote(status: unknown): string | undefined {
+  if (!isRecord(status)) return undefined
+  const state = status['BackendState']
+  if (state === 'NeedsLogin') return 'Tailscale 未登录：先在这台机器上登录，peer 清单才会出现。'
+  if (state === 'Stopped') return 'Tailscale 已停止：启动它之后 peer 清单才会出现。'
+  return undefined
+}
+
 /** What one status run produced, whatever went wrong. */
 export type TailscaleStatusOutcome =
   | { readonly ok: true; readonly status: unknown }
@@ -257,13 +272,16 @@ async function demandOf(deps: TailscaleBridgeDeps): Promise<string | undefined> 
 /** Write one full picture: peers, the error note, and which demand this was. */
 async function runOnce(deps: TailscaleBridgeDeps, demand: string): Promise<void> {
   const outcome = await deps.status()
+  // 命令成功但 BackendState 不是 Running（最常见是未登录）也属于「这一拍没清单」，
+  // 把原因写进 error 键，面板那句「为什么是空的」才有内容；命令本身失败时用它给的原因。
+  const note = outcome.ok ? backendStateNote(outcome.status) : outcome.reason
   const ops: unknown[] = [
     { op: 'set', path: ['data', TAILSCALE_PEERS_KEY], value: JSON.stringify(outcome.ok ? parseTailscaleStatus(outcome.status) : []) },
     // 应答键写「消费到的那一拍」，不是本地时钟：面板比对的是它自己写下去的值。
     { op: 'set', path: ['data', TAILSCALE_REFRESHED_KEY], value: demand },
-    outcome.ok
+    note === undefined
       ? { op: 'unset', path: ['data', TAILSCALE_ERROR_KEY] }
-      : { op: 'set', path: ['data', TAILSCALE_ERROR_KEY], value: outcome.reason },
+      : { op: 'set', path: ['data', TAILSCALE_ERROR_KEY], value: note },
   ]
   try {
     await deps.settings.mutate(HOST_STORE_ENTRY_ID, ops)

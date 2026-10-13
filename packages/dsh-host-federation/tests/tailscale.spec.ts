@@ -237,6 +237,27 @@ describe('startTailscaleBridge：启动与按需刷新', () => {
     expect(rig.refreshed()).toBe('')
   })
 
+  it('命令成功（exit 0）但 BackendState 是 NeedsLogin：写空清单 + error 键说「未登录」', async () => {
+    // 未登录时 tailscale status --json 照样吐 JSON、照样 exit 0，命令层看不出坏，
+    // 只有 BackendState 能告诉面板「空是因为没登录」，而不是「空是因为没 peer」。
+    const rig = bench({ status: () => ({ ok: true, status: { BackendState: 'NeedsLogin', Self: { ID: '' } } }) })
+    await rig.bridge.settled()
+    expect(rig.peers()).toBe('[]')
+    expect(rig.error()).toContain('未登录')
+  })
+
+  it('BackendState 是 Stopped：error 键说「已停止」', async () => {
+    const rig = bench({ status: () => ({ ok: true, status: { BackendState: 'Stopped' } }) })
+    await rig.bridge.settled()
+    expect(rig.error()).toContain('已停止')
+  })
+
+  it('BackendState 是 Running：不写 error 键（清单就是清单，没有「为什么空」要解释）', async () => {
+    const rig = bench({ status: () => ({ ok: true, status: statusFixture() }) })
+    await rig.bridge.settled()
+    expect(rig.error()).toBeUndefined()
+  })
+
   it('面板改 refresh 键 → 收到 document-updated → 重跑并把新清单写回去', async () => {
     let call = 0
     const rig = bench({ status: () => (call += 1) === 1 ? ({ ok: true, status: statusFixture() }) : ({ ok: true, status: { Peer: {} } }) })
