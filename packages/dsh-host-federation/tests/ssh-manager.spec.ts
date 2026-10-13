@@ -43,6 +43,8 @@ describe('DshSshManager', () => {
     expect(source).toContain('port_busy')
     expect(source).toContain('dsh plugin --profile web add')
     expect(source).toContain('threadharbor-dsh-web')
+    expect(source).toContain('tailscale ip -4')
+    expect(source).toContain('LAUNCH_URL=')
     expect(source).not.toContain('hostd')
   })
 

@@ -6,7 +6,8 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type { SshConnectionConfig, SshDeployProgress, SshDeployRequest, SshDeployResult, SshHostKeyCandidate } from './types.ts'
+import type { SshAccessMode, SshConnectionConfig, SshDeployProgress, SshDeployRequest, SshDeployResult, SshHostKeyCandidate } from './types.ts'
+import { composeLaunchUrl, parseAccessMode, parseDeployMarkers, validateBindHost, optionalHost } from './access.ts'
 import { run, runWithEnv } from './run.ts'
 import { freePort, portListening } from './port.ts'
 import { deploymentChannel, destination, parseSshInput, shellQuote } from './parse.ts'
@@ -64,6 +65,13 @@ export class DshSshManager {
     onProgress: (progress: SshDeployProgress) => void = () => undefined,
   ): Promise<SshDeployResult> {
     const config = this.parseApprovedConfig(request.ssh)
+    const accessMode = parseAccessMode(request.accessMode)
+    const bindOverride = optionalHost(request.bindHost, 'bindHost')
+    const trustedHost = optionalHost(request.trustedHost, 'trustedHost')
+    if (accessMode === 'custom' && bindOverride === undefined) {
+      throw new Error('custom 访问模式必须提供 bindHost（具体 IP 或主机名，不能是 0.0.0.0）')
+    }
+    if (bindOverride !== undefined) validateBindHost(bindOverride)
     const remotePort = request.remoteWebPort ?? this.options.defaultRemoteWebPort
     const channel = this.options.deploymentChannel
     const releaseRoot = resolveReleaseDirectory(this.options.releaseDirectory)
@@ -136,25 +144,52 @@ export class DshSshManager {
         hostId: request.hostId,
         hostTitle: request.hostTitle,
         upgrade: request.upgrade === true,
+        accessMode,
+        ...(bindOverride === undefined ? {} : { bindOverride }),
+        ...(trustedHost === undefined ? {} : { trustedHost }),
       })
       const install = await this.remoteExec(materialized, installScript, this.options.installTimeoutMs)
       if (install.code !== 0) {
         const reason = install.stderr.trim() || install.stdout.trim() || `status ${install.code}`
         throw new Error(`远端安装失败：${reason}`)
       }
-      const alreadyRunning = /ALREADY_RUNNING=1/.test(install.stdout)
+      const markers = parseDeployMarkers(install.stdout)
+      const alreadyRunning = markers.alreadyRunning
+      const bindHost = markers.bindHost ?? (accessMode === 'tunnel' ? '127.0.0.1' : bindOverride ?? '127.0.0.1')
+      const remoteLaunch = markers.launchUrl
+      if (remoteLaunch === undefined || remoteLaunch === '') {
+        throw new Error('未能从远端日志读取带 ?token= 的 dsh web 启动 URL；请查看远端 dsh-web.log 或勾选升级后重试')
+      }
 
-      onProgress({ phase: 'starting', detail: alreadyRunning ? '远端服务已在运行，正在校验。' : '正在启动远端 DSH Web。' })
-      onProgress({ phase: 'opening-tunnel', detail: '正在建立本机到远端的安全隧道。' })
-      const endpoint = await this.ensureTunnel(materialized, remotePort)
+      onProgress({ phase: 'starting', detail: alreadyRunning ? '远端服务已在运行，已读取现有启动 URL。' : '正在启动远端 DSH Web。' })
 
-      onProgress({ phase: 'verifying', detail: '正在确认远端 Web 可访问。' })
+      let endpoint: string
+      if (accessMode === 'tunnel') {
+        onProgress({ phase: 'opening-tunnel', detail: '正在建立本机到远端 loopback 的 SSH 端口转发。' })
+        endpoint = await this.ensureTunnelWithAuth(materialized, remotePort)
+      } else {
+        endpoint = originForBind(bindHost, remotePort)
+        onProgress({ phase: 'verifying', detail: `正在确认 ${endpoint} 可访问（请确保本机与该地址网络互通，例如同一 Tailscale 网）。` })
+      }
+
+      onProgress({ phase: 'verifying', detail: '正在确认 DSH Web 健康检查。' })
       const healthy = await this.waitRemoteHealthy(endpoint)
-      if (!healthy) throw new Error('部署后远端 DSH Web 未通过健康检查（本机隧道端口无响应）')
+      if (!healthy) {
+        throw new Error(accessMode === 'tunnel'
+          ? '部署后远端 DSH Web 未通过健康检查（本机隧道端口无响应）'
+          : `部署后无法在管理机上访问 ${endpoint}（请检查 Tailscale/防火墙与 --trusted-host）`)
+      }
+
+      const launchUrl = accessMode === 'tunnel'
+        ? composeLaunchUrl(endpoint, remoteLaunch)
+        : remoteLaunch
 
       onProgress({ phase: 'succeeded', detail: '部署完成。' })
       return {
         endpoint,
+        launchUrl,
+        accessMode,
+        bindHost,
         remoteWebPort: remotePort,
         releaseVersion,
         alreadyRunning,
@@ -403,6 +438,11 @@ function commandExists(name: string): boolean {
   return result.status === 0
 }
 
+function originForBind(bindHost: string, port: number): string {
+  const host = bindHost.includes(':') && !bindHost.startsWith('[') ? `[${bindHost}]` : bindHost
+  return `http://${host}:${port}`
+}
+
 function buildInstallScript(input: {
   readonly channel: string
   readonly releaseDir: string
@@ -411,8 +451,16 @@ function buildInstallScript(input: {
   readonly hostId: string
   readonly hostTitle: string
   readonly upgrade: boolean
+  readonly accessMode: SshAccessMode
+  readonly bindOverride?: string
+  readonly trustedHost?: string
 }): string {
-  const { channel, releaseDir, nodePath, remotePort, hostId, hostTitle, upgrade } = input
+  const {
+    channel, releaseDir, nodePath, remotePort, hostId, hostTitle, upgrade, accessMode, bindOverride, trustedHost,
+  } = input
+  const bindOverrideQ = bindOverride === undefined ? '' : shellQuote(bindOverride)
+  const trustedQ = trustedHost === undefined ? '' : shellQuote(trustedHost)
+  const accessQ = shellQuote(accessMode)
   return [
     'set -eu',
     `channel=${shellQuote(channel)}`,
@@ -421,11 +469,15 @@ function buildInstallScript(input: {
     `port=${remotePort}`,
     `host_id=${shellQuote(hostId)}`,
     `host_title=${shellQuote(hostTitle)}`,
+    `access_mode=${accessQ}`,
+    bindOverrideQ === '' ? 'bind_override=' : `bind_override=${bindOverrideQ}`,
+    trustedQ === '' ? 'trusted_extra=' : `trusted_extra=${trustedQ}`,
     'node_dir="$(dirname "$node")"',
     'common_path="$node_dir:$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"',
     'export PATH="$common_path"',
     'dsh_home="$HOME/.dsh-threadharbor-$channel"',
     'state="$HOME/.local/state/threadharbor/$channel"',
+    'log_file="$state/dsh-web.log"',
     'export DSH_HOME="$dsh_home"',
     'if ! command -v dsh >/dev/null 2>&1; then',
     '  if ! command -v npm >/dev/null 2>&1; then echo "npm not found; install Node npm or place dsh on PATH" >&2; exit 1; fi',
@@ -434,28 +486,55 @@ function buildInstallScript(input: {
     'dsh plugin --profile web add "link:$release" || dsh plugin --profile web add "link:$release"',
     'identity_file="$dsh_home/profiles/web/threadharbor-identity.env"',
     'printf \'DSH_HOST_ID=%s\\nDSH_HOST_TITLE=%s\\n\' "$host_id" "$host_title" > "$identity_file"',
+    'bind_host="127.0.0.1"',
+    'if [ "$access_mode" = "tailscale" ]; then',
+    '  if [ -n "$bind_override" ]; then bind_host="$bind_override"; else bind_host="$(tailscale ip -4 2>/dev/null | head -1 || true)"; fi',
+    '  if [ -z "$bind_host" ]; then echo "未检测到 Tailscale IPv4；请安装 tailscale 或在表单填写绑定地址" >&2; exit 1; fi',
+    'elif [ "$access_mode" = "custom" ]; then',
+    '  bind_host="$bind_override"',
+    'fi',
+    'case "$bind_host" in (0.0.0.0|"") echo "refusing wildcard bind" >&2; exit 1;; esac',
+    'dsh_bin="$(command -v dsh)"',
+    'dsh_args="--profile web --no-open --port $port --host $bind_host"',
+    'if [ "$bind_host" != "127.0.0.1" ] && [ "$bind_host" != "::1" ]; then',
+    '  if [ -n "$trusted_extra" ]; then dsh_args="$dsh_args --trusted-host $trusted_extra"; else dsh_args="$dsh_args --trusted-host $bind_host"; fi',
+    'fi',
     'service_name="threadharbor-dsh-web-$channel.service"',
     'service="$HOME/.config/systemd/user/$service_name"',
-    'args="--profile web --no-open --port $port"',
-    `printf '%s\\n' '[Unit]' "Description=ThreadHarbor DSH Web ($channel)" 'After=network-online.target' '' '[Service]' "Environment=PATH=$common_path" "Environment=DSH_HOME=$dsh_home" "EnvironmentFile=-$identity_file" "ExecStart=$(command -v dsh) $args" 'Restart=on-failure' 'RestartSec=2' '' '[Install]' 'WantedBy=default.target' > "$service"`,
+    'printf \'%s\\n\' \'[Unit]\' "Description=ThreadHarbor DSH Web ($channel)" \'After=network-online.target\' \'\' \'[Service]\' "Environment=PATH=$common_path" "Environment=DSH_HOME=$dsh_home" "EnvironmentFile=-$identity_file" "ExecStart=$dsh_bin $dsh_args" \'Restart=on-failure\' \'RestartSec=2\' \'\' \'[Install]\' \'WantedBy=default.target\' > "$service"',
+    'health_url() { printf \'http://%s:%s/\' "$bind_host" "$port"; }',
     'port_pids() { { if command -v lsof >/dev/null 2>&1; then lsof -nP -iTCP:' + remotePort + ' -sTCP:LISTEN -t 2>/dev/null; elif command -v ss >/dev/null 2>&1; then ss -ltnpH "sport = :' + remotePort + '" 2>/dev/null | grep -o "pid=[0-9]*" | cut -d= -f2; elif command -v fuser >/dev/null 2>&1; then fuser ' + remotePort + '/tcp 2>/dev/null; fi; } | tr " " "\\n" | grep -E "^[0-9]+$" | sort -u; }',
     'port_busy() { if command -v ss >/dev/null 2>&1; then [ -n "$(ss -ltnH "sport = :' + remotePort + '" 2>/dev/null)" ]; elif command -v lsof >/dev/null 2>&1; then lsof -nP -iTCP:' + remotePort + ' -sTCP:LISTEN >/dev/null 2>&1; elif command -v fuser >/dev/null 2>&1; then fuser ' + remotePort + '/tcp >/dev/null 2>&1; else return 1; fi; }',
+    'launch_url_from_log() {',
+    '  url=""',
+    '  if [ -f "$log_file" ]; then url="$(grep -E \'^dsh web: \' "$log_file" | tail -1 | sed \'s/^dsh web: //\')"; fi',
+    '  if [ -z "$url" ] && command -v journalctl >/dev/null 2>&1; then url="$(journalctl --user -u "$service_name" -n 40 --no-pager 2>/dev/null | grep \'dsh web:\' | tail -1 | sed \'s/.*dsh web: //\')"; fi',
+    '  printf \'%s\' "$url"',
+    '}',
+    'emit_success() {',
+    '  url="$(launch_url_from_log)"',
+    '  if [ -z "$url" ]; then echo "missing launch url in log" >&2; exit 1; fi',
+    '  echo "BIND_HOST=$bind_host"',
+    '  echo "LAUNCH_URL=$url"',
+    '  exit 0',
+    '}',
     'already=0',
-    'if port_busy && command -v curl >/dev/null 2>&1; then code="$(curl -fsS -o /dev/null -w "%{http_code}" "http://127.0.0.1:$port/" 2>/dev/null || true)"; case "$code" in 200|401) already=1;; esac; fi',
-    upgrade ? 'if [ "$already" = "1" ]; then echo ALREADY_RUNNING=1; fi' : 'if [ "$already" = "1" ]; then echo ALREADY_RUNNING=1; exit 0; fi',
+    'if port_busy && command -v curl >/dev/null 2>&1; then code="$(curl -fsS -o /dev/null -w "%{http_code}" "$(health_url)" 2>/dev/null || true)"; case "$code" in 200|401) already=1;; esac; fi',
+    'if [ "$already" = "1" ]; then echo ALREADY_RUNNING=1; fi',
+    upgrade ? '' : 'if [ "$already" = "1" ]; then emit_success; fi',
     'if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then systemctl --user daemon-reload && systemctl --user enable --now "$service_name" && systemctl --user restart "$service_name"',
     'else',
     'pid_file="$state/dsh-web.pid"',
     'if [ -f "$pid_file" ]; then old_pid="$(cat "$pid_file")"; case "$old_pid" in (*[!0-9]*|"") ;; (*) kill "$old_pid" 2>/dev/null || true ;; esac; fi',
     'for pid in $(port_pids); do kill "$pid" 2>/dev/null || true; done',
     'for _ in 1 2 3 4 5 6 7 8 9 10; do port_busy || break; sleep 0.5; done',
-    'nohup dsh $args >>"$state/dsh-web.log" 2>&1 </dev/null & printf \'%s\\n\' "$!" > "$pid_file"',
+    'nohup $dsh_bin $dsh_args >>"$log_file" 2>&1 </dev/null & printf \'%s\\n\' "$!" > "$pid_file"',
     'fi',
-    'for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do',
-    '  if command -v curl >/dev/null 2>&1; then code="$(curl -fsS -o /dev/null -w "%{http_code}" "http://127.0.0.1:$port/" 2>/dev/null || true)"; case "$code" in 200|401) exit 0;; esac; fi',
+    'for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do',
+    '  if command -v curl >/dev/null 2>&1; then code="$(curl -fsS -o /dev/null -w "%{http_code}" "$(health_url)" 2>/dev/null || true)"; case "$code" in 200|401) emit_success;; esac; fi',
     '  sleep 1',
     'done',
-    'echo "DSH Web did not become healthy on port $port" >&2',
+    'echo "DSH Web did not become healthy" >&2',
     'exit 1',
-  ].join('; ')
+  ].filter(line => line !== '').join('; ')
 }

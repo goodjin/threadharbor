@@ -51,6 +51,8 @@ export type SshDeployProgress = {
   readonly total?: number
 }
 
+export type SshAccessMode = 'tunnel' | 'tailscale' | 'custom'
+
 export type SshDeployRequest = {
   readonly ssh: SshConnectionInput & { readonly hostKeyFingerprint: string }
   readonly hostId: string
@@ -59,10 +61,25 @@ export type SshDeployRequest = {
   readonly remoteWebPort?: number
   /** When true, replace an existing release and restart the service. */
   readonly upgrade?: boolean
+  /**
+   * `tunnel` — remote listens on 127.0.0.1 and the manager opens SSH -L (default).
+   * `tailscale` — bind remote DSH to Tailscale IPv4 (`tailscale ip -4`) or `bindHost`.
+   * `custom` — bind to `bindHost` (concrete IP/hostname, never 0.0.0.0).
+   */
+  readonly accessMode?: SshAccessMode
+  /** Override bind address for tailscale/custom (MagicDNS name or IP). */
+  readonly bindHost?: string
+  /** Extra `--trusted-host` authority (e.g. MagicDNS) when bind is an IP. */
+  readonly trustedHost?: string
 }
 
 export type SshDeployResult = {
+  /** Normalized origin used for reach checks and listing (`http(s)://host:port`). */
   readonly endpoint: string
+  /** Full URL including `?token=` when captured from remote logs. */
+  readonly launchUrl: string
+  readonly accessMode: SshAccessMode
+  readonly bindHost: string
   readonly remoteWebPort: number
   readonly releaseVersion: string
   readonly alreadyRunning: boolean

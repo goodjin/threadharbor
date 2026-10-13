@@ -24,6 +24,11 @@ export type HostRegistration = {
   readonly hostTitle: string
   /** The origin to open in a browser, normalized (`http(s)://host[:port]`). */
   readonly address: string
+  /**
+   * Optional full entry URL with launch `?token=` (sensitive). When present the
+   * UI can open the host without hunting stderr; origin must match `address`.
+   */
+  readonly launchUrl?: string
   /** When the registration was made, in the page's clock. */
   readonly createdAt: number
 }
@@ -78,7 +83,12 @@ export function normalizeAddress(input: string): { readonly ok: true; readonly o
  */
 export function hostRegistry(storage: RegistryStorage, now: () => number = Date.now): {
   list(): readonly HostRegistration[]
-  add(input: { readonly hostId: string; readonly hostTitle: string; readonly address: string }): RegistrationResult
+  add(input: {
+    readonly hostId: string
+    readonly hostTitle: string
+    readonly address: string
+    readonly launchUrl?: string
+  }): RegistrationResult
   remove(hostId: string): boolean
 } {
   const read = (): HostRegistration[] => {
@@ -115,6 +125,12 @@ export function hostRegistry(storage: RegistryStorage, now: () => number = Date.
       }
       const address = normalizeAddress(input.address)
       if (!address.ok) return { ok: false, error: { kind: 'bad-address', detail: address.detail } }
+      let launchUrl: string | undefined
+      if (input.launchUrl !== undefined && input.launchUrl.trim() !== '') {
+        const parsed = normalizeLaunchUrl(input.launchUrl, address.origin)
+        if (!parsed.ok) return { ok: false, error: { kind: 'bad-address', detail: parsed.detail } }
+        launchUrl = parsed.url
+      }
       const entries = read()
       if (entries.some(entry => entry.hostId === hostId)) {
         return {
@@ -126,6 +142,7 @@ export function hostRegistry(storage: RegistryStorage, now: () => number = Date.
         hostId,
         hostTitle: input.hostTitle.trim() === '' ? hostId : input.hostTitle.trim(),
         address: address.origin,
+        ...(launchUrl === undefined ? {} : { launchUrl }),
         createdAt: now(),
       }
       write([...entries, entry])
@@ -150,10 +167,31 @@ function parseEntry(item: unknown): HostRegistration | undefined {
   if (typeof address !== 'string' || normalizeAddress(address).ok !== true) return undefined
   const hostTitle = record['hostTitle']
   const createdAt = record['createdAt']
+  const launchUrl = record['launchUrl']
   return {
     hostId,
     hostTitle: typeof hostTitle === 'string' && hostTitle !== '' ? hostTitle : hostId,
     address,
+    ...(typeof launchUrl === 'string' && launchUrl !== '' ? { launchUrl } : {}),
     createdAt: typeof createdAt === 'number' && Number.isFinite(createdAt) ? createdAt : 0,
   }
+}
+
+function normalizeLaunchUrl(input: string, expectedOrigin: string): { readonly ok: true; readonly url: string } | { readonly ok: false; readonly detail: string } {
+  let parsed: URL
+  try {
+    parsed = new URL(input.trim())
+  } catch {
+    return { ok: false, detail: 'launchUrl 必须是完整 URL' }
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return { ok: false, detail: 'launchUrl 只支持 http/https' }
+  }
+  if (parsed.origin !== expectedOrigin) {
+    return { ok: false, detail: `launchUrl 的源（${parsed.origin}）必须与地址（${expectedOrigin}）一致` }
+  }
+  if (parsed.searchParams.get('token') === null || parsed.searchParams.get('token') === '') {
+    return { ok: false, detail: 'launchUrl 必须包含 ?token=' }
+  }
+  return { ok: true, url: parsed.toString() }
 }

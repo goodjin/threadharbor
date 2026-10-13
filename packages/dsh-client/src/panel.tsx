@@ -30,7 +30,7 @@ import type { AgentDescriptor, GatewayResult } from './gateway.ts'
 import type { ProbeOutcome } from './probe.ts'
 import { probeReach } from './reach.ts'
 import type { ReachOutcome } from './reach.ts'
-import type { HostIdentity, HostRegistration, RegistrationResult, SshConnectionInput, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
+import type { HostIdentity, HostRegistration, RegistrationResult, SshAccessMode, SshConnectionInput, SshDeployResult, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
 import type { HostSnapshot } from '@threadharbor/dsh-host-federation'
 import type { HostStorePosture } from './host-store.ts'
 import {
@@ -63,7 +63,12 @@ export type ProbeStarter = (presetId: string) => Promise<ProbeOutcome>
 /** The host registry, as the panel reads and edits it. */
 export type HostRegistryPort = {
   list(): readonly HostRegistration[]
-  add(input: { readonly hostId: string; readonly hostTitle: string; readonly address: string }): RegistrationResult
+  add(input: {
+    readonly hostId: string
+    readonly hostTitle: string
+    readonly address: string
+    readonly launchUrl?: string
+  }): RegistrationResult
   remove(hostId: string): boolean
 }
 
@@ -436,7 +441,7 @@ function SshDeploySection(props: {
   readonly hostTitle: string
   readonly onHostIdChange: (value: string) => void
   readonly onHostTitleChange: (value: string) => void
-  readonly onDeployed: (address: string) => void
+  readonly onDeployed: (result: SshDeployResult) => void
   readonly onError: (message: string) => void
 }): ReactNode {
   const [target, setTarget] = useState('')
@@ -452,6 +457,10 @@ function SshDeploySection(props: {
   const [approvedFingerprint, setApprovedFingerprint] = useState('')
   const [busy, setBusy] = useState<'inspect' | 'deploy' | undefined>(undefined)
   const [progress, setProgress] = useState<SshDeployOperationView | undefined>(undefined)
+  const [accessMode, setAccessMode] = useState<SshAccessMode>('tunnel')
+  const [bindHost, setBindHost] = useState('')
+  const [trustedHost, setTrustedHost] = useState('')
+  const [deployed, setDeployed] = useState<SshDeployResult | undefined>(undefined)
 
   const sshPayload = (): SshConnectionInput => {
     const base: SshConnectionInput = { target: target.trim() }
@@ -496,6 +505,9 @@ function SshDeploySection(props: {
       hostTitle: props.hostTitle.trim() === '' ? props.hostId.trim() : props.hostTitle.trim(),
       ssh: { ...sshPayload(), hostKeyFingerprint: approvedFingerprint },
       ...(remoteWebPort.trim() === '' ? {} : { remoteWebPort: Number(remoteWebPort) }),
+      accessMode,
+      ...(bindHost.trim() === '' ? {} : { bindHost: bindHost.trim() }),
+      ...(trustedHost.trim() === '' ? {} : { trustedHost: trustedHost.trim() }),
     }).then(started => {
       if (!started.ok) {
         setBusy(undefined)
@@ -512,17 +524,62 @@ function SshDeploySection(props: {
           props.onError(done.value.error ?? '部署失败')
           return
         }
-        props.onDeployed(done.value.result.endpoint)
+        setDeployed(done.value.result)
+        props.onDeployed(done.value.result)
       })
     })
+  }
+
+  const copyLaunchUrl = (): void => {
+    if (deployed === undefined) return
+    void navigator.clipboard.writeText(deployed.launchUrl)
   }
 
   return (
     <div data-ssh-deploy="" className={styles.sshSection}>
       <p className={styles.note}>
         SSH 自动部署在本机（提供 Web 页面的那台机器）上执行：私钥路径指<strong>这台机器</strong>上的绝对路径；
-        粘贴私钥或密码只发给本机 DSH 进程，不会写入日志。
+        粘贴私钥或密码只发给本机 DSH 进程，不会写入日志。非 loopback 绑定不会使用 0.0.0.0，仍依赖 DSH 的 <code>?token=</code> 换 cookie。
       </p>
+      <fieldset className={styles.accessModes}>
+        <legend className={styles.summary}>访问方式</legend>
+        <label className={styles.sshKeyRow}>
+          <input type="radio" name="access-mode" checked={accessMode === 'tunnel'} onChange={() => { setAccessMode('tunnel') }} />
+          <span>本机 SSH 隧道（远端只监听 127.0.0.1，登记 <code>http://127.0.0.1:&lt;本地端口&gt;</code>）</span>
+        </label>
+        <label className={styles.sshKeyRow}>
+          <input type="radio" name="access-mode" checked={accessMode === 'tailscale'} onChange={() => { setAccessMode('tailscale') }} />
+          <span>Tailscale 直连（远端绑定 Tailscale IPv4，不建隧道；需本机也在同一 Tailnet）</span>
+        </label>
+        <label className={styles.sshKeyRow}>
+          <input type="radio" name="access-mode" checked={accessMode === 'custom'} onChange={() => { setAccessMode('custom') }} />
+          <span>自定义绑定地址（具体 IP 或主机名，配合 <code>--trusted-host</code>）</span>
+        </label>
+      </fieldset>
+      {accessMode === 'tailscale'
+        ? (
+            <label className={styles.field}>
+              绑定地址（可选，留空则远端执行 <code>tailscale ip -4</code>）
+              <input className={styles.input} value={bindHost} onChange={event => { setBindHost(event.target.value) }} placeholder="100.x.x.x 或 machine.tail.ts.net" />
+            </label>
+          )
+        : undefined}
+      {accessMode === 'custom'
+        ? (
+            <label className={styles.field}>
+              绑定地址（必填）
+              <input className={styles.input} value={bindHost} onChange={event => { setBindHost(event.target.value) }} placeholder="100.x.x.x" />
+            </label>
+          )
+        : undefined}
+      {accessMode !== 'tunnel'
+        ? (
+            <label className={styles.field}>
+              --trusted-host（可选，MagicDNS 名）
+              <input className={styles.input} value={trustedHost} onChange={event => { setTrustedHost(event.target.value) }} placeholder="mybox.tail1234.ts.net" />
+            </label>
+          )
+        : undefined}
       <div className={styles.formGrid}>
         <label className={styles.field}>
           SSH 主机
@@ -569,7 +626,7 @@ function SshDeploySection(props: {
                 </label>
               )}
         <label className={styles.field}>
-          远端 DSH Web 端口（loopback）
+          远端 DSH Web 端口
           <input className={styles.input} value={remoteWebPort} onChange={event => { setRemoteWebPort(event.target.value) }} />
         </label>
       </div>
@@ -605,6 +662,18 @@ function SshDeploySection(props: {
               {progress.progress.detail}
               {progress.status === 'failed' && progress.error !== undefined ? `（${progress.error}）` : ''}
             </p>
+          )
+        : undefined}
+      {deployed !== undefined
+        ? (
+            <div data-ssh-launch-url="" className={styles.launchUrlBox}>
+              <p className={styles.stateLine}>打开链接即可换 cookie 上线（已写入登记）：</p>
+              <code className={styles.launchUrlText}>{deployed.launchUrl}</code>
+              <div className={styles.formActions}>
+                <button type="button" className={styles.action} data-action="copy-launch-url" onClick={copyLaunchUrl}>复制链接</button>
+                <a className={styles.actionPrimary} data-action="open-launch-url" href={deployed.launchUrl} target="_blank" rel="noreferrer">打开</a>
+              </div>
+            </div>
           )
         : undefined}
       <label className={styles.field}>
@@ -998,20 +1067,22 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
               onHostIdChange={setAddIdDraft}
               onHostTitleChange={setAddTitleDraft}
               onError={message => { setFormMessage({ tone: 'bad', text: message }) }}
-              onDeployed={address => {
+              onDeployed={deployResult => {
                 const result = props.registry.add({
                   hostId: addIdDraft.trim(),
                   hostTitle: addTitleDraft.trim(),
-                  address,
+                  address: deployResult.endpoint,
+                  launchUrl: deployResult.launchUrl,
                 })
                 if (!result.ok) {
                   setFormMessage({ tone: 'bad', text: result.error.detail })
                   return
                 }
                 setRegistryRevision(revision => revision + 1)
-                setFormMessage({ tone: 'ok', text: `已部署并登记：${address}。请用该地址打开远端页面（含 token）后，该行才会显示在线。` })
-                setAddMode('manual')
-                setView({ page: 'list' })
+                setFormMessage({
+                  tone: 'ok',
+                  text: `已登记 ${deployResult.endpoint}。点「打开」在新标签页完成 token 交换后，跨标签页频道会显示在线。`,
+                })
               }}
             />
           </section>
@@ -1115,6 +1186,18 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                                   : reach.kind === 'timeout'
                                     ? `测不通：${reach.ms} ms 内无应答（超时）。`
                                     : `测不通：${reach.reason}。`}
+                          </p>
+                        )
+                      : undefined}
+                    {registration.launchUrl !== undefined
+                      ? (
+                          <p data-registry-launch="" className={styles.stateLine}>
+                            <a className={styles.actionPrimary} href={registration.launchUrl} target="_blank" rel="noreferrer">打开（含 token）</a>
+                            <button
+                              type="button"
+                              className={styles.action}
+                              onClick={() => { void navigator.clipboard.writeText(registration.launchUrl ?? '') }}
+                            >复制链接</button>
                           </p>
                         )
                       : undefined}

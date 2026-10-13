@@ -14,6 +14,7 @@ import { OperationStore } from './ssh/operations.ts'
 import { deploymentChannel, redactSshForLog } from './ssh/parse.ts'
 import type { SshDeployOperationView, SshDeployRequest } from './ssh/types.ts'
 import { isValidHostId } from './identity.ts'
+import { optionalHost, parseAccessMode, validateBindHost } from './ssh/access.ts'
 
 export const SSH_DEPLOY_ENTRY_ID = 'threadharbor-ssh-deploy'
 
@@ -175,12 +176,23 @@ function parseDeployRequest(record: Record<string, unknown>): SshDeployRequest {
   const hostTitle = typeof record['hostTitle'] === 'string' ? record['hostTitle'].trim() : hostId
   const remoteWebPort = typeof record['remoteWebPort'] === 'number' ? record['remoteWebPort'] : undefined
   const upgrade = record['upgrade'] === true
+  const accessMode = parseAccessMode(record['accessMode'])
+  const bindHost = optionalHost(record['bindHost'], 'bindHost')
+  const trustedHost = optionalHost(record['trustedHost'], 'trustedHost')
+  if (accessMode === 'custom') {
+    if (bindHost === undefined) throw new Error('custom 访问模式必须提供 bindHost')
+    validateBindHost(bindHost)
+  }
+  if (bindHost !== undefined) validateBindHost(bindHost)
   const ssh = record['ssh']
   return {
     hostId,
     hostTitle: hostTitle === '' ? hostId : hostTitle,
     ...(remoteWebPort === undefined ? {} : { remoteWebPort }),
     upgrade,
+    accessMode,
+    ...(bindHost === undefined ? {} : { bindHost }),
+    ...(trustedHost === undefined ? {} : { trustedHost }),
     ssh: ssh as SshDeployRequest['ssh'],
   }
 }

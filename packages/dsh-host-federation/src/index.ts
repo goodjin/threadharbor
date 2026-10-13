@@ -10,6 +10,7 @@ export type { HostRegistration, RegistrationError, RegistrationResult, RegistryS
 export { HOST_STORE_ENTRY_ID } from './host-store-id.ts'
 export { SSH_DEPLOY_ENTRY_ID } from './ssh-deploy.ts'
 export type {
+  SshAccessMode,
   SshConnectionInput,
   SshDeployOperationView,
   SshDeployProgress,
