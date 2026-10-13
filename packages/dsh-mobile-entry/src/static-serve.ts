@@ -51,13 +51,28 @@ export interface MobileRoute {
   handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
 }
 
+/** 官方 admit 的准入结果（官方 PeerAdmission 的最小投影）：准入给 peer，拒绝给 401 | 403。 */
+export type MobileAdmission = { readonly peer: unknown } | { readonly rejection: 401 | 403 }
+
+/**
+ * 本插件用到的官方 connection 服务面：index 到访的令牌交换（authorizeIndex）、
+ * pair-url 的准入（admit，与官方 /api 同一处置）与带令牌手机根网址的铸造
+ * （authenticatedUrl）。成员是官方 HostConnectionService 的最小投影，本包各
+ * 路由模块按需取用。
+ */
+export interface MobileConnection extends AuthorizeIndexConnection {
+  /** 官方准入：请求事实里只有 headers 是必填；通过给 peer，拒绝给 401 | 403。 */
+  admit(request: { readonly headers: Readonly<Record<string, string | readonly string[] | undefined>> }): MobileAdmission
+  /** 把进程令牌追加为查询参数，返回保留 authority 与挂载点的带令牌网址。 */
+  authenticatedUrl(baseUrl: string): string
+}
+
 export interface MobileRouteContext {
   effect(factory: () => unknown, label?: string): unknown
   webServer: {
     register(route: MobileRoute): () => void
   }
-  /** 官方 connection 服务面：index 到访的令牌交换经它完成（本任务只用 authorizeIndex）。 */
-  connection: AuthorizeIndexConnection
+  connection: MobileConnection
 }
 
 const NOT_FOUND: MobileAsset = { status: 404 }
