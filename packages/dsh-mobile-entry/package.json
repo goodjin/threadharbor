@@ -1,0 +1,18 @@
+{
+  "name": "@threadharbor/dsh-mobile-entry",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.4"
+  }
+}

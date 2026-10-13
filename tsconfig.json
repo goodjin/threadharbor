@@ -5,6 +5,7 @@
     { "path": "packages/dsh-acp-agent" },
     { "path": "packages/dsh-preset-dispatch" },
     { "path": "packages/dsh-host-federation" },
+    { "path": "packages/dsh-mobile-entry" },
     { "path": "packages/zcode-acp" },
     { "path": "tsconfig.plugin.json" }
   ]

@@ -31,6 +31,10 @@
       name: '@threadharbor/dsh-host-federation/tailscale'
     - id: threadharbor-ssh-deploy
       name: '@threadharbor/dsh-host-federation/ssh-deploy'
+    # 手机端独立入口（宿主侧）：手机页静态资源 + peers / pair-url 接口。
+    # 本行先挂空骨架入口（threadharbor-mobile-entry），行为随后续任务展开。
+    - id: threadharbor-mobile-entry
+      name: '@threadharbor/dsh-mobile-entry'
     # 名册过滤器:下面五个 agent 仍然注册成 preset——急切装载让它们的模型
     # 进全局目录(模型列表可切换),model→preset 跟随、会话交接也都靠注册。
     # 但注册同时会把它们列进 preset 选择器,和模型列表重复。这行在名册的
