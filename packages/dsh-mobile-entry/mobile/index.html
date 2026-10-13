@@ -1,12 +1,19 @@
 <!doctype html>
-<!-- 手机页占位壳：只有这一页，Task 8 会把真正的应用页换进来。不放应用逻辑。 -->
+<!-- 手机页应用壳（无构建链）：本页只挂容器与资源引用——界面与文案出自
+     views.js 纯函数，编排与 DOM 挂接在 app.js，样式在 app.css。资源用绝对
+     路径：/threadharbor/mobile 与 /threadharbor/mobile/ 两种拼写都伺服本页，
+     相对路径在无斜杠拼写下会落到错误前缀。 -->
 <html lang="zh">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>threadharbor mobile</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="light dark">
+    <title>ThreadHarbor 手机端</title>
+    <link rel="stylesheet" href="/threadharbor/mobile/app.css">
   </head>
   <body>
-    <p>threadharbor mobile：占位壳，正式页面随后续任务换入。</p>
+    <div id="app"></div>
+    <noscript><p class="boot-loading">本页需要启用 JavaScript 才能连接主机。</p></noscript>
+    <script type="module" src="/threadharbor/mobile/app.js"></script>
   </body>
 </html>

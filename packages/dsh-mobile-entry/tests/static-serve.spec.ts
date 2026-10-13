@@ -51,11 +51,13 @@ describe('resolveMobileAsset（手机页资源解析）', () => {
   })
 
   it('缺省目录参数时读包内 mobile/', () => {
+    // Task 8 换真应用壳后不再对正文做短语断言（壳文案自有 views.spec/app.spec
+    // 管着），这里只钉「读得到、是 HTML」。
     const result = resolveMobileAsset('/threadharbor/mobile')
     expect(result.status).toBe(200)
     if (result.status === 200) {
       expect(result.contentType).toBe('text/html')
-      expect(result.body).toContain('threadharbor mobile')
+      expect(result.body).toContain('<script type="module"')
     }
   })
 
@@ -250,10 +252,11 @@ describe('prefix 路由的 index 准入（带令牌经官方 authorizeIndex 换 
   it('非 index 资源即使带令牌也按静态资源解析（不经封装，不委托）', () => {
     // handler 服务包内真实 mobile/ 目录（与 Task 2 的 handler 用例同一约定），
     // 这里用不存在的资源：断言点在「带令牌也不触发委托」，不在资源本身。
+    // （Task 8 起 app.js 已真实存在，占位用例改用确实没有的资源名。）
     const { routes, ctx, connection } = captureRoutes()
     registerMobileRoutes(ctx, {})
     const serve = routes.find(route => route.kind === 'prefix')!
-    const state = call(serve.handler, { method: 'GET', url: '/threadharbor/mobile/app.js?token=abc123' })
+    const state = call(serve.handler, { method: 'GET', url: '/threadharbor/mobile/nope.js?token=abc123' })
     expect(state.status).toBe(404)
     expect(connection.calls).toHaveLength(0)
   })
