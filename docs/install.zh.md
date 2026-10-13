@@ -92,6 +92,52 @@ dsh --profile web --dump-config
 
 输出中应包含 `threadharbor-gateway` 和 `threadharbor-client`，官方 `ui-sidebar` 与 `ui-conversation` 两行应被 profile patch 禁用。若 DSH 报某个包无法解析，先在源码 checkout 重新运行 `corepack pnpm install` 和 `pnpm run build`；npm 安装则运行 `dsh plugin --profile web install` 修复 profile 依赖。
 
+## 手机通道（Android，经 Tailscale）
+
+手机装上 Tailscale 加入同一私网后，可以打开某台机器的 `https://<机器名>.<tailnet>.ts.net/threadharbor/mobile/`：看那台机器的会话、发消息、批权限、停止回合。手机页的界面与配对体验见 [mobile-client.zh.md](./mobile-client.zh.md)，下面是一次性配置。
+
+### 一次性配置
+
+1. **发布端口。** 在提供页面的机器上运行：
+
+   ```sh
+   scripts/mobile-setup.sh <dsh端口>
+   ```
+
+   脚本读本机 Tailscale 的 DNS 名，执行 `tailscale serve --bg <dsh端口>`（把回环端口发布为 `https://<机器名>.<tailnet>.ts.net/`，仅 tailnet 内可达），并把第 2、3 步要抄的配置原样打印出来；tailscale 不可用时非零退出并说明原因。撤销发布用 `tailscale serve reset`。
+
+   想手工做，等价命令是 `tailscale serve --bg <dsh端口>`；本机 ts.net 名用 `tailscale status --json` 里 `Self.DNSName` 查（注意它结尾带一个点，抄进配置时不要带）。
+
+2. **dsh 启动时加信任主机**（不加的话，手机在该域名下的一切 API 调用会被 403 拒绝）：
+
+   ```sh
+   dsh --profile web --trusted-host <机器名>.<tailnet>.ts.net --port <dsh端口>
+   ```
+
+   `--trusted-host` 可重复传入多个。开发实例走 `scripts/dev.sh` 时，导出环境变量即可透传：
+
+   ```sh
+   THREADHARBOR_TRUSTED_HOST=<机器名>.<tailnet>.ts.net scripts/dev.sh restart web
+   ```
+
+3. **配置 mobileOrigin。** 在 profile 的 cordis.patch.yml（`$DSH_HOME/profiles/web/cordis.patch.yml`）里加一条指向入口行的配置覆盖：
+
+   ```yaml
+   - id: threadharbor-mobile-entry
+     config:
+       mobileOrigin: https://<机器名>.<tailnet>.ts.net
+   ```
+
+   该字段只收 https 源：不带路径、查询、结尾斜杠；写错时 DSH 装载即失败并说明原因（能解析但不规范的形式，如带冗余端口，会报出规范化写法）。改完重启 `dsh --profile web`，可用 `dsh --profile web --dump-config` 核对该字段已生效。
+
+### 配对
+
+每台机器各自配对一次：在该机的桌面端打开侧栏「手机配对」面板，用手机扫面板上的二维码（内容是该机 `/threadharbor/mobile/pair-url` 返回的带令牌网址）。首次配对、换手机、凭据过期都重新扫一次。二维码与网址含进程凭据，勿截图外传。serve 的发布由 tailscaled 持久保存（一般电脑重启后仍有效）；若重启后手机连不上，重跑一遍发布命令即可。dsh 端口变更后需重跑一次发布命令。
+
+### 备用通道：SSH 隧道
+
+`tailscale serve` 不可用时的临时替代：在与主机同一网络里的手机上（例如 Termux）把本机 DSH 端口经 SSH 转发出来，`ssh -L <本地端口>:127.0.0.1:<dsh端口> <主机>`，然后在手机浏览器打开 `http://127.0.0.1:<本地端口>/`，用桌面端启动时打印的带 `?token=…` 的官方网址完成首次登录（把其中的端口换成 `<本地端口>`）。这条通道通向桌面样式的页面入口，没有手机页的扫码配对——配对二维码依赖的 `mobileOrigin` 只收 https 源，隧道地址不参与它。
+
 ## 首次使用
 
 1. 启动 `dsh --profile web` 并打开页面。
