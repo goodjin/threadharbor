@@ -14,6 +14,10 @@
       "types": "./src/host-store.ts",
       "default": "./src/host-store.ts"
     },
+    "./tailscale": {
+      "types": "./src/tailscale.ts",
+      "default": "./src/tailscale.ts"
+    },
     "./package.json": "./package.json"
   },
   "dependencies": {

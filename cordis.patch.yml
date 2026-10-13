@@ -22,6 +22,13 @@
     # dsh-client 的 host-store.ts，写的是同一个 id 的命名空间。
     - id: threadharbor-host-store
       name: '@threadharbor/dsh-host-federation/host-store'
+    # 主机侧的 Tailscale 桥：在提供页面的这台机器上跑 `tailscale status
+    # --json`，把 peer 清单写进 threadharbor-host-store 的 data 字典
+    # （dsh.tailscale.peers），浏览器侧的「从 Tailscale 选」读同一个键。
+    # 面板自己没有执行主机命令的通道，所以这半边桥必须在这里。没有自己的
+    # volatile 字段，就不会多出一个设置页；刷新走 data.dsh.tailscale.refresh。
+    - id: threadharbor-tailscale
+      name: '@threadharbor/dsh-host-federation/tailscale'
     - id: acp-codex
       name: '@deepseek-ai/dsh-agent-preset'
       config:
