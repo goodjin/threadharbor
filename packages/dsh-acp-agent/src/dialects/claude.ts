@@ -59,6 +59,33 @@ const CHATTER = new Set([
 export const claudeDialect: AcpDialect = {
   id: 'claude',
 
+  capabilities: {
+    cancelsTurns: true,
+    // claude renders image blocks as text placeholders, so prompts must not
+    // attach images to it; its tool frames do carry a live in-progress status.
+    acceptsImageContent: false,
+    toolFrameShape: 'in_progress',
+    commandVia: 'tool_frame',
+    // Anthropic tool names (the `_meta.claudeCode.toolName` values) translated
+    // onto the names DSH renders. Every VALUE was checked against the reference
+    // DSH client (2026-10-13): the `classifyTool` table in
+    // ui-tool/.../tool-call-model.ts and the keyed `tool.call.toolview`
+    // registrations. `todo_write` — not `todo` — is the key the todo row
+    // registers; `read`/`bash`/... are both classified and keyed.
+    toolNameMap: {
+      Read: 'read',
+      Edit: 'edit',
+      Bash: 'bash',
+      Write: 'write',
+      Grep: 'grep',
+      Glob: 'glob',
+      TodoWrite: 'todo_write',
+      WebFetch: 'web_fetch',
+      WebSearch: 'web_search',
+      Skill: 'skill',
+    },
+  },
+
   foldTool(carried, update) {
     const toolCallId = typeof update['toolCallId'] === 'string' ? update['toolCallId'] : randomUUID()
     const meta = record(record(update['_meta'])['claudeCode'])

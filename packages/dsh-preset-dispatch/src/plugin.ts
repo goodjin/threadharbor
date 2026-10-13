@@ -18,11 +18,16 @@
 
 import { holdsAcpDispatch, presetIdOf } from './dispatch.ts'
 import type { AgentLike, PresetResolver } from './dispatch.ts'
-import type { PermissionDecision, PermissionRequest } from '@threadharbor/dsh-acp-agent'
+import type {
+  AskQuestionAnswer,
+  AskQuestionRequest,
+  PermissionDecision,
+  PermissionRequest,
+} from '@threadharbor/dsh-acp-agent'
 import { buildPresetTable, openSessionsOf, sessionsRegistry } from './registry.ts'
 import type { AcpPresetConfig, PresetConfig } from './registry.ts'
 import { makeSessionFactory } from './factory.ts'
-import { modelsOfPreset, registerCatalog } from './catalog-registration.ts'
+import { modelsOfPreset, registerCatalog, runtimeModels } from './catalog-registration.ts'
 import { mountSwitchOnForeignModelRequest, servicesOf } from './switch-mount.ts'
 import { followModelSelection, followPresetSelection } from './follow.ts'
 import { switchShared } from './switch-shared.ts'
@@ -75,6 +80,13 @@ export type AcpPluginDeps = {
    */
   answerPermission?(request: PermissionRequest): Promise<PermissionDecision>
   /**
+   * Put the agent's question in front of a human.
+   *
+   * Omitted when the host has no question service, in which case the agent's
+   * question keeps its benign auto-answer.
+   */
+  answerAskQuestion?(request: AskQuestionRequest): Promise<AskQuestionAnswer>
+  /**
    * Say what went wrong on a session this row claimed.
    *
    * Optional because most callers only care that a session was or was not taken
@@ -113,6 +125,13 @@ export function applyAcpPlugin(
   deps: AcpPluginDeps,
 ): void {
   const presets: PresetConfig = { presets: { [presetId]: config } }
+  // The ledger the factory feeds and the catalog reads, created BEFORE the
+  // factory so the wiring below can hand both ends the same object. Created
+  // here rather than left to the standalone entry because this is the function
+  // the loaded entry actually calls — a report recorded anywhere else is the
+  // catalogue bug again: the runner would drop every `session/new` model list
+  // and `listModels` would silently degrade to the configured list forever.
+  const runtimeModelReports = runtimeModels()
   const factory = makeSessionFactory(presets, {
     // Refusing without asking is the safe default and the honest one when there
     // is nowhere to ask. Where there IS a host that answers, use it — a row
@@ -121,7 +140,9 @@ export function applyAcpPlugin(
     answerPermission: request => (deps.answerPermission === undefined
       ? Promise.resolve({ outcome: 'reject' })
       : deps.answerPermission(request)),
+    ...(deps.answerAskQuestion === undefined ? {} : { answerAskQuestion: deps.answerAskQuestion }),
     ...(deps.transport === undefined ? {} : { transport: deps.transport }),
+    onRuntimeModels: (reportedPresetId, models) => { runtimeModelReports.record(reportedPresetId, models) },
   })
   const dialect = factory.dialectFor(presetId, config)
   // An unknown agent is a configuration mistake. Taking sessions over anyway
@@ -162,6 +183,13 @@ export function applyAcpPlugin(
       take: sessionId => switchShared.takeHandover(sessionId),
       restore: (sessionId, text) => switchShared.restoreHandover(sessionId, text),
     },
+    // The session's own transcript, for a first request whose external
+    // conversation starts empty — a host restart lost the connection but not
+    // the log. Read through the same shared fabric that wired the session
+    // reader; a host without it replays nothing and the turn runs as before.
+    replay: {
+      take: sessionId => switchShared.replayPrimer(sessionId),
+    },
   })
   // What makes the external agent's models appear in the host's own model
   // picker: the catalog is global to this Host generation and already read by
@@ -169,8 +197,15 @@ export function applyAcpPlugin(
   // the function the loaded entry actually calls — a registration anywhere
   // else is the catalogue bug again. Silent when the host has no registry; the
   // picker then simply shows nothing of ours.
+  //
+  // The picker's list reads the agent's own `session/new` report once a
+  // session has opened (the runner feeds the ledger above through the
+  // factory); until then it degrades to the configured list, so a working
+  // agent never shows an empty group just because nobody has asked it a
+  // question yet.
   const catalogDeps: CatalogDeps = {
     modelsOf: presetId => modelsOfPreset(presets, factory, presetId),
+    runtimeModelsOf: presetId => runtimeModelReports.modelsOf(presetId),
     dialectOf: presetId => table.get(presetId)?.dialect,
   }
   // A model request landing on one of these routes for a session this row does

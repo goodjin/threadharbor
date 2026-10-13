@@ -19,9 +19,11 @@
 // as a typo, which is the one thing a registration must never be.
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
-import type { PropsRuntime, SlotCore } from '@deepseek-ai/dsh-client-ui-slots'
+import type { PropsLocale, PropsRuntime, SlotCore } from '@deepseek-ai/dsh-client-ui-slots'
 import { createElement, useSyncExternalStore } from 'react'
 import styles from './switch-progress.module.css'
+import { NAMESPACE } from './locales.ts'
+import type { ProgressKey } from './locales.ts'
 
 /** Where the switch stands: the new session is being asked for, or is here. */
 export type SwitchProgressPhase = 'preparing' | 'loading' | 'ready'
@@ -68,10 +70,10 @@ export const FINISH_DELAY_MS = 600
 const LAYER_ID = 'threadharbor-switch-progress'
 
 /** What one step says on screen; the target session's new agent names itself. */
-const PHASE_TEXT: Record<SwitchProgressPhase, (target: string) => string> = {
-  preparing: target => `正在准备打开新会话 · ${target}`,
-  loading: target => `正在读新会话的历史 · ${target}`,
-  ready: target => `新会话已就绪，正在切换 · ${target}`,
+const PHASE_KEY: Record<SwitchProgressPhase, ProgressKey> = {
+  preparing: 'progress.preparing',
+  loading: 'progress.loading',
+  ready: 'progress.ready',
 }
 
 /**
@@ -112,8 +114,10 @@ export function createSwitchProgressStore(): SwitchProgressStore {
   }
 }
 
-/** Component props: the framework runtime share plus the store the registration injects. */
-export type SwitchProgressLayerProps = PropsRuntime<'shell.overlay'> & { progress: SwitchProgressStore }
+/** Component props: the framework runtime share, the locale `t` seat, and the store the registration injects. */
+export type SwitchProgressLayerProps = PropsRuntime<'shell.overlay'>
+  & PropsLocale<typeof NAMESPACE>
+  & { progress: SwitchProgressStore }
 
 /**
  * The bar itself: a line along the top of the frame and one line of text.
@@ -125,7 +129,7 @@ export function SwitchProgressLayer(props: SwitchProgressLayerProps): ReturnType
   const store = props.progress
   const current = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot).current
   if (current === undefined) return null
-  const text = PHASE_TEXT[current.phase](current.target)
+  const text = props.t(PHASE_KEY[current.phase], { target: current.target })
   return createElement(
     'div',
     { className: styles.layer, 'data-phase': current.phase },
@@ -214,7 +218,9 @@ export function startSwitchProgressSurface(params: {
 }): SwitchProgressSurface {
   const { ctx, store, slots } = params
   slots.inject('shell.overlay', () => slots.register(
-    { name: 'shell.overlay', id: LAYER_ID, inject: () => ({ progress: store }) },
+    // `locale` puts the framework-synthesized `t` seat on the layer's props;
+    // the dictionaries themselves register in the entry (locales.ts owns them).
+    { name: 'shell.overlay', id: LAYER_ID, locale: NAMESPACE, inject: () => ({ progress: store }) },
     SwitchProgressLayer,
   ))
   return {

@@ -24,9 +24,10 @@
 import type { ConversationLocation, ConversationNodeContext, ConversationNodeDefinition } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { ChatNodeDataMap } from '@deepseek-ai/dsh-client-ui-chat/client'
 import type { TurnEndReasonMap } from '@deepseek-ai/dsh-session/types'
-import type { PropsRuntime, SlotCore } from '@deepseek-ai/dsh-client-ui-slots'
+import type { PropsLocale, PropsRuntime, SlotCore } from '@deepseek-ai/dsh-client-ui-slots'
 import { createElement, useEffect } from 'react'
 import type { SwitchProgressSurface } from './switch-progress.ts'
+import { NAMESPACE } from './locales.ts'
 import styles from './handover.module.css'
 
 /** The ending this plugin owns, merged into the host's ending union. */
@@ -135,8 +136,9 @@ export const agentSwitchHandoverDefinition: ConversationNodeDefinition<HandoverS
  */
 const followedHandovers = new Set<string>()
 
-/** Component props: the framework runtime share plus the navigation callback. */
+/** Component props: the framework runtime share, the locale `t` seat, and the navigation callbacks. */
 export type HandoverCardProps = PropsRuntime<'conversation.chat.node', 'agent-switch-handover'>
+  & PropsLocale<typeof NAMESPACE>
   & {
     openSession: ((sessionId: string) => void) | undefined
     /**
@@ -193,7 +195,7 @@ export function AgentSwitchHandoverCard(props: HandoverCardProps): ReturnType<ty
       createElement(
         'span',
         { className: styles.handoverTitle },
-        `已切换到 ${data.target}，对话已移到新会话`,
+        props.t('handover.title', { target: data.target }),
       ),
       createElement('span', { className: styles.handoverNote }, data.note),
     ),
@@ -204,7 +206,7 @@ export function AgentSwitchHandoverCard(props: HandoverCardProps): ReturnType<ty
         className: styles.handoverOpen,
         onClick: () => { open(data.sessionId) },
       },
-      '打开新会话',
+      props.t('handover.open'),
     ),
   )
 }
@@ -293,7 +295,9 @@ function install(
   // as ui-user-questions registers its Definition: one call, no extra wrap.
   register(agentSwitchHandoverDefinition)
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register(
-    { name: 'conversation.chat.node', key: 'agent-switch-handover', inject: () => ({ openSession, prepare }) },
+    // `locale` puts the framework-synthesized `t` seat on the card's props;
+    // the dictionaries themselves register in the entry (locales.ts owns them).
+    { name: 'conversation.chat.node', key: 'agent-switch-handover', locale: NAMESPACE, inject: () => ({ openSession, prepare }) },
     AgentSwitchHandoverCard,
   ))
 }

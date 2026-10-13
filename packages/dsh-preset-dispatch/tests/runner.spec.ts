@@ -8,6 +8,7 @@
  */
 
 import type { AcpFrame } from '@threadharbor/dsh-acp-agent'
+import { grokDialect } from '@threadharbor/dsh-acp-agent'
 import { describe, expect, it } from 'vitest'
 import { AcpTurnRunner } from '../src/runner.ts'
 import type { AcpClientPort } from '../src/runner.ts'
@@ -65,6 +66,35 @@ describe('AcpTurnRunner', () => {
 
     const news = client.calls.filter(call => call.method === 'session/new')
     expect(news).toHaveLength(1)
+  })
+
+  it('reads the model list off the session/new reply through the dialect', async () => {
+    // The picker serves what the agent reports, so the reply's model list has
+    // to reach the catalog the moment the session opens — read by the dialect,
+    // because the agents disagree on where the list lives.
+    const seen: unknown[] = []
+    const client = fakeClient()
+    await new AcpTurnRunner(client, { cwd: '/tmp', dialect: grokDialect, onModels: models => { seen.push(models) } })
+      .run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
+
+    // fakeClient answers session/new with grok-shaped availableModels.
+    expect(seen).toEqual([[{ id: 'm1', name: 'M1' }]])
+  })
+
+  it('reports a session/new reply that names no models as an empty list, not silence', async () => {
+    // An agent that serves nothing must be able to say so through the same
+    // channel; swallowing the report would leave the previous answer standing.
+    const seen: unknown[] = []
+    const client = fakeClient()
+    client.request = async (method, params) => {
+      client.calls.push({ method, params })
+      if (method === 'session/new') return { sessionId: 's1' }
+      return { stopReason: 'end_turn' }
+    }
+    await new AcpTurnRunner(client, { cwd: '/tmp', dialect: grokDialect, onModels: models => { seen.push(models) } })
+      .run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
+
+    expect(seen).toEqual([[]])
   })
 
   it('authenticates between initialize and session/new when the port has one', async () => {
@@ -161,14 +191,17 @@ describe('AcpTurnRunner', () => {
 
   it('surfaces a failure to open rather than answering with an empty turn', async () => {
     // An empty turn would look to the user like the agent simply had nothing to
-    // say, which is not what happened.
+    // say, which is not what happened. The turn ends as a classified error
+    // instead, its row naming the reconnect hint and the original cause.
     const client = fakeClient()
     client.request = async (method, params) => {
       client.calls.push({ method, params })
-      if (method === 'session/new') throw new Error('agent binary missing')
+      if (method === 'session/new') throw new Error('acp agent grok-4.7 could not run: spawn ENOENT')
       return {}
     }
-    await expect(new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })).rejects.toThrow(/agent binary missing/)
+    const result = await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
+    expect(result.end).toMatchObject({ kind: 'error', error: { code: 'ACP_CONNECTION' } })
+    expect((result.end as { error: { message: string } }).error.message).toContain('could not run')
   })
 
   it('feeds text to the stream as frames arrive, not after the turn ends', async () => {
@@ -233,8 +266,14 @@ describe('AcpTurnRunner', () => {
       return {}
     }
     const runner = new AcpTurnRunner(client, { cwd: '/tmp' })
-    await expect(runner.run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })).rejects.toThrow(/turn blew up/)
-    await expect(runner.run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })).rejects.toThrow(/turn blew up/)
+    const first = await runner.run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
+    const second = await runner.run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
+    // Both failures end as classified errors — and the external conversation
+    // still opened only once, so the failure did not turn into re-open churn.
+    // The thrown text is not `acp `-shaped, so it is an internal failure, not
+    // a connection one: the label says so instead of borrowing the hint.
+    expect(first.end).toMatchObject({ kind: 'error', error: { code: 'ACP_INTERNAL' } })
+    expect(second.end).toMatchObject({ kind: 'error', error: { code: 'ACP_INTERNAL' } })
     expect(client.calls.filter(call => call.method === 'session/new')).toHaveLength(1)
     expect(attempts).toBe(2)
   })
@@ -249,8 +288,10 @@ describe('AcpTurnRunner handshake', () => {
       { request: () => new Promise(() => {}), notify: () => {}, onFrame: () => {} },
       { cwd: '/tmp', openTimeoutMs: 20 },
     )
-    await expect(runner.run({ kind: 'enter', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] },
-      { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })).rejects.toThrow(/within 20ms/)
+    const result = await runner.run({ kind: 'enter', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] },
+      { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
+    expect(result.end).toMatchObject({ kind: 'error', error: { code: 'ACP_CONNECTION' } })
+    expect((result.end as { error: { message: string } }).error.message).toContain('within 20ms')
   })
 })
 
@@ -306,7 +347,151 @@ describe('AcpTurnRunner — handed-over conversation', () => {
       },
     })
 
-    await expect(runner.run(DECISION, TURN_OF('s1'))).rejects.toThrow(/agent died/)
+    const result = await runner.run(DECISION, TURN_OF('s1'))
+    expect(result.end.kind).toBe('error')
     expect(restored).toEqual(['s1:【移交记录】'])
+  })
+})
+
+/**
+ * A failed turn's error row is the turn's own end reason: the client renders
+ * its `error.message` verbatim. A raw transport or JSON-RPC string there reads
+ * as noise, so the runner classifies the failure into the actionable copy the
+ * spec names — connection-class ends point at resending, permission-class
+ * ends point at approval/login, and everything else keeps the raw string.
+ */
+describe('AcpTurnRunner — failed turns end with actionable error rows', () => {
+  const TURN_OF = (sessionId: string) => ({
+    sessionId, position: { turn: 1, step: 1 }, produce: () => [], write: () => 1,
+  })
+
+  it('ends a dead connection as an error naming the reconnect hint', async () => {
+    // Measured shape: the transport's death fails every in-flight request with
+    // its close reason ('acp connection closed', a process exit line, …) — no
+    // JSON-RPC reply was involved.
+    const client = fakeClient()
+    client.request = async method => {
+      if (method === 'session/prompt') throw new Error('acp connection closed: agent process exited (1)')
+      if (method === 'session/new') return { sessionId: 's1' }
+      return {}
+    }
+    const result = await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, TURN_OF('s1'))
+    expect(result.end).toMatchObject({
+      kind: 'error',
+      error: { code: 'ACP_CONNECTION' },
+    })
+    const message = (result.end as { error: { message: string } }).error.message
+    expect(message).toContain('重新发送')
+    // The original detail stays on the row: a hint without the cause is a
+    // dead end for anyone diagnosing why the connection dropped.
+    expect(message).toContain('acp connection closed')
+  })
+
+  it('ends an agent permission/auth refusal as an error naming the approval hint', async () => {
+    // Measured shape: an agent refusing the prompt replies with a JSON-RPC
+    // error, which reaches the runner as `acp error: {json}`.
+    const client = fakeClient()
+    client.request = async method => {
+      if (method === 'session/prompt') throw new Error('acp error: {"code":-32000,"message":"authentication required"}')
+      if (method === 'session/new') return { sessionId: 's1' }
+      return {}
+    }
+    const result = await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, TURN_OF('s1'))
+    expect(result.end).toMatchObject({ kind: 'error', error: { code: 'ACP_PERMISSION' } })
+    const message = (result.end as { error: { message: string } }).error.message
+    expect(message).toContain('授权')
+    expect(message).toContain('authentication required')
+  })
+
+  it('shows any other agent rejection as the raw string it sent', async () => {
+    // The spec's third bucket: not a connection problem, not a permission
+    // problem — the row keeps the agent's own error untouched.
+    const raw = 'acp error: {"code":-32603,"message":"Internal error"}'
+    const client = fakeClient()
+    client.request = async method => {
+      if (method === 'session/prompt') throw new Error(raw)
+      if (method === 'session/new') return { sessionId: 's1' }
+      return {}
+    }
+    const result = await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, TURN_OF('s1'))
+    expect(result.end).toMatchObject({ kind: 'error', error: { code: 'ACP_ERROR', message: raw } })
+  })
+
+  it('ends a failed session open as a connection error too', async () => {
+    // An agent that never opened (spawn failure, handshake timeout) is the
+    // reconnect case just as much as one that died mid-turn. The shape here is
+    // the transport's own spawn line, which carries the `acp ` marker.
+    const client = fakeClient()
+    client.request = async (method, params) => {
+      client.calls.push({ method, params })
+      if (method === 'session/new') throw new Error('acp agent grok-4.7 could not run: spawn ENOENT')
+      return {}
+    }
+    const result = await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, TURN_OF('s1'))
+    expect(result.end).toMatchObject({ kind: 'error', error: { code: 'ACP_CONNECTION' } })
+    expect(((result.end as { error: { message: string } }).error.message)).toContain('could not run')
+  })
+
+  it('does not dress an internal failure up as a connection problem', async () => {
+    // A bug inside the turn's own handling (a TypeError anywhere around open,
+    // set_mode or the prompt plumbing) is not the agent's connection dying.
+    // Labeling it ACP_CONNECTION would tell the user to resend and reconnect —
+    // advice that cannot help — so a non-`acp `-shaped error gets the neutral
+    // internal label, with the detail kept for whoever diagnoses it.
+    const client = fakeClient()
+    client.request = async method => {
+      if (method === 'session/new') return { sessionId: 's1' }
+      if (method === 'session/prompt') throw new TypeError('cannot read properties of undefined (reading sessionId)')
+      return {}
+    }
+    const result = await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, TURN_OF('s1'))
+    expect(result.end).toMatchObject({ kind: 'error', error: { code: 'ACP_INTERNAL' } })
+    const message = (result.end as { error: { message: string } }).error.message
+    expect(message).toContain('cannot read properties of undefined')
+    expect(message).not.toContain('重新发送')
+  })
+
+  it('writes the frames the agent sent before the connection died', async () => {
+    // The agent said things before dying; a turn that dropped them would erase
+    // work the user watched happen. The failure path now runs the same
+    // produce/write tail a completed turn does.
+    const client = fakeClient()
+    let emit: (frame: AcpFrame) => void = () => {}
+    client.request = async method => {
+      if (method === 'session/new') return { sessionId: 's1' }
+      if (method === 'session/prompt') {
+        emit({ jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'partial thought' } } } })
+        throw new Error('acp connection closed')
+      }
+      return {}
+    }
+    client.onFrame = handler => { emit = handler }
+    const produced: unknown[] = []
+    const written: unknown[] = []
+    await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, {
+      sessionId: 's1', position: { turn: 1, step: 1 },
+      produce: result => { produced.push(result); return [] },
+      write: events => { written.push(events); return undefined },
+    })
+    expect(produced).toHaveLength(1)
+    expect(written).toHaveLength(1)
+  })
+
+  it('still ends a stopped turn as aborted even when the prompt then fails', async () => {
+    // The user stopped; whatever error raced out of the dying connection, the
+    // turn is what the user made it — stopped, not broken.
+    const client = fakeClient()
+    client.request = async method => {
+      if (method === 'session/new') return { sessionId: 's1' }
+      if (method === 'session/prompt') throw new Error('acp connection closed')
+      return {}
+    }
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp', abort: () => {
+      const controller = new AbortController()
+      controller.abort()
+      return controller.signal
+    } })
+    const result = await runner.run(DECISION, TURN_OF('s1'))
+    expect(result.end.kind).toBe('aborted')
   })
 })

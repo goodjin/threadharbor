@@ -14,6 +14,42 @@ import type { AcpDialect } from '@threadharbor/dsh-acp-agent'
 import type { AcpPresetConfig, PresetConfig } from './registry.ts'
 
 /**
+ * One model as a live `session/new` reply reported it.
+ *
+ * The same shape `AcpDialect.readModels` returns, keyed by preset so several
+ * configured agents each keep their own report.
+ */
+export type ReportedModel = { readonly id: string; readonly name: string; readonly description?: string }
+
+/**
+ * The models the agents themselves reported, per preset.
+ *
+ * The picker is meant to serve what the agent serves — not the operator's
+ * configured guess that predates the first turn. The runner reads the list off
+ * each `session/new` reply and records it here; the catalog adapter prefers
+ * this report over the configured list the moment one exists.
+ */
+export interface RuntimeModels {
+  /** Record (or replace) one preset's report. A re-opened session reports afresh. */
+  record(presetId: string, models: readonly ReportedModel[]): void
+  /** The preset's latest report, or `undefined` while none has arrived. */
+  modelsOf(presetId: string): readonly ReportedModel[] | undefined
+}
+
+/** One in-memory report ledger, shared by the runner seam and the catalog adapter. */
+export function runtimeModels(): RuntimeModels {
+  const byPreset = new Map<string, readonly ReportedModel[]>()
+  return {
+    record: (presetId, models) => {
+      // Keep only entries an agent could actually serve: a model names itself
+      // with a wire id, and anything else would render as a broken picker row.
+      byPreset.set(presetId, models.filter(model => typeof model?.id === 'string'))
+    },
+    modelsOf: presetId => byPreset.get(presetId),
+  }
+}
+
+/**
  * The provider routes this configuration adds to the catalog.
  *
  * One per preset, named after the preset so the picker's provider column reads

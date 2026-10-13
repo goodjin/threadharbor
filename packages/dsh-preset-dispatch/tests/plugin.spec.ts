@@ -409,3 +409,97 @@ describe('会话停下来的善后', () => {
   })
 })
 
+describe('加载路径的模型报告真的进目录（applyAcpPlugin 端到端）', () => {
+  /**
+   * An agent the takeover can claim, with a real `step` for the installer to
+   * replace — the same shape the loop hands over on `agent/created`.
+   */
+  class StepfulAgent {
+    session: { header: { agentPreset?: string } }
+    constructor(preset: string) {
+      this.session = { header: { agentPreset: preset } }
+    }
+    async step(): Promise<{ kind: 'completed' } | null> {
+      return { kind: 'completed' }
+    }
+  }
+
+  /** A scripted transport: records what was sent, replays what is received. */
+  function scriptedTransport(): AcpTransport & { sent: string[]; receive(frame: string): void } {
+    let line: (frame: string) => void = () => {}
+    const sent: string[] = []
+    return {
+      send: frame => { sent.push(frame) },
+      close: () => {},
+      onLine: handler => { line = handler },
+      onDeath: () => {},
+      sent,
+      /** Exposed so the test can answer requests the way a live agent would. */
+      receive: (frame: string) => { line(frame) },
+    } as AcpTransport & { sent: string[]; receive(frame: string): void }
+  }
+
+  /** Yield long enough for the runner's awaited request to be on the wire. */
+  const settle = (): Promise<void> => new Promise(resolve => { setTimeout(resolve, 0) })
+
+  it('一个回合的 session/new 报告经 applyAcpPlugin 到达 listModels', async () => {
+    // The loaded entry mounts the row through applyAcpPlugin; if the factory's
+    // runtime report had nowhere to land on this path, the picker would
+    // silently serve the configured guess forever. So the whole chain runs
+    // here: mount → takeover → one turn → the catalog adapter answers.
+    const context = ctx()
+    let adapter: { listModels(provider: string): Promise<readonly { id: string; name?: string }[]> } | undefined
+    const withRegistry = Object.assign(context, {
+      get: (key: string) => (key === 'llm'
+        ? { registerAdapter: (_providers: string[], registered: never) => { adapter = registered } }
+        : undefined),
+    })
+
+    const transport = scriptedTransport()
+    applyAcpPlugin(withRegistry, 'acp-grok', {
+      agent: 'grok',
+      url: 'ws://127.0.0.1:2419',
+      // A configured guess the report must replace once it lands.
+      models: [{ id: 'configured-guess', name: 'Configured guess' }],
+    }, {
+      install: (agent, _presetId, _dialect, table) => {
+        installAcpDispatch(agent as never, table, {
+          produce: () => [],
+          write: () => 1,
+          positionOf: () => ({ turn: 1, step: 1 }),
+        })
+      },
+      transport: () => transport,
+    })
+
+    const agent = new StepfulAgent('acp-grok')
+    context.created(agent)
+    const turn = (agent as unknown as { step(d: unknown): Promise<unknown> }).step({ kind: 'enter', messages: [] })
+    // Answer every request as it lands, until the turn settles: initialize,
+    // then session/new carrying the grok-shaped model list, then the prompt.
+    let settled = false
+    void turn.then(() => { settled = true }, () => { settled = true })
+    for (let guard = 0; guard < 100 && !settled; guard += 1) {
+      for (const frame of transport.sent.splice(0)) {
+        const request = JSON.parse(frame) as { id?: number; method?: string }
+        if (request.id === undefined) continue
+        const result = request.method === 'session/new'
+          ? { sessionId: 's1', models: { availableModels: [{ modelId: 'm1', name: 'M1' }] } }
+          : request.method === 'session/prompt'
+            ? { stopReason: 'end_turn' }
+            : {}
+        transport.receive(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }))
+      }
+      await settle()
+    }
+    await turn
+
+    expect(adapter).toBeDefined()
+    const models = await adapter!.listModels('acp:acp-grok')
+    // The agent's own report replaced the configured guess — through the
+    // loaded path, not a side door.
+    expect(models.map(model => model.id)).toEqual(['m1'])
+    expect(models[0]?.name).toBe('M1')
+  })
+})
+

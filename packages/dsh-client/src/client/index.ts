@@ -57,6 +57,8 @@ import { AgentPanel } from '../panel.tsx'
 import type { AgentListPort, AgentPanelProps, ProbeStarter, TailscalePeersResult, TailscalePort } from '../panel.tsx'
 import { registerAgentSwitchHandoverSurface } from '../handover-card.ts'
 import { createSwitchProgressStore, startSwitchProgressSurface } from '../switch-progress.ts'
+import { NAMESPACE, en, zh } from '../locales.ts'
+import type { ClientLocaleKey } from '../locales.ts'
 import { createElement } from 'react'
 
 /** Required browser services. The remote namespace is the gateway's whole door
@@ -71,8 +73,11 @@ import { createElement } from 'react'
  *  conversation events register its Chat Definition, the workspace service is
  *  the stock jump-to-session action. `sessions` is the session object layer:
  *  the switch's progress reads the new session's first page through it, so
- *  the panel swaps onto content that is already there. */
-export const inject = ['slots', 'remote', 'remote.settings', 'uiConversation', 'uiWorkspace', 'sessions']
+ *  the panel swaps onto content that is already there. `locale` is the
+ *  dictionary registry: this entry registers its namespaces there and the
+ *  slot registrations hand the framework-synthesized `t` seat to the
+ *  surfaces whose copy they carry. */
+export const inject = ['slots', 'remote', 'remote.settings', 'uiConversation', 'uiWorkspace', 'sessions', 'locale']
 
 // The panel's pieces are one published surface: the verify-build step reads
 // every export under src/client and requires it in the built artifact, and a
@@ -126,7 +131,6 @@ export type {
 
 /** Shared identity of the sidebar entry and the body it mounts. */
 const PANEL_ID = 'threadharbor-rollup'
-const PANEL_LABEL = '各主机'
 /** Row order in the global panel list; above 100 sits below DSH's own rows. */
 const PANEL_ORDER = 100
 /** How often this tab re-announces itself, and how long silence means gone. */
@@ -168,8 +172,10 @@ export type ClientPanelContext = {
  * the panel came up blank on every load.
  * @param slots - the page's slot registry face.
  * @param face - what the panel body reads.
+ * @param label - the sidebar row's label, re-read per render so it follows the
+ * active locale without re-registering (SlotLabel's thunk form).
  */
-export function registerPanelSlots(slots: PanelSlotHost, face: AgentPanelProps): void {
+export function registerPanelSlots(slots: PanelSlotHost, face: AgentPanelProps, label: () => string): void {
   // Both registrations share PANEL_ID: the sidebar row resolves its active
   // state and the main slot addresses its occupant by the same id.
   slots.inject('main', () => slots.register(
@@ -177,7 +183,7 @@ export function registerPanelSlots(slots: PanelSlotHost, face: AgentPanelProps):
     AgentPanel,
   ))
   slots.inject('sidebar.panellist', () => slots.register(
-    { name: 'sidebar.panellist', id: PANEL_ID, order: PANEL_ORDER, label: PANEL_LABEL },
+    { name: 'sidebar.panellist', id: PANEL_ID, order: PANEL_ORDER, label },
     PanelIcon,
   ))
 }
@@ -313,6 +319,20 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
     log.info(`host store posture: ${JSON.stringify(hostStore.posture())}`)
   })
 
+  // The dictionaries this plugin owns register with the host's locale service;
+  // the slot registrations (progress layer, handover card) declare the
+  // namespace, and the framework synthesizes their typed `t` seat from it.
+  // The sidebar row's label re-reads through a bound `t` so it follows the
+  // active language without re-registering. A missing service degrades to one
+  // log line and the dictionaries' source text — the surfaces keep working.
+  const locale = localeFaceOf(ctx)
+  if (locale === undefined) {
+    log.warn('locale service unavailable — copy renders in the dictionary source language; progress bar, handover card and panel label keep working')
+  } else {
+    ctx.effect(() => locale.register(NAMESPACE, { zh, en }), 'threadharbor: locale dictionary')
+  }
+  const t = locale?.bind(NAMESPACE) ?? ((key: ClientLocaleKey) => zh[key])
+
   const openGateway = (): GatewayOpening => openSessionGateway(ctx)
   // A mount-time read, purely for the self-report: what the host provides may
   // settle later, so absence here is a log line, never a functional gate.
@@ -335,7 +355,7 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
       return () => { window.removeEventListener('storage', handler) }
     },
   }
-  registerPanelSlots(ctx.slots, face)
+  registerPanelSlots(ctx.slots, face, () => t('panel.label'))
 
   // A switched-away turn ends by naming the session that took over. This is
   // what turns that ending into the on-page behavior the user asked for: a
@@ -387,6 +407,27 @@ function readService(ctx: ClientPanelContext, name: string): unknown {
     // below is how gateway.ts reaches the same service.
   }
   return (ctx as unknown as Record<string, unknown>)[name]
+}
+
+/**
+ * The locale service, narrowed to the two calls this entry makes.
+ *
+ * `register` puts this plugin's dictionaries into the host's locale registry
+ * (both shipped languages, or the registration is refused); `bind` returns the
+ * translate function registration-time text reads through.
+ */
+type LocaleFace = {
+  register(ns: string, dictionaries: { zh: Record<string, string>; en: Record<string, string> }): unknown
+  bind(ns: string): (key: string, params?: Record<string, unknown>) => string
+}
+
+/** Read the locale service, or say it is not there. */
+function localeFaceOf(ctx: ClientPanelContext): LocaleFace | undefined {
+  const service = readService(ctx, 'locale')
+  if (!isRecord(service)) return undefined
+  const { register, bind } = service as Record<string, unknown>
+  if (typeof register !== 'function' || typeof bind !== 'function') return undefined
+  return service as LocaleFace
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -481,8 +522,8 @@ function hostStoreDeps(ctx: ClientPanelContext, log: (message: string) => void):
           const answered = isRecord(response) && typeof response['ok'] === 'boolean' ? response : undefined
           if (answered !== undefined && !answered.ok) {
             const error = isRecord(answered['error']) ? answered['error'] : undefined
-            const message = isRecord(error) && typeof error['message'] === 'string' ? error['message'] : 'settings channel refused the write'
-            throw new Error(message)
+            const detail = isRecord(error) && typeof error['message'] === 'string' ? error['message'] : 'settings channel refused the write'
+            throw new Error(detail)
           }
         },
       }

@@ -29,7 +29,8 @@ describe('projectStepContent', () => {
 
   it('carries the same payloads as the full projection', () => {
     const events = projectStepContent(claudeTool, { turn: 1, step: 1, dialect: claudeDialect })
-    expect((events[0]!.payload as { name: string }).name).toBe('Bash')
+    // The card name goes through toolNameMap, same as the full projection.
+    expect((events[0]!.payload as { name: string }).name).toBe('bash')
     expect((events[0]!.payload as { turn: number; step: number }).turn).toBe(1)
   })
 

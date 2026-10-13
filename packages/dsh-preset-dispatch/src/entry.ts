@@ -28,6 +28,7 @@ import { applyAcpPlugin } from './plugin.ts'
 import { installAcpDispatch, presetOfState } from './dispatch.ts'
 import type { AgentLike, AcpPresetBinding, ContentEvent, StepPosition, TurnModelDecision, TurnStreamHandle } from './dispatch.ts'
 import { makeApprovalBridge } from './approval-bridge.ts'
+import { makeQuestionBridge } from './question-bridge.ts'
 import { presetsForHost } from './host-filter.ts'
 import { makeContentWriter } from './content-writer.ts'
 import { decideSelection, pendingSelectionOf, selectionOf } from './selection.ts'
@@ -180,11 +181,16 @@ export function apply(ctx: unknown, config: Config): void {
   // through the sessions it takes over — so without this a preset that loaded
   // the row but never matched a session would look exactly like a plugin that
   // was never installed.
+  const foundQuestions = host.get?.('userQuestions')
+  const questions = (foundQuestions === null || typeof foundQuestions !== 'object'
+    ? undefined
+    : foundQuestions as { ask(request: unknown): Promise<unknown> })
   const summary = `acp row mounted: preset=${config.presetId} agent=${config.agent} `
     + `transport=${config.url === undefined ? 'process' : 'websocket'} `
     + `host=${hostId} `
     + `preset-reading=${readProjection(host) === undefined ? 'header-only' : 'projection'} `
-    + `approvals=${host.get?.('approval') === undefined ? 'refuse-all' : 'host'}`
+    + `approvals=${host.get?.('approval') === undefined ? 'refuse-all' : 'host'} `
+    + `questions=${questions === undefined ? 'auto-answer' : 'host'}`
   host.logger?.info(summary)
   // Also to stderr: this row is silent by design, and whether it mounted at all
   // is the first question anyone asks when no session is taken over. The host's
@@ -285,9 +291,22 @@ export function apply(ctx: unknown, config: Config): void {
     describeRequest,
   )
 
+  // Where an agent's own question goes — the same opportunistic reach, for the
+  // host's user-questions service (`questions`, read up at the mount summary).
+  // When the host has one, cursor's blocking `cursor/ask_question` shows the
+  // native question card and the answer returns to the agent; when it has
+  // none, the question keeps its benign auto-answer. The agent is resolved per
+  // request from the session the question names, for the same reason the
+  // approval bridge does it that way.
+  const questionBridge = questions === undefined ? undefined : makeQuestionBridge(
+    request => questions.ask(request),
+    sessionId => sessionId === undefined ? undefined : agents.get(sessionId),
+  )
+
   applyAcpPlugin(host, config.presetId, preset, {
     ...(readProjection(host) === undefined ? {} : { presetOf: readProjection(host) }),
     ...(ask === undefined ? {} : { answerPermission: ask }),
+    ...(questionBridge === undefined ? {} : { answerAskQuestion: questionBridge }),
     report: message => {
       host.logger?.warn(message)
       process.stderr.write(`[threadharbor] ${message}\n`)

@@ -17,7 +17,14 @@ import {
   cursorDialect,
   grokDialect,
 } from '@threadharbor/dsh-acp-agent'
-import type { AcpDialect, AcpTransport, PermissionDecision, PermissionRequest } from '@threadharbor/dsh-acp-agent'
+import type {
+  AcpDialect,
+  AcpTransport,
+  AskQuestionAnswer,
+  AskQuestionRequest,
+  PermissionDecision,
+  PermissionRequest,
+} from '@threadharbor/dsh-acp-agent'
 import type { AcpSession, AcpSessionFactory, PresetConfig } from './registry.ts'
 import { AcpTurnRunner } from './runner.ts'
 import type { AcpClientPort } from './runner.ts'
@@ -26,6 +33,13 @@ export type FactoryDeps = {
   /** Answer an agent-initiated permission request. */
   answerPermission(request: PermissionRequest): Promise<PermissionDecision>
   /**
+   * Put the agent's question in front of a human and return the answer.
+   *
+   * Supplied when the host has a question service to ask through; omitted
+   * means cursor's question keeps its benign auto-answer.
+   */
+  answerAskQuestion?(request: AskQuestionRequest): Promise<AskQuestionAnswer>
+  /**
    * Build the transport a preset connects over.
    *
    * Supplied by tests so the client this factory builds can actually be driven —
@@ -33,6 +47,15 @@ export type FactoryDeps = {
    * to itself, which leaves nothing to assert against.
    */
   transport?(preset: { url?: string; command?: string }): AcpTransport
+  /**
+   * Receive the model list the agent reported when a session of this preset
+   * opened.
+   *
+   * The factory is the seam that knows which preset opened, so it keys the
+   * report; the catalog adapter serves the latest report per preset. Optional:
+   * a caller without a catalog to feed skips the wiring and nothing changes.
+   */
+  onRuntimeModels?(presetId: string, models: readonly { id: string; name: string; description?: string }[]): void
 }
 
 /** Which frame dialect an agent speaks. Unknown agents are not ours. */
@@ -113,7 +136,20 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
       // Cursor sends two blocking custom methods that stall the turn if left
       // unanswered. Answer them with a benign outcome so the agent proceeds;
       // any other unknown method still falls through to the default error.
+      // The ask hook sits in front of that auto-answer when the host can put
+      // the question to a human — the client hands the question over and the
+      // user's answer returns in cursor's answered envelope. The request names
+      // this opener's DSH session when the frame itself does not, because the
+      // host resolves the live agent — and with it the conversation the
+      // question card belongs to — by session.
       if (preset.agent === 'cursor') {
+        if (deps.answerAskQuestion !== undefined) {
+          client.onAskQuestion = async request => await deps.answerAskQuestion!(
+            request.sessionId === undefined && options.dshSessionId !== undefined
+              ? { ...request, sessionId: options.dshSessionId }
+              : request,
+          )
+        }
         client.onExtensionRequest = frame => {
           if (typeof frame.id !== 'number') return false
           if (frame.method === 'cursor/ask_question') { client.reply(frame.id, { outcome: { outcome: 'skipped' } }); return true }
@@ -122,7 +158,15 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
         }
       }
 
-      const runner = new AcpTurnRunner(adaptClient(client, dialect), options)
+      // The dialect lets the runner write each tool card as its first frame
+      // arrives; without it the runner would keep writing everything at turn
+      // end. The same dialect reads the reply's model list, which rides to the
+      // catalog keyed by the preset that opened.
+      const runner = new AcpTurnRunner(adaptClient(client, dialect), {
+        ...options,
+        dialect,
+        ...(deps.onRuntimeModels === undefined ? {} : { onModels: models => { deps.onRuntimeModels!(presetId, models) } }),
+      })
       return {
         run: async (decision, turn) => await runner.run(decision, turn),
         // Drops the connection itself, not just the runner's bookkeeping: a

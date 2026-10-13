@@ -17,6 +17,110 @@
 
 import type { AcpPresetConfig, PresetConfig } from './registry.ts'
 
+/** How many characters of one tool result travel; the rest is cut. */
+const TOOL_RESULT_LIMIT = 500
+
+/** One rendered line of the replay text, tagged by what it came from. */
+type ReplayLine = {
+  readonly kind: 'user' | 'assistant' | 'tool' | 'result'
+  readonly text: string
+}
+
+/** One content block's text, or nothing when it carries none. */
+function blockTextOf(block: unknown): string {
+  if (typeof block === 'string') return block
+  const record = (typeof block === 'object' && block !== null ? block : {}) as { type?: unknown; text?: unknown }
+  return record['type'] === 'text' && typeof record['text'] === 'string' ? record['text'] : ''
+}
+
+/** Flatten one log message's content — a string or a block array — to its text. */
+function messageTextOf(message: unknown): string {
+  const record = (typeof message === 'object' && message !== null ? message : {}) as { content?: unknown }
+  if (typeof record.content === 'string') return record.content
+  if (!Array.isArray(record.content)) return ''
+  return record.content.map(blockTextOf).filter(text => text !== '').join('\n')
+}
+
+/** Read one logged event into a replay line, or nothing when it carries none. */
+function replayLineOf(event: unknown): ReplayLine | undefined {
+  if (typeof event !== 'object' || event === null) return undefined
+  const record = event as { type?: unknown; data?: unknown }
+  const data = (typeof record.data === 'object' && record.data !== null ? record.data : {}) as {
+    message?: unknown
+    name?: unknown
+  }
+  switch (record.type) {
+    case 'user/message': {
+      const text = messageTextOf(record.data)
+      return text === '' ? undefined : { kind: 'user', text }
+    }
+    case 'assistant/message': {
+      const text = messageTextOf(data.message)
+      return text === '' ? undefined : { kind: 'assistant', text }
+    }
+    case 'tool/call':
+      return typeof data.name === 'string' && data.name !== '' ? { kind: 'tool', text: data.name } : undefined
+    case 'tool/result': {
+      const text = messageTextOf(data.message)
+      if (text === '') return undefined
+      return { kind: 'result', text: text.length > TOOL_RESULT_LIMIT ? `${text.slice(0, TOOL_RESULT_LIMIT)}…` : text }
+    }
+    default:
+      return undefined
+  }
+}
+
+/** The label each replay line carries, named so a model reads the exchange. */
+const LABEL_OF: Readonly<Record<ReplayLine['kind'], string>> = {
+  user: '【用户】',
+  assistant: '【助手】',
+  tool: '【工具】',
+  result: '【工具结果】',
+}
+
+/**
+ * Render the transcript into the replay text.
+ *
+ * Every finished turn travels whole — only a single tool result is cut, at
+ * `TOOL_RESULT_LIMIT`. The trailing user messages are dropped: the dispatch
+ * writes the opening turn's question to the log before its step runs, so those
+ * trailing messages are the question the prompt itself carries, and keeping
+ * them here would read the same words to the agent twice.
+ */
+function renderReplay(events: readonly unknown[]): string | undefined {
+  const lines: ReplayLine[] = []
+  for (const event of events) {
+    const line = replayLineOf(event)
+    if (line !== undefined) lines.push(line)
+  }
+  let end = lines.length
+  while (end > 0 && lines[end - 1]!.kind === 'user') end -= 1
+  const kept = lines.slice(0, end)
+  if (kept.length === 0) return undefined
+  return kept.map(line => `${LABEL_OF[line.kind]}${line.text}`).join('\n')
+}
+
+/**
+ * The transcript events of one host session, read structurally.
+ *
+ * A live session exposes a snapshot read; a query lease exposes the events
+ * array directly. Whatever shape answers, an unreadable one is absence — the
+ * caller replays nothing rather than failing the turn.
+ */
+function sessionEvents(session: unknown): readonly unknown[] | undefined {
+  const record = session as { snapshotEvents?: unknown; ownEvents?: unknown; events?: unknown }
+  for (const read of [record.snapshotEvents, record.ownEvents]) {
+    if (typeof read !== 'function') continue
+    try {
+      const events = (read as (this: unknown) => unknown).call(session)
+      if (Array.isArray(events)) return events
+    } catch {
+      // Fall through to the next reader; absence is handled below.
+    }
+  }
+  return Array.isArray(record.events) ? record.events : undefined
+}
+
 /** One model a mounted preset serves, with what planning needs to know about it. */
 export type MountedModel = {
   readonly id: string
@@ -57,6 +161,17 @@ export type SwitchShared = {
   takeHandover(sessionId: string): string | undefined
   /** Put a priming text back after its first attempt failed to deliver it. */
   restoreHandover(sessionId: string, text: string): void
+
+  /**
+   * The session's earlier conversation, rendered as previous-conversation text.
+   *
+   * Read from the host's own transcript, so a fresh external conversation can
+   * pick the history back up after the connection that held it is gone.
+   * `undefined` when the session cannot be read or carries nothing before the
+   * question now being asked — there is then nothing to replay, and the first
+   * request stays exactly the question.
+   */
+  replayPrimer(sessionId: string): string | undefined
 
   /** Remember the switch a source session already made. */
   recordSwitch(sourceSessionId: string, record: SwitchRecord): void
@@ -106,6 +221,20 @@ export function makeSwitchShared(reads: {
     },
     restoreHandover(sessionId, text): void {
       primed.set(sessionId, text)
+    },
+    replayPrimer(sessionId): string | undefined {
+      let session: unknown
+      try {
+        session = sessionById?.(sessionId)
+      } catch {
+        // An unreadable session replays nothing; the first request stays the
+        // question alone rather than failing the turn over a display read.
+        return undefined
+      }
+      if (session === undefined || session === null) return undefined
+      const events = sessionEvents(session)
+      if (events === undefined) return undefined
+      return renderReplay(events)
     },
     recordSwitch(sourceSessionId, record): void {
       switched.set(sourceSessionId, record)

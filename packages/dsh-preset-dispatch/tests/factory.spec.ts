@@ -45,6 +45,34 @@ describe('makeSessionFactory', () => {
     const factory = makeSessionFactory(CONFIG, deps)
     await expect(factory.open('acp-missing', { cwd: '/tmp' })).rejects.toThrow(/no preset named/)
   })
+
+  it('hands the session/new model list to the catalog as the opening preset’s report', async () => {
+    // The picker serves what the agent reported; the factory knows which preset
+    // opened, so it is the seam that keys the report by preset.
+    const transport = recordingTransport()
+    const reports: { presetId: string; models: unknown }[] = []
+    const factory = makeSessionFactory(
+      { presets: { 'acp-grok': { agent: 'grok', url: 'ws://127.0.0.1:2419' } } },
+      { ...deps, transport: () => transport, onRuntimeModels: (presetId, models) => { reports.push({ presetId, models }) } },
+    )
+    const session = await factory.open('acp-grok', { cwd: '/tmp' })
+    void session.run(
+      { kind: 'enter', messages: [] },
+      { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 },
+    )
+    // Answer the handshake in order: initialize, then session/new with the
+    // grok-shaped model list.
+    for (const frame of transport.sent) {
+      const request = JSON.parse(frame) as { id?: number; method?: string }
+      if (request.id === undefined) continue
+      const result = request.method === 'session/new'
+        ? { sessionId: 's1', models: { availableModels: [{ modelId: 'm1', name: 'M1' }] } }
+        : {}
+      transport.receive(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }))
+      await flush()
+    }
+    expect(reports).toEqual([{ presetId: 'acp-grok', models: [{ id: 'm1', name: 'M1' }] }])
+  })
 })
 
 /** A transport a test can kill, holding one death slot like the real ones do. */
@@ -78,14 +106,18 @@ describe('连接死亡的转播', () => {
     const seenBySession: string[] = []
     session.onDead(reason => { seenBySession.push(reason) })
 
-    // One request in flight: its rejection proves the client kept its listener.
+    // One request in flight: its classified failure proves the client kept its
+    // listener (the transport's death reason names the row's reconnect hint).
+    // The reason text is the real stdio transport's exit line — `acp `-prefixed,
+    // which is what keeps it in the connection bucket.
     const pending = session.run(
       { kind: 'enter', messages: [] },
       { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 },
     )
-    transport.die('agent process exited')
-    await expect(pending).rejects.toThrow('agent process exited')
-    expect(seenBySession).toEqual(['agent process exited'])
+    transport.die('acp agent grok-4.7 exited (code=1 signal=none)')
+    const result = await pending
+    expect(result.end).toMatchObject({ kind: 'error', error: { code: 'ACP_CONNECTION' } })
+    expect(seenBySession).toEqual(['acp agent grok-4.7 exited (code=1 signal=none)'])
   })
 
   it('会话自己关掉时不再报告死亡', async () => {
@@ -99,5 +131,80 @@ describe('连接死亡的转播', () => {
     session.onDead(reason => { deaths.push(reason) })
     session.close()
     expect(deaths).toEqual([])
+  })
+})
+
+/** A transport that records what the client wrote, and can push frames in. */
+function recordingTransport(): AcpTransport & { readonly sent: string[]; receive: (frame: string) => void } {
+  const sent: string[] = []
+  let line: (frame: string) => void = () => {}
+  return {
+    sent,
+    send: (frame: string) => { sent.push(frame) },
+    onLine: (handler: (frame: string) => void) => { line = handler },
+    onDeath: () => {},
+    close: () => {},
+    receive: (frame: string) => { line(frame) },
+  } as AcpTransport & { readonly sent: string[]; receive: (frame: string) => void }
+}
+
+/** Let queued microtasks run, so the async answer path has settled. */
+async function flush(): Promise<void> {
+  for (let tick = 0; tick < 12; tick++) await Promise.resolve()
+}
+
+const CURSOR_ASK = JSON.stringify({
+  jsonrpc: '2.0',
+  id: 0,
+  method: 'cursor/ask_question',
+  params: {
+    questions: [{ id: 'q1', prompt: 'Which mode?', options: [{ id: 'plan', label: 'Plan' }] }],
+  },
+})
+
+describe('把 agent 的提问接到 host 的提问服务', () => {
+  it('host 可提问时，提问走 host 钩子并带上会话，答案按 cursor 形状回传', async () => {
+    // The hook answered on the host's behalf, and the reply is the answered
+    // envelope — not the auto-answer's skip.
+    const transport = recordingTransport()
+    const seen: unknown[] = []
+    const factory = makeSessionFactory(
+      { presets: { 'acp-cursor': { agent: 'cursor', url: 'ws://127.0.0.1:2419' } } },
+      {
+        ...deps,
+        transport: () => transport,
+        answerAskQuestion: async request => { seen.push(request); return { answer: 'Plan' } },
+      },
+    )
+    // The opener knows the DSH session; the hook's request names it, so the
+    // host-side bridge can resolve the live agent the card belongs to.
+    await factory.open('acp-cursor', { cwd: '/tmp', dshSessionId: 's1' })
+    transport.receive(CURSOR_ASK)
+    await flush()
+
+    expect(seen[0]).toMatchObject({ sessionId: 's1', questions: [{ id: 'q1', prompt: 'Which mode?' }] })
+    expect(transport.sent).toHaveLength(1)
+    const reply = JSON.parse(transport.sent[0]!) as { id: number; result: { outcome: { outcome: string } } }
+    expect(reply.id).toBe(0)
+    expect(reply.result).toEqual({
+      outcome: { outcome: 'answered', answers: [{ questionId: 'q1', selectedOptionIds: ['plan'] }] },
+    })
+  })
+
+  it('host 接不到时维持现状：扩展钩子的自动应答照旧生效', async () => {
+    // No-regression pin: without a host ask bridge, cursor's question gets the
+    // benign skip it has always gotten, and the turn proceeds.
+    const transport = recordingTransport()
+    const factory = makeSessionFactory(
+      { presets: { 'acp-cursor': { agent: 'cursor', url: 'ws://127.0.0.1:2419' } } },
+      { ...deps, transport: () => transport },
+    )
+    await factory.open('acp-cursor', { cwd: '/tmp' })
+    transport.receive(CURSOR_ASK)
+    await flush()
+
+    const reply = JSON.parse(transport.sent[0]!) as { id: number; result: { outcome: { outcome: string } } }
+    expect(reply.id).toBe(0)
+    expect(reply.result.outcome.outcome).toBe('skipped')
   })
 })

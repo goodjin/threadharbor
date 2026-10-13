@@ -47,6 +47,23 @@ const CHATTER = new Set(['available_commands_update', 'usage_update', 'session_i
 export const grokDialect: AcpDialect = {
   id: 'grok',
 
+  capabilities: {
+    cancelsTurns: true,
+    acceptsImageContent: true,
+    // grok emits an opening frame and a completed frame per call — no
+    // in-progress status in between.
+    toolFrameShape: 'two_frame',
+    commandVia: 'tool_frame',
+    // The latched first-frame `title` is grok's tool identity. The one tool
+    // observed live (2026-10-09 capture, `tests/live.spec.ts`) is the terminal
+    // command tool; DSH's bash card is the matching view (value verified
+    // against the reference client's `classifyTool`, 2026-10-13). Any other
+    // title stays itself and degrades to the generic card.
+    toolNameMap: {
+      run_terminal_command: 'bash',
+    },
+  },
+
   foldTool(carried, update) {
     const toolCallId = typeof update['toolCallId'] === 'string' ? update['toolCallId'] : randomUUID()
     // Latch the name: later updates replace `title` with a human line.

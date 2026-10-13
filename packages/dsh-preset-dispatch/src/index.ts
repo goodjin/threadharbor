@@ -29,6 +29,8 @@ export { makeContentWriter } from './content-writer.ts'
 export type { ContentWriter, SessionAppend } from './content-writer.ts'
 export { ALLOWED_ONCE, makeApprovalBridge } from './approval-bridge.ts'
 export type { ApprovalBridge, ApprovalPort } from './approval-bridge.ts'
+export { makeQuestionBridge } from './question-bridge.ts'
+export type { QuestionBridge, QuestionPort } from './question-bridge.ts'
 
 export type { AcpPluginContext, AcpPluginDeps } from './plugin.ts'
 

@@ -169,6 +169,13 @@ function baseName(name: string, effort: string): string {
 export type CatalogDeps = {
   /** The models one preset's agent reports for itself. */
   modelsOf(presetId: string): readonly { readonly id: string; readonly name: string; readonly description?: string }[]
+  /**
+   * The models one preset's agent reported on its live `session/new` reply, or
+   * `undefined` while none has arrived this host generation. Present wins over
+   * `modelsOf` — including present-and-empty, which is the agent saying it
+   * serves nothing; the configured list must not resurrect over that answer.
+   */
+  runtimeModelsOf?(presetId: string): readonly { readonly id: string; readonly name: string; readonly description?: string }[] | undefined
   /** The frame dialect of one preset's agent. */
   dialectOf(presetId: string): AcpDialect | undefined
   /**
@@ -217,7 +224,9 @@ export function presetForModel(
   const presetId = presetOfRoute(route)
   if (presetId === undefined) return undefined
   if (config.presets[presetId] === undefined) return undefined
-  return deps.modelsOf(presetId).some(model => model.id === modelId) ? presetId : undefined
+  return (deps.runtimeModelsOf?.(presetId) ?? deps.modelsOf(presetId)).some(model => model.id === modelId)
+    ? presetId
+    : undefined
 }
 
 /** Names shown in the selector for the agents we drive. */
@@ -240,6 +249,12 @@ const DISPLAY: Readonly<Record<string, string>> = {
  * worse than one that says so.
  */
 export function catalogAdapter(config: PresetConfig, deps: CatalogDeps): CatalogAdapterLike {
+  // One source of truth for every catalog-facing answer: the agent's own
+  // report once one has landed, the operator's configured list until then.
+  // Resolving and routing must read the same list the picker advertised, or a
+  // selection can advertise from one list and route against another.
+  const modelsFor = (presetId: string): readonly { readonly id: string; readonly name: string; readonly description?: string }[] =>
+    deps.runtimeModelsOf?.(presetId) ?? deps.modelsOf(presetId)
   return {
     providerInfo: (provider: string) => {
       const presetId = presetOfRoute(provider) ?? ''
@@ -251,7 +266,7 @@ export function catalogAdapter(config: PresetConfig, deps: CatalogDeps): Catalog
       const presetId = presetOfRoute(provider)
       if (presetId === undefined) return []
       if (config.presets[presetId] === undefined) return []
-      const models = deps.modelsOf(presetId)
+      const models = modelsFor(presetId)
       // Collapse same-base entries (one model published as base[low]…base[ultra])
       // into a single row carrying its efforts, so the picker shows the model
       // once and reasoning effort becomes a separate axis rather than N rows.
@@ -278,7 +293,7 @@ export function catalogAdapter(config: PresetConfig, deps: CatalogDeps): Catalog
       const presetId = presetOfRoute(provider)
       const declared = presetId === undefined
         ? undefined
-        : deps.modelsOf(presetId).find(candidate => candidate.id === model)
+        : modelsFor(presetId).find(candidate => candidate.id === model)
       if (declared !== undefined) {
         return {
           provider,
@@ -293,7 +308,7 @@ export function catalogAdapter(config: PresetConfig, deps: CatalogDeps): Catalog
       // aligned with what the picker advertised.
       const collapsed = presetId === undefined
         ? undefined
-        : collapseEffortModels(deps.modelsOf(presetId)).find(entry => entry.baseId === model)
+        : collapseEffortModels(modelsFor(presetId)).find(entry => entry.baseId === model)
       if (collapsed === undefined) return { provider, id: model, name: model }
       return collapsedToCatalog(provider, collapsed)
     },
