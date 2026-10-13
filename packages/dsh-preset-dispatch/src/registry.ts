@@ -137,6 +137,19 @@ export type PresetTableOptions = {
     take(sessionId: string): string | undefined
     restore(sessionId: string, text: string): void
   }
+  /**
+   * Session transcripts keyed by session, read for a fresh external
+   * conversation's first request.
+   *
+   * Where the primer carries a conversation handed over by a switch, this one
+   * re-reads what the session itself still holds — the history an external
+   * conversation lost when its connection went away. Optional like the primer:
+   * a table built without one opens sessions that start from the question
+   * alone, exactly as before.
+   */
+  readonly replay?: {
+    take(sessionId: string): string | undefined
+  }
 }
 
 /**
@@ -181,6 +194,7 @@ export function buildPresetTable(
             ...(preset.model === undefined ? {} : { modelId: preset.model }),
             ...(preset.mode === undefined ? {} : { modeId: preset.mode }),
             ...(options.primer === undefined ? {} : { primer: options.primer }),
+            ...(options.replay === undefined ? {} : { replay: options.replay }),
             // The turn's stop signal, as a getter the runner consults per turn,
             // and only when the dialect claims the capability. The getter
             // closes over the agent, not over this turn, so the one entry

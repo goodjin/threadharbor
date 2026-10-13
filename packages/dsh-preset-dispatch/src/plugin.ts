@@ -162,6 +162,13 @@ export function applyAcpPlugin(
       take: sessionId => switchShared.takeHandover(sessionId),
       restore: (sessionId, text) => switchShared.restoreHandover(sessionId, text),
     },
+    // The session's own transcript, for a first request whose external
+    // conversation starts empty — a host restart lost the connection but not
+    // the log. Read through the same shared fabric that wired the session
+    // reader; a host without it replays nothing and the turn runs as before.
+    replay: {
+      take: sessionId => switchShared.replayPrimer(sessionId),
+    },
   })
   // What makes the external agent's models appear in the host's own model
   // picker: the catalog is global to this Host generation and already read by

@@ -81,6 +81,22 @@ export type RunnerOptions = {
     restore(sessionId: string, text: string): void
   }
   /**
+   * This session's earlier conversation, read from the host's own transcript.
+   *
+   * An external conversation starts empty even when the DSH session's record
+   * does not — a host restart forgets the connection but not the log — so the
+   * first request of a fresh external conversation carries the transcript
+   * ahead of the question, framed as previous conversation. Consulted only on
+   * the session's first open, and only when no handover primer exists: the
+   * handover is the fresher copy of the same conversation. Never put back —
+   * unlike a primer it is read from the host, so a retry can simply take it
+   * again — and when the agent then refuses the prompt, the turn ends naming
+   * the refusal rather than dying with the agent's bare error.
+   */
+  readonly replay?: {
+    take(sessionId: string): string | undefined
+  }
+  /**
    * The current turn's stop signal, when the host can stop the turn.
    *
    * Consulted once per turn, before the prompt goes out — the listener has to
@@ -107,6 +123,11 @@ function textOf(content: unknown): string {
   if (typeof entry['text'] === 'string') return entry['text']
   const nested = recordOf(entry['content'])
   return typeof nested['text'] === 'string' ? nested['text'] : ''
+}
+
+/** The message an error carries, however it was shaped. */
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 /** Pull the user-authored text out of a step decision's messages. */
@@ -256,6 +277,12 @@ export class AcpTurnRunner {
    * was never written.
    */
   async run(decision: StepDecisionLike, turn: TurnContext): Promise<AcpStepResult> {
+    // Whether this run opens the external conversation, decided before `open`
+    // settles: a different session asking, or no external session yet (first
+    // turn, or the last attempt failed), means the transcript has not been
+    // replayed into it. Only that first request carries the history — a later
+    // request would read it to the agent a second time.
+    const firstOpen = this.dshSessionId !== turn.sessionId || this.sessionId === undefined
     const sessionId = await this.open(turn.sessionId)
     this.turnFrames = []
     this.aborted = false
@@ -284,9 +311,18 @@ export class AcpTurnRunner {
     // without it would silently drop the conversation — and that is the one
     // outcome a handover must never produce.
     const handedOver = this.options.primer?.take(turn.sessionId)
-    const text = handedOver === undefined
-      ? promptText(decision.messages)
-      : `${handedOver}\n\n${promptText(decision.messages)}`
+    // The host transcript rides the first request too, but only when no
+    // handover exists — the handover is the fresher copy of the same
+    // conversation, and carrying both would read the history twice.
+    const replayed = handedOver === undefined && firstOpen
+      ? this.options.replay?.take(turn.sessionId)
+      : undefined
+    const question = promptText(decision.messages)
+    const text = handedOver !== undefined
+      ? `${handedOver}\n\n${question}`
+      : replayed !== undefined
+        ? `【之前对话】\n${replayed}\n\n【当前问题】\n${question}`
+        : question
     const params: Record<string, unknown> = {
       sessionId,
       prompt: [{ type: 'text', text }],
@@ -321,6 +357,25 @@ export class AcpTurnRunner {
       // claiming a commit that will not happen.
       stream?.abandon()
       if (handedOver !== undefined) this.options.primer?.restore(turn.sessionId, handedOver)
+      if (replayed !== undefined) {
+        // The transcript rode this very prompt, so it is the likeliest reason
+        // the agent refused it — a first request suddenly oversized or in a
+        // shape the agent does not take. End the turn naming that instead of
+        // dying with the agent's bare error: the user keeps their question on
+        // the record and reads why the answer never came, rather than watching
+        // the turn vanish into an opaque failure. Not classified further — any
+        // failure of a prompt that carried the replay says so here.
+        return {
+          frames: [...this.turnFrames],
+          end: {
+            kind: 'error',
+            error: {
+              message: `历史回灌被拒绝：${messageOf(failure)}`,
+              code: 'REPLAY_REJECTED',
+            },
+          },
+        }
+      }
       throw failure
     }
 
