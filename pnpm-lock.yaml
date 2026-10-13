@@ -14,6 +14,9 @@ importers:
       '@threadharbor/dsh-host-federation':
         specifier: workspace:^
         version: link:packages/dsh-host-federation
+      '@threadharbor/dsh-mobile-entry':
+        specifier: workspace:^
+        version: link:packages/dsh-mobile-entry
       '@threadharbor/dsh-preset-dispatch':
         specifier: workspace:^
         version: link:packages/dsh-preset-dispatch

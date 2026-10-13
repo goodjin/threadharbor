@@ -46,6 +46,7 @@
   "dependencies": {
     "@threadharbor/dsh-client": "workspace:^",
     "@threadharbor/dsh-host-federation": "workspace:^",
+    "@threadharbor/dsh-mobile-entry": "workspace:^",
     "@threadharbor/dsh-preset-dispatch": "workspace:^"
   },
   "peerDependencies": {
