@@ -1,6 +1,6 @@
 # SSH 自动部署远端 DSH
 
-每台主机地位相同。任意一台已经在跑 ThreadHarbor 的机器，都可以 SSH 到另一台：读取对方是否装好插件、DSH 听在哪、带 token 的地址是什么，再按监听方式打开页面或建隧道。也可以在对方还没装的时候直接部署。
+每台主机地位相同。任意一台已经在跑 ThreadHarbor 的机器，都可以 SSH 到另一台：读取对方是否装好插件和带 token 的地址，再通过本机 SSH 隧道打开页面。也可以在对方还没装的时候直接部署。对方的 DSH 只听 `127.0.0.1`。
 
 ## 前置条件
 
@@ -10,12 +10,9 @@
 
 ## 访问方式
 
-| 模式 | 对方 DSH 绑定 | 怎么连 |
-|------|----------------|--------|
-| **回环 + SSH 隧道**（默认） | `127.0.0.1` | 连接方 `ssh -L`，带 `ServerAliveInterval`；隧道进程退出后，下次连接会重新打开 |
-| **Tailscale** | `tailscale ip -4`（或手填） | 直接打开对方 URL，不维持隧道 |
+对方 DSH 绑定 `127.0.0.1`。连接方用 `ssh -L` 把本机一个端口转到对方的回环端口，带 `ServerAliveInterval`。隧道进程退出后，下次连接会重新打开。页面地址是连接方本机的 `http://127.0.0.1:<端口>/?token=`。鉴权仍依赖 DSH 的 `?token=`。
 
-仍禁止 `0.0.0.0`；非 loopback 绑定会加 `--trusted-host`。鉴权仍依赖 DSH 的 `?token=`。
+「从 Tailscale 选」只用来填写 SSH 目标，不让 DSH 听在 Tailscale 地址上。
 
 ## 界面：会话树与主机状态
 
@@ -24,9 +21,9 @@
 
 ## 使用步骤
 
-1. 侧栏 **各主机** → **添加新主机** → **SSH 自动部署**（默认 **127.0.0.1 + SSH 隧道**）。
-2. 填写 SSH 与认证，批准主机密钥后可点 **通过 SSH 读取对方状态**：读 `$HOME/.local/state/threadharbor/peer.json`（插件是否已装、`loopback` 还是 `tailscale`、`launchUrl`）。没有这份文件就还没装好。
-3. 选择监听方式（默认回环 + 隧道），勾选要启用的 ACP preset，再 **部署 DSH 并登记**。部署成功时对方会写下 `peer.json`，之后任何主机都能用同一条 SSH 读到。
+1. 侧栏 **各主机** → **添加新主机** → **SSH 自动部署**。
+2. 填写 SSH 与认证，批准主机密钥后可点 **通过 SSH 读取对方状态**：读 `$HOME/.local/state/threadharbor/peer.json`（插件是否已装、`launchUrl`）。没有这份文件就还没装好。
+3. 勾选要启用的 ACP preset，再 **部署 DSH 并登记**。对方只听 `127.0.0.1`，连接方打开本机隧道。部署成功时对方会写下 `peer.json`，之后任何主机都能用同一条 SSH 读到。
 4. 使用界面上的 **带 token 链接** 复制或打开；`launchUrl` 写入登记簿。
 5. 左侧会话树会随本机/远端数据刷新；远端约每 30 秒重拉一次。
 
@@ -40,7 +37,7 @@
 |------|------|------|
 | `/api/threadharbor.host-ssh.inspect` | POST | 扫描主机密钥 |
 | `/api/threadharbor.host-ssh.peer` | POST | SSH 读取对方 `peer.json`（插件与 URL） |
-| `/api/threadharbor.host-ssh.deploy` | POST | 异步部署（`accessMode`: `host-ip` \| `tunnel` 等） |
+| `/api/threadharbor.host-ssh.deploy` | POST | 异步部署（对方只听回环，连接方建 SSH 隧道） |
 | `/api/threadharbor.host-ssh.operation` | GET | 进度；`result.launchUrl` |
 | `/api/threadharbor.host-remote.sessions` | POST | body: `{ launchUrl }`，拉取远端项目/会话快照 |
 
@@ -48,4 +45,4 @@
 
 - `launchUrl` 含 launch token，保存在管理机登记数据中。
 - SSH 部署不安装 ACP agent 二进制；需在目标机自行安装并在 PATH 上提供 `codex-acp`、`claude-agent-acp`、`grok`、`cursor-agent` 等。部署会写入 `threadharbor-remote-agents.patch.yml` 并用 `dsh web --patch` 启用/禁用各 preset。插件默认 `github:goodjin/threadharbor#main`（可配置）。
-- Tailscale 模式要求浏览器能直接访问对方地址。回环模式只要求 SSH 通，页面走本机隧道。
+- 页面走本机隧道，只要求 SSH 通。

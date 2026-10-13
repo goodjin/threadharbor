@@ -14,7 +14,7 @@ import { OperationStore } from './ssh/operations.ts'
 import { deploymentChannel, redactSshForLog } from './ssh/parse.ts'
 import type { SshDeployOperationView, SshDeployRequest } from './ssh/types.ts'
 import { isValidHostId } from './identity.ts'
-import { optionalHost, parseAccessMode, validateBindHost } from './ssh/access.ts'
+import { parseAccessMode } from './ssh/access.ts'
 import { fetchRemoteSessions } from './host-remote-sessions.ts'
 import { DEFAULT_REMOTE_DSH_PLUGINS, normalizePluginSpecs } from './ssh/deploy-plugins.ts'
 import { parseRemoteAgentSelection } from './ssh/remote-agents.ts'
@@ -203,13 +203,6 @@ function parseDeployRequest(record: Record<string, unknown>): SshDeployRequest {
   const remoteWebPort = typeof record['remoteWebPort'] === 'number' ? record['remoteWebPort'] : undefined
   const upgrade = record['upgrade'] === true
   const accessMode = parseAccessMode(record['accessMode'])
-  const bindHost = optionalHost(record['bindHost'], 'bindHost')
-  const trustedHost = optionalHost(record['trustedHost'], 'trustedHost')
-  if (accessMode === 'custom') {
-    if (bindHost === undefined) throw new Error('custom 访问模式必须提供 bindHost')
-    validateBindHost(bindHost)
-  }
-  if (bindHost !== undefined) validateBindHost(bindHost)
   const ssh = record['ssh']
   const remoteAgents = parseRemoteAgentSelection(record['remoteAgents'])
   return {
@@ -218,8 +211,6 @@ function parseDeployRequest(record: Record<string, unknown>): SshDeployRequest {
     ...(remoteWebPort === undefined ? {} : { remoteWebPort }),
     upgrade,
     accessMode,
-    ...(bindHost === undefined ? {} : { bindHost }),
-    ...(trustedHost === undefined ? {} : { trustedHost }),
     ...(remoteAgents === undefined ? {} : { remoteAgents }),
     ssh: ssh as SshDeployRequest['ssh'],
   }

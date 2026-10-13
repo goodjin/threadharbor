@@ -10,7 +10,7 @@ export type PeerListen = 'loopback' | 'tailscale'
 export type PeerStatus = {
   /** ThreadHarbor's peer file exists and says the bundle was installed. */
   readonly pluginsInstalled: boolean
-  /** `loopback` — reach it with an SSH tunnel. `tailscale` — open the URL directly. */
+  /** `loopback` is the only listen mode new deploys write. `tailscale` is an older record. */
   readonly listen?: PeerListen
   readonly port?: number
   readonly bindHost?: string

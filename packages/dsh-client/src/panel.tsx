@@ -35,7 +35,7 @@ import type { AgentDescriptor, GatewayResult } from './gateway.ts'
 import type { ProbeOutcome } from './probe.ts'
 import { probeReach } from './reach.ts'
 import type { ReachOutcome } from './reach.ts'
-import type { HostIdentity, HostRegistration, PeerStatus, RegistrationResult, RemoteAgentDeploySelection, SshAccessMode, SshConnectionInput, SshDeployResult, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
+import type { HostIdentity, HostRegistration, PeerStatus, RegistrationResult, RemoteAgentDeploySelection, SshConnectionInput, SshDeployResult, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
 import { REMOTE_DEPLOY_AGENT_SPECS } from '@threadharbor/dsh-host-federation'
 import type { HostSnapshot } from '@threadharbor/dsh-host-federation'
 import type { HostStorePosture } from './host-store.ts'
@@ -617,10 +617,7 @@ function SshDeploySection(props: {
   const [approvedFingerprint, setApprovedFingerprint] = useState('')
   const [busy, setBusy] = useState<'inspect' | 'peer' | 'deploy' | undefined>(undefined)
   const [progress, setProgress] = useState<SshDeployOperationView | undefined>(undefined)
-  const [accessMode, setAccessMode] = useState<SshAccessMode>('tunnel')
   const [peer, setPeer] = useState<PeerStatus | undefined>(undefined)
-  const [bindHost, setBindHost] = useState('')
-  const [trustedHost, setTrustedHost] = useState('')
   const [deployed, setDeployed] = useState<SshDeployResult | undefined>(undefined)
   const [remoteAgents, setRemoteAgents] = useState<RemoteAgentDeploySelection>(() => (
     Object.fromEntries(REMOTE_DEPLOY_AGENT_SPECS.map(spec => [spec.key, true])) as RemoteAgentDeploySelection
@@ -666,11 +663,6 @@ function SshDeploySection(props: {
         return
       }
       setPeer(result.value)
-      if (result.value.listen === 'loopback') setAccessMode('tunnel')
-      if (result.value.listen === 'tailscale') {
-        setAccessMode('tailscale')
-        if (result.value.bindHost !== undefined) setBindHost(result.value.bindHost)
-      }
     })
   }
 
@@ -690,9 +682,7 @@ function SshDeploySection(props: {
       hostTitle: props.hostTitle.trim() === '' ? props.hostId.trim() : props.hostTitle.trim(),
       ssh: { ...sshPayload(), hostKeyFingerprint: approvedFingerprint },
       ...(remoteWebPort.trim() === '' ? {} : { remoteWebPort: Number(remoteWebPort) }),
-      accessMode,
-      ...(bindHost.trim() === '' ? {} : { bindHost: bindHost.trim() }),
-      ...(trustedHost.trim() === '' ? {} : { trustedHost: trustedHost.trim() }),
+      accessMode: 'tunnel',
       remoteAgents,
     }).then(started => {
       if (!started.ok) {
@@ -724,35 +714,8 @@ function SshDeploySection(props: {
   return (
     <div data-ssh-deploy="" className={styles.sshSection}>
       <p className={styles.note}>
-        任意一台已安装 ThreadHarbor 的主机都可以 SSH 到另一台：读取对方是否已装插件、监听方式和带 token 的地址，再按需建隧道。私钥路径指<strong>当前这台机器</strong>上的绝对路径；粘贴的私钥或密码只发给本机 DSH 进程，不会写入日志。
+        对方的 DSH 只听 127.0.0.1。任意一台已安装 ThreadHarbor 的主机都可以 SSH 到另一台，读取对方是否已装插件和带 token 的地址，再在本机打开 SSH 隧道访问。私钥路径指<strong>当前这台机器</strong>上的绝对路径；粘贴的私钥或密码只发给本机 DSH 进程，不会写入日志。
       </p>
-      <fieldset className={styles.accessModes}>
-        <legend className={styles.summary}>对方 DSH 监听</legend>
-        <label className={styles.sshKeyRow}>
-          <input type="radio" name="access-mode" checked={accessMode === 'tunnel'} onChange={() => { setAccessMode('tunnel') }} />
-          <span>127.0.0.1 + SSH 隧道（默认）。对方只听回环，连接方用隧道转发；SSH 保活，断了下次连接会重开隧道。</span>
-        </label>
-        <label className={styles.sshKeyRow}>
-          <input type="radio" name="access-mode" checked={accessMode === 'tailscale'} onChange={() => { setAccessMode('tailscale') }} />
-          <span>Tailscale 地址。对方听 Tailscale IP，其他主机直接打开 URL，不维持隧道。</span>
-        </label>
-      </fieldset>
-      {accessMode === 'tailscale'
-        ? (
-            <label className={styles.field}>
-              Tailscale 地址（可选，留空则对方用 tailscale ip -4）
-              <input className={styles.input} value={bindHost} onChange={event => { setBindHost(event.target.value) }} placeholder="100.x.x.x" />
-            </label>
-          )
-        : undefined}
-      {accessMode !== 'tunnel'
-        ? (
-            <label className={styles.field}>
-              --trusted-host（可选，MagicDNS 名）
-              <input className={styles.input} value={trustedHost} onChange={event => { setTrustedHost(event.target.value) }} placeholder="mybox.tail1234.ts.net" />
-            </label>
-          )
-        : undefined}
       <div className={styles.formGrid}>
         <label className={styles.field}>
           SSH 主机
@@ -852,7 +815,9 @@ function SshDeploySection(props: {
         ? (
             <p data-ssh-peer="" className={styles.stateLine}>
               {peer.pluginsInstalled
-                ? `对方已安装插件。监听：${peer.listen === 'loopback' ? '127.0.0.1（需隧道）' : peer.listen === 'tailscale' ? 'Tailscale' : '未知'}。${peer.launchUrl ?? ''}`
+                ? peer.listen === 'loopback'
+                  ? `对方已安装插件，DSH 听在 127.0.0.1。打开页面会走本机 SSH 隧道。${peer.launchUrl ?? ''}`
+                  : '对方这份记录不是回环监听。重新部署会改成只听 127.0.0.1，并由本机隧道访问。'
                 : '对方还没有 ThreadHarbor 的 peer 记录（尚未安装，或安装后还没成功启动）。可以在这里部署。'}
             </p>
           )
