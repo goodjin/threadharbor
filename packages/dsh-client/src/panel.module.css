@@ -1,10 +1,10 @@
 /*
  * The 各主机 panel's skin.
  *
- * 2026-10-12 用户反馈定下的形状：面板是三个界面——列表页（固定宽度的框，
- * 只有添加按钮和主机行）、详情页和添加页（同一套表单的两种模式）。行的
- * 名字和徽标是列表页最响的东西；事实区、说明、建议全部折进 details 或
- * 收进各自的页面，不占列表页。
+ * 2026-10-13 用户反馈定下的形状：面板是三个界面——列表页（一张正常的表：
+ * 名称/IP/状态 三列，一行一台主机）、详情页和添加页（同一套表单的两种
+ * 模式，主机只有名称和 IP 两个字段）。添加页的返回按钮在表单方框外面，
+ * 「从 Tailscale 选」在表单前面，确定/取消之后不再有内容。
  * Built only from DSH's own design tokens (--dsw-*): the panel sits inside
  * DSH's shell, so hard-coded colors would disagree with whatever theme the
  * shell is in. Class names are CSS modules.
@@ -47,6 +47,20 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+/* 表单页：返回按钮在方框外面（2026-10-13 用户反馈），框里才是表单。 */
+.formPage {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.formNav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
 }
 
 .cardHead {
@@ -327,15 +341,6 @@
   padding-top: 8px;
 }
 
-.addNotes {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  border-top: 1px dashed var(--dsw-alias-border-l2);
-  padding-top: 8px;
-  margin-top: 8px;
-}
-
 .notices {
   margin: 0;
   padding-left: 18px;
@@ -347,10 +352,10 @@
 }
 
 /*
- * The host list as a table: one row per machine. The row is a summary —
- * name, the (CSS-truncated) id, the badge — and the whole row is the button
- * that opens the host's detail page. A header row labels the columns so the
- * table reads as a table, distinct from the 添加新主机 button above it.
+ * The host list as a table (2026-10-13 用户反馈)：one line per machine, three
+ * columns — name, IP, status. The whole row is the button that opens the
+ * host's detail page; a header row with the same grid labels the columns, so
+ * the list reads as a list.
  */
 .hostList {
   display: flex;
@@ -361,10 +366,10 @@
   overflow: hidden;
 }
 
-/* Column header: labels the table so it reads as one, not a stack of buttons. */
+/* Column header: same grid as the rows, so the labels sit over their columns. */
 .hostListHead {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 220px) 72px;
   align-items: center;
   gap: 12px;
   padding: 8px 16px;
@@ -377,8 +382,21 @@
 }
 
 .hostListHeadLabel {
-  /* First column ("主机") spans the name + id; the rest sit at the right. */
-  grid-column: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 状态列右对齐：表头和下面的徽标同一侧收口。 */
+.hostListHeadLabel:last-child {
+  justify-self: end;
+}
+
+.hostListEmpty {
+  margin: 0;
+  padding: 14px 16px;
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
 }
 
 .hostRow {
@@ -398,12 +416,12 @@
   font: inherit;
   text-align: left;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 220px) 72px;
   align-items: center;
   gap: 12px;
   min-width: 0;
   width: 100%;
-  padding: 12px 16px;
+  padding: 10px 16px;
   cursor: pointer;
 }
 
@@ -411,30 +429,21 @@
   color: var(--dsw-alias-label-secondary);
 }
 
-.hostMain {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
 .hostName {
   font-weight: 600;
   font-size: 13px;
-}
-
-.hostIdShort {
-  color: var(--dsw-alias-label-caption);
-  font-size: 12px;
-  max-width: 32ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.chevron {
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 11px;
+.hostIp {
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .hostBadge {
@@ -443,6 +452,7 @@
   border-radius: 999px;
   padding: 1px 8px;
   flex: none;
+  justify-self: end;
 }
 
 .hostBadge[data-host-badge='self'] {
@@ -474,36 +484,14 @@
   flex-wrap: wrap;
 }
 
-.steps {
-  margin: 8px 0 0;
-  padding-left: 18px;
-  color: var(--dsw-alias-label-secondary);
-  font-size: 12px;
+/* 从 Tailscale 选：表单前面的入口，和它拉出来的节点清单（2026-10-13
+   用户反馈：放在表单前面，选一台把名称和 IP 一起填上）。 */
+.tailscaleSection {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  max-width: 64ch;
-}
-
-.steps code {
-  font-family: var(--dsw-font-family-mono, monospace);
-  font-size: 11px;
-  background: var(--dsw-alias-bg-layer-2);
-  border-radius: var(--dsw-radius-sm);
-  padding: 0 4px;
-}
-
-
-/* 从 Tailscale 选：地址那一行旁边的按钮，和它拉出来的节点清单。 */
-.addressRow {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-
-.addressRow .input {
-  flex: 1;
-  min-width: 0;
+  margin-top: 4px;
+  max-width: 420px;
 }
 
 .tailscalePicker {

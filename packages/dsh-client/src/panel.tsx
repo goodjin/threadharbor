@@ -1,18 +1,21 @@
 /**
  * The panel itself: one sidebar entry's worth of screen.
  *
- * 2026-10-12 用户反馈定下的形状：三个界面，列表页之外都是独立的页面——
+ * 2026-10-13 用户反馈定下的形状（覆盖 2026-10-12 的三界面骨架）：三个界面，
+ * 列表页之外都是独立的页面——
  *
- * 1. 列表页：上方一个「添加新主机」按钮，下面是主机行。行是摘要（名字、
- *    简短标识、徽标），点行进详情页，不就地展开；列表页宽度固定，别的
- *    什么都不放。
- * 2. 详情页：与添加页共用同一套表单（HostFormPage 的 view 模式）——用户填
- *    的字段（主机标识、显示名、地址）是表单，主机自己报的事实（在线状态、
- *    心跳、自报的标识和名字）只在详情模式出现。本机的 agent 列表属于本机
- *    的详情页，不再单独占一张卡。
- * 3. 添加页：同一套表单的 new 模式，表单在上，下面「确定」「取消」。
+ * 1. 列表页：一张正常的表。「名称 / IP / 状态」三列表头，一行一台主机，
+ *    点行进详情页；上方一个「添加新主机」按钮，别的什么都不放。
+ * 2. 详情页：与添加页共用同一套表单（HostFormPage 的 view 模式）。主机只有
+ *    「名称」「IP」两个字段（显示名撤销：主机标识改名「名称」并兼任显示名，
+ *    登记存储里 hostTitle 留空、落库回落到 hostId）。主机自己报的事实（在线
+ *    状态、心跳、自报的标识）只在详情模式出现。本机的 agent 列表属于本机
+ *    的详情页。
+ * 3. 添加页：返回按钮在表单方框外面；「从 Tailscale 选」放在表单前面，
+ *    选中一台就把名称和 IP 一起填上；「确定」「取消」收尾，按钮下面不再
+ *    放说明文字。
  *
- * 主机标识两边可能不一样（人填的 vs 机器自报的）：详情页把两个值都摆出来
+ * 名称两边可能不一样（人填的 vs 机器自报的）：详情页把两个值都摆出来
  * 并标明不一致，不悄悄用其中一个覆盖另一个。
  *
  * There is no restart control, on purpose. A restart ordered from this page
@@ -256,6 +259,32 @@ export function hostOf(address: string | undefined): string | undefined {
 }
 
 /**
+ * The stored origin as the IP field shows it: the scheme comes off, the host
+ * (and the port, when there is one) stays. `http://192.168.1.20:3081` reads
+ * `192.168.1.20:3081`; a value without a scheme passes through unchanged, so
+ * round-tripping never invents or eats anything the operator typed.
+ * @param address - the registry's stored address.
+ * @returns what the IP field holds.
+ */
+export function hostPartOfAddress(address: string): string {
+  return address.trim().replace(/^https?:\/\//i, '')
+}
+
+/**
+ * The IP field's value as the registry stores it: `http://` goes on when the
+ * scheme is missing (the browser needs an absolute URL; guessing https would
+ * send the operator somewhere they did not mean), an explicit scheme is
+ * respected, and an empty value stays empty so the registry can say so.
+ * @param value - what the IP field holds: an IP, host[:port], or a full URL.
+ * @returns the address to hand to the registry.
+ */
+export function addressFromHostPart(value: string): string {
+  const trimmed = value.trim()
+  if (trimmed === '') return ''
+  return /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`
+}
+
+/**
  * How long since the host was last heard, in words.
  * @param lastSeen - the page-clock time of the last announcement.
  * @param now - the page clock; defaults to Date.now, injected for tests.
@@ -271,12 +300,15 @@ export function heartbeatWord(lastSeen: number, now: number = Date.now()): strin
 }
 
 /**
- * What an operator fills in for one host: the identifier, the name, and where
- * it lives. The same three values drive the add page and the detail page.
+ * What an operator fills in for one host: its name and where it lives. The
+ * name is the hostId — 2026-10-13 用户决定：主机只有这两个字段，显示名撤销，
+ * 主机标识改名「名称」并兼任显示名（登记时 hostTitle 落库留空，存储层回落
+ * 到 hostId，列表显示的就是名称）。The address is the full origin the
+ * registry stores; the form's IP field shows it without the scheme
+ * （hostPartOfAddress / addressFromHostPart 在边界上互转）.
  */
 export type HostFormValues = {
   readonly hostId: string
-  readonly hostTitle: string
   readonly address: string
 }
 
@@ -291,8 +323,6 @@ export type HostReportedFacts = {
   readonly lastSeen?: number
   /** The identifier the host itself announces; absent while it is not heard. */
   readonly reportedId?: string
-  /** The name the host itself announces; absent while it is not heard. */
-  readonly reportedTitle?: string
   /** Every identifier actually announcing right now — the real cross-check. */
   readonly onlineIds: readonly string[]
 }
@@ -300,7 +330,6 @@ export type HostReportedFacts = {
 /** Which form fields a view-mode page lets the operator edit; the rest read out. */
 export type HostFormFieldPolicy = {
   readonly id: boolean
-  readonly title: boolean
   readonly address: boolean
 }
 
@@ -325,12 +354,11 @@ export type TailscalePort = {
   refresh(): Promise<TailscalePeersResult>
 }
 
-const ALL_FIELDS: HostFormFieldPolicy = { id: true, title: true, address: true }
+const ALL_FIELDS: HostFormFieldPolicy = { id: true, address: true }
 
-/** What an operator edits on one registration: id (optional), name, address. */
+/** What an operator edits on one registration: the name (the id), and the address. */
 export type RegistrationEditInput = {
   readonly hostId?: string
-  readonly hostTitle: string
   readonly address: string
 }
 
@@ -341,13 +369,15 @@ export type RegistrationEditInput = {
  * remove-then-add, with one safety rail: if the new entry is refused (a bad
  * address, an id somebody else already holds), the previous entry goes back
  * in, because a failed edit must not silently delete the operator's record.
- * The identifier is editable too — that is exactly how a filled-in id gets
+ * The name is editable too — that is exactly how a filled-in name gets
  * corrected to the one the machine actually announces. A row that is present
  * but never registered (another same-origin tab) has nothing to edit, so this
- * is simply an add.
+ * is simply an add. The stored hostTitle is left empty on every write: the
+ * storage layer falls it back to the hostId, which is the name — 显示名已
+ * 撤销（2026-10-13），旧登记里不一样的 hostTitle 在下一次保存时被名称取代.
  * @param registry - the registry port as the wiring provides it.
  * @param previousId - which registration to replace.
- * @param input - the new id (omit to keep the old one), name, and address.
+ * @param input - the new name (omit to keep the old one) and address.
  * @returns the add's result, whatever it was.
  */
 export function applyRegistrationEdit(
@@ -358,10 +388,10 @@ export function applyRegistrationEdit(
   const previous = registry.list().find(entry => entry.hostId === previousId)
   const nextId = input.hostId !== undefined && input.hostId.trim() !== '' ? input.hostId.trim() : previousId
   if (previous === undefined) {
-    return registry.add({ hostId: nextId, hostTitle: input.hostTitle, address: input.address })
+    return registry.add({ hostId: nextId, hostTitle: '', address: input.address })
   }
   registry.remove(previousId)
-  const result = registry.add({ hostId: nextId, hostTitle: input.hostTitle, address: input.address })
+  const result = registry.add({ hostId: nextId, hostTitle: '', address: input.address })
   if (!result.ok) {
     registry.add({ hostId: previous.hostId, hostTitle: previous.hostTitle, address: previous.address })
   }
@@ -453,9 +483,9 @@ function VerdictLine(props: {
 }
 
 /**
- * One host row in the list. The row is a summary — name, the short id, the
- * badge — and the whole row is the button that opens the host's detail page.
- * Nothing else rides on it: details live on the detail page.
+ * One host row in the list. The row is a line in a table — name, IP, status —
+ * and the whole row is the button that opens the host's detail page. Nothing
+ * else rides on it: details live on the detail page.
  * @param props - the merged row and the open handler.
  * @returns the row.
  */
@@ -464,10 +494,9 @@ export function HostRow(props: {
   readonly onOpen: () => void
 }): ReactNode {
   const { row } = props
-  // 副行只在地址里的 IP / 地址名跟名字不一样时显示：本机名就是 IP（127.0.0.1），
-  // 再列一遍是重复；没有地址的（本机）也不硬塞内部标识充数。
+  // 本机没有登记地址（它的地址就是这个标签页自己的 URL），IP 列以 — 占位，
+  // 不硬塞内部标识充数。
   const ip = hostOf(row.address)
-  const secondary = ip !== undefined && ip !== row.name ? ip : undefined
   const badge = row.self
     ? { word: '本机', tone: 'self' as const }
     : row.online
@@ -481,14 +510,9 @@ export function HostRow(props: {
         className={styles.hostRowButton}
         onClick={props.onOpen}
       >
-        <span className={styles.hostMain}>
-          <strong data-host-name="" className={styles.hostName}>{row.name}</strong>
-          {secondary !== undefined
-            ? <span data-host-id-label="" className={styles.hostIdShort} title={secondary}>{secondary}</span>
-            : undefined}
-        </span>
+        <strong data-host-name="" className={styles.hostName}>{row.name}</strong>
+        <span data-host-ip="" className={styles.hostIp} title={ip ?? undefined}>{ip ?? '—'}</span>
         <span data-host-badge={badge.tone} className={styles.hostBadge}>{badge.word}</span>
-        <span className={styles.chevron} aria-hidden="true">▸</span>
       </button>
     </div>
   )
@@ -496,11 +520,14 @@ export function HostRow(props: {
 
 /**
  * The form page both adding and viewing share — one component, two modes, so
- * a field changes in one place. Mode `new` collects the three operator-filled
- * fields over 确定/取消. Mode `view` shows the same fields (minus the ones
- * this page has no business editing) plus the facts the host itself reports —
- * status, heartbeat, and the id and name the host announces, laid beside what
- * was filled in, with mismatches named out loud instead of silently resolved.
+ * a field changes in one place. Mode `new` collects the two operator-filled
+ * fields (名称、IP) over 确定/取消, with 「从 Tailscale 选」 sitting before
+ * the form to fill both at once. Mode `view` shows the same fields (minus the
+ * ones this page has no business editing) plus the facts the host itself
+ * reports — status, heartbeat, and the id the host announces, laid beside
+ * what was filled in, with mismatches named out loud instead of silently
+ * resolved. The back button lives outside the card: the card frames the
+ * form, navigation is not part of it (2026-10-13 用户反馈).
  *
  * @param props - mode, initial values, field policy, the reported facts
  *   (view only), confirm/cancel handlers, and optional sections.
@@ -520,26 +547,26 @@ export function HostFormPage(props: {
   readonly postureNote?: ReactNode
   readonly onConfirm: (values: HostFormValues) => boolean
   readonly onCancel: () => void
-  /** 从 Tailscale 选地址的口；缺省就不显示那个按钮。 */
+  /** 从 Tailscale 选的口（表单前面的入口）；缺省就不显示那个按钮。 */
   readonly tailscale?: TailscalePort | undefined
 }): ReactNode {
   const [idDraft, setIdDraft] = useState(props.values.hostId)
-  const [titleDraft, setTitleDraft] = useState(props.values.hostTitle)
-  const [addressDraft, setAddressDraft] = useState(props.values.address)
+  // IP 字段里放的是去协议的主机（可带端口）；入库前补协议，出库时剥掉。
+  const [ipDraft, setIpDraft] = useState(hostPartOfAddress(props.values.address))
   const { reported } = props
   const fields = props.mode === 'new' ? ALL_FIELDS : props.fields ?? ALL_FIELDS
   const confirm = (): void => {
     // onConfirm 回 true＝保存成功，页面关掉回列表（列表本身就是保存结果的
     // 反馈：新行以「未连接」出现、名字换成新的）；回 false＝留在本页看错误。
-    const close = props.onConfirm({ hostId: idDraft.trim(), hostTitle: titleDraft.trim(), address: addressDraft.trim() })
+    const close = props.onConfirm({ hostId: idDraft.trim(), address: addressFromHostPart(ipDraft) })
     if (close) props.onCancel()
   }
-  // 自报值与填写值当场比对（跟着输入走），不一致就明说，两边都保留。
+  // 自报标识与填写的名称当场比对（跟着输入走），不一致就明说，两边都保留。
   const idMatch = reported?.reportedId === undefined ? undefined : reported.reportedId === idDraft.trim()
-  const titleMatch = reported?.reportedTitle === undefined ? undefined : reported.reportedTitle === titleDraft.trim()
   const addressHidden = props.mode === 'view' && !fields.address && props.values.address === ''
 
-  // 从 Tailscale 选：点开→读清单→列出；选一台→填地址+收起；刷新→主机侧重跑一次。
+  // 从 Tailscale 选（表单前面的入口）：点开→读清单→列出；选一台→名称和 IP
+  // 一起填上＋收起；刷新让主机侧重跑一次；收起只关不填。
   const [picker, setPicker] = useState<{ open: boolean; result?: TailscalePeersResult | undefined }>({ open: false })
   const canPickAddress = props.tailscale !== undefined && fields.address
   const openPicker = async (): Promise<void> => {
@@ -555,240 +582,188 @@ export function HostFormPage(props: {
     setPicker({ open: true, result })
   }
   const pickPeer = (peer: TailscalePeer): void => {
-    // MagicDNS 名换 IP 不换名字，地址用它最稳；端口先填 3081，用户能改。
-    setAddressDraft(`http://${peer.name}:3081`)
+    // 选中即填两个字段：名称用 peer 名，IP 用它的 tailnet 地址；端口不一样
+    // 的在 IP 里自己补（如 100.101.1.7:3081）。
+    setIdDraft(peer.name)
+    setIpDraft(peer.ip)
     setPicker({ open: false })
   }
   return (
-    <section data-panel-page={props.mode === 'new' ? 'add' : 'detail'} className={styles.card}>
-      <div className={styles.cardHead}>
+    <div data-panel-page={props.mode === 'new' ? 'add' : 'detail'} className={styles.formPage}>
+      {/* 返回在方框外面（2026-10-13 用户反馈）：框住的是表单，导航不是表单
+          的一部分。 */}
+      <div className={styles.formNav}>
         <button
           type="button"
           data-form-cancel=""
           className={styles.action}
           onClick={props.onCancel}
         >‹ 返回</button>
-        <h2 className={styles.title}>{props.heading}</h2>
-        {/* 点开每一台主机都进这里：标题点明这是「主机管理」设置界面，
-            下面的主机信息（自报标识、状态、登记字段）是其中一个栏目。 */}
-        <span data-host-management-heading="" className={styles.managementTag}>主机管理</span>
-        <span className={styles.spacer} />
       </div>
-      {reported === undefined
-        ? undefined
-        : (
-            <div data-reported-facts="" className={styles.reportedFacts}>
-              {reported.self
-                ? <p className={styles.stateLine}>这就是本机：这里显示和编辑的是这个标签页自己声明的身份。</p>
-                : undefined}
-              <p data-fact-online="" className={styles.stateLine}>
-                状态：{reported.online ? '在线' : '未连接'}
-                {reported.online && reported.lastSeen !== undefined
-                  ? <span data-fact-heartbeat=""> · 最近心跳 {heartbeatWord(reported.lastSeen)}</span>
-                  : undefined}
-              </p>
-              {!reported.online && !reported.self
-                ? (
-                    <p data-fact-offline-note="" className={styles.stateLine}>
-                      频道上没有这个标识的报数
-                      {reported.onlineIds.length > 0
-                        ? <>；现在在线的标识：<span data-fact-online-ids="">{reported.onlineIds.join('、')}</span></>
-                        : null}
-                      。
-                    </p>
-                  )
-                : undefined}
-              {reported.reportedId !== undefined
-                ? (
-                    <p data-fact-reported-id="" className={styles.stateLine}>
-                      主机自报标识：{reported.reportedId}
-                      {idMatch === true
-                        ? <span data-fact-id-match="">（与填写一致）</span>
-                        : <span data-fact-id-mismatch="" className={styles.mismatch}>（与填写的不一样；两边都保留，把上面的标识改成它，两边就对上了）</span>}
-                    </p>
-                  )
-                : undefined}
-              {reported.reportedTitle !== undefined
-                ? (
-                    <p data-fact-reported-title="" className={styles.stateLine}>
-                      主机自报名字：{reported.reportedTitle}
-                      {titleMatch === true
-                        ? <span data-fact-title-match="">（与填写一致）</span>
-                        : <span data-fact-title-mismatch="" className={styles.mismatch}>（与填写的不一样；列表显示的是登记名）</span>}
-                    </p>
-                  )
-                : undefined}
-            </div>
-          )}
-      <form
-        data-host-form=""
-        className={styles.formGrid}
-        onSubmit={event => {
-          event.preventDefault()
-          confirm()
-        }}
-      >
-        <label className={styles.field}>
-          主机标识
-          {fields.id
-            ? (
-                <input
-                  value={idDraft}
-                  data-form-field-id=""
-                  className={styles.input}
-                  onChange={event => { setIdDraft(event.target.value) }}
-                  placeholder={props.mode === 'new' ? '那台机器面板里配置的 hostId' : undefined}
-                />
-              )
-            : <span data-form-field-id="" className={styles.readonlyValue}>{props.values.hostId}</span>}
-        </label>
-        <label className={styles.field}>
-          显示名
-          {fields.title
-            ? (
-                <input
-                  value={titleDraft}
-                  data-form-field-title=""
-                  className={styles.input}
-                  onChange={event => { setTitleDraft(event.target.value) }}
-                  placeholder="如：测试机"
-                />
-              )
-            : <span data-form-field-title="" className={styles.readonlyValue}>{props.values.hostTitle}</span>}
-        </label>
-        {addressHidden
+      <section data-form-card="" className={styles.card}>
+        <div className={styles.cardHead}>
+          <h2 className={styles.title}>{props.heading}</h2>
+          {/* 点开每一台主机都进这里：标题点明这是「主机管理」设置界面，
+              下面的主机信息（自报标识、状态、登记字段）是其中一个栏目。 */}
+          <span data-host-management-heading="" className={styles.managementTag}>主机管理</span>
+          <span className={styles.spacer} />
+        </div>
+        {reported === undefined
           ? undefined
           : (
-              <>
-                <label className={styles.field}>
-                  地址（含 http 和端口）
-                  <div className={styles.addressRow}>
-                    {fields.address
-                      ? (
-                          <input
-                            value={addressDraft}
-                            data-form-field-address=""
-                            className={styles.input}
-                            onChange={event => { setAddressDraft(event.target.value) }}
-                            placeholder="http://192.168.1.10:3081"
-                          />
-                        )
-                      : <span data-form-field-address="" className={styles.readonlyValue}>{props.values.address}</span>}
-                    {canPickAddress
-                      ? (
-                          <button
-                            type="button"
-                            data-action="tailscale-pick"
-                            className={styles.action}
-                            onClick={() => { void openPicker() }}
-                          >
-                            从 Tailscale 选
-                          </button>
-                        )
-                      : undefined}
-                  </div>
-                </label>
-                  {picker.open && canPickAddress
-                    ? (
-                        <div data-tailscale-picker="" className={styles.tailscalePicker}>
-                          <div className={styles.tailscalePickerBar}>
-                            <span className={styles.tailscalePickerTitle}>从 Tailscale 选一台</span>
-                            <button type="button" data-action="tailscale-refresh" className={styles.action} onClick={() => { void refreshPicker() }}>刷新</button>
-                          </div>
-                          {picker.result === undefined
-                            ? <p data-tailscale-state="loading" className={styles.stateLine}>正在读取清单……</p>
-                            : picker.result.ok === false
-                              ? <p data-tailscale-state="failed" className={styles.stateBad}>{picker.result.message}</p>
-                              : (
-                                  <>
-                                    {picker.result.note !== undefined
-                                      ? <p data-tailscale-note="" className={styles.note}>{picker.result.note}</p>
-                                      : undefined}
-                                    {picker.result.peers.length === 0
-                                      ? <p data-tailscale-state="empty" className={styles.stateLine}>清单是空的——只有本机，或还没登录 Tailscale。</p>
-                                      : (
-                                          <ul className={styles.tailscalePeerList}>
-                                            {picker.result.peers.map(peer => (
-                                              <li key={peer.name}>
-                                                <button
-                                                  type="button"
-                                                  data-tailscale-peer={peer.name}
-                                                  data-tailscale-online={peer.online ? 'true' : 'false'}
-                                                  className={peer.online ? styles.tailscalePeer : styles.tailscalePeerOffline}
-                                                  onClick={() => { pickPeer(peer) }}
-                                                >
-                                                  <span className={styles.tailscalePeerName}>{peer.name}</span>
-                                                  <span className={styles.tailscalePeerMeta}>{peer.ip} · {peer.online ? '在线' : '未连接'}</span>
-                                                </button>
-                                              </li>
-                                            ))}
-                                          </ul>
-                                        )}
-                                  </>
-                                )}
-                        </div>
-                      )
+              <div data-reported-facts="" className={styles.reportedFacts}>
+                {reported.self
+                  ? <p className={styles.stateLine}>这就是本机：这里显示和编辑的是这个标签页自己声明的身份。</p>
+                  : undefined}
+                <p data-fact-online="" className={styles.stateLine}>
+                  状态：{reported.online ? '在线' : '未连接'}
+                  {reported.online && reported.lastSeen !== undefined
+                    ? <span data-fact-heartbeat=""> · 最近心跳 {heartbeatWord(reported.lastSeen)}</span>
                     : undefined}
-              </>
+                </p>
+                {!reported.online && !reported.self
+                  ? (
+                      <p data-fact-offline-note="" className={styles.stateLine}>
+                        频道上没有这台主机的报数
+                        {reported.onlineIds.length > 0
+                          ? <>；现在在线的名称：<span data-fact-online-ids="">{reported.onlineIds.join('、')}</span></>
+                          : null}
+                        。
+                      </p>
+                    )
+                  : undefined}
+                {reported.reportedId !== undefined
+                  ? (
+                      <p data-fact-reported-id="" className={styles.stateLine}>
+                        主机自报名称：{reported.reportedId}
+                        {idMatch === true
+                          ? <span data-fact-id-match="">（与填写一致）</span>
+                          : <span data-fact-id-mismatch="" className={styles.mismatch}>（与填写的不一样；两边都保留，把名称改成它，两边就对上了）</span>}
+                      </p>
+                    )
+                  : undefined}
+              </div>
             )}
-      </form>
-      {props.message === undefined
-        ? undefined
-        : <p data-form-message={props.message.tone} className={props.message.tone === 'ok' ? styles.stateLine : styles.stateBad}>{props.message.text}</p>}
-      {props.postureNote}
-      <div className={styles.formActions}>
-        {props.mode === 'new' || fields.id || fields.title || fields.address
+        {canPickAddress
           ? (
-              <button type="button" data-form-confirm="" className={styles.actionPrimary} onClick={confirm}>
-                {props.mode === 'new' ? '确定' : '保存'}
-              </button>
+              <div data-tailscale-section="" className={styles.tailscaleSection}>
+                {!picker.open
+                  ? (
+                      <button
+                        type="button"
+                        data-action="tailscale-pick"
+                        className={styles.action}
+                        onClick={() => { void openPicker() }}
+                      >
+                        从 Tailscale 选
+                      </button>
+                    )
+                  : (
+                      <div data-tailscale-picker="" className={styles.tailscalePicker}>
+                        <div className={styles.tailscalePickerBar}>
+                          <span className={styles.tailscalePickerTitle}>从 Tailscale 选一台</span>
+                          <span className={styles.spacer} />
+                          <button type="button" data-action="tailscale-refresh" className={styles.action} onClick={() => { void refreshPicker() }}>刷新</button>
+                          <button type="button" data-action="tailscale-close" className={styles.action} onClick={() => { setPicker({ open: false }) }}>收起</button>
+                        </div>
+                        {picker.result === undefined
+                          ? <p data-tailscale-state="loading" className={styles.stateLine}>正在读取清单……</p>
+                          : picker.result.ok === false
+                            ? <p data-tailscale-state="failed" className={styles.stateBad}>{picker.result.message}</p>
+                            : (
+                                <>
+                                  {picker.result.note !== undefined
+                                    ? <p data-tailscale-note="" className={styles.note}>{picker.result.note}</p>
+                                    : undefined}
+                                  {picker.result.peers.length === 0
+                                    ? <p data-tailscale-state="empty" className={styles.stateLine}>清单是空的——只有本机，或还没登录 Tailscale。</p>
+                                    : (
+                                        <ul className={styles.tailscalePeerList}>
+                                          {picker.result.peers.map(peer => (
+                                            <li key={peer.name}>
+                                              <button
+                                                type="button"
+                                                data-tailscale-peer={peer.name}
+                                                data-tailscale-online={peer.online ? 'true' : 'false'}
+                                                className={peer.online ? styles.tailscalePeer : styles.tailscalePeerOffline}
+                                                onClick={() => { pickPeer(peer) }}
+                                              >
+                                                <span className={styles.tailscalePeerName}>{peer.name}</span>
+                                                <span className={styles.tailscalePeerMeta}>{peer.ip} · {peer.online ? '在线' : '未连接'}</span>
+                                              </button>
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      )}
+                                </>
+                              )}
+                      </div>
+                    )}
+              </div>
             )
           : undefined}
-        <button type="button" data-form-cancel-bottom="" className={styles.action} onClick={props.onCancel}>
-          {props.mode === 'new' ? '取消' : '返回列表'}
-        </button>
-      </div>
-      {props.footer}
-      {props.agents}
-      {props.mode === 'new'
-        ? (
-            <div data-add-notes="" className={styles.addNotes}>
-              <p data-registry-posture="" className={styles.note}>
-                添加主机＝登记它的地址和打开步骤，<strong>不是建立连接</strong>：本页无法跨源读取另一台主机的接口，也听不到它标签页的频道；
-                每台主机用它自己的页面打开，那一个标签页有自己的面板。
-              </p>
-              <details className={styles.noteDetails}>
-                <summary className={styles.summary}>添加一台主机需要什么</summary>
-                <ol className={styles.steps}>
-                  <li>
-                    在那台机器上启动：<code>dsh web --port &lt;端口&gt;</code>。DSH 只监听本机 127.0.0.1——
-                    <code>0.0.0.0</code> 被启动器以安全理由直接拒绝（会把远程代码执行暴露给网络），
-                    绑具体内网地址也会被配置校验拒绝（只认 127.0.0.1 / 0.0.0.0 两个值）。这是当前版本（0.2.0-rc.2）的事实。
-                  </li>
-                  <li>
-                    跨机器访问靠端口转发：在浏览这台页面的机器上执行
-                    <code>ssh -L &lt;本地端口&gt;:127.0.0.1:&lt;端口&gt; &lt;那台机器&gt;</code>，
-                    然后访问 <code>http://127.0.0.1:&lt;本地端口&gt;</code>。转发后的 Host 仍是 127.0.0.1，不需要 <code>--trusted-host</code>；
-                    只有把页面放到反向代理后面、换了地址时，才要在那台机器上配 <code>--trusted-host &lt;代理后的地址&gt;</code>
-                    （写 <code>IP</code> 匹配任意端口，写 <code>IP:端口</code> 精确匹配，格式写错插件会加载失败）。
-                    这一步没有界面能替你做。
-                  </li>
-                  <li>
-                    打开：token 以那台机器 <code>dsh web</code> 打印的 <code>?token=…</code> 为准，
-                    不保存在这台机器上（凭证留在主机侧）。
-                  </li>
-                  <li>
-                    打开之前想清楚安全代价：端口转发和反向代理把那台机器的远程代码执行面带进你的网络路径，
-                    谁能连到转发端口，谁就可能在那台机器上执行命令；跨机器转发的事件不做脱敏，
-                    一台主机的数据会原样显示在连着它的浏览器里。
-                  </li>
-                </ol>
-              </details>
-            </div>
-          )
-        : undefined}
-      {props.notes}
-    </section>
+        <form
+          data-host-form=""
+          className={styles.formGrid}
+          onSubmit={event => {
+            event.preventDefault()
+            confirm()
+          }}
+        >
+          <label className={styles.field}>
+            名称
+            {fields.id
+              ? (
+                  <input
+                    value={idDraft}
+                    data-form-field-id=""
+                    className={styles.input}
+                    onChange={event => { setIdDraft(event.target.value) }}
+                    placeholder={props.mode === 'new' ? '如：mac-mini' : undefined}
+                  />
+                )
+              : <span data-form-field-id="" className={styles.readonlyValue}>{props.values.hostId}</span>}
+          </label>
+          {addressHidden
+            ? undefined
+            : (
+                <label className={styles.field}>
+                  IP
+                  {fields.address
+                    ? (
+                        <input
+                          value={ipDraft}
+                          data-form-field-address=""
+                          className={styles.input}
+                          onChange={event => { setIpDraft(event.target.value) }}
+                          placeholder="100.101.1.7，可带端口：100.101.1.7:3081"
+                        />
+                      )
+                    : <span data-form-field-address="" className={styles.readonlyValue}>{hostPartOfAddress(props.values.address)}</span>}
+                </label>
+              )}
+        </form>
+        {props.message === undefined
+          ? undefined
+          : <p data-form-message={props.message.tone} className={props.message.tone === 'ok' ? styles.stateLine : styles.stateBad}>{props.message.text}</p>}
+        {props.postureNote}
+        <div className={styles.formActions}>
+          {props.mode === 'new' || fields.id || fields.address
+            ? (
+                <button type="button" data-form-confirm="" className={styles.actionPrimary} onClick={confirm}>
+                  {props.mode === 'new' ? '确定' : '保存'}
+                </button>
+              )
+            : undefined}
+          <button type="button" data-form-cancel-bottom="" className={styles.action} onClick={props.onCancel}>
+            {props.mode === 'new' ? '取消' : '返回列表'}
+          </button>
+        </div>
+        {props.footer}
+        {props.agents}
+        {props.notes}
+      </section>
+    </div>
   )
 }
 
@@ -877,8 +852,10 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
     setConfirmingRemove(false)
     setView({ page: 'list' })
   }
-  const confirmAdd = (values: { readonly hostId: string; readonly hostTitle: string; readonly address: string }): boolean => {
-    const result = props.registry.add(values)
+  const confirmAdd = (values: HostFormValues): boolean => {
+    // 显示名已撤销（2026-10-13）：hostTitle 落库留空，存储层回落到 hostId，
+    // 列表显示的就是名称本身。
+    const result = props.registry.add({ hostId: values.hostId, hostTitle: '', address: values.address })
     // 成功不留在本页：关闭后的列表里那行「未连接」就是结果。只把失败留在页面上。
     if (!result.ok) {
       setFormMessage({ tone: 'bad', text: result.error.detail })
@@ -886,10 +863,9 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
     setRegistryRevision(revision => revision + 1)
     return result.ok
   }
-  const confirmEdit = (previousId: string, values: { readonly hostId: string; readonly hostTitle: string; readonly address: string }): boolean => {
+  const confirmEdit = (previousId: string, values: HostFormValues): boolean => {
     const result = applyRegistrationEdit(props.registry, previousId, {
       ...(values.hostId === '' || values.hostId === previousId ? {} : { hostId: values.hostId }),
-      hostTitle: values.hostTitle,
       address: values.address,
     })
     if (!result.ok) {
@@ -898,10 +874,11 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
     setRegistryRevision(revision => revision + 1)
     return result.ok
   }
-  const confirmSelf = (values: { readonly hostId: string; readonly hostTitle: string; readonly address: string }): boolean => {
+  const confirmSelf = (values: HostFormValues): boolean => {
+    // 名称同时写 id 和 title：id 是频道上认账的键，title 是列表显示的名。
+    // 只写 id 的话，本机行的显示会退回派生名（如 127.0.0.1），名称就白改了。
     props.rollUp.setIdentity({
-      ...(values.hostId === '' ? {} : { hostId: values.hostId }),
-      ...(values.hostTitle === '' ? {} : { hostTitle: values.hostTitle }),
+      ...(values.hostId === '' ? {} : { hostId: values.hostId, hostTitle: values.hostId }),
     })
     // The section's identity is read at render time; this bump is what makes
     // the panel show the new one.
@@ -934,7 +911,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
           key="add"
           mode="new"
           heading="添加新主机"
-          values={{ hostId: '', hostTitle: '', address: '' }}
+          values={{ hostId: '', address: '' }}
           message={formMessage}
           postureNote={<StoragePostureLine posture={props.hostStore?.posture()} />}
           onConfirm={values => confirmAdd(values)}
@@ -954,30 +931,19 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
         self: row.self,
         online: row.online,
         ...(row.lastSeen === undefined ? {} : { lastSeen: row.lastSeen }),
-        ...(row.online
-          ? {
-              reportedId: row.hostId,
-              // 自报的名字取主机自己的快照，不是合并后的显示名：两者不同正是要摆出来的事。
-              reportedTitle: row.self
-                ? identity.hostTitle
-                : presence.find(host => host.hostId === row.hostId)?.hostTitle ?? row.name,
-            }
-          : {}),
+        ...(row.online ? { reportedId: row.hostId } : {}),
         onlineIds: props.rollUp.onlineHostIds(),
       }
       const values: HostFormValues = {
         hostId: row.self ? identity.hostId : row.hostId,
-        hostTitle: row.self ? identity.hostTitle : row.name,
         address: row.address ?? '',
       }
-      // 本机的标识与名字是本机身份，可编辑；地址是登记簿的东西，只读展示。
-      // 外来主机登记过就能整行改；只是路过（同源另一标签页）就没有可填的。
-      // 本机：标识与名字可改（名字是本机身份），地址只读——那是这个标签页
-      // 自己的 URL，不是登记簿里的。外来主机：整行可改；路过（同源另一标签页）
-      // 也开放填写，保存即登记。
+      // 本机的名称是本机身份，可编辑；地址是登记簿的东西，只读展示。
+      // 外来主机登记过就能整行改；只是路过（同源另一标签页）也一样开放
+      // 填写，保存即登记。
       const fields = row.self
-        ? { id: true, title: true, address: false }
-        : { id: true, title: true, address: true }
+        ? { id: true, address: false }
+        : { id: true, address: true }
       const reach = reaches.get(row.hostId)
       return (
         <div data-threadharbor-panel="" className={styles.root}>
@@ -1101,17 +1067,23 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
         >添加新主机</button>
       </div>
       <StoragePostureLine posture={props.hostStore?.posture()} />
+      {/* 一张正常的表（2026-10-13 用户反馈）：三列表头 + 一行一台主机，
+          点行进详情页。 */}
       <div data-host-list="" data-panel-page="list" className={styles.hostList}>
         <div data-host-list-head="" className={styles.hostListHead} aria-hidden="true">
-          <span className={styles.hostListHeadLabel}>主机</span>
+          <span className={styles.hostListHeadLabel}>名称</span>
+          <span className={styles.hostListHeadLabel}>IP</span>
+          <span className={styles.hostListHeadLabel}>状态</span>
         </div>
-        {hostRows.map(row => (
-          <HostRow
-            key={row.hostId}
-            row={row}
-            onOpen={() => { setFormMessage(undefined); setConfirmingRemove(false); setView({ page: 'detail', hostId: row.hostId }) }}
-          />
-        ))}
+        {hostRows.length === 0
+          ? <p data-host-list-empty="" className={styles.hostListEmpty}>还没有主机。点「添加新主机」登记第一台。</p>
+          : hostRows.map(row => (
+              <HostRow
+                key={row.hostId}
+                row={row}
+                onOpen={() => { setFormMessage(undefined); setConfirmingRemove(false); setView({ page: 'detail', hostId: row.hostId }) }}
+              />
+            ))}
       </div>
     </div>
   )

@@ -1,15 +1,17 @@
 /**
  * The agent panel's pieces, without a browser in the loop.
  *
- * 2026-10-12 用户反馈定下的形状：面板是三个界面——
- * 1. 列表页：上方一个「添加新主机」按钮，下面是主机行；行是摘要，点行进
- *    详情页（不再就地展开）；列表页宽度固定，别的什么都不放。
- * 2. 详情页：和添加页是同一套表单的两种模式——用户填的字段（主机标识、
- *    显示名、地址）是表单，主机自己报的事实（在线状态、心跳、自报的标识
- *    和名字）只在详情模式出现；本机的 agent 列表属于本机的详情页。
- * 3. 添加页：同一套表单的新增模式，下面「确定」「取消」两个按钮。
- * 主机标识两边可能不一样（人填的 vs 机器自报的）：两个都摆出来，不悄悄
- * 用一个覆盖另一个。
+ * 2026-10-13 用户反馈定下的形状：面板是三个界面——
+ * 1. 列表页：一张正常的表（名称/IP/状态 三列，一行一台主机），上方一个
+ *    「添加新主机」按钮；点行进详情页，别的什么都不放。
+ * 2. 详情页：和添加页是同一套表单的两种模式——主机只有「名称」「IP」两个
+ *    字段（显示名撤销，名称就是原来的主机标识）；主机自己报的事实（在线
+ *    状态、心跳、自报标识）只在详情模式出现；本机的 agent 列表属于本机
+ *    的详情页。
+ * 3. 添加页：返回按钮在方框外面，「从 Tailscale 选」在表单前面，「确定」
+ *    「取消」之后不再有内容。
+ * 名称两边可能不一样（人填的 vs 机器自报的）：两个都摆出来，不悄悄用
+ * 一个覆盖另一个。
  *
  * 这里的测试管结构：哪个界面该有什么、收起时什么必须不出现。点击行为
  * （跳转、保存、提交）另有 jsdom 交互测试（panel-interact.spec.ts），真机
@@ -32,6 +34,8 @@ import {
   mergeHostRows,
   heartbeatWord,
   applyRegistrationEdit,
+  hostPartOfAddress,
+  addressFromHostPart,
   type ProbeRunState,
   type RegistrationEditInput,
 } from '../src/panel.tsx'
@@ -309,22 +313,21 @@ describe('主机表单页：新增和详情是同一套东西的两种模式', (
   const viewProps = {
     mode: 'view',
     heading: '测试机',
-    values: { hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' },
+    values: { hostId: 'bench', address: 'http://192.168.1.20:3081' },
     onConfirm: () => true,
     onCancel: () => {},
   } as const
 
-  it('新增模式：只有人填的三个字段和确定/取消；主机报的字段一概不出现', () => {
+  it('新增模式：两个字段（名称、IP）和确定/取消；主机报的字段一概不出现；按钮下面没有内容', () => {
     const html = renderToString(createElement(HostFormPage, {
       mode: 'new',
       heading: '添加新主机',
-      values: { hostId: '', hostTitle: '', address: '' },
+      values: { hostId: '', address: '' },
       onConfirm: () => false,
       onCancel: () => {},
     }))
     expect(html).toContain('data-panel-page="add"')
     expect(html).toContain('data-form-field-id=""')
-    expect(html).toContain('data-form-field-title=""')
     expect(html).toContain('data-form-field-address=""')
     expect(html).toContain('data-form-confirm=""')
     expect(html).toContain('确定')
@@ -333,15 +336,31 @@ describe('主机表单页：新增和详情是同一套东西的两种模式', (
     expect(html).not.toContain('data-reported-facts')
     expect(html).not.toContain('最近心跳')
     expect(html).not.toContain('data-agent-section')
-    // 诚实的说明不丢：登记不是建连 + 完整环境前提都在添加页（折叠）。
-    expect(html).toContain('data-registry-posture=""')
-    expect(html).toContain('不是建立连接')
-    expect(html).toContain('添加一台主机需要什么')
-    expect(html).toContain('--trusted-host')
-    expect(html).toContain('凭证留在主机侧')
+    // 显示名撤销（2026-10-13）：表单里不再有第三个字段。
+    expect(html).not.toContain('data-form-field-title')
+    expect(html).not.toContain('显示名')
+    // 确定和取消下面的内容要去掉（2026-10-13）：登记说明、环境前提都不在。
+    expect(html).not.toContain('data-add-notes')
+    expect(html).not.toContain('不是建立连接')
+    expect(html).not.toContain('添加一台主机需要什么')
+    expect(html).not.toContain('--trusted-host')
   })
 
-  it('详情模式：同一套字段之外，主机自报的事实也在（在线、心跳、自报标识和名字）', () => {
+  it('新增模式：返回按钮在方框外面——它在 data-form-card 之前出现，不进方框', () => {
+    const html = renderToString(createElement(HostFormPage, {
+      mode: 'new',
+      heading: '添加新主机',
+      values: { hostId: '', address: '' },
+      onConfirm: () => false,
+      onCancel: () => {},
+    }))
+    const navAt = html.indexOf('data-form-cancel=""')
+    const cardAt = html.indexOf('data-form-card=""')
+    expect(navAt).toBeGreaterThanOrEqual(0)
+    expect(cardAt).toBeGreaterThan(navAt)
+  })
+
+  it('详情模式：同一套字段之外，主机自报的事实也在（在线、心跳、自报标识）', () => {
     const html = renderToString(createElement(HostFormPage, {
       ...viewProps,
       reported: {
@@ -349,7 +368,6 @@ describe('主机表单页：新增和详情是同一套东西的两种模式', (
         online: true,
         lastSeen: 9_000,
         reportedId: 'bench',
-        reportedTitle: '测试机',
         onlineIds: ['bench'],
       },
     }))
@@ -359,26 +377,23 @@ describe('主机表单页：新增和详情是同一套东西的两种模式', (
     expect(html).toContain('在线')
     expect(html).toContain('最近心跳')
     expect(html).toContain('data-fact-reported-id=""')
-    expect(html).toContain('data-fact-reported-title=""')
     expect(html).toContain('data-form-confirm=""')
     expect(html).toContain('data-form-cancel=""')
   })
 
-  it('自报的标识和名字与登记一致时，明说一致', () => {
+  it('自报的标识与填写的名称一致时，明说一致', () => {
     const html = renderToString(createElement(HostFormPage, {
       ...viewProps,
-      reported: { self: false, online: true, lastSeen: 9_000, reportedId: 'bench', reportedTitle: '测试机', onlineIds: ['bench'] },
+      reported: { self: false, online: true, lastSeen: 9_000, reportedId: 'bench', onlineIds: ['bench'] },
     }))
     expect(html).toContain('data-fact-id-match=""')
-    expect(html).toContain('data-fact-title-match=""')
     expect(html).not.toContain('data-fact-id-mismatch')
-    expect(html).not.toContain('data-fact-title-mismatch')
   })
 
-  it('自报标识与填的标识不一致时，两个都摆出来，不覆盖', () => {
+  it('自报标识与填写的名称不一致时，两个都摆出来，不覆盖', () => {
     const html = renderToString(createElement(HostFormPage, {
       ...viewProps,
-      reported: { self: false, online: true, lastSeen: 9_000, reportedId: 'bench-x', reportedTitle: '测试机', onlineIds: ['bench-x'] },
+      reported: { self: false, online: true, lastSeen: 9_000, reportedId: 'bench-x', onlineIds: ['bench-x'] },
     }))
     expect(html).toContain('data-fact-id-mismatch=""')
     expect(html).toContain('bench-x')
@@ -386,22 +401,12 @@ describe('主机表单页：新增和详情是同一套东西的两种模式', (
     expect(html).not.toContain('data-fact-id-match')
   })
 
-  it('自报名字与登记名不一致时，两个名字都在', () => {
-    const html = renderToString(createElement(HostFormPage, {
-      ...viewProps,
-      reported: { self: false, online: true, lastSeen: 9_000, reportedId: 'bench', reportedTitle: '机器自报的名字', onlineIds: ['bench'] },
-    }))
-    expect(html).toContain('data-fact-title-mismatch=""')
-    expect(html).toContain('机器自报的名字')
-    expect(html).toContain('测试机')
-  })
-
   it('登记的标识不在频道上时，如实说没有，并列出现在在线的标识（真实传入的数据）', () => {
     const html = renderToString(createElement(HostFormPage, {
       ...viewProps,
       reported: { self: false, online: false, onlineIds: ['alpha-live', 'zeta-live'] },
     }))
-    expect(html).toContain('频道上没有这个标识')
+    expect(html).toContain('频道上没有这台主机的报数')
     expect(html).toContain('data-fact-online-ids=""')
     expect(html).toContain('alpha-live')
     expect(html).toContain('zeta-live')
@@ -421,8 +426,8 @@ describe('主机表单页：新增和详情是同一套东西的两种模式', (
     const html = renderToString(createElement(HostFormPage, {
       mode: 'view',
       heading: '本机',
-      values: { hostId: 'self-host', hostTitle: '本机', address: '' },
-      reported: { self: true, online: true, lastSeen: 9_000, reportedId: 'self-host', reportedTitle: '本机', onlineIds: ['self-host'] },
+      values: { hostId: 'self-host', address: '' },
+      reported: { self: true, online: true, lastSeen: 9_000, reportedId: 'self-host', onlineIds: ['self-host'] },
       onConfirm: () => true,
       onCancel: () => {},
     }))
@@ -433,7 +438,7 @@ describe('主机表单页：新增和详情是同一套东西的两种模式', (
   it('agent 区只在传进来时渲染：它是调用方（本机详情）的事', () => {
     const withAgents = renderToString(createElement(HostFormPage, {
       ...viewProps,
-      reported: { self: true, online: true, lastSeen: 9_000, reportedId: 'bench', reportedTitle: '测试机', onlineIds: ['bench'] },
+      reported: { self: true, online: true, lastSeen: 9_000, reportedId: 'bench', onlineIds: ['bench'] },
       agents: createElement('div', { 'data-agent-section': '' }, 'agent 区'),
     }))
     expect(withAgents).toContain('data-agent-section=""')
@@ -461,17 +466,27 @@ describe('面板三个界面', () => {
     expect(html).not.toContain('data-host-details')
   })
 
-  it('列表页的主行还是只有名字、简短标识、徽标', () => {
+  it('列表页的主行是三列：名称、IP、徽标；完整地址不出现', () => {
     const html = renderToString(createElement(HostRow, {
       row: { hostId: 'bench', name: '测试机', self: false, online: false, address: 'http://192.168.1.20:3081' },
       onOpen: () => {},
     }))
     expect(html).toContain('data-host-open="bench"')
     expect(html).toContain('data-host-name=""')
-    expect(html).toContain('data-host-id-label=""')
+    expect(html).toContain('data-host-ip=""')
+    expect(html).toContain('192.168.1.20')
     expect(html).toContain('data-host-badge="offline"')
     expect(html).not.toContain('http://192.168.1.20:3081')
     expect(html).not.toContain('最近心跳')
+  })
+
+  it('没有登记地址的行（本机）IP 列以 — 占位', () => {
+    const html = renderToString(createElement(HostRow, {
+      row: { hostId: 'self', name: '本机', self: true, online: true },
+      onOpen: () => {},
+    }))
+    expect(html).toContain('data-host-badge="self"')
+    expect(html).toContain('—')
   })
 
   it('徽标分三色：本机、在线、未连接', () => {
@@ -492,7 +507,7 @@ describe('面板三个界面', () => {
     const html = renderToString(createElement(HostFormPage, {
       mode: 'view',
       heading: '测试机',
-      values: { hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' },
+      values: { hostId: 'bench', address: 'http://192.168.1.20:3081' },
       reported: { self: false, online: false, onlineIds: [] },
       notes: createElement('ul', { 'data-panel-notices': '' }, createElement('li', null, '「在线」= 同源标签页按心跳报数')),
       onConfirm: () => true,
@@ -508,28 +523,28 @@ describe('登记编辑', () => {
     { hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' },
   ])
 
-  it('改名成功：旧条目被替换，列表里是新名字新地址', () => {
+  it('改名称成功：旧条目被替换，hostTitle 落库回落到新名称（显示名撤销）', () => {
     const registry = seeded()
-    const input: RegistrationEditInput = { hostTitle: '甲板机', address: 'http://10.0.0.8:3081' }
+    const input: RegistrationEditInput = { hostId: '甲板机', address: 'http://10.0.0.8:3081' }
     const result = applyRegistrationEdit(registry, 'bench', input)
     expect(result.ok).toBe(true)
     expect(registry.list()).toHaveLength(1)
-    expect(registry.list()[0]).toMatchObject({ hostId: 'bench', hostTitle: '甲板机', address: 'http://10.0.0.8:3081' })
+    expect(registry.list()[0]).toMatchObject({ hostId: '甲板机', hostTitle: '甲板机', address: 'http://10.0.0.8:3081' })
   })
 
-  it('标识也能改：换成机器实际自报的那个，旧标识的条目不再存在', () => {
+  it('名称换成机器实际自报的那个：旧标识的条目不再存在', () => {
     const registry = seeded()
-    const result = applyRegistrationEdit(registry, 'bench', { hostId: 'bench-x', hostTitle: '测试机', address: 'http://192.168.1.20:3081' })
+    const result = applyRegistrationEdit(registry, 'bench', { hostId: 'bench-x', address: 'http://192.168.1.20:3081' })
     expect(result.ok).toBe(true)
     expect(registry.list().map(entry => entry.hostId)).toEqual(['bench-x'])
   })
 
-  it('标识改成已存在的：报错，原登记原样保留', () => {
+  it('名称改成已存在的：报错，原登记原样保留', () => {
     const registry = seededRegistry([
       { hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' },
       { hostId: 'taken', hostTitle: '被占用', address: 'http://192.168.1.21:3081' },
     ])
-    const result = applyRegistrationEdit(registry, 'bench', { hostId: 'taken', hostTitle: 'X', address: 'http://192.168.1.20:3081' })
+    const result = applyRegistrationEdit(registry, 'bench', { hostId: 'taken', address: 'http://192.168.1.20:3081' })
     expect(result.ok).toBe(false)
     expect(registry.list()).toHaveLength(2)
     expect(registry.list().find(entry => entry.hostId === 'bench')).toMatchObject({ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' })
@@ -537,7 +552,7 @@ describe('登记编辑', () => {
 
   it('编辑成非法地址：报错，且原登记原样保留', () => {
     const registry = seeded()
-    const result = applyRegistrationEdit(registry, 'bench', { hostTitle: 'X', address: '不是地址' })
+    const result = applyRegistrationEdit(registry, 'bench', { address: '不是 地址' })
     expect(result.ok).toBe(false)
     expect(registry.list()).toHaveLength(1)
     expect(registry.list()[0]).toMatchObject({ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' })
@@ -545,9 +560,25 @@ describe('登记编辑', () => {
 
   it('行在场但没有登记：按新增处理', () => {
     const registry = seededRegistry()
-    const result = applyRegistrationEdit(registry, 'beta', { hostTitle: '乙', address: 'http://10.0.0.9:3081' })
+    const result = applyRegistrationEdit(registry, 'beta', { address: 'http://10.0.0.9:3081' })
     expect(result.ok).toBe(true)
     expect(registry.list().map(entry => entry.hostId)).toEqual(['beta'])
+  })
+})
+
+describe('IP 字段与存储地址的互转', () => {
+  it('存储的地址去掉协议给 IP 字段看；端口原样保留', () => {
+    expect(hostPartOfAddress('http://192.168.1.20:3081')).toBe('192.168.1.20:3081')
+    expect(hostPartOfAddress('https://a.example')).toBe('a.example')
+    expect(hostPartOfAddress('100.101.1.7')).toBe('100.101.1.7')
+    expect(hostPartOfAddress('')).toBe('')
+  })
+
+  it('IP 字段的值补上协议入库；已带协议的不动，空的留给登记层报错', () => {
+    expect(addressFromHostPart('100.101.1.7')).toBe('http://100.101.1.7')
+    expect(addressFromHostPart('100.101.1.7:3081')).toBe('http://100.101.1.7:3081')
+    expect(addressFromHostPart('http://10.0.0.8:8080')).toBe('http://10.0.0.8:8080')
+    expect(addressFromHostPart('  ')).toBe('')
   })
 })
 
