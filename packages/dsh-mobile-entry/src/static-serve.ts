@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url'
 import { extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { authorizeMobileIndex, type AuthorizeIndexConnection } from './pairing.ts'
 
-/** 手机页所有路由都挂在这个前缀下，后续任务（pairing / peers）同样如此。 */
+/** 手机页所有路由都挂在这个前缀下；pair-url 与 peers 的 exact 路由同样如此。 */
 export const MOBILE_PREFIX = '/threadharbor/mobile'
 
 /** hello 标记：探针用，证明手机入口已经挂上，不做任何准入。 */

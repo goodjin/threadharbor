@@ -4,12 +4,13 @@
  * 这个包在 DSH Web 服务上挂手机页静态资源与 peers / pair-url 接口。
  * 装载器读到的是 `name` / `inject` / `Config` / `apply` 四件套，组合行
  * （cordis.patch.yml 的 threadharbor-mobile-entry）指向这里；目前挂上
- * 手机页静态资源、hello 标记与 pair-url 接口，peers 与正式应用页在
+ * 手机页静态资源、hello 标记、pair-url 与 peers 接口，正式应用页在
  * 后续任务加。
  */
 
 import Schema from '@deepseek-ai/schemastery'
 import { assertMobileOrigin, MOBILE_ORIGIN_PATTERN, registerPairUrlRoute } from './pair-url.ts'
+import { registerPeersRoute } from './peers.ts'
 import { registerMobileRoutes, type MobileRouteContext } from './static-serve.ts'
 
 export const name = 'threadharbor-mobile-entry'
@@ -33,8 +34,8 @@ export const Config: Schema = Schema.object({
 })
 
 /**
- * 挂载入口：注册手机页静态资源 prefix 路由、hello 标记 exact 路由与
- * pair-url exact 路由。peers / 正式应用页都在后续任务往这里加。
+ * 挂载入口：注册手机页静态资源 prefix 路由、hello 标记 exact 路由，
+ * 以及 pair-url 与 peers 两个 exact 路由。正式应用页在后续任务往这里加。
  * @param ctx - 宿主上下文（webServer / connection 服务从这里取）。
  * @param config - 校验后的组合配置（mobileOrigin 可缺省）。
  */
@@ -43,4 +44,5 @@ export function apply(ctx: MobileRouteContext, config?: MobileEntryConfig): void
   if (config?.mobileOrigin !== undefined) assertMobileOrigin(config.mobileOrigin)
   registerMobileRoutes(ctx, config)
   registerPairUrlRoute(ctx, config?.mobileOrigin)
+  registerPeersRoute(ctx)
 }

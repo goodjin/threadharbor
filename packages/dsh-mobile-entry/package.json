@@ -13,6 +13,7 @@
     "./package.json": "./package.json"
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.4"
+    "@deepseek-ai/schemastery": "^3.18.4",
+    "@threadharbor/dsh-host-federation": "workspace:^"
   }
 }
