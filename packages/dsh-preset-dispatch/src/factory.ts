@@ -122,7 +122,10 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
         }
       }
 
-      const runner = new AcpTurnRunner(adaptClient(client, dialect), options)
+      // The dialect lets the runner write each tool card as its first frame
+      // arrives; without it the runner would keep writing everything at turn
+      // end.
+      const runner = new AcpTurnRunner(adaptClient(client, dialect), { ...options, dialect })
       return {
         run: async (decision, turn) => await runner.run(decision, turn),
         // Drops the connection itself, not just the runner's bookkeeping: a

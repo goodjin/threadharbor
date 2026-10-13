@@ -8,7 +8,8 @@
  */
 
 import type { AcpStepResult, StepDecisionLike, StepEndReason, TurnContext } from './dispatch.ts'
-import type { AcpFrame } from '@threadharbor/dsh-acp-agent'
+import { projectToolCallFrame } from '@threadharbor/dsh-acp-agent'
+import type { AcpDialect, AcpFrame } from '@threadharbor/dsh-acp-agent'
 
 /** The JSON-RPC surface this runner needs, kept narrow so it can be stood in for. */
 export type AcpClientPort = {
@@ -54,6 +55,16 @@ export type RunnerOptions = {
    * is happening. Give up loudly instead.
    */
   readonly openTimeoutMs?: number
+  /**
+   * The frame dialect of the agent this runner drives, when known.
+   *
+   * With it, the runner writes each tool's opening card the moment the call's
+   * first frame arrives — the card exists in the log while the agent still
+   * works, and the turn-end write strips those already written. Without it
+   * (or for a frame without a call id, which cannot be tracked to stay
+   * single) the turn writes everything at its end, exactly as before.
+   */
+  readonly dialect?: AcpDialect
   /**
    * A conversation handed over from another session, keyed by session.
    *
@@ -141,6 +152,21 @@ export class AcpTurnRunner {
   private stream: TurnStreamPort | undefined
   /** Set when this turn's stop signal fired; everything after it is dropped. */
   private aborted = false
+  /**
+   * The turn in flight, for writing a tool card as its first frame arrives.
+   *
+   * Bound for the prompt's duration only: a frame can reach the log as
+   * mid-turn only while this turn's writer is the one that owns it, and a
+   * frame arriving between turns belongs to no turn at all (it falls out of
+   * the frame list when the next turn starts, exactly as before).
+   */
+  private liveCards: {
+    readonly turn: number
+    readonly step: number
+    readonly write: TurnContext['write']
+    /** Call ids whose opening card already went to the log this turn. */
+    readonly written: Set<string>
+  } | undefined
 
   private readonly client: AcpClientPort
   private readonly options: RunnerOptions
@@ -161,10 +187,42 @@ export class AcpTurnRunner {
     // projecting them would resurrect text under a turn that ended aborted.
     if (this.aborted) return
     this.turnFrames.push(frame)
+    this.writeOpeningCard(frame)
     const stream = this.stream
     if (stream === undefined) return
     // Held locally so nothing can clear it while this frame is being pushed.
     this.pushToStream(frame, stream)
+  }
+
+  /**
+   * Write a tool's opening card the moment its first frame arrives.
+   *
+   * The card is the projection's own tool/call — the exact payload the
+   * turn-end write would have produced — so the session writer files it under
+   * the same `turn:callId` key it pairs results with. Only the first frame for
+   * an id writes; the turn-end write strips these and carries the results.
+   * A failed append wrote nothing (the session validates before it commits),
+   * so the id is left unwritten and the card falls to the turn-end write as
+   * always — and the frame handler, which also drives the live stream, must
+   * never let a write error kill it.
+   */
+  private writeOpeningCard(frame: AcpFrame): void {
+    const live = this.liveCards
+    const dialect = this.options.dialect
+    if (live === undefined || dialect === undefined) return
+    const update = recordOf(recordOf(recordOf(frame)['params'])['update'])
+    const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
+    if (kind !== 'tool_call' && kind !== 'tool_call_update') return
+    const id = typeof update['toolCallId'] === 'string' ? update['toolCallId'] : undefined
+    if (id === undefined || live.written.has(id)) return
+    const event = projectToolCallFrame(frame, { turn: live.turn, step: live.step, dialect })
+    if (event === undefined) return
+    try {
+      live.write([event])
+    } catch {
+      return
+    }
+    live.written.add(id)
   }
 
   /** Feed one frame's text to the live stream. */
@@ -199,6 +257,18 @@ export class AcpTurnRunner {
     const sessionId = await this.open(turn.sessionId)
     this.turnFrames = []
     this.aborted = false
+    // Bound before the prompt goes out: a tool frame only arrives once the
+    // agent has the question, but the binding must not be able to lose the
+    // race with it. Held in a local too — the field is cleared the moment the
+    // prompt settles, and the turn-end write below still needs the written
+    // record to know which cards not to write a second time.
+    const liveCards = this.options.dialect === undefined ? undefined : {
+      turn: turn.position.turn,
+      step: turn.position.step,
+      write: turn.write,
+      written: new Set<string>(),
+    }
+    this.liveCards = liveCards
     // Registered before the prompt goes out: the stop lands while the agent is
     // still working, and a listener added afterwards would never hear it.
     const detachStop = this.watchStop(sessionId)
@@ -234,8 +304,11 @@ export class AcpTurnRunner {
       failure = error
     } finally {
       // A listener must not outlive its turn, or a later turn would inherit
-      // this one's stop and end aborted before it began.
+      // this one's stop and end aborted before it began. The same goes for
+      // the mid-turn card writer: frames trailing the reply belong to the
+      // turn-end write, not to a mid-turn one racing it.
       detachStop()
+      this.liveCards = undefined
     }
     const stopReason = (reply as { stopReason?: unknown } | null)?.stopReason
 
@@ -262,7 +335,18 @@ export class AcpTurnRunner {
     // Produce after the run, write after that, and only then announce the end:
     // the closing frame carries the message's sequence number, and pointing at
     // a message that is not written yet shows the user text that then vanishes.
-    const seq = turn.write(turn.produce(result))
+    // Cards already written mid-turn are stripped here, so the log carries
+    // each exactly once; anything the mid-turn writer could not track (a frame
+    // with no call id) still rides the turn-end write as before.
+    const produced = turn.produce(result)
+    const events = liveCards === undefined
+      ? produced
+      : produced.filter(event => {
+          if (event.type !== 'tool/call') return true
+          const callId = recordOf(event.payload)['callId']
+          return !(typeof callId === 'string' && liveCards.written.has(callId))
+        })
+    const seq = turn.write(events)
     if (stream === undefined) return result
     if (seq === undefined) stream.abandon()
     else stream.settle('assistant/message', () => seq)

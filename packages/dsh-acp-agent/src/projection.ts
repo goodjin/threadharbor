@@ -296,6 +296,29 @@ function toolResultEvent(tool: ToolCall, turn: number, step: number): Projection
   }
 }
 
+/**
+ * The opening card of one tool frame, for mid-turn writing.
+ *
+ * The turn's full projection can only run when the turn is over; the runner
+ * calls this as each frame arrives, so a card exists in the log while the
+ * agent still works. It folds just this frame — the caller invokes it only
+ * for a call id's first frame, where nothing is carried yet, exactly like the
+ * first frame in `projectTurnIncremental`. The payload is the shared tool/call
+ * shape, identical to what the end-of-turn projection emits for the same
+ * frame; the result still comes from that end-of-turn run, which the caller's
+ * already-written record keeps from doubling the card.
+ */
+export function projectToolCallFrame(
+  frame: AcpFrame,
+  options: { readonly turn: number; readonly step: number; readonly dialect: AcpDialect },
+): ProjectionEvent | undefined {
+  const update = recordOf(recordOf(frame.params)['update'])
+  const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
+  if (kind !== 'tool_call' && kind !== 'tool_call_update') return undefined
+  const call = options.dialect.foldTool(undefined, update)
+  return toolCallEvent(call, options.turn, options.step)
+}
+
 function accumulate(frames: readonly AcpFrame[], dialect: AcpDialect): Accumulator {
   const thought: string[] = []
   const text: string[] = []
