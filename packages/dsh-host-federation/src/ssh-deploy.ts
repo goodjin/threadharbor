@@ -18,7 +18,7 @@ import { optionalHost, parseAccessMode, validateBindHost } from './ssh/access.ts
 import { fetchRemoteSessions } from './host-remote-sessions.ts'
 import { DEFAULT_REMOTE_DSH_PLUGINS, normalizePluginSpecs } from './ssh/deploy-plugins.ts'
 
-export const SSH_DEPLOY_ENTRY_ID = 'threadharbor-ssh-deploy'
+export { SSH_DEPLOY_ENTRY_ID } from './ssh-deploy-id.ts'
 
 /** Waits for the browser connection service so `/api` routes can register. */
 export const inject = ['connection']

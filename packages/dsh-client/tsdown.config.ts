@@ -81,6 +81,13 @@ export default defineConfig([
       },
     }],
     outputOptions: {
+      // One file, always: the module loader's `require` resolves only its own
+      // table (platform seed words, materialized plugins, registered package
+      // factories) — never files. A dynamic `import()` in the source would
+      // otherwise emit a sibling chunk and call the factory parameter with its
+      // relative path, taking the page down at boot with "missed the module
+      // table". Same choice DSH's own single-file client plugins make.
+      inlineDynamicImports: true,
       entryFileNames: 'client.js',
       banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify(id)}, factory: (require) => {`,
       footer: 'return module.exports; } });',

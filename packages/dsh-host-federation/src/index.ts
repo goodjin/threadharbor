@@ -28,7 +28,10 @@ export {
   TAILSCALE_REFRESH_KEY,
 } from './tailscale-keys.ts'
 export type { TailscalePeer } from './tailscale-keys.ts'
-export { SSH_DEPLOY_ENTRY_ID } from './ssh-deploy.ts'
+// SSH 部署的入口 id 只从这里出：行为入口（./ssh-deploy）拖着 node:os 与
+// node:path，浏览器侧绝不能顺着根入口把它拖进 bundle（同上 tailscale 的
+// 先例；`ssh-deploy-id.ts` 是纯字符串模块）。
+export { SSH_DEPLOY_ENTRY_ID } from './ssh-deploy-id.ts'
 export type {
   SshAccessMode,
   SshConnectionInput,

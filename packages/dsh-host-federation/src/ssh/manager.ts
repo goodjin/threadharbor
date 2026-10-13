@@ -39,8 +39,13 @@ export class DshSshManager {
   private readonly tunnels = new Map<string, OwnedTunnel>()
   private readonly tunnelOps = new Map<string, Promise<void>>()
   private readonly tempKeys = new Set<string>()
+  private readonly options: SshManagerOptions
 
-  constructor(private readonly options: SshManagerOptions) {
+  // A declared field with a plain assignment, not a constructor parameter
+  // property: the web host loads linked plugins through Node's strip-only
+  // TypeScript mode, which rejects parameter properties at import time.
+  constructor(options: SshManagerOptions) {
+    this.options = options
     deploymentChannel(options.deploymentChannel)
     mkdirSync(dirname(options.knownHostsPath), { recursive: true, mode: 0o700 })
     if (!existsSync(options.knownHostsPath)) writeFileSync(options.knownHostsPath, '', { mode: 0o600 })
