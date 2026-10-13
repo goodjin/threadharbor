@@ -7,9 +7,9 @@ import type { SshAccessMode } from './types.ts'
 const FORBIDDEN_BIND = new Set(['0.0.0.0', '::', '[::]', '*', '0'])
 
 export function parseAccessMode(value: unknown): SshAccessMode {
-  if (value === undefined || value === null || value === 'tunnel') return 'tunnel'
-  if (value === 'tailscale' || value === 'custom') return value
-  throw new Error('accessMode must be tunnel, tailscale, or custom')
+  if (value === undefined || value === null || value === 'host-ip') return 'host-ip'
+  if (value === 'tunnel' || value === 'tailscale' || value === 'custom') return value
+  throw new Error('accessMode must be host-ip, tunnel, tailscale, or custom')
 }
 
 export function validateBindHost(input: string): string {

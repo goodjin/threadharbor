@@ -15,6 +15,8 @@ import { deploymentChannel, redactSshForLog } from './ssh/parse.ts'
 import type { SshDeployOperationView, SshDeployRequest } from './ssh/types.ts'
 import { isValidHostId } from './identity.ts'
 import { optionalHost, parseAccessMode, validateBindHost } from './ssh/access.ts'
+import { fetchRemoteSessions } from './host-remote-sessions.ts'
+import { DEFAULT_REMOTE_DSH_PLUGINS, normalizePluginSpecs } from './ssh/deploy-plugins.ts'
 
 export const SSH_DEPLOY_ENTRY_ID = 'threadharbor-ssh-deploy'
 
@@ -24,6 +26,7 @@ export const inject = ['connection']
 export const ROUTE_INSPECT = '/api/threadharbor.host-ssh.inspect'
 export const ROUTE_DEPLOY = '/api/threadharbor.host-ssh.deploy'
 export const ROUTE_OPERATION = '/api/threadharbor.host-ssh.operation'
+export const ROUTE_REMOTE_SESSIONS = '/api/threadharbor.host-remote.sessions'
 
 export type Config = {
   knownHostsPath?: string
@@ -32,6 +35,8 @@ export type Config = {
   deploymentChannel?: string
   releaseDirectory?: string
   defaultRemoteWebPort?: number
+  remotePlugins?: readonly string[]
+  installPluginsFromGithub?: boolean
 }
 
 export const Config: Schema = Schema.object({
@@ -43,6 +48,8 @@ export const Config: Schema = Schema.object({
   deploymentChannel: Schema.string().default('managed'),
   releaseDirectory: Schema.string().description('ThreadHarbor release directory to upload; defaults to stable-current or workspace'),
   defaultRemoteWebPort: Schema.natural().min(1).max(65_535).default(3081),
+  remotePlugins: Schema.array(Schema.string()).description('GitHub/npm specs for dsh plugin add on remote hosts').default([...DEFAULT_REMOTE_DSH_PLUGINS]),
+  installPluginsFromGithub: Schema.boolean().description('Install plugins from GitHub instead of uploading a local release tarball').default(true),
 })
 
 type ConnectionService = {
@@ -86,6 +93,7 @@ function loggerOf(ctx: unknown): { info(message: string, extra?: unknown): void;
 export function apply(ctx: unknown, config: Config = {}): void {
   const log = loggerOf(ctx)
   const channel = deploymentChannel(config.deploymentChannel ?? 'managed')
+  const remotePlugins = normalizePluginSpecs(config.remotePlugins)
   const manager = new DshSshManager({
     knownHostsPath: config.knownHostsPath ?? join(homedir(), '.local/state/threadharbor/ssh/known_hosts'),
     connectTimeoutMs: config.connectTimeoutMs ?? 15_000,
@@ -93,6 +101,8 @@ export function apply(ctx: unknown, config: Config = {}): void {
     deploymentChannel: channel,
     ...(config.releaseDirectory === undefined ? {} : { releaseDirectory: config.releaseDirectory }),
     defaultRemoteWebPort: config.defaultRemoteWebPort ?? 3081,
+    remotePlugins,
+    installPluginsFromGithub: config.installPluginsFromGithub ?? true,
   })
   const operations = new OperationStore()
   const connection = connectionOf(ctx)
@@ -131,6 +141,13 @@ export function apply(ctx: unknown, config: Config = {}): void {
     const keys = await manager.inspectAll(ssh)
     log.info('ssh inspect', redactSshForLog(ssh))
     return { keys }
+  })
+
+  register(ROUTE_REMOTE_SESSIONS, async body => {
+    const record = body as Record<string, unknown>
+    const launchUrl = typeof record['launchUrl'] === 'string' ? record['launchUrl'] : ''
+    if (launchUrl.trim() === '') throw new Error('launchUrl 必填')
+    return await fetchRemoteSessions(launchUrl)
   })
 
   register(ROUTE_DEPLOY, async body => {

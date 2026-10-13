@@ -12,6 +12,7 @@ import { run, runWithEnv } from './run.ts'
 import { freePort, portListening } from './port.ts'
 import { deploymentChannel, destination, parseSshInput, shellQuote } from './parse.ts'
 import { readReleaseVersion, resolveReleaseDirectory } from './release.ts'
+import { DEFAULT_REMOTE_DSH_PLUGINS } from './deploy-plugins.ts'
 
 export type SshManagerOptions = {
   readonly knownHostsPath: string
@@ -20,6 +21,10 @@ export type SshManagerOptions = {
   readonly deploymentChannel: string
   readonly releaseDirectory?: string
   readonly defaultRemoteWebPort: number
+  /** `dsh plugin --profile web add` specs (GitHub URLs). */
+  readonly remotePlugins?: readonly string[]
+  /** When true, skip tarball upload and install plugins from `remotePlugins` only. */
+  readonly installPluginsFromGithub?: boolean
 }
 
 type ScanResult = SshHostKeyCandidate & { readonly knownHostLine: string }
@@ -131,11 +136,17 @@ export class DshSshManager {
       ].join('; '), this.handshakeBudgetMs())
       if (prepare.code !== 0) throw new Error('无法在远端创建 ThreadHarbor/DSH 目录')
 
-      onProgress({ phase: 'uploading', detail: '正在上传 ThreadHarbor 发行包……', current: 0, total: 1 })
-      await this.uploadReleaseTar(materialized, releaseRoot, releaseDir)
-      onProgress({ phase: 'uploading', detail: '发行包上传完成。', current: 1, total: 1 })
+      const installFromGithub = this.options.installPluginsFromGithub !== false
+      if (!installFromGithub) {
+        onProgress({ phase: 'uploading', detail: '正在上传 ThreadHarbor 发行包……', current: 0, total: 1 })
+        await this.uploadReleaseTar(materialized, releaseRoot, releaseDir)
+        onProgress({ phase: 'uploading', detail: '发行包上传完成。', current: 1, total: 1 })
+      } else {
+        onProgress({ phase: 'preparing', detail: '将通过 GitHub 地址安装插件，跳过本地上传。' })
+      }
 
       onProgress({ phase: 'installing', detail: '正在安装 DSH 与 ThreadHarbor 插件。' })
+      const remotePlugins = this.options.remotePlugins ?? DEFAULT_REMOTE_DSH_PLUGINS
       const installScript = buildInstallScript({
         channel,
         releaseDir,
@@ -145,6 +156,8 @@ export class DshSshManager {
         hostTitle: request.hostTitle,
         upgrade: request.upgrade === true,
         accessMode,
+        installFromGithub,
+        remotePlugins,
         ...(bindOverride === undefined ? {} : { bindOverride }),
         ...(trustedHost === undefined ? {} : { trustedHost }),
       })
@@ -452,12 +465,16 @@ function buildInstallScript(input: {
   readonly hostTitle: string
   readonly upgrade: boolean
   readonly accessMode: SshAccessMode
+  readonly installFromGithub: boolean
+  readonly remotePlugins: readonly string[]
   readonly bindOverride?: string
   readonly trustedHost?: string
 }): string {
   const {
-    channel, releaseDir, nodePath, remotePort, hostId, hostTitle, upgrade, accessMode, bindOverride, trustedHost,
+    channel, releaseDir, nodePath, remotePort, hostId, hostTitle, upgrade, accessMode, installFromGithub, remotePlugins,
+    bindOverride, trustedHost,
   } = input
+  const pluginPayload = shellQuote(remotePlugins.join('\n'))
   const bindOverrideQ = bindOverride === undefined ? '' : shellQuote(bindOverride)
   const trustedQ = trustedHost === undefined ? '' : shellQuote(trustedHost)
   const accessQ = shellQuote(accessMode)
@@ -483,16 +500,27 @@ function buildInstallScript(input: {
     '  if ! command -v npm >/dev/null 2>&1; then echo "npm not found; install Node npm or place dsh on PATH" >&2; exit 1; fi',
     '  npm install -g @deepseek-ai/dsh@">=0.2.0-rc.2 <0.3"',
     'fi',
-    'dsh plugin --profile web add "link:$release" || dsh plugin --profile web add "link:$release"',
-    'identity_file="$dsh_home/profiles/web/threadharbor-identity.env"',
-    'printf \'DSH_HOST_ID=%s\\nDSH_HOST_TITLE=%s\\n\' "$host_id" "$host_title" > "$identity_file"',
+    installFromGithub
+      ? `plugin_specs=${pluginPayload}`
+      : '',
+    installFromGithub
+      ? 'printf \'%s\\n\' "$plugin_specs" | while IFS= read -r spec; do [ -z "$spec" ] && continue; dsh plugin --profile web add "$spec" || dsh plugin --profile web add "$spec"; done'
+      : 'dsh plugin --profile web add "link:$release" || dsh plugin --profile web add "link:$release"',
     'bind_host="127.0.0.1"',
-    'if [ "$access_mode" = "tailscale" ]; then',
+    'if [ "$access_mode" = "tunnel" ]; then',
+    '  bind_host="127.0.0.1"',
+    'elif [ "$access_mode" = "host-ip" ]; then',
+    '  if [ -n "$bind_override" ]; then bind_host="$bind_override"; else bind_host="$(tailscale ip -4 2>/dev/null | head -1 || true)"; fi',
+    '  if [ -z "$bind_host" ]; then bind_host="$(hostname -I 2>/dev/null | awk \'{print $1}\' || true)"; fi',
+    '  if [ -z "$bind_host" ]; then echo "未能自动检测主机 IP；请在表单填写绑定地址" >&2; exit 1; fi',
+    'elif [ "$access_mode" = "tailscale" ]; then',
     '  if [ -n "$bind_override" ]; then bind_host="$bind_override"; else bind_host="$(tailscale ip -4 2>/dev/null | head -1 || true)"; fi',
     '  if [ -z "$bind_host" ]; then echo "未检测到 Tailscale IPv4；请安装 tailscale 或在表单填写绑定地址" >&2; exit 1; fi',
     'elif [ "$access_mode" = "custom" ]; then',
     '  bind_host="$bind_override"',
     'fi',
+    'identity_file="$dsh_home/profiles/web/threadharbor-identity.env"',
+    'printf \'DSH_HOST_ID=%s\\nDSH_HOST_TITLE=%s\\n\' "$host_id" "$host_title" > "$identity_file"',
     'case "$bind_host" in (0.0.0.0|"") echo "refusing wildcard bind" >&2; exit 1;; esac',
     'dsh_bin="$(command -v dsh)"',
     'dsh_args="--profile web --no-open --port $port --host $bind_host"',

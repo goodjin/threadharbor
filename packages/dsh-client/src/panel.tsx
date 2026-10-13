@@ -80,6 +80,11 @@ export type AgentPanelProps = {
   readonly rollUp: RollUpSection
   /** The registration list for other hosts; owned by the wiring. */
   readonly registry: HostRegistryPort
+  /** Pull remote host session trees via the management server's API. */
+  readonly remoteSessions?: {
+    refresh(registrations: readonly HostRegistration[]): void
+    subscribe(listener: () => void): () => void
+  }
   /**
    * Where the registry and the default identity are stored right now, plus a
    * subscription to its changes. The panel renders the posture as-is: where
@@ -155,6 +160,8 @@ type LoadPhase =
  * the channel's presence (self + whoever announces) and the registration list
  * (the operator's inventory, which knows hosts that are not open right now).
  */
+export type HostConnectionStatus = 'connected' | 'reachable' | 'disconnected' | 'checking'
+
 export type HostListRow = {
   readonly hostId: string
   /** What the row leads with: the operator's registered name, else the host's own. */
@@ -162,10 +169,31 @@ export type HostListRow = {
   readonly self: boolean
   /** Present on the channel right now. */
   readonly online: boolean
+  readonly connection: HostConnectionStatus
   /** When the host was last heard, in the page's clock; only when online. */
   readonly lastSeen?: number
   /** The address the operator registered; only when there is one. */
   readonly address?: string
+  readonly launchUrl?: string
+}
+
+export function deriveHostConnection(
+  row: Pick<HostListRow, 'self' | 'online'>,
+  reach?: ReachOutcome | 'probing',
+): HostConnectionStatus {
+  if (reach === 'probing') return 'checking'
+  if (row.self || row.online) return 'connected'
+  if (reach?.kind === 'reachable') return 'reachable'
+  return 'disconnected'
+}
+
+export function connectionStatusLabel(status: HostConnectionStatus): string {
+  switch (status) {
+    case 'connected': return '已连接'
+    case 'reachable': return '可达未同步'
+    case 'checking': return '检测中'
+    case 'disconnected': return '未连接'
+  }
 }
 
 /**
@@ -182,34 +210,49 @@ export type HostListRow = {
 export function mergeHostRows(
   hosts: readonly HostSnapshot[],
   registrations: readonly HostRegistration[],
+  reaches?: ReadonlyMap<string, ReachOutcome | 'probing'>,
 ): readonly HostListRow[] {
   const byId = new Map<string, HostListRow>()
   for (const host of hosts) {
-    byId.set(host.hostId, {
+    const base = {
       hostId: host.hostId,
       name: nonEmpty(host.hostTitle) ?? host.hostId,
       self: host.self,
       online: true,
       lastSeen: host.lastSeen,
+    }
+    byId.set(host.hostId, {
+      ...base,
+      connection: deriveHostConnection({ self: base.self, online: true }, reaches?.get(host.hostId)),
     })
   }
   for (const registration of registrations) {
     const existing = byId.get(registration.hostId)
     const address = nonEmpty(registration.address)
+    const launchUrl = nonEmpty(registration.launchUrl)
     if (existing === undefined) {
-      byId.set(registration.hostId, {
+      const row = {
         hostId: registration.hostId,
         name: nonEmpty(registration.hostTitle) ?? registration.hostId,
         self: false,
         online: false,
         ...(address === undefined ? {} : { address }),
+        ...(launchUrl === undefined ? {} : { launchUrl }),
+      }
+      byId.set(registration.hostId, {
+        ...row,
+        connection: deriveHostConnection(row, reaches?.get(registration.hostId)),
       })
     } else {
-      byId.set(registration.hostId, {
+      const merged = {
         ...existing,
-        // 登记的名字是这台机器的操作者起的，优先于主机自报的派生名。
         name: nonEmpty(registration.hostTitle) ?? existing.name,
         ...(address === undefined ? {} : { address }),
+        ...(launchUrl === undefined ? {} : { launchUrl }),
+      }
+      byId.set(registration.hostId, {
+        ...merged,
+        connection: deriveHostConnection(merged, reaches?.get(registration.hostId)),
       })
     }
   }
@@ -413,9 +456,13 @@ export function HostRow(props: {
   const { row } = props
   const badge = row.self
     ? { word: '本机', tone: 'self' as const }
-    : row.online
-      ? { word: '在线', tone: 'online' as const }
-      : { word: '未连接', tone: 'offline' as const }
+    : row.connection === 'connected'
+      ? { word: '已连接', tone: 'online' as const }
+      : row.connection === 'reachable'
+        ? { word: '可达', tone: 'online' as const }
+        : row.connection === 'checking'
+          ? { word: '检测中', tone: 'offline' as const }
+          : { word: '未连接', tone: 'offline' as const }
   return (
     <div data-host-row={row.hostId} className={styles.hostRow}>
       <button
@@ -457,7 +504,7 @@ function SshDeploySection(props: {
   const [approvedFingerprint, setApprovedFingerprint] = useState('')
   const [busy, setBusy] = useState<'inspect' | 'deploy' | undefined>(undefined)
   const [progress, setProgress] = useState<SshDeployOperationView | undefined>(undefined)
-  const [accessMode, setAccessMode] = useState<SshAccessMode>('tunnel')
+  const [accessMode, setAccessMode] = useState<SshAccessMode>('host-ip')
   const [bindHost, setBindHost] = useState('')
   const [trustedHost, setTrustedHost] = useState('')
   const [deployed, setDeployed] = useState<SshDeployResult | undefined>(undefined)
@@ -544,31 +591,19 @@ function SshDeploySection(props: {
       <fieldset className={styles.accessModes}>
         <legend className={styles.summary}>访问方式</legend>
         <label className={styles.sshKeyRow}>
+          <input type="radio" name="access-mode" checked={accessMode === 'host-ip'} onChange={() => { setAccessMode('host-ip') }} />
+          <span>主机 IP（默认：远端自动检测 IP 并绑定，登记 <code>http://&lt;主机IP&gt;:&lt;端口&gt;</code>，不建 SSH 隧道）</span>
+        </label>
+        <label className={styles.sshKeyRow}>
           <input type="radio" name="access-mode" checked={accessMode === 'tunnel'} onChange={() => { setAccessMode('tunnel') }} />
-          <span>本机 SSH 隧道（远端只监听 127.0.0.1，登记 <code>http://127.0.0.1:&lt;本地端口&gt;</code>）</span>
-        </label>
-        <label className={styles.sshKeyRow}>
-          <input type="radio" name="access-mode" checked={accessMode === 'tailscale'} onChange={() => { setAccessMode('tailscale') }} />
-          <span>Tailscale 直连（远端绑定 Tailscale IPv4，不建隧道；需本机也在同一 Tailnet）</span>
-        </label>
-        <label className={styles.sshKeyRow}>
-          <input type="radio" name="access-mode" checked={accessMode === 'custom'} onChange={() => { setAccessMode('custom') }} />
-          <span>自定义绑定地址（具体 IP 或主机名，配合 <code>--trusted-host</code>）</span>
+          <span>本机 SSH 隧道（远端 127.0.0.1 + 本地端口转发）</span>
         </label>
       </fieldset>
-      {accessMode === 'tailscale'
+      {accessMode === 'host-ip'
         ? (
             <label className={styles.field}>
-              绑定地址（可选，留空则远端执行 <code>tailscale ip -4</code>）
-              <input className={styles.input} value={bindHost} onChange={event => { setBindHost(event.target.value) }} placeholder="100.x.x.x 或 machine.tail.ts.net" />
-            </label>
-          )
-        : undefined}
-      {accessMode === 'custom'
-        ? (
-            <label className={styles.field}>
-              绑定地址（必填）
-              <input className={styles.input} value={bindHost} onChange={event => { setBindHost(event.target.value) }} placeholder="100.x.x.x" />
+              绑定地址（可选，留空则远端自动检测 Tailscale / 网卡 IP）
+              <input className={styles.input} value={bindHost} onChange={event => { setBindHost(event.target.value) }} placeholder="192.168.x.x 或 100.x.x.x" />
             </label>
           )
         : undefined}
@@ -1044,7 +1079,15 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   // Re-read on every render, including every list tick: presence and the
   // registry both change out from under this component.
   const presence = props.rollUp.hosts()
-  const hostRows = mergeHostRows(presence, registrations)
+  const hostRows = mergeHostRows(presence, registrations, reaches)
+
+  useEffect(() => {
+    props.remoteSessions?.refresh(registrations)
+    const timer = window.setInterval(() => { props.remoteSessions?.refresh(registrations) }, 30_000)
+    return () => { window.clearInterval(timer) }
+  }, [props.remoteSessions, registryRevision, registrations])
+
+  useEffect(() => props.remoteSessions?.subscribe(() => { setListTick(tick => tick + 1) }) ?? (() => undefined), [props.remoteSessions])
 
   if (view.page === 'add') {
     if (sshDeployAvailable && addMode === 'ssh') {
@@ -1172,32 +1215,47 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
             footer={registration !== undefined
               ? (
                   <div data-registry-actions="" className={styles.registryActions}>
-                    {!row.online
-                      ? (
-                          <p data-registry-reach="" className={styles.stateLine}>
-                            {reach === undefined
-                              ? (
-                                  <button type="button" data-registry-reach-try="" className={styles.action} onClick={() => { startReach(registration) }}>测网络可达</button>
-                                )
-                              : reach === 'probing'
-                                ? '正在测……'
-                                : reach.kind === 'reachable'
-                                  ? `网络可达（${reach.ms} ms 内有应答）。这只是端口上有东西回应，不能确认是 DSH，也不校验 token。`
-                                  : reach.kind === 'timeout'
-                                    ? `测不通：${reach.ms} ms 内无应答（超时）。`
-                                    : `测不通：${reach.reason}。`}
-                          </p>
-                        )
+                    <p data-host-connection="" className={styles.stateLine}>
+                      状态：{connectionStatusLabel(row.connection)}
+                      {row.connection === 'disconnected' || row.connection === 'reachable'
+                        ? (
+                            <>
+                              {' '}
+                              <button type="button" data-registry-reach-try="" className={styles.action} onClick={() => { startReach(registration) }}>检测可达</button>
+                            </>
+                          )
+                        : undefined}
+                    </p>
+                    {reach !== undefined && reach !== 'probing' && reach.kind !== 'reachable'
+                      ? <p className={styles.stateBad}>{reach.kind === 'timeout' ? `检测超时（${reach.ms} ms）` : reach.reason}</p>
                       : undefined}
                     {registration.launchUrl !== undefined
                       ? (
                           <p data-registry-launch="" className={styles.stateLine}>
-                            <a className={styles.actionPrimary} href={registration.launchUrl} target="_blank" rel="noreferrer">打开（含 token）</a>
+                            <a className={styles.actionPrimary} href={registration.launchUrl} target="_blank" rel="noreferrer">连接（打开含 token 的页面）</a>
                             <button
                               type="button"
                               className={styles.action}
                               onClick={() => { void navigator.clipboard.writeText(registration.launchUrl ?? '') }}
                             >复制链接</button>
+                          </p>
+                        )
+                      : undefined}
+                    {sshDeployAvailable && !row.self
+                      ? (
+                          <p className={styles.stateLine}>
+                            <button
+                              type="button"
+                              data-action="redeploy-ssh"
+                              className={styles.actionPrimary}
+                              onClick={() => {
+                                setAddIdDraft(registration.hostId)
+                                setAddTitleDraft(registration.hostTitle)
+                                setAddMode('ssh')
+                                setFormMessage(undefined)
+                                setView({ page: 'add' })
+                              }}
+                            >重新部署 DSH</button>
                           </p>
                         )
                       : undefined}
@@ -1261,7 +1319,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                 <ul data-panel-notices="" className={styles.notices}>
                   <li>「在线」= 这台机器的页面在同一个浏览器的同源标签页里开着并按心跳报数；关闭或崩溃的页面过了静默窗口会自动转为未列出。</li>
                   <li>另一台机器（另一个源）的页面不在这个频道里；它的行以「未连接」出现，靠的是登记。</li>
-                  <li>会话与项目不再在此列出（2026-10-11 决定）：要看某台主机的会话，去那台主机自己的页面。</li>
+                  <li>左侧树按主机列出项目与会话：本机来自 DSH 投影；远端登记主机通过 launchUrl 由管理端拉取（失败时请点「连接」打开远端页面）。</li>
                 </ul>
               </details>
             )}
@@ -1273,7 +1331,13 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
 
   return (
     <div data-threadharbor-panel="" className={styles.root}>
-      <section data-panel-page="list" className={styles.card}>
+      <section data-panel-page="list" className={styles.listLayout}>
+        <div data-session-tree="" className={styles.sessionTreePane}>
+          <h2 className={styles.title}>会话（按主机）</h2>
+          <div ref={attachRollUpMount(props.rollUp)} data-rollup-host="" className={styles.rollupHost} />
+        </div>
+        <div data-host-pane="" className={styles.hostPane}>
+        <section data-panel-page="list" className={styles.card}>
         <div className={styles.cardHead}>
           <h2 className={styles.title}>主机</h2>
           <span className={styles.spacer} />
@@ -1295,6 +1359,15 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
           ))}
         </div>
       </section>
+        </div>
+      </section>
     </div>
   )
+}
+
+function attachRollUpMount(section: RollUpSection): (node: HTMLDivElement | null) => void {
+  return node => {
+    if (node === null) return
+    node.replaceChildren(section.element())
+  }
 }

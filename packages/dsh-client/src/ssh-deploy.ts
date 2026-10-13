@@ -7,6 +7,7 @@ import type { SshConnectionInput, SshDeployOperationView, SshDeployRequest, SshH
 export const ROUTE_INSPECT = '/api/threadharbor.host-ssh.inspect'
 export const ROUTE_DEPLOY = '/api/threadharbor.host-ssh.deploy'
 export const ROUTE_OPERATION = '/api/threadharbor.host-ssh.operation'
+export const ROUTE_REMOTE_SESSIONS = '/api/threadharbor.host-remote.sessions'
 
 type ApiResult<T> =
   | { readonly ok: true; readonly value: T }
@@ -58,6 +59,10 @@ export async function waitSshDeployOperation(
     if (snapshot.value.status === 'succeeded' || snapshot.value.status === 'failed') return snapshot
     await new Promise(resolve => setTimeout(resolve, pollMs))
   }
+}
+
+export async function fetchRemoteHostSessions(launchUrl: string): Promise<ApiResult<{ readonly sessions: readonly { projectId: string; sessionId: string; title: string; projectTitle?: string }[]; readonly note?: string }>> {
+  return await postJson(ROUTE_REMOTE_SESSIONS, { launchUrl })
 }
 
 export async function probeSshDeployApi(): Promise<boolean> {

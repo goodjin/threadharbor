@@ -153,6 +153,9 @@ class FakeRollUpSection implements RollUpSection {
   }
   setIdentity(_value: ConfiguredIdentity): void {}
   rereadIdentity(): void {}
+  republish(): void {}
+  element(): HTMLDivElement { return document.createElement('div') }
+  notices(): readonly string[] { return [] }
   dispose(): void {}
 }
 
@@ -463,7 +466,7 @@ describe('面板三个界面', () => {
 
   it('列表页的主行还是只有名字、简短标识、徽标', () => {
     const html = renderToString(createElement(HostRow, {
-      row: { hostId: 'bench', name: '测试机', self: false, online: false, address: 'http://192.168.1.20:3081' },
+      row: { hostId: 'bench', name: '测试机', self: false, online: false, connection: 'disconnected', address: 'http://192.168.1.20:3081' },
       onOpen: () => {},
     }))
     expect(html).toContain('data-host-open="bench"')
@@ -476,9 +479,9 @@ describe('面板三个界面', () => {
 
   it('徽标分三色：本机、在线、未连接', () => {
     const cases: [HostListRow, string][] = [
-      [{ hostId: 'self', name: '本机', self: true, online: true }, 'data-host-badge="self"'],
-      [{ hostId: 'beta', name: 'b', self: false, online: true }, 'data-host-badge="online"'],
-      [{ hostId: 'bench', name: 'b', self: false, online: false }, 'data-host-badge="offline"'],
+      [{ hostId: 'self', name: '本机', self: true, online: true, connection: 'connected' }, 'data-host-badge="self"'],
+      [{ hostId: 'beta', name: 'b', self: false, online: true, connection: 'connected' }, 'data-host-badge="online"'],
+      [{ hostId: 'bench', name: 'b', self: false, online: false, connection: 'disconnected' }, 'data-host-badge="offline"'],
     ]
     for (const [row, marker] of cases) {
       const html = renderToString(createElement(HostRow, { row, onOpen: () => {} }))

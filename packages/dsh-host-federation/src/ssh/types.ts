@@ -51,7 +51,7 @@ export type SshDeployProgress = {
   readonly total?: number
 }
 
-export type SshAccessMode = 'tunnel' | 'tailscale' | 'custom'
+export type SshAccessMode = 'host-ip' | 'tunnel' | 'tailscale' | 'custom'
 
 export type SshDeployRequest = {
   readonly ssh: SshConnectionInput & { readonly hostKeyFingerprint: string }
@@ -62,9 +62,9 @@ export type SshDeployRequest = {
   /** When true, replace an existing release and restart the service. */
   readonly upgrade?: boolean
   /**
-   * `tunnel` — remote listens on 127.0.0.1 and the manager opens SSH -L (default).
-   * `tailscale` — bind remote DSH to Tailscale IPv4 (`tailscale ip -4`) or `bindHost`.
-   * `custom` — bind to `bindHost` (concrete IP/hostname, never 0.0.0.0).
+   * `host-ip` — bind remote DSH to a concrete host IP (auto-detect on remote; default).
+   * `tunnel` — remote listens on 127.0.0.1 and the manager opens SSH -L.
+   * `tailscale` / `custom` — legacy explicit bind modes.
    */
   readonly accessMode?: SshAccessMode
   /** Override bind address for tailscale/custom (MagicDNS name or IP). */

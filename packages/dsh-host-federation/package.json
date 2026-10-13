@@ -22,6 +22,14 @@
       "types": "./src/ssh/types.ts",
       "default": "./src/ssh/types.ts"
     },
+    "./rollup-view": {
+      "types": "./src/rollup-view.ts",
+      "default": "./src/rollup-view.ts"
+    },
+    "./rollup-mount": {
+      "types": "./src/rollup-mount.ts",
+      "default": "./src/rollup-mount.ts"
+    },
     "./package.json": "./package.json"
   },
   "dependencies": {

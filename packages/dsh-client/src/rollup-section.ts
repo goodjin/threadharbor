@@ -1,12 +1,19 @@
 /**
- * The host list's source: who this tab is, and who else is on the channel.
+ * The roll-up, as a panel section.
  *
- * 2026-10-11 用户决定：各主机面板只列主机及其基本信息，不再显示会话与项目
- * （覆盖原「主机 → 项目 → 会话」三层分组，记录见
- * docs/design/dsh-multi-host-migration.md §8.3）。这个模块随之收缩：原先是
- * 会话发布与树渲染的装配处，会话读取（session-source）与树渲染
- * （rollup-mount / rollup-view）随该决定一并移除；留下的只有身份解析、
- * 心跳和在场的过期清理。
+ * This is the assembly the roll-up waited for: a real settings source (the
+ * panel's identity form, backed by page storage), a real channel, a real
+ * heartbeat — and a real session source: this host's sessions, read from DSH's
+ * own client projections and published to every other same-origin tab. When
+ * that source cannot deliver, the section says exactly why instead of showing
+ * a tree that looks caught up.
+ *
+ * Built directly on the federation's exported pieces. `applyHostFederation`
+ * would have been the front door, but its published handle re-points
+ * `publishSessions` at itself and recurses until the stack gives out — it has
+ * never once run to completion. The steps it meant to take are taken here,
+ * each one owned by this file: defensive settings read, channel fallback
+ * warning, timer ownership, publish-on-start.
  *
  * Identity changes restart the federation: the old one says goodbye on
  * dispose, the new one announces under the new identity, and no stale host is
@@ -14,13 +21,33 @@
  */
 
 import { HostFederation, browserChannel, resolveHostIdentity } from '@threadharbor/dsh-host-federation'
-import type { FederationBus, HostIdentity, HostSnapshot } from '@threadharbor/dsh-host-federation'
+import type { FederationBus, HostIdentity, HostSnapshot, HostRegistration } from '@threadharbor/dsh-host-federation'
+import { mountRollUp } from '@threadharbor/dsh-host-federation/rollup-mount'
+import type { SessionTarget } from '@threadharbor/dsh-host-federation/rollup-mount'
+import { mountRollUpSurface } from './surface.ts'
+import type { RollUpSurface } from './surface.ts'
 import type { ConfiguredIdentity, IdentitySettings } from './settings-source.ts'
+import { rollUpViewWithRegistry } from './host-roll-up.ts'
+
+/** What one host reports about its sessions, as the federation reads it. */
+export type SectionSession = { readonly projectId: string; readonly sessionId: string; readonly title: string; readonly projectTitle?: string }
 
 /** Everything the section needs from the page around it. */
 export type RollUpSectionDeps = {
   /** The panel's identity form: what this host is called and where it is kept. */
   settings: IdentitySettings
+  /** Sessions this host holds; re-read on every publish. */
+  sessions(): readonly SectionSession[]
+  /** Registered hosts and remote snapshots for the left-hand session tree. */
+  registrations?(): readonly HostRegistration[]
+  remoteSessions?(): ReadonlyMap<string, readonly SectionSession[]>
+  onSelectSession?(target: SessionTarget): void
+  /**
+   * Why the tree's rows may be empty or stale, in words the operator can act
+   * on. Empty when the session source is healthy: nothing is said about a
+   * read that succeeded.
+   */
+  sourceNotes(): readonly string[]
   /** Cross-tab channel; absent means the section opens a BroadcastChannel. */
   bus?: FederationBus
   setInterval(handler: () => void, ms: number): number
@@ -31,56 +58,62 @@ export type RollUpSectionDeps = {
   staleMs: number
 }
 
-/** The host list, as the panel renders it. */
+/** The roll-up as the panel renders it. */
 export type RollUpSection = {
+  /** The drawn roll-up, ready to place in the panel. */
+  element(): HTMLElement
   /** Who this tab currently says it is. */
   identity(): HostIdentity
-  /** Every host in sight: this tab, plus whoever is present on the channel. */
+  /** What the section cannot show, in words the operator can act on. */
+  notices(): readonly string[]
+  /** Save a new identity; an id change re-announces under the new one. */
+  setIdentity(value: ConfiguredIdentity): void
+  /** Re-read identity from settings without writing (host storage hydration). */
+  rereadIdentity(): void
+  /** Every host currently visible on the channel (presence). */
   hosts(): readonly HostSnapshot[]
   /** The hostIds currently present on the channel, this tab's included. */
   onlineHostIds(): readonly string[]
-  /** Save a new identity; an id change re-announces under the new one. */
-  setIdentity(value: ConfiguredIdentity): void
-  /**
-   * Re-read the identity from settings without writing. The settings can
-   * change underneath the section — host-side settings hydrate asynchronously
-   * after mount — and the section must take the configured identity the
-   * moment it appears, retiring the derived one it started with.
-   */
-  rereadIdentity(): void
+  /** Re-read this host's sessions and announce them again. */
+  republish(): void
   /** Stop the heartbeat and say goodbye. */
   dispose(): void
 }
 
-/** The channel name one host list shares; one name means one list. */
+/** The channel name one roll-up shares; one name means one roll-up. */
 const CHANNEL_NAME = 'dsh-host-federation'
 
 /**
- * Start the host list section.
+ * Start the roll-up section.
  * @param deps - the page-supplied ports; see {@link RollUpSectionDeps}.
  * @returns the section; dispose stops the heartbeat and says goodbye.
  */
 export function startRollUpSection(deps: RollUpSectionDeps): RollUpSection {
   let identity = resolveIdentity()
+  // The federation can report changes before the surface exists; the holder
+  // lets the first drawings and every later one go through the same path.
+  let surface: RollUpSurface | undefined
+  let onChange: () => void = () => {}
   let federation = open(identity)
-  // Announced up front: a tab that only said hello would leave its own row
-  // empty in every other tab, and nothing is going to come and ask.
-  federation.start()
   const timer = deps.setInterval(() => { beat() }, deps.heartbeatMs)
 
   function beat(): void {
-    // Expiry first: a crashed tab never says goodbye, so silence past the
-    // window is the only honest way for it to leave the list — and 「在线」
-    // must not be a claim that can never become false.
     try {
-      federation.expire(Date.now())
+      // The re-read is the point: sessions opened or closed since the last
+      // beat reach the other tabs without anyone pressing anything.
+      federation.publishSessions(deps.sessions())
     } catch (error: unknown) {
-      deps.report(`host expiry failed: ${messageOf(error)}`)
+      deps.report(`session publish failed: ${messageOf(error)}`)
     }
     try {
       federation.emitHeartbeat()
     } catch (error: unknown) {
       deps.report(`host heartbeat failed: ${messageOf(error)}`)
+    }
+    try {
+      federation.expire(Date.now())
+    } catch (error: unknown) {
+      deps.report(`host expiry failed: ${messageOf(error)}`)
     }
   }
 
@@ -90,7 +123,7 @@ export function startRollUpSection(deps: RollUpSectionDeps): RollUpSection {
       configured = deps.settings.read()
     } catch (error: unknown) {
       // A settings read that fails is an ordinary not-configured-yet, not a
-      // reason to take the host list down.
+      // reason to take the roll-up down.
       configured = {}
       deps.report(`host settings could not be read: ${messageOf(error)}`)
     }
@@ -105,61 +138,102 @@ export function startRollUpSection(deps: RollUpSectionDeps): RollUpSection {
 
   function open(next: HostIdentity): HostFederation {
     const bus = deps.bus ?? openChannel()
-    return new HostFederation(next, bus, { staleMs: deps.staleMs })
+    return new HostFederation(next, bus, {
+      staleMs: deps.staleMs,
+      listSessions: () => deps.sessions(),
+      onChange: () => { onChange() },
+    })
   }
 
   function openChannel(): FederationBus {
     const bus = browserChannel(CHANNEL_NAME)
     // The channel is how other tabs hear about this host at all; a page
-    // without one must not look like a working host list that shows nobody.
+    // without one must not look like a working roll-up that shows nobody.
     if (typeof BroadcastChannel === 'undefined') {
-      deps.report('no BroadcastChannel on this page: the cross-tab host list stays empty and other hosts will not appear')
+      deps.report('no BroadcastChannel on this page: the cross-tab roll-up stays empty and other hosts will not appear')
     }
     return bus
   }
 
-  return {
-    identity: () => identity,
-    hosts: () => federation.hosts(),
-    onlineHostIds: () => federation.hosts().map(host => host.hostId),
-    setIdentity: value => {
-      deps.settings.write(value)
-      applyIdentity()
-    },
-    rereadIdentity: () => {
-      applyIdentity()
-    },
-    dispose: () => {
-      // The timer first: a heartbeat left running after the panel is gone
-      // would keep announcing a host nobody is listening for.
-      deps.clearInterval(timer)
-      federation.dispose()
-    },
+  // Announced up front: a tab that only said hello would leave its own row
+  // empty in every other tab, and nothing is going to come and ask. The
+  // surface publishes on start — that is its documented job — so the section
+  // does not say it twice.
+  federation.start()
+  const readView = () => {
+    const registrations = deps.registrations?.() ?? []
+    const remote = deps.remoteSessions?.() ?? new Map()
+    return rollUpViewWithRegistry(federation.rollUp(), registrations, remote)
   }
+  surface = mountRollUpSurface({
+    read: readView,
+    federation: {
+      rollUp: () => federation.rollUp(),
+      identity: () => identity,
+      publishSessions: () => { federation.publishSessions(deps.sessions()) },
+      tick: () => { beat() },
+      dispose: () => { federation.dispose() },
+    },
+    ...(deps.onSelectSession === undefined ? {} : { onSelect: deps.onSelectSession }),
+    mount: (container, read) => mountRollUp(container, read, {
+      ...(deps.onSelectSession === undefined ? {} : { onSelect: deps.onSelectSession }),
+      hostNote: host => {
+        if (host.self) {
+          const notes = deps.sourceNotes()
+          return notes.length > 0 ? notes.join(' ') : undefined
+        }
+        return host.empty ? '这台主机还没有会话数据——请点「连接」打开远端 DSH，或等待后台拉取。' : undefined
+      },
+    }),
+  })
+  onChange = () => { surface?.refresh() }
 
-  /**
-   * Take the identity settings now hold, whether because the operator saved
-   * one or because the storage gained one behind the section's back (the
-   * host-side settings hydrate after mount). An id change is a different
-   * identity on the channel, so the old one retires (dispose says bye)
-   * before the new one is announced; a same-id rename re-titles in place.
-   */
-  function applyIdentity(): void {
-    const next = resolveIdentity()
+  function applyIdentity(next: HostIdentity): void {
     if (next.hostId === identity.hostId) {
-      // Same id, new name: re-title in place so the list row (which reads
-      // the presence snapshot) shows the saved name at once, and one
-      // heartbeat tells other tabs — no bye/hello churn.
-      if (next.hostTitle !== identity.hostTitle) {
-        federation.renameSelf(next.hostTitle)
-      }
+      const titleChanged = next.hostTitle !== identity.hostTitle
       identity = next
+      if (titleChanged) federation.renameSelf(next.hostTitle)
+      onChange()
       return
     }
     federation.dispose()
     identity = next
     federation = open(identity)
     federation.start()
+    onChange()
+  }
+
+  return {
+    element: () => surface?.element() ?? document.createElement('div'),
+    identity: () => identity,
+    notices: () => [
+      ...deps.sourceNotes(),
+      '跨主机说明：页签间的通道只在同源之间通信。同一台 DSH 的多个标签页会互相看见；另一台机器（另一个源）的页面不在这个频道里，要让它出现，请在那里打开它自己的页面。',
+    ],
+    setIdentity: value => {
+      deps.settings.write(value)
+      applyIdentity(resolveIdentity())
+    },
+    rereadIdentity: () => {
+      applyIdentity(resolveIdentity())
+    },
+    hosts: () => federation.hosts(),
+    onlineHostIds: () => federation.hosts().map(host => host.hostId),
+    republish: () => {
+      try {
+        federation.publishSessions(deps.sessions())
+      } catch (error: unknown) {
+        deps.report(`session publish failed: ${messageOf(error)}`)
+      }
+      onChange()
+    },
+    dispose: () => {
+      // The timer first: a heartbeat left running after the panel is gone
+      // would keep announcing a host nobody is listening for.
+      deps.clearInterval(timer)
+      surface?.dispose()
+      federation.dispose()
+    },
   }
 }
 

@@ -51,7 +51,11 @@ import { layeredIdentitySettings, IDENTITY_STORAGE_KEY } from '../settings-sourc
 import { HOST_REGISTRY_KEY, HOST_STORE_ENTRY_ID, hostRegistry } from '@threadharbor/dsh-host-federation'
 import { startHostStore } from '../host-store.ts'
 import type { HostStoreChannel, HostStoreDeps, StoreOp } from '../host-store.ts'
+import { buildHostSessions, readSessionSources } from '../session-source.ts'
+import type { SessionRead } from '../session-source.ts'
 import { startRollUpSection } from '../rollup-section.ts'
+import type { SectionSession } from '../rollup-section.ts'
+import { createRemoteSessionStore } from '../remote-session-store.ts'
 import { AgentPanel } from '../panel.tsx'
 import type { AgentListPort, AgentPanelProps, ProbeStarter } from '../panel.tsx'
 import { registerAgentSwitchHandoverSurface } from '../handover-card.ts'
@@ -71,7 +75,7 @@ import { createElement } from 'react'
  *  the stock jump-to-session action. `sessions` is the session object layer:
  *  the switch's progress reads the new session's first page through it, so
  *  the panel swaps onto content that is already there. */
-export const inject = ['slots', 'remote', 'remote.settings', 'uiConversation', 'uiWorkspace', 'sessions']
+export const inject = ['slots', 'remote', 'remote.settings', 'uiConversation', 'uiWorkspace', 'sessions', 'workspaces']
 
 // The panel's pieces are one published surface: the verify-build step reads
 // every export under src/client and requires it in the built artifact, and a
@@ -90,7 +94,9 @@ export {
 } from '../settings-source.ts'
 export type { ConfiguredIdentity, IdentitySettings, IdentityStorage } from '../settings-source.ts'
 export { startRollUpSection } from '../rollup-section.ts'
-export type { RollUpSection, RollUpSectionDeps } from '../rollup-section.ts'
+export { buildHostSessions, readSessionSources } from '../session-source.ts'
+export type { SessionRead, SessionListSource, SourceSession, WorkspaceListSource } from '../session-source.ts'
+export type { RollUpSection, RollUpSectionDeps, SectionSession } from '../rollup-section.ts'
 export { mergeHostRows, heartbeatWord } from '../panel.tsx'
 export type { HostListRow } from '../panel.tsx'
 export { AgentPanel, AgentRow, runProbe } from '../panel.tsx'
@@ -286,8 +292,22 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // claim two hosts, and it is not a bug to fix.
   const hostStore = startHostStore(hostStoreDeps(ctx, message => { log.warn(message) }))
   const settings = layeredIdentitySettings(window.sessionStorage, hostStore.storage)
-  const section = startRollUpSection({
+  const registry = hostRegistry(hostStore.storage)
+  const remoteSessions = createRemoteSessionStore()
+  const sessionSource = hostSessionSource(ctx)
+  let section = startRollUpSection({
     settings,
+    sessions: sessionSource.sessions,
+    sourceNotes: sessionSource.sourceNotes,
+    registrations: () => registry.list(),
+    remoteSessions: () => remoteSessions.snapshot(),
+    onSelectSession: target => {
+      if (target.hostId !== section.identity().hostId) return
+      const uiWorkspace = ctx.get('uiWorkspace')
+      if (typeof uiWorkspace === 'object' && uiWorkspace !== null && typeof (uiWorkspace as Record<string, unknown>)['openSession'] === 'function') {
+        (uiWorkspace as { openSession(sessionId: string): void }).openSession(target.sessionId)
+      }
+    },
     setInterval: (handler, ms) => window.setInterval(handler, ms),
     clearInterval: handle => { window.clearInterval(handle) },
     report: message => { log.warn(message) },
@@ -302,6 +322,20 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // from an empty storage and must take the configured one the moment it
   // appears (same path as an explicit save).
   ctx.effect(() => hostStore.subscribe(() => { section.rereadIdentity() }), 'threadharbor: identity re-read on host storage hydration')
+  const { workspaces, sessions: sessionList } = readSessionSources({
+    workspaces: safeContextService(ctx, 'workspaces'),
+    sessions: safeContextService(ctx, 'sessions'),
+  })
+  for (const source of [workspaces, sessionList]) {
+    const subscribe = source?.subscribe
+    if (subscribe === undefined) continue
+    try {
+      const detach = subscribe(() => { section.republish() })
+      ctx.effect(() => () => { detach() }, 'threadharbor: session source subscription')
+    } catch (error) {
+      log.warn(`session source subscription failed: ${String(error)} — the heartbeat still republishes`)
+    }
+  }
   // Another tab of this host writing the document says so on the settings
   // channel; re-read so this tab's list and names follow.
   ctx.effect(() => settingsInvalidation(ctx, () => { hostStore.refresh() }), 'threadharbor: host storage invalidation')
@@ -321,7 +355,20 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
     agents: agentListPort(openGateway),
     probe: panelProbe(openGateway),
     rollUp: section,
-    registry: hostRegistry(hostStore.storage),
+    registry,
+    remoteSessions: {
+      refresh: registrations => {
+        for (const entry of registrations) {
+          const launchUrl = entry.launchUrl
+          if (launchUrl === undefined || launchUrl === '') continue
+          void import('../ssh-deploy.ts').then(({ fetchRemoteHostSessions }) => fetchRemoteHostSessions(launchUrl)).then(result => {
+            if (result.ok) remoteSessions.set(entry.hostId, result.value.sessions, result.value.note)
+          })
+        }
+        section.republish()
+      },
+      subscribe: remoteSessions.subscribe,
+    },
     hostStore: {
       posture: () => hostStore.posture(),
       subscribe: hostStore.subscribe,
@@ -353,7 +400,38 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   const identity = section.identity()
   log.info(`panel registered: id=${PANEL_ID}, slots=main+sidebar.panellist, order=${PANEL_ORDER}`)
   log.info(`probe gateway: ${mountOpening.gateway === undefined ? `not open at mount (missing ${mountOpening.missing.join(', ')}); retried per use` : 'open'}`)
-  log.info(`host list identity: ${identity.hostId}${identity.derived ? ' (derived from page origin; configure it in the panel)' : ''}; hosts only — sessions and projects are not read or shown (2026-10-11 decision)`)
+  log.info(`roll-up identity: ${identity.hostId}${identity.derived ? ' (derived from page origin; configure it in the panel)' : ''}; session tree: DSH projections + remote pull via launchUrl`)
+}
+
+export function hostSessionSource(ctx: ClientPanelContext): {
+  sessions(): readonly SectionSession[]
+  sourceNotes(): readonly string[]
+} {
+  let lastRead: SessionRead | undefined
+  const read = (): SessionRead => {
+    const { workspaces, sessions } = readSessionSources({
+      workspaces: safeContextService(ctx, 'workspaces'),
+      sessions: safeContextService(ctx, 'sessions'),
+    })
+    return buildHostSessions(workspaces, sessions)
+  }
+  return {
+    sessions: () => {
+      lastRead = read()
+      return lastRead.ok
+        ? lastRead.sessions.map(row => ({
+            projectId: row.projectId,
+            sessionId: row.sessionId,
+            title: row.title,
+            projectTitle: row.projectTitle,
+          }))
+        : []
+    },
+    sourceNotes: () => {
+      if (lastRead === undefined) lastRead = read()
+      return lastRead.ok ? [] : [lastRead.note]
+    },
+  }
 }
 
 /** The glyph the sidebar draws. Self-contained so the panel needs no icon set. */
@@ -414,6 +492,14 @@ function stringRecord(value: unknown): Record<string, string> | undefined {
     if (typeof entry !== 'string') return undefined
   }
   return value as Record<string, string>
+}
+
+function safeContextService(ctx: ClientPanelContext, name: 'workspaces' | 'sessions'): unknown {
+  try {
+    return ctx.get(name)
+  } catch {
+    return undefined
+  }
 }
 
 /** The registry entry id a stored list entry merges by. */
