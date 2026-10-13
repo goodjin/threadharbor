@@ -201,6 +201,11 @@ export class AcpTurnRunner {
    * turn-end write would have produced — so the session writer files it under
    * the same `turn:callId` key it pairs results with. Only the first frame for
    * an id writes; the turn-end write strips these and carries the results.
+   * The written-set is keyed on the PROJECTED card's callId, not the raw
+   * frame's `toolCallId`: a dialect may sanitize the id when it folds (cursor
+   * collapses a newline it joins two ids with), and the turn-end strip reads
+   * the same folded payload — keying both ends alike is what makes "exactly
+   * once" hold by construction rather than by agreement.
    * A failed append wrote nothing (the session validates before it commits),
    * so the id is left unwritten and the card falls to the turn-end write as
    * always — and the frame handler, which also drives the live stream, must
@@ -210,19 +215,16 @@ export class AcpTurnRunner {
     const live = this.liveCards
     const dialect = this.options.dialect
     if (live === undefined || dialect === undefined) return
-    const update = recordOf(recordOf(recordOf(frame)['params'])['update'])
-    const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
-    if (kind !== 'tool_call' && kind !== 'tool_call_update') return
-    const id = typeof update['toolCallId'] === 'string' ? update['toolCallId'] : undefined
-    if (id === undefined || live.written.has(id)) return
     const event = projectToolCallFrame(frame, { turn: live.turn, step: live.step, dialect })
     if (event === undefined) return
+    const callId = recordOf(event.payload)['callId']
+    if (typeof callId !== 'string' || live.written.has(callId)) return
     try {
       live.write([event])
     } catch {
       return
     }
-    live.written.add(id)
+    live.written.add(callId)
   }
 
   /** Feed one frame's text to the live stream. */

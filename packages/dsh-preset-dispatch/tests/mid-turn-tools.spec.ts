@@ -16,8 +16,8 @@
  * agent's clock stand in.
  */
 
-import type { AcpFrame } from '@threadharbor/dsh-acp-agent'
-import { claudeDialect, projectStepContent } from '@threadharbor/dsh-acp-agent'
+import type { AcpDialect, AcpFrame } from '@threadharbor/dsh-acp-agent'
+import { claudeDialect, cursorDialect, projectStepContent } from '@threadharbor/dsh-acp-agent'
 import { describe, expect, it } from 'vitest'
 import type { StepDecisionLike, TurnContext } from '../src/dispatch.ts'
 import { makeContentWriter } from '../src/content-writer.ts'
@@ -80,11 +80,11 @@ function recordingWrite(order: string[]): { write: ContentWriter; appends: Appen
 }
 
 /** The turn as the dispatch wires it: the real projection over the real dialect. */
-function turnOf(write: ContentWriter, position = { turn: 4, step: 2 }): TurnContext {
+function turnOf(write: ContentWriter, position = { turn: 4, step: 2 }, dialect: AcpDialect = claudeDialect): TurnContext {
   return {
     sessionId: 'dsh1',
     position,
-    produce: result => projectStepContent(result.frames, { turn: position.turn, step: position.step, dialect: claudeDialect }),
+    produce: result => projectStepContent(result.frames, { turn: position.turn, step: position.step, dialect }),
     write,
   }
 }
@@ -103,7 +103,7 @@ type Harness = {
  * A runner against an agent whose prompt hangs until `release` — the shape of
  * a real turn, where frames arrive while the agent is still working.
  */
-function harness(options: { dialect?: typeof claudeDialect; abort?: () => AbortSignal }): Harness {
+function harness(options: { dialect?: AcpDialect; abort?: () => AbortSignal }): Harness {
   let deliver: ((frame: AcpFrame) => void) | undefined
   let releasePrompt: () => void
   const order: string[] = []
@@ -131,7 +131,7 @@ function harness(options: { dialect?: typeof claudeDialect; abort?: () => AbortS
     ...(options.dialect === undefined ? {} : { dialect: options.dialect }),
     ...(options.abort === undefined ? {} : { abort: options.abort }),
   })
-  const running = runner.run(DECISION, turnOf(write))
+  const running = runner.run(DECISION, turnOf(write, undefined, options.dialect))
   return {
     run: () => running,
     started: () => started.then(() => new Promise<void>(resolve => { setTimeout(resolve, 0) })),
@@ -227,6 +227,41 @@ describe('mid-turn tool-card writing', () => {
     await turn1.run()
     expect(turn1.appends[0]!.type).toBe('tool/call')
     expect(turn1.appends[0]!.payload).toEqual(oldPath.payload)
+  })
+
+  it('writes a cursor call whose id carries a newline exactly once', async () => {
+    // Cursor concatenates two ids with a literal newline and the dialect
+    // collapses it when folding (singleLineId). The written-set and the
+    // turn-end strip must both key on the FOLDED id — the one the projected
+    // card carries — or the strip misses and the card lands twice.
+    const rawId = 'call_1\ncall_1_tail'
+    const cursorOpen: AcpFrame = {
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: update({ sessionUpdate: 'tool_call', toolCallId: rawId, kind: 'execute', status: 'in_progress' }),
+    }
+    const cursorDone: AcpFrame = {
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: update({
+        sessionUpdate: 'tool_call_update', toolCallId: rawId, status: 'completed',
+        rawOutput: { exitCode: 0, stdout: 'ok', stderr: '' },
+      }),
+    }
+    const turn1 = harness({ dialect: cursorDialect })
+    await turn1.started()
+    turn1.push([cursorOpen, cursorDone, answerFrame])
+    turn1.release()
+    await turn1.run()
+
+    const calls = turn1.appends.filter(append => append.type === 'tool/call')
+    const foldedId = rawId.replace(/[\r\n]+/g, '')
+    // Exactly one card, and it is the folded id the end-of-turn path uses too.
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.payload['callId']).toBe(foldedId)
+    expect(calls[0]!.payload['callId']).not.toContain('\n')
+    // Everything else arrives once: the message and the paired result.
+    expect(turn1.appends.map(append => append.type)).toEqual(['tool/call', 'assistant/message', 'tool/result'])
   })
 
   it('without a dialect the runner writes only at turn end, exactly as before', async () => {
