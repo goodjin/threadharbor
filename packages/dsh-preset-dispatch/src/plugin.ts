@@ -18,7 +18,12 @@
 
 import { holdsAcpDispatch, presetIdOf } from './dispatch.ts'
 import type { AgentLike, PresetResolver } from './dispatch.ts'
-import type { PermissionDecision, PermissionRequest } from '@threadharbor/dsh-acp-agent'
+import type {
+  AskQuestionAnswer,
+  AskQuestionRequest,
+  PermissionDecision,
+  PermissionRequest,
+} from '@threadharbor/dsh-acp-agent'
 import { buildPresetTable, openSessionsOf, sessionsRegistry } from './registry.ts'
 import type { AcpPresetConfig, PresetConfig } from './registry.ts'
 import { makeSessionFactory } from './factory.ts'
@@ -75,6 +80,13 @@ export type AcpPluginDeps = {
    */
   answerPermission?(request: PermissionRequest): Promise<PermissionDecision>
   /**
+   * Put the agent's question in front of a human.
+   *
+   * Omitted when the host has no question service, in which case the agent's
+   * question keeps its benign auto-answer.
+   */
+  answerAskQuestion?(request: AskQuestionRequest): Promise<AskQuestionAnswer>
+  /**
    * Say what went wrong on a session this row claimed.
    *
    * Optional because most callers only care that a session was or was not taken
@@ -121,6 +133,7 @@ export function applyAcpPlugin(
     answerPermission: request => (deps.answerPermission === undefined
       ? Promise.resolve({ outcome: 'reject' })
       : deps.answerPermission(request)),
+    ...(deps.answerAskQuestion === undefined ? {} : { answerAskQuestion: deps.answerAskQuestion }),
     ...(deps.transport === undefined ? {} : { transport: deps.transport }),
   })
   const dialect = factory.dialectFor(presetId, config)

@@ -191,6 +191,10 @@ export function buildPresetTable(
         if (session === undefined) {
           session = await factory.open(presetId, {
             cwd: preset.cwd ?? process.cwd(),
+            // Named so the opened client can put the host session on any
+            // question it asks the human — the session host services resolve
+            // an agent by.
+            dshSessionId: turn.sessionId,
             ...(preset.model === undefined ? {} : { modelId: preset.model }),
             ...(preset.mode === undefined ? {} : { modeId: preset.mode }),
             ...(options.primer === undefined ? {} : { primer: options.primer }),

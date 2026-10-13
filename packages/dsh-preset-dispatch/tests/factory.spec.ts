@@ -101,3 +101,78 @@ describe('连接死亡的转播', () => {
     expect(deaths).toEqual([])
   })
 })
+
+/** A transport that records what the client wrote, and can push frames in. */
+function recordingTransport(): AcpTransport & { readonly sent: string[]; receive: (frame: string) => void } {
+  const sent: string[] = []
+  let line: (frame: string) => void = () => {}
+  return {
+    sent,
+    send: (frame: string) => { sent.push(frame) },
+    onLine: (handler: (frame: string) => void) => { line = handler },
+    onDeath: () => {},
+    close: () => {},
+    receive: (frame: string) => { line(frame) },
+  } as AcpTransport & { readonly sent: string[]; receive: (frame: string) => void }
+}
+
+/** Let queued microtasks run, so the async answer path has settled. */
+async function flush(): Promise<void> {
+  for (let tick = 0; tick < 12; tick++) await Promise.resolve()
+}
+
+const CURSOR_ASK = JSON.stringify({
+  jsonrpc: '2.0',
+  id: 0,
+  method: 'cursor/ask_question',
+  params: {
+    questions: [{ id: 'q1', prompt: 'Which mode?', options: [{ id: 'plan', label: 'Plan' }] }],
+  },
+})
+
+describe('把 agent 的提问接到 host 的提问服务', () => {
+  it('host 可提问时，提问走 host 钩子并带上会话，答案按 cursor 形状回传', async () => {
+    // The hook answered on the host's behalf, and the reply is the answered
+    // envelope — not the auto-answer's skip.
+    const transport = recordingTransport()
+    const seen: unknown[] = []
+    const factory = makeSessionFactory(
+      { presets: { 'acp-cursor': { agent: 'cursor', url: 'ws://127.0.0.1:2419' } } },
+      {
+        ...deps,
+        transport: () => transport,
+        answerAskQuestion: async request => { seen.push(request); return { answer: 'Plan' } },
+      },
+    )
+    // The opener knows the DSH session; the hook's request names it, so the
+    // host-side bridge can resolve the live agent the card belongs to.
+    await factory.open('acp-cursor', { cwd: '/tmp', dshSessionId: 's1' })
+    transport.receive(CURSOR_ASK)
+    await flush()
+
+    expect(seen[0]).toMatchObject({ sessionId: 's1', questions: [{ id: 'q1', prompt: 'Which mode?' }] })
+    expect(transport.sent).toHaveLength(1)
+    const reply = JSON.parse(transport.sent[0]!) as { id: number; result: { outcome: { outcome: string } } }
+    expect(reply.id).toBe(0)
+    expect(reply.result).toEqual({
+      outcome: { outcome: 'answered', answers: [{ questionId: 'q1', selectedOptionIds: ['plan'] }] },
+    })
+  })
+
+  it('host 接不到时维持现状：扩展钩子的自动应答照旧生效', async () => {
+    // No-regression pin: without a host ask bridge, cursor's question gets the
+    // benign skip it has always gotten, and the turn proceeds.
+    const transport = recordingTransport()
+    const factory = makeSessionFactory(
+      { presets: { 'acp-cursor': { agent: 'cursor', url: 'ws://127.0.0.1:2419' } } },
+      { ...deps, transport: () => transport },
+    )
+    await factory.open('acp-cursor', { cwd: '/tmp' })
+    transport.receive(CURSOR_ASK)
+    await flush()
+
+    const reply = JSON.parse(transport.sent[0]!) as { id: number; result: { outcome: { outcome: string } } }
+    expect(reply.id).toBe(0)
+    expect(reply.result.outcome.outcome).toBe('skipped')
+  })
+})

@@ -1,5 +1,5 @@
 export { AcpClient } from './client.ts'
-export type { PermissionRequest, PermissionDecision } from './client.ts'
+export type { PermissionRequest, PermissionDecision, AskQuestionRequest, AskQuestionItem, AskQuestionAnswer, AskQuestionOutcome } from './client.ts'
 export { StdioAcpTransport, WebSocketAcpTransport, GrokServeTransport } from './transport.ts'
 export type { AcpTransport, StdioTransportOptions, GrokServeOptions, GrokServeChild, GrokServeSpawn } from './transport.ts'
 export { projectTurn, projectUserMessage, projectStepContent, projectTurnIncremental, projectToolCallFrame, mapToolName } from './projection.ts'

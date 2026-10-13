@@ -35,6 +35,41 @@ export type PermissionDecision =
   | { readonly outcome: 'allow' }
   | { readonly outcome: 'reject' }
 
+/** One question the agent asked, with the choices it offered. */
+export type AskQuestionItem = {
+  /** The agent's question id, echoed back in the answer. */
+  readonly id: string
+  /** The question to display. */
+  readonly prompt: string
+  readonly options: readonly { readonly id: string; readonly label: string }[]
+  /** Whether more than one option may be selected. */
+  readonly allowMultiple: boolean
+}
+
+/** An agent's ask-the-user request, flattened out of the raw frame. */
+export type AskQuestionRequest = {
+  /** The session the frame names, when it names one. */
+  readonly sessionId?: string
+  /** The agent's tool call the question belongs to, when sent. */
+  readonly toolCallId?: string
+  /** One heading for the whole ask, when sent. */
+  readonly title?: string
+  readonly questions: readonly AskQuestionItem[]
+}
+
+/** The human's answer, as the text the asker should read. */
+export type AskQuestionAnswer = { readonly answer: string }
+
+/**
+ * Cursor's reply envelope for `cursor/ask_question` (`docs/agent-acp/cursor.md`).
+ * An answered question names option **ids**; `skipped` is both the user
+ * dismissing the question and the only channel for an answer those ids cannot
+ * express, which is why the optional `reason` travels with it.
+ */
+export type AskQuestionOutcome = {
+  readonly outcome: { readonly outcome: 'answered' | 'skipped'; readonly answers?: unknown; readonly reason?: string }
+}
+
 /** A terminal an agent asked us to run a command in. */
 export type TerminalCreateRequest = {
   readonly sessionId?: string
@@ -49,6 +84,22 @@ export class AcpClient {
 
   onNotification: (frame: AcpFrame) => void = () => {}
   onPermissionRequest: (request: PermissionRequest) => Promise<PermissionDecision> = async () => ({ outcome: 'reject' })
+
+  /**
+   * Serves the agent's ask-the-user request, when this client can put the
+   * question in front of a human.
+   *
+   * Cursor's `cursor/ask_question` is blocking: unanswered, the turn stalls
+   * with no error. With this hook set the question is handed over and the
+   * returned answer goes back in cursor's `answered` envelope — the answer text
+   * mapped onto the offered option labels, since the envelope names option ids.
+   * An answer matching no offered option has no faithful encoding there, so it
+   * travels as `skipped` with the user's own words in `reason`; a throwing hook
+   * answers `skipped` too, because a question that cannot be presented must
+   * still release the turn. Left unset, the request falls through to
+   * `onExtensionRequest` — the factory's auto-answer — exactly as before.
+   */
+  onAskQuestion: ((request: AskQuestionRequest) => Promise<AskQuestionAnswer>) | undefined = undefined
 
   /**
    * Answers an agent-initiated request the built-in handlers do not recognize.
@@ -157,6 +208,10 @@ export class AcpClient {
       if (frame.method === 'session/request_permission') void this.answerPermission(frame)
       else if (frame.method.startsWith('terminal/')) void this.answerTerminal(frame)
       else if (frame.method.startsWith('fs/')) void this.answerFile(frame)
+      // The ask hook takes the question before the extension hook, so a wired
+      // human answer beats the benign auto-answer; unset, the request reaches
+      // the extension hook unchanged.
+      else if (frame.method === 'cursor/ask_question' && this.onAskQuestion !== undefined) void this.answerAskQuestion(frame)
       // An agent-specific extension the built-in handlers do not know. Give the
       // wired hook first crack (cursor's blocking `cursor/*` methods); only when
       // it declines do we send the generic "cannot serve" error.
@@ -341,8 +396,81 @@ export class AcpClient {
     }))
   }
 
+  /** Serve one `cursor/ask_question`: hand it to the hook, return the answer. */
+  private async answerAskQuestion(frame: AcpFrame): Promise<void> {
+    const id = frame.id as number
+    const request = parseAskQuestion(frame.params)
+    let answer: AskQuestionAnswer
+    try {
+      answer = await this.onAskQuestion!(request)
+    } catch {
+      // Unpresented is not unanswered: the turn must end either way, and the
+      // reason is structural — the error's text may carry question payload.
+      this.respond(id, skipOutcome('the host could not present this question; the user was not asked'), undefined)
+      return
+    }
+    this.respond(id, answeredOutcome(request.questions, answer.answer), undefined)
+  }
+
   private failAll(error: Error): void {
     for (const entry of this.pending.values()) entry.reject(error)
     this.pending.clear()
   }
+}
+
+/** Long enough for an answer, short enough to stay a bounded agent-facing field. */
+const REASON_LIMIT = 500
+
+/** Read the question off the wire, tolerating the shapes cursor omits fields in. */
+function parseAskQuestion(params: unknown): AskQuestionRequest {
+  const raw = (params ?? {}) as { sessionId?: unknown; toolCallId?: unknown; title?: unknown; questions?: unknown }
+  const questions = Array.isArray(raw.questions) ? raw.questions : []
+  return {
+    ...(typeof raw.sessionId === 'string' ? { sessionId: raw.sessionId } : {}),
+    ...(typeof raw.toolCallId === 'string' ? { toolCallId: raw.toolCallId } : {}),
+    ...(typeof raw.title === 'string' ? { title: raw.title } : {}),
+    questions: questions.map((item, index) => {
+      const question = (item ?? {}) as { id?: unknown; prompt?: unknown; options?: unknown; allowMultiple?: unknown }
+      const options = Array.isArray(question.options) ? question.options : []
+      return {
+        id: typeof question.id === 'string' && question.id !== '' ? question.id : `q${index}`,
+        prompt: typeof question.prompt === 'string' ? question.prompt : '',
+        options: options.map(option => {
+          const choice = (option ?? {}) as { id?: unknown; label?: unknown }
+          const label = typeof choice.label === 'string' ? choice.label : ''
+          return { id: typeof choice.id === 'string' && choice.id !== '' ? choice.id : label, label }
+        }),
+        allowMultiple: question.allowMultiple === true,
+      }
+    }),
+  }
+}
+
+/** `skipped`, with the reason cursor's envelope leaves room for — and no reason field when there is nothing to say. */
+function skipOutcome(reason: string): AskQuestionOutcome {
+  const bounded = reason.trim().slice(0, REASON_LIMIT)
+  return { outcome: { outcome: 'skipped', ...(bounded === '' ? {} : { reason: bounded }) } }
+}
+
+/**
+ * The user's answer as cursor's reply.
+ *
+ * The `answered` envelope names option ids, so the answer text is matched
+ * against each question's offered labels. An answer no question offers — the
+ * ordinary free-text path — cannot be encoded as a selection: replying
+ * `answered` with an empty selection would read as "asked and chose nothing"
+ * and drop the user's words, so the reply is `skipped` with those words in the
+ * reason, which the agent reads.
+ */
+function answeredOutcome(questions: readonly AskQuestionItem[], answer: string): AskQuestionOutcome {
+  const text = answer.trim()
+  const answers: { questionId: string; selectedOptionIds: string[] }[] = []
+  for (const question of questions) {
+    const ids = question.options.filter(option => option.label.trim() === text).map(option => option.id)
+    if (ids.length === 0) return skipOutcome(text === '' ? '' : `the user answered in free text: ${text}`)
+    answers.push({ questionId: question.id, selectedOptionIds: ids })
+  }
+  return answers.length === 0
+    ? skipOutcome(text === '' ? '' : `the user answered in free text: ${text}`)
+    : { outcome: { outcome: 'answered', answers } }
 }

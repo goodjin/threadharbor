@@ -45,6 +45,14 @@ export type TurnStreamPort = {
 /** How to reach an agent, and where its work happens. */
 export type RunnerOptions = {
   readonly cwd: string
+  /**
+   * The DSH session this runner drives, when the opener knows it.
+   *
+   * The runner's own `sessionId` is the external conversation's; this one
+   * names the host session, which is what host-side services (the question
+   * card, notably) resolve an agent by.
+   */
+  readonly dshSessionId?: string
   /** Applied once, before the first turn; claude needs `default` to ask at all. */
   readonly modeId?: string
   readonly modelId?: string

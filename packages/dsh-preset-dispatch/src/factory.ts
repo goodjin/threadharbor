@@ -17,7 +17,14 @@ import {
   cursorDialect,
   grokDialect,
 } from '@threadharbor/dsh-acp-agent'
-import type { AcpDialect, AcpTransport, PermissionDecision, PermissionRequest } from '@threadharbor/dsh-acp-agent'
+import type {
+  AcpDialect,
+  AcpTransport,
+  AskQuestionAnswer,
+  AskQuestionRequest,
+  PermissionDecision,
+  PermissionRequest,
+} from '@threadharbor/dsh-acp-agent'
 import type { AcpSession, AcpSessionFactory, PresetConfig } from './registry.ts'
 import { AcpTurnRunner } from './runner.ts'
 import type { AcpClientPort } from './runner.ts'
@@ -25,6 +32,13 @@ import type { AcpClientPort } from './runner.ts'
 export type FactoryDeps = {
   /** Answer an agent-initiated permission request. */
   answerPermission(request: PermissionRequest): Promise<PermissionDecision>
+  /**
+   * Put the agent's question in front of a human and return the answer.
+   *
+   * Supplied when the host has a question service to ask through; omitted
+   * means cursor's question keeps its benign auto-answer.
+   */
+  answerAskQuestion?(request: AskQuestionRequest): Promise<AskQuestionAnswer>
   /**
    * Build the transport a preset connects over.
    *
@@ -113,7 +127,20 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
       // Cursor sends two blocking custom methods that stall the turn if left
       // unanswered. Answer them with a benign outcome so the agent proceeds;
       // any other unknown method still falls through to the default error.
+      // The ask hook sits in front of that auto-answer when the host can put
+      // the question to a human — the client hands the question over and the
+      // user's answer returns in cursor's answered envelope. The request names
+      // this opener's DSH session when the frame itself does not, because the
+      // host resolves the live agent — and with it the conversation the
+      // question card belongs to — by session.
       if (preset.agent === 'cursor') {
+        if (deps.answerAskQuestion !== undefined) {
+          client.onAskQuestion = async request => await deps.answerAskQuestion!(
+            request.sessionId === undefined && options.dshSessionId !== undefined
+              ? { ...request, sessionId: options.dshSessionId }
+              : request,
+          )
+        }
         client.onExtensionRequest = frame => {
           if (typeof frame.id !== 'number') return false
           if (frame.method === 'cursor/ask_question') { client.reply(frame.id, { outcome: { outcome: 'skipped' } }); return true }
