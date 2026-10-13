@@ -102,6 +102,12 @@ export type AgentPanelProps = {
     posture(): HostStorePosture
     subscribe(listener: () => void): () => void
   } | undefined
+
+  /**
+   * 从 Tailscale 选主机地址的口。缺省表示这台机器没有这个桥
+   * （主机侧插件没装、或设置通道缺失），地址旁就不出现那个按钮。
+   */
+  readonly tailscale?: TailscalePort
   /** Storage events re-read the registry; injectable for tests. */
   listenStorage?(handler: () => void): () => void
   /** Said instead of an empty list, so "none listed" never reads as "none configured". */
@@ -296,6 +302,27 @@ export type HostFormFieldPolicy = {
   readonly id: boolean
   readonly title: boolean
   readonly address: boolean
+}
+
+/** 一台 Tailscale 节点：选择器要显示的名字、IP、在线状态。 */
+export type TailscalePeer = {
+  readonly name: string
+  readonly ip: string
+  readonly online: boolean
+}
+
+/**
+ * 读清单的结果：成功带 peers（可附主机侧报的 note），失败带原因。
+ * 失败的原因是人话（「没提供设置通道」），面板原样说在面上，不藏。
+ */
+export type TailscalePeersResult =
+  | { readonly ok: true; readonly peers: readonly TailscalePeer[]; readonly note?: string }
+  | { readonly ok: false; readonly message: string }
+
+/** 面板读 Tailscale 清单的口：loadPeers 读一次，refresh 让主机侧重跑一次。 */
+export type TailscalePort = {
+  loadPeers(): Promise<TailscalePeersResult>
+  refresh(): Promise<TailscalePeersResult>
 }
 
 const ALL_FIELDS: HostFormFieldPolicy = { id: true, title: true, address: true }
@@ -493,6 +520,8 @@ export function HostFormPage(props: {
   readonly postureNote?: ReactNode
   readonly onConfirm: (values: HostFormValues) => boolean
   readonly onCancel: () => void
+  /** 从 Tailscale 选地址的口；缺省就不显示那个按钮。 */
+  readonly tailscale?: TailscalePort | undefined
 }): ReactNode {
   const [idDraft, setIdDraft] = useState(props.values.hostId)
   const [titleDraft, setTitleDraft] = useState(props.values.hostTitle)
@@ -509,6 +538,27 @@ export function HostFormPage(props: {
   const idMatch = reported?.reportedId === undefined ? undefined : reported.reportedId === idDraft.trim()
   const titleMatch = reported?.reportedTitle === undefined ? undefined : reported.reportedTitle === titleDraft.trim()
   const addressHidden = props.mode === 'view' && !fields.address && props.values.address === ''
+
+  // 从 Tailscale 选：点开→读清单→列出；选一台→填地址+收起；刷新→主机侧重跑一次。
+  const [picker, setPicker] = useState<{ open: boolean; result?: TailscalePeersResult | undefined }>({ open: false })
+  const canPickAddress = props.tailscale !== undefined && fields.address
+  const openPicker = async (): Promise<void> => {
+    if (props.tailscale === undefined) return
+    setPicker({ open: true, result: undefined })
+    const result = await props.tailscale.loadPeers()
+    setPicker({ open: true, result })
+  }
+  const refreshPicker = async (): Promise<void> => {
+    if (props.tailscale === undefined) return
+    setPicker({ open: true, result: undefined })
+    const result = await props.tailscale.refresh()
+    setPicker({ open: true, result })
+  }
+  const pickPeer = (peer: TailscalePeer): void => {
+    // MagicDNS 名换 IP 不换名字，地址用它最稳；端口先填 3081，用户能改。
+    setAddressDraft(`http://${peer.name}:3081`)
+    setPicker({ open: false })
+  }
   return (
     <section data-panel-page={props.mode === 'new' ? 'add' : 'detail'} className={styles.card}>
       <div className={styles.cardHead}>
@@ -609,20 +659,77 @@ export function HostFormPage(props: {
         {addressHidden
           ? undefined
           : (
-              <label className={styles.field}>
-                地址（含 http 和端口）
-                {fields.address
-                  ? (
-                      <input
-                        value={addressDraft}
-                        data-form-field-address=""
-                        className={styles.input}
-                        onChange={event => { setAddressDraft(event.target.value) }}
-                        placeholder="http://192.168.1.10:3081"
-                      />
-                    )
-                  : <span data-form-field-address="" className={styles.readonlyValue}>{props.values.address}</span>}
-              </label>
+              <>
+                <label className={styles.field}>
+                  地址（含 http 和端口）
+                  <div className={styles.addressRow}>
+                    {fields.address
+                      ? (
+                          <input
+                            value={addressDraft}
+                            data-form-field-address=""
+                            className={styles.input}
+                            onChange={event => { setAddressDraft(event.target.value) }}
+                            placeholder="http://192.168.1.10:3081"
+                          />
+                        )
+                      : <span data-form-field-address="" className={styles.readonlyValue}>{props.values.address}</span>}
+                    {canPickAddress
+                      ? (
+                          <button
+                            type="button"
+                            data-action="tailscale-pick"
+                            className={styles.action}
+                            onClick={() => { void openPicker() }}
+                          >
+                            从 Tailscale 选
+                          </button>
+                        )
+                      : undefined}
+                  </div>
+                </label>
+                  {picker.open && canPickAddress
+                    ? (
+                        <div data-tailscale-picker="" className={styles.tailscalePicker}>
+                          <div className={styles.tailscalePickerBar}>
+                            <span className={styles.tailscalePickerTitle}>从 Tailscale 选一台</span>
+                            <button type="button" data-action="tailscale-refresh" className={styles.action} onClick={() => { void refreshPicker() }}>刷新</button>
+                          </div>
+                          {picker.result === undefined
+                            ? <p data-tailscale-state="loading" className={styles.stateLine}>正在读取清单……</p>
+                            : picker.result.ok === false
+                              ? <p data-tailscale-state="failed" className={styles.stateBad}>{picker.result.message}</p>
+                              : (
+                                  <>
+                                    {picker.result.note !== undefined
+                                      ? <p data-tailscale-note="" className={styles.note}>{picker.result.note}</p>
+                                      : undefined}
+                                    {picker.result.peers.length === 0
+                                      ? <p data-tailscale-state="empty" className={styles.stateLine}>清单是空的——只有本机，或还没登录 Tailscale。</p>
+                                      : (
+                                          <ul className={styles.tailscalePeerList}>
+                                            {picker.result.peers.map(peer => (
+                                              <li key={peer.name}>
+                                                <button
+                                                  type="button"
+                                                  data-tailscale-peer={peer.name}
+                                                  data-tailscale-online={peer.online ? 'true' : 'false'}
+                                                  className={peer.online ? styles.tailscalePeer : styles.tailscalePeerOffline}
+                                                  onClick={() => { pickPeer(peer) }}
+                                                >
+                                                  <span className={styles.tailscalePeerName}>{peer.name}</span>
+                                                  <span className={styles.tailscalePeerMeta}>{peer.ip} · {peer.online ? '在线' : '未连接'}</span>
+                                                </button>
+                                              </li>
+                                            ))}
+                                          </ul>
+                                        )}
+                                  </>
+                                )}
+                        </div>
+                      )
+                    : undefined}
+              </>
             )}
       </form>
       {props.message === undefined
@@ -832,6 +939,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
           postureNote={<StoragePostureLine posture={props.hostStore?.posture()} />}
           onConfirm={values => confirmAdd(values)}
           onCancel={openList}
+          tailscale={props.tailscale}
         />
       </div>
     )
@@ -889,6 +997,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
             postureNote={<StoragePostureLine posture={props.hostStore?.posture()} />}
             onConfirm={values => row.self ? confirmSelf(values) : confirmEdit(view.hostId, values)}
             onCancel={openList}
+            tailscale={props.tailscale}
             footer={registration !== undefined
               ? (
                   <div data-registry-actions="" className={styles.registryActions}>

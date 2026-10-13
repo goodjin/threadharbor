@@ -18,7 +18,7 @@ import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
 import { AgentPanel } from '../src/panel.tsx'
-import type { AgentListPort, AgentPanelProps, HostRegistryPort } from '../src/panel.tsx'
+import type { AgentListPort, AgentPanelProps, HostRegistryPort, TailscalePeer, TailscalePeersResult, TailscalePort } from '../src/panel.tsx'
 import type { RollUpSection } from '../src/rollup-section.ts'
 import type { ConfiguredIdentity } from '../src/settings-source.ts'
 import type { AgentDescriptor, GatewayResult } from '../src/gateway.ts'
@@ -116,7 +116,32 @@ function makeRegistry(entries: readonly { hostId: string; hostTitle: string; add
 
 const SELF_HOST: HostSnapshot = { hostId: 'self-host', hostTitle: '本机', lastSeen: 1_000, self: true }
 
-async function mountPanel(registry: HostRegistryPort, hostStore?: FakeHostStore, rollUp?: FakeRollUp): Promise<{ container: HTMLElement; root: Root }> {
+/**
+ * 带原型的假 Tailscale 端口：loadPeers / refresh 都按面板的契约给结果，
+ * refresh 记下被点过几次。真端口在 client/index.ts 里走 remote.settings，
+ * 这里只管「选择器拿到什么、刷新给什么」。
+ */
+class FakeTailscale implements TailscalePort {
+  public refreshCalls = 0
+  constructor(
+    private readonly loaded: TailscalePeersResult,
+    private readonly refreshed: TailscalePeersResult = loaded,
+  ) {}
+  async loadPeers(): Promise<TailscalePeersResult> {
+    return this.loaded
+  }
+  async refresh(): Promise<TailscalePeersResult> {
+    this.refreshCalls += 1
+    return this.refreshed
+  }
+}
+
+const TWO_PEERS: readonly TailscalePeer[] = [
+  { name: 'bench.tail-scale.ts.net', ip: '100.101.1.7', online: true },
+  { name: 'labbox', ip: '100.101.2.9', online: false },
+]
+
+async function mountPanel(registry: HostRegistryPort, hostStore?: FakeHostStore, rollUp?: FakeRollUp, tailscale?: TailscalePort): Promise<{ container: HTMLElement; root: Root }> {
   const container = document.createElement('div')
   document.body.appendChild(container)
   const root = createRoot(container)
@@ -126,6 +151,7 @@ async function mountPanel(registry: HostRegistryPort, hostStore?: FakeHostStore,
     rollUp: rollUp ?? new FakeRollUp([SELF_HOST]),
     registry,
     ...(hostStore === undefined ? {} : { hostStore }),
+    ...(tailscale === undefined ? {} : { tailscale }),
   }
   await act(async () => {
     root.render(createElement(AgentPanel, props))
@@ -493,6 +519,134 @@ describe('存储姿态行：跟状态走，加页也在', () => {
       expect(addPage.textContent).toContain('远程机器')
     } finally {
       await unmount(root)
+    }
+  })
+})
+
+describe('从 Tailscale 选：地址旁的选择器', () => {
+  /** 点开按钮后把 loadPeers 的异步落地等完（选择器状态是异步置的）。 */
+  async function settle(): Promise<void> {
+    await act(async () => {
+      await Promise.resolve()
+    })
+  }
+
+  it('添加页点「从 Tailscale 选」：列出 peers（名字+IP+在线徽标），选一台地址填 http://<名字>:3081 且选择器收起', async () => {
+    const { container, root } = await mountPanel(makeRegistry(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
+    try {
+      click(container, '[data-action="add-host"]')
+      click(container, '[data-action="tailscale-pick"]')
+      await settle()
+
+      const picker = q(container, '[data-tailscale-picker]')
+      const bench = q(container, '[data-tailscale-peer="bench.tail-scale.ts.net"]')
+      expect(bench.textContent).toContain('100.101.1.7')
+      expect(bench.textContent).toContain('在线')
+      expect(q(container, '[data-tailscale-peer="labbox"]').textContent).toContain('未连接')
+      expect(bench.getAttribute('data-tailscale-online')).toBe('true')
+      expect(q(container, '[data-tailscale-peer="labbox"]').getAttribute('data-tailscale-online')).toBe('false')
+
+      click(container, '[data-tailscale-peer="bench.tail-scale.ts.net"]')
+      const address = q(container, '[data-form-field-address]')
+      if (!(address instanceof HTMLInputElement)) throw new Error('address input missing')
+      expect(address.value).toBe('http://bench.tail-scale.ts.net:3081')
+      expect(container.querySelector('[data-tailscale-picker]')).toBeNull()
+      expect(picker).toBeTruthy()
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('离线主机置灰但仍可选：点了照样填地址，徽标是未连接', async () => {
+    const { container, root } = await mountPanel(makeRegistry(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
+    try {
+      click(container, '[data-action="add-host"]')
+      click(container, '[data-action="tailscale-pick"]')
+      await settle()
+      const labbox = q(container, '[data-tailscale-peer="labbox"]')
+      expect(labbox.getAttribute('data-tailscale-online')).toBe('false')
+      click(container, '[data-tailscale-peer="labbox"]')
+      const address = q(container, '[data-form-field-address]')
+      if (!(address instanceof HTMLInputElement)) throw new Error('address input missing')
+      expect(address.value).toBe('http://labbox:3081')
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('点「刷新」走 port.refresh：换上的新清单出现', async () => {
+    const refreshed: readonly TailscalePeer[] = [{ name: 'newbox', ip: '100.101.9.9', online: true }]
+    const port = new FakeTailscale(
+      { ok: true, peers: TWO_PEERS },
+      { ok: true, peers: refreshed },
+    )
+    const { container, root } = await mountPanel(makeRegistry(), undefined, undefined, port)
+    try {
+      click(container, '[data-action="add-host"]')
+      click(container, '[data-action="tailscale-pick"]')
+      await settle()
+      expect(container.querySelector('[data-tailscale-peer="newbox"]')).toBeNull()
+
+      click(container, '[data-action="tailscale-refresh"]')
+      await settle()
+
+      expect(port.refreshCalls).toBe(1)
+      expect(q(container, '[data-tailscale-peer="newbox"]')).toBeTruthy()
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('读不到清单（通道缺失等）：选择器里说明原因，不是空白', async () => {
+    const { container, root } = await mountPanel(
+      makeRegistry(),
+      undefined,
+      undefined,
+      new FakeTailscale({ ok: false, message: '这台机器没有提供设置通道（remote.settings）' }),
+    )
+    try {
+      click(container, '[data-action="add-host"]')
+      click(container, '[data-action="tailscale-pick"]')
+      await settle()
+      expect(q(container, '[data-tailscale-state="failed"]').textContent).toContain('设置通道')
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('主机侧报告了 tailscale 的毛病（note）：清单照列，毛病原样说在面上', async () => {
+    const { container, root } = await mountPanel(
+      makeRegistry(),
+      undefined,
+      undefined,
+      new FakeTailscale({ ok: true, peers: [], note: 'tailscale status --json 失败：未登录' }),
+    )
+    try {
+      click(container, '[data-action="add-host"]')
+      click(container, '[data-action="tailscale-pick"]')
+      await settle()
+      expect(q(container, '[data-tailscale-note]').textContent).toContain('未登录')
+      expect(q(container, '[data-tailscale-state="empty"]').textContent).toContain('只有本机')
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('地址不可编辑的页面（本机详情）没有这个按钮；没接端口时也不出现', async () => {
+    const withPort = await mountPanel(makeRegistry(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
+    try {
+      click(withPort.container, '[data-host-open="self-host"]')
+      expect(withPort.container.querySelector('[data-action="tailscale-pick"]')).toBeNull()
+    } finally {
+      await unmount(withPort.root)
+    }
+
+    const withoutPort = await mountPanel(makeRegistry())
+    try {
+      click(withoutPort.container, '[data-action="add-host"]')
+      expect(withoutPort.container.querySelector('[data-action="tailscale-pick"]')).toBeNull()
+    } finally {
+      await unmount(withoutPort.root)
     }
   })
 })

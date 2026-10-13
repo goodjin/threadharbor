@@ -492,3 +492,84 @@
   border-radius: var(--dsw-radius-sm);
   padding: 0 4px;
 }
+
+
+/* 从 Tailscale 选：地址那一行旁边的按钮，和它拉出来的节点清单。 */
+.addressRow {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.addressRow .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.tailscalePicker {
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-2);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 248px;
+  overflow-y: auto;
+}
+
+.tailscalePickerBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tailscalePickerTitle {
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.tailscalePeerList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tailscalePeer,
+.tailscalePeerOffline {
+  appearance: none;
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  text-align: left;
+  padding: 6px 10px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tailscalePeer:hover {
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+/* 未连接：置灰但仍可点——选了照样填地址，只是这台现在没在 tailnet 上。 */
+.tailscalePeerOffline {
+  opacity: 0.55;
+}
+
+.tailscalePeerName {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tailscalePeerMeta {
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary);
+}

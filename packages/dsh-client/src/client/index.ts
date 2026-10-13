@@ -48,12 +48,13 @@ import type { AgentDescriptor, GatewayResult, SessionGateway } from '../gateway.
 import { runSessionProbe } from '../probe.ts'
 import type { ProbeOutcome } from '../probe.ts'
 import { layeredIdentitySettings, IDENTITY_STORAGE_KEY } from '../settings-source.ts'
-import { HOST_REGISTRY_KEY, HOST_STORE_ENTRY_ID, hostRegistry } from '@threadharbor/dsh-host-federation'
+import { HOST_REGISTRY_KEY, HOST_STORE_ENTRY_ID, TAILSCALE_ERROR_KEY, TAILSCALE_PEERS_KEY, TAILSCALE_REFRESHED_KEY, TAILSCALE_REFRESH_KEY, hostRegistry } from '@threadharbor/dsh-host-federation'
+import type { TailscalePeer } from '@threadharbor/dsh-host-federation'
 import { startHostStore } from '../host-store.ts'
 import type { HostStoreChannel, HostStoreDeps, StoreOp } from '../host-store.ts'
 import { startRollUpSection } from '../rollup-section.ts'
 import { AgentPanel } from '../panel.tsx'
-import type { AgentListPort, AgentPanelProps, ProbeStarter } from '../panel.tsx'
+import type { AgentListPort, AgentPanelProps, ProbeStarter, TailscalePeersResult, TailscalePort } from '../panel.tsx'
 import { registerAgentSwitchHandoverSurface } from '../handover-card.ts'
 import { createSwitchProgressStore, startSwitchProgressSurface } from '../switch-progress.ts'
 import { createElement } from 'react'
@@ -284,7 +285,9 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // two can never drift apart again. This tab's own claim stays in
   // sessionStorage: that per-tab override is what lets two tabs of one DSH
   // claim two hosts, and it is not a bug to fix.
-  const hostStore = startHostStore(hostStoreDeps(ctx, message => { log.warn(message) }))
+  const hostStoreDepsResult = hostStoreDeps(ctx, message => { log.warn(message) })
+  const hostStore = startHostStore(hostStoreDepsResult.deps)
+  const tailscale = tailscalePort(ctx, hostStoreDepsResult.channel, message => { log.warn(message) })
   const settings = layeredIdentitySettings(window.sessionStorage, hostStore.storage)
   const section = startRollUpSection({
     settings,
@@ -326,6 +329,7 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
       posture: () => hostStore.posture(),
       subscribe: hostStore.subscribe,
     },
+    tailscale,
     listenStorage: handler => {
       window.addEventListener('storage', handler)
       return () => { window.removeEventListener('storage', handler) }
@@ -443,7 +447,7 @@ function legacyBrowserStorage(): { getItem(key: string): string | null } {
  * methods are bound before use — a method called detached from its namespace
  * dies on `this`, which is how a whole page once went down.
  */
-function hostStoreDeps(ctx: ClientPanelContext, log: (message: string) => void): HostStoreDeps {
+function hostStoreDeps(ctx: ClientPanelContext, log: (message: string) => void): { channel: HostStoreChannel | undefined; deps: HostStoreDeps } {
   const remote = readService(ctx, 'remote')
   const host = propertyOf(remote, '$host')
   const loopback = isRecord(host) && host['isLoopback'] === true
@@ -487,12 +491,69 @@ function hostStoreDeps(ctx: ClientPanelContext, log: (message: string) => void):
     log('host store: this page is on the serving machine but remote.settings is missing — the registry cannot persist')
   }
   return {
-    loopback: () => loopback,
     channel,
-    listKeys: [{ key: HOST_REGISTRY_KEY, idOf: hostIdOfEntry }],
-    migrateFrom: legacyBrowserStorage(),
-    migrateKeys: [HOST_REGISTRY_KEY, IDENTITY_STORAGE_KEY],
-    log,
+    deps: {
+      loopback: () => loopback,
+      channel,
+      listKeys: [{ key: HOST_REGISTRY_KEY, idOf: hostIdOfEntry }],
+      migrateFrom: legacyBrowserStorage(),
+      migrateKeys: [HOST_REGISTRY_KEY, IDENTITY_STORAGE_KEY],
+      log,
+    },
+  }
+}
+
+/**
+ * The Tailscale picker's port, over the SAME settings channel the registry
+ * uses — there is no other host-side door from the browser. `loadPeers` reads
+ * the `dsh.tailscale.peers` key the host-side bridge writes; `refresh` drops a
+ * demand timestamp and polls until the bridge answers it, so 「已重跑」 is told
+ * apart from 「没人应答」 by the `dsh.tailscale.refreshed` marker.
+ * @param ctx - the browser plugin context.
+ * @param channel - the host-store settings channel, or undefined when this host offers none.
+ * @param log - where a refused read/write is reported, never thrown at the page.
+ * @returns the port the panel's 「从 Tailscale 选」 button drives.
+ */
+function tailscalePort(ctx: ClientPanelContext, channel: HostStoreChannel | undefined, log: (message: string) => void): TailscalePort {
+  const readKey = async (key: string): Promise<string | undefined> => {
+    if (channel === undefined) return undefined
+    try {
+      const data = await channel.loadDocument()
+      return data?.[key]
+    } catch (error) {
+      log(`tailscale: 读清单失败：${error instanceof Error ? error.message : String(error)}`)
+      return undefined
+    }
+  }
+  const readPeers = async (): Promise<TailscalePeersResult> => {
+    if (channel === undefined) return { ok: false, message: '这台机器没有提供设置通道（remote.settings）' }
+    const raw = await readKey(TAILSCALE_PEERS_KEY)
+    if (raw === undefined) return { ok: true, peers: [] }
+    try {
+      const peers = JSON.parse(raw) as TailscalePeer[]
+      const note = await readKey(TAILSCALE_ERROR_KEY)
+      return { ok: true, peers, ...(note === undefined ? {} : { note }) }
+    } catch {
+      return { ok: false, message: '清单读出来是坏的，没法解析' }
+    }
+  }
+  return {
+    loadPeers: readPeers,
+    refresh: async () => {
+      if (channel === undefined) return { ok: false, message: '这台机器没有提供设置通道（remote.settings）' }
+      const demand = String(Date.now())
+      try {
+        await channel.mutateDocument([{ kind: 'set', key: TAILSCALE_REFRESH_KEY, value: demand }])
+      } catch (error) {
+        return { ok: false, message: `刷新请求被拒：${error instanceof Error ? error.message : String(error)}` }
+      }
+      // 轮询：等主机侧把 refreshed 写成我们的 demand；超时也读一次当前清单（可能是旧的），不当作失败。
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        await new Promise(resolve => { setTimeout(resolve, 300) })
+        if (await readKey(TAILSCALE_REFRESHED_KEY) === demand) return readPeers()
+      }
+      return readPeers()
+    },
   }
 }
 
