@@ -22,6 +22,8 @@
     # dsh-client 的 host-store.ts，写的是同一个 id 的命名空间。
     - id: threadharbor-host-store
       name: '@threadharbor/dsh-host-federation/host-store'
+    - id: threadharbor-ssh-deploy
+      name: '@threadharbor/dsh-host-federation/ssh-deploy'
     - id: acp-codex
       name: '@deepseek-ai/dsh-agent-preset'
       config:

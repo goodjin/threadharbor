@@ -76,7 +76,7 @@ cordis.patch.yml               安装到 DSH Web profile 的标准 bundle patch�
 reference/                     被 Git 忽略的 DeepSeek Harness 参考源码
 ```
 
-设计说明见 [docs/design/dsh-multi-host-migration.md](docs/design/dsh-multi-host-migration.md)，各 agent 的对接实测见 [docs/agent-acp/](docs/agent-acp/README.md)，AgentHarbor/SessionPort 对比见 [docs/landscape.zh.md](docs/landscape.zh.md)。手机端（Android）接入方案尚未实现，见 [docs/mobile-client.zh.md](docs/mobile-client.zh.md)。
+设计说明见 [docs/design/dsh-multi-host-migration.md](docs/design/dsh-multi-host-migration.md)，各 agent 的对接实测见 [docs/agent-acp/](docs/agent-acp/README.md)，AgentHarbor/SessionPort 对比见 [docs/landscape.zh.md](docs/landscape.zh.md)。通过 SSH 在远端安装 DSH 见 [docs/ssh-deploy.zh.md](docs/ssh-deploy.zh.md)。手机端（Android）接入方案尚未实现，见 [docs/mobile-client.zh.md](docs/mobile-client.zh.md)。
 
 ## 开发检查
 

@@ -30,9 +30,16 @@ import type { AgentDescriptor, GatewayResult } from './gateway.ts'
 import type { ProbeOutcome } from './probe.ts'
 import { probeReach } from './reach.ts'
 import type { ReachOutcome } from './reach.ts'
-import type { HostIdentity, HostRegistration, RegistrationResult } from '@threadharbor/dsh-host-federation'
+import type { HostIdentity, HostRegistration, RegistrationResult, SshConnectionInput, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
 import type { HostSnapshot } from '@threadharbor/dsh-host-federation'
 import type { HostStorePosture } from './host-store.ts'
+import {
+  inspectSshHost,
+  probeSshDeployApi,
+  startSshDeploy,
+  waitSshDeployOperation,
+} from './ssh-deploy.ts'
+import type { SshDeployOperationView } from '@threadharbor/dsh-host-federation'
 import styles from './panel.module.css'
 
 /** What one probe attempt is doing, as the row shows it. */
@@ -422,6 +429,196 @@ export function HostRow(props: {
   )
 }
 
+type SshAuthMode = 'identityFile' | 'identityPem' | 'password'
+
+function SshDeploySection(props: {
+  readonly hostId: string
+  readonly hostTitle: string
+  readonly onHostIdChange: (value: string) => void
+  readonly onHostTitleChange: (value: string) => void
+  readonly onDeployed: (address: string) => void
+  readonly onError: (message: string) => void
+}): ReactNode {
+  const [target, setTarget] = useState('')
+  const [port, setPort] = useState('22')
+  const [user, setUser] = useState('')
+  const [proxyJump, setProxyJump] = useState('')
+  const [authMode, setAuthMode] = useState<SshAuthMode>('identityFile')
+  const [identityFile, setIdentityFile] = useState('')
+  const [identityPem, setIdentityPem] = useState('')
+  const [password, setPassword] = useState('')
+  const [remoteWebPort, setRemoteWebPort] = useState('3081')
+  const [keys, setKeys] = useState<readonly SshHostKeyCandidate[]>([])
+  const [approvedFingerprint, setApprovedFingerprint] = useState('')
+  const [busy, setBusy] = useState<'inspect' | 'deploy' | undefined>(undefined)
+  const [progress, setProgress] = useState<SshDeployOperationView | undefined>(undefined)
+
+  const sshPayload = (): SshConnectionInput => {
+    const base: SshConnectionInput = { target: target.trim() }
+    const withPort = port.trim() === '' ? base : { ...base, port: Number(port) }
+    const withUser = user.trim() === '' ? withPort : { ...withPort, user: user.trim() }
+    const withJump = proxyJump.trim() === '' ? withUser : { ...withUser, proxyJump: proxyJump.trim() }
+    if (authMode === 'identityFile' && identityFile.trim() !== '') return { ...withJump, identityFile: identityFile.trim() }
+    if (authMode === 'identityPem' && identityPem.trim() !== '') return { ...withJump, identityPem: identityPem.trim() }
+    if (authMode === 'password' && password !== '') return { ...withJump, password }
+    return withJump
+  }
+
+  const runInspect = (): void => {
+    setBusy('inspect')
+    setKeys([])
+    setApprovedFingerprint('')
+    void inspectSshHost(sshPayload()).then(result => {
+      setBusy(undefined)
+      if (!result.ok) {
+        props.onError(result.error)
+        return
+      }
+      setKeys(result.value.keys)
+      const only = result.value.keys[0]
+      if (result.value.keys.length === 1 && only !== undefined) setApprovedFingerprint(only.hostKeyFingerprint)
+    })
+  }
+
+  const runDeploy = (): void => {
+    if (approvedFingerprint === '') {
+      props.onError('请先检查并批准 SSH 主机密钥指纹')
+      return
+    }
+    if (!props.hostId.trim()) {
+      props.onError('请填写主机标识')
+      return
+    }
+    setBusy('deploy')
+    setProgress(undefined)
+    void startSshDeploy({
+      hostId: props.hostId.trim(),
+      hostTitle: props.hostTitle.trim() === '' ? props.hostId.trim() : props.hostTitle.trim(),
+      ssh: { ...sshPayload(), hostKeyFingerprint: approvedFingerprint },
+      ...(remoteWebPort.trim() === '' ? {} : { remoteWebPort: Number(remoteWebPort) }),
+    }).then(started => {
+      if (!started.ok) {
+        setBusy(undefined)
+        props.onError(started.error)
+        return
+      }
+      void waitSshDeployOperation(started.value.operationId, view => { setProgress(view) }).then(done => {
+        setBusy(undefined)
+        if (!done.ok) {
+          props.onError(done.error)
+          return
+        }
+        if (done.value.status !== 'succeeded' || done.value.result === undefined) {
+          props.onError(done.value.error ?? '部署失败')
+          return
+        }
+        props.onDeployed(done.value.result.endpoint)
+      })
+    })
+  }
+
+  return (
+    <div data-ssh-deploy="" className={styles.sshSection}>
+      <p className={styles.note}>
+        SSH 自动部署在本机（提供 Web 页面的那台机器）上执行：私钥路径指<strong>这台机器</strong>上的绝对路径；
+        粘贴私钥或密码只发给本机 DSH 进程，不会写入日志。
+      </p>
+      <div className={styles.formGrid}>
+        <label className={styles.field}>
+          SSH 主机
+          <input className={styles.input} value={target} onChange={event => { setTarget(event.target.value) }} placeholder="192.168.1.10" />
+        </label>
+        <label className={styles.field}>
+          端口
+          <input className={styles.input} value={port} onChange={event => { setPort(event.target.value) }} />
+        </label>
+        <label className={styles.field}>
+          用户
+          <input className={styles.input} value={user} onChange={event => { setUser(event.target.value) }} placeholder="deploy" />
+        </label>
+        <label className={styles.field}>
+          ProxyJump（可选）
+          <input className={styles.input} value={proxyJump} onChange={event => { setProxyJump(event.target.value) }} />
+        </label>
+        <label className={styles.field}>
+          认证方式
+          <select className={styles.input} value={authMode} onChange={event => { setAuthMode(event.target.value as SshAuthMode) }}>
+            <option value="identityFile">本机私钥路径</option>
+            <option value="identityPem">粘贴私钥 PEM</option>
+            <option value="password">密码（需本机安装 sshpass）</option>
+          </select>
+        </label>
+        {authMode === 'identityFile'
+          ? (
+              <label className={styles.field}>
+                私钥路径（Web 服务主机上）
+                <input className={styles.input} value={identityFile} onChange={event => { setIdentityFile(event.target.value) }} placeholder="/home/me/.ssh/id_ed25519" />
+              </label>
+            )
+          : authMode === 'identityPem'
+            ? (
+                <label className={styles.field}>
+                  私钥 PEM
+                  <textarea className={styles.textarea} value={identityPem} onChange={event => { setIdentityPem(event.target.value) }} rows={4} />
+                </label>
+              )
+            : (
+                <label className={styles.field}>
+                  SSH 密码
+                  <input type="password" className={styles.input} value={password} onChange={event => { setPassword(event.target.value) }} autoComplete="off" />
+                </label>
+              )}
+        <label className={styles.field}>
+          远端 DSH Web 端口（loopback）
+          <input className={styles.input} value={remoteWebPort} onChange={event => { setRemoteWebPort(event.target.value) }} />
+        </label>
+      </div>
+      <div className={styles.formActions}>
+        <button type="button" className={styles.action} disabled={busy !== undefined} onClick={runInspect}>
+          {busy === 'inspect' ? '正在检查……' : '检查 SSH 主机密钥'}
+        </button>
+        <button type="button" className={styles.actionPrimary} disabled={busy !== undefined} onClick={runDeploy}>
+          {busy === 'deploy' ? '正在部署……' : '部署 DSH 并登记'}
+        </button>
+      </div>
+      {keys.length > 0
+        ? (
+            <div data-ssh-keys="" className={styles.sshKeys}>
+              <p className={styles.stateLine}>请核对指纹后选择要信任的那把钥匙：</p>
+              {keys.map(key => (
+                <label key={key.hostKeyFingerprint} className={styles.sshKeyRow}>
+                  <input
+                    type="radio"
+                    name="ssh-host-key"
+                    checked={approvedFingerprint === key.hostKeyFingerprint}
+                    onChange={() => { setApprovedFingerprint(key.hostKeyFingerprint) }}
+                  />
+                  <span>{key.algorithm} · {key.hostKeyFingerprint}</span>
+                </label>
+              ))}
+            </div>
+          )
+        : undefined}
+      {progress !== undefined
+        ? (
+            <p data-ssh-progress="" className={styles.stateLine}>
+              {progress.progress.detail}
+              {progress.status === 'failed' && progress.error !== undefined ? `（${progress.error}）` : ''}
+            </p>
+          )
+        : undefined}
+      <label className={styles.field}>
+        主机标识（部署后登记用）
+        <input className={styles.input} value={props.hostId} onChange={event => { props.onHostIdChange(event.target.value) }} />
+      </label>
+      <label className={styles.field}>
+        显示名
+        <input className={styles.input} value={props.hostTitle} onChange={event => { props.onHostTitleChange(event.target.value) }} />
+      </label>
+    </div>
+  )
+}
+
 /**
  * The form page both adding and viewing share — one component, two modes, so
  * a field changes in one place. Mode `new` collects the three operator-filled
@@ -659,6 +856,14 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   const [, setIdentityRevision] = useState(0)
   const [registryRevision, setRegistryRevision] = useState(0)
   const [formMessage, setFormMessage] = useState<{ readonly tone: 'ok' | 'bad'; readonly text: string } | undefined>(undefined)
+  const [addMode, setAddMode] = useState<'manual' | 'ssh'>('manual')
+  const [addIdDraft, setAddIdDraft] = useState('')
+  const [addTitleDraft, setAddTitleDraft] = useState('')
+  const [addAddressDraft, setAddAddressDraft] = useState('')
+  const [sshDeployAvailable, setSshDeployAvailable] = useState(false)
+  useEffect(() => {
+    void probeSshDeployApi().then(setSshDeployAvailable)
+  }, [])
   const [confirmingRemove, setConfirmingRemove] = useState(false)
   const [reaches, setReaches] = useState<ReadonlyMap<string, ReachOutcome | 'probing'>>(new Map())
   // The host list lives in the section, not in React state; this tick is what
@@ -773,16 +978,69 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   const hostRows = mergeHostRows(presence, registrations)
 
   if (view.page === 'add') {
+    if (sshDeployAvailable && addMode === 'ssh') {
+      return (
+        <div data-threadharbor-panel="" className={styles.root}>
+          <section data-panel-page="add-ssh" className={styles.card}>
+            <div className={styles.cardHead}>
+              <button type="button" className={styles.action} onClick={openList}>‹ 返回</button>
+              <h2 className={styles.title}>SSH 自动部署</h2>
+              <span className={styles.spacer} />
+              <button type="button" className={styles.action} onClick={() => { setAddMode('manual'); setFormMessage(undefined) }}>手动登记</button>
+            </div>
+            <StoragePostureLine posture={props.hostStore?.posture()} />
+            {formMessage !== undefined
+              ? <p data-form-message={formMessage.tone} className={formMessage.tone === 'ok' ? styles.stateLine : styles.stateBad}>{formMessage.text}</p>
+              : undefined}
+            <SshDeploySection
+              hostId={addIdDraft}
+              hostTitle={addTitleDraft}
+              onHostIdChange={setAddIdDraft}
+              onHostTitleChange={setAddTitleDraft}
+              onError={message => { setFormMessage({ tone: 'bad', text: message }) }}
+              onDeployed={address => {
+                const result = props.registry.add({
+                  hostId: addIdDraft.trim(),
+                  hostTitle: addTitleDraft.trim(),
+                  address,
+                })
+                if (!result.ok) {
+                  setFormMessage({ tone: 'bad', text: result.error.detail })
+                  return
+                }
+                setRegistryRevision(revision => revision + 1)
+                setFormMessage({ tone: 'ok', text: `已部署并登记：${address}。请用该地址打开远端页面（含 token）后，该行才会显示在线。` })
+                setAddMode('manual')
+                setView({ page: 'list' })
+              }}
+            />
+          </section>
+        </div>
+      )
+    }
     return (
       <div data-threadharbor-panel="" className={styles.root}>
         <HostFormPage
           key="add"
           mode="new"
           heading="添加新主机"
-          values={{ hostId: '', hostTitle: '', address: '' }}
+          values={{ hostId: addIdDraft, hostTitle: addTitleDraft, address: addAddressDraft }}
           message={formMessage}
           postureNote={<StoragePostureLine posture={props.hostStore?.posture()} />}
-          onConfirm={values => confirmAdd(values)}
+          footer={sshDeployAvailable
+            ? (
+                <p className={styles.note}>
+                  也可以在远端自动安装 DSH 与 ThreadHarbor：
+                  <button type="button" data-action="add-host-ssh" className={styles.action} onClick={() => { setAddMode('ssh'); setFormMessage(undefined) }}>SSH 自动部署</button>
+                </p>
+              )
+            : undefined}
+          onConfirm={values => {
+            setAddIdDraft(values.hostId)
+            setAddTitleDraft(values.hostTitle)
+            setAddAddressDraft(values.address)
+            return confirmAdd(values)
+          }}
           onCancel={openList}
         />
       </div>

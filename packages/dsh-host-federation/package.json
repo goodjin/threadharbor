@@ -14,6 +14,14 @@
       "types": "./src/host-store.ts",
       "default": "./src/host-store.ts"
     },
+    "./ssh-deploy": {
+      "types": "./src/ssh-deploy.ts",
+      "default": "./src/ssh-deploy.ts"
+    },
+    "./ssh/types": {
+      "types": "./src/ssh/types.ts",
+      "default": "./src/ssh/types.ts"
+    },
     "./package.json": "./package.json"
   },
   "dependencies": {

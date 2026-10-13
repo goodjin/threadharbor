@@ -235,6 +235,43 @@
  * The form page's fields: label over control, one column, so the add page and
  * the detail page read the same. Read-only values keep the field's place.
  */
+.sshSection {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sshKeys {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: var(--dsw-radius-sm);
+  border: 1px solid var(--dsw-alias-settings-card-stroke);
+  background: var(--dsw-alias-settings-card-fill);
+}
+
+.sshKeyRow {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-family: var(--dsw-font-mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+
+.textarea {
+  width: 100%;
+  min-height: 72px;
+  font-family: var(--dsw-font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  border-radius: var(--dsw-radius-sm);
+  border: 1px solid var(--dsw-alias-settings-card-stroke);
+  background: var(--dsw-alias-settings-card-fill);
+  color: var(--dsw-alias-label-primary);
+  padding: 8px;
+  box-sizing: border-box;
+}
+
 .formGrid {
   display: flex;
   flex-direction: column;
