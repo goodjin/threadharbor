@@ -113,6 +113,45 @@ describe('AcpTurnRunner — 历史回灌', () => {
     expect((result.end as { error: { message: string } }).error.message).toContain('prompt too long')
   })
 
+  it('中止优先于回灌被拒：停止的回合以 aborted 收尾，且中止前的内容照写', async () => {
+    // First-open carries the replay; the user stops AND the prompt then rejects
+    // (the dying connection's error reply). The stop outranks the rejection: the
+    // turn ends aborted — not REPLAY_REJECTED — and the shared tail still
+    // produces and writes the frames the agent sent before the stop, so the
+    // pre-stop content is not orphaned.
+    const client = fakeClient()
+    client.request = async (method, params) => {
+      client.calls.push({ method, params })
+      if (method === 'session/new') return { sessionId: 's1' }
+      if (method === 'session/prompt') throw new Error('acp connection closed')
+      return {}
+    }
+    const written: unknown[] = []
+    const turn = {
+      sessionId: 's1',
+      position: { turn: 1, step: 1 },
+      produce: () => [{ type: 'assistant/message', payload: { content: [{ text: '中止前的部分回答' }] } }],
+      write: (events: readonly { type: string }[]) => {
+        written.push(...events)
+        return events.length
+      },
+    }
+    const runner = new AcpTurnRunner(client, {
+      cwd: '/tmp',
+      replay: { take: () => '用户：上次聊了重构\n助手：好' },
+      abort: () => {
+        const controller = new AbortController()
+        controller.abort()
+        return controller.signal
+      },
+    })
+
+    const result = await runner.run(decision('继续'), turn)
+
+    expect(result.end.kind).toBe('aborted')
+    expect(written.some(event => (event as { type: string }).type === 'assistant/message')).toBe(true)
+  })
+
   it('没有回灌时提问失败按类别收尾，而不是抛原始错误', async () => {
     // The failure ends the turn as a classified error row, the same seam every
     // other failed turn takes; the replay path alone keeps its own named

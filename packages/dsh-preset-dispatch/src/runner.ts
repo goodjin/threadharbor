@@ -537,7 +537,13 @@ export class AcpTurnRunner {
     if (failure !== undefined) {
       // The handover goes back first: a retry must keep the history.
       if (handedOver !== undefined) this.options.primer?.restore(turn.sessionId, handedOver)
-      if (replayed !== undefined) {
+      // A stop outranks the replay rejection too: if the user stopped the turn
+      // AND the prompt then rejected (the dying connection's error reply), the
+      // turn is what the user made it — stopped — and the frames it sent before
+      // the stop must still be written. Fall through to the shared tail, which
+      // ends aborted and produces/writes them, rather than dying here with the
+      // replay reason and orphaning the pre-stop content.
+      if (replayed !== undefined && !this.aborted) {
         // The transcript rode this very prompt, so it is the likeliest reason
         // the agent refused it — a first request suddenly oversized or in a
         // shape the agent does not take. End the turn naming that instead of
