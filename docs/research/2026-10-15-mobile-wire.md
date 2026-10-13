@@ -33,7 +33,7 @@ TOKEN=$(grep -o 'token=[^& ]*' "$DSH_HOME/threadharbor-runtime/web.log" | tail -
 node scripts/probe-mobile-wire.mjs "$TOKEN"        # 或 DSH_PROBE_TOKEN=… / DSH_PROBE_BASE=…
 ```
 
-每次运行自建探针会话、自换 cookie、自行收尾（cancel + 关 socket），输出逐行 JSON。本文引用三轮实测：run-1（全量形状）、run-2/3（审批升级尝试；run-3 为最终脚本）。
+每次运行自建探针会话、自换 cookie、自行收尾（cancel + 关 socket），输出逐行 JSON。本文引用四轮实测，日志全部保留在 sdd 任务目录（probe-run-1…4.log）：run-1（全量形状；含 `$events/result` 双层 args 的形状错误实录）、run-2/3（审批升级尝试；run-3 为修正早退水印后的脚本）、run-4（最终提交版脚本的可重复性验证）。另有复核补采 `adhoc-evidence.log`（实例重启后对持久会话的 page 补采，出处见 §3.2）。
 
 ### 1.4 构建期补充（提交内可见）
 
@@ -105,7 +105,8 @@ item 字段名实录（run-3，5 个会话）：`sessionId, updatedAt, agentAvai
 
 - `address` 只有两种形状：`{kind:'session',sessionId}` 与 subagent 三元组（ref `types.ts:408-414`）。
 - 请求字段全集：`{address, throughSeq, beforeSeq?, maxMessages?, turnWindow?}`（ref `types.ts:471-484`）；响应 `{records, hasMore}`（ref `types.ts:546-549`）。
-- **`throughSeq` 语义（实测钉死）**：它是「已载入窗口最旧记录之下」的含端截断。日志最旧 seq 为 0 时传 `-1` 得 `{records:[],hasMore:false}`（run-1/3 `page.chain` 实录）；超出日志长度报 `gateway/bad-request "…past cursor N"`（实测，错误信息顺带披露当前游标 N）。翻页循环：`throughSeq ← 本页最旧 seq − 1`；`-1` 即到底。
+- **`throughSeq` 语义（实测钉死）**：它是「已载入窗口最旧记录之下」的含端截断。日志最旧 seq 为 0 时传 `-1` 得 `{records:[],hasMore:false}`（run-1/3 `page.chain` 实录）；超出日志长度报 `gateway/bad-request "…past cursor N"`，错误信息顺带披露当前游标 N（复核补采实录：`throughSeq:999999 → "session page through seq 999999 is past cursor 17"`，见 sdd 任务目录 `adhoc-evidence.log`）。翻页循环：`throughSeq ← 本页最旧 seq − 1`；`-1` 即到底。
+- 非空页应答样例（复核补采，`adhoc-evidence.log`；会话为 run-3 遗留持久会话，重启后重放同形）：`throughSeq:10,maxMessages:5 → records[0..3]=permission/preset(seq0)、sandbox/mode(seq1)、approval/policy(seq2)、agent/inbox/spliced(seq3),…`。
 - follow 开窗的 `cursor` 是当时的日志末位（下帧见 §4.2），`session/page` 不接受超过它的 `throughSeq`——「加载更早」永远向下走。
 
 ### 3.3 发消息 `session/prompt`
@@ -137,28 +138,28 @@ ref `sessions/session.ts:347-355`（运行中回合取消；排队项保留）�
 ### 4.1 握手与 `$events` 订阅（双连接实测）
 
 ```
-WS  ws://127.0.0.1:3091/api/remote.mux            （Upgrade 带 cookie；无 cookie → HTTP 401 拒绝升级）
+WS  ws://127.0.0.1:3091/api/remote.mux            （Upgrade 带 cookie；无 cookie 的升级被拒＝源码钉死 ref stream-server.ts:433-444，探针未测过无 cookie 升级）
 C→  {"type":"open","streamId":"<uuid>","endpoint":"$events","payload":{"args":{}}}
 S→  {"type":"item","streamId":"<同上>","value":{"type":"ready","clientId":"8f65c756-…","host":{"home":"/Users/good"}}}
 ```
 
 - 路径 ref `packages/api/gateway/src/stream-protocol.ts:7`；`$events`/payload/ready 常量 ref `stream-protocol.ts:10-19`；就绪帧必为首项 ref `packages/api/gateway/src/client/remote-events.ts:132-146`。
 - 两个连接各得**不同 clientId**（run-3 `events.ready`：`8f65c756…` vs `54bbf303…`）——它是应答回路的身份（§6）。
-- 客户帧全集四个：`open/item/end/cancel`，字段校验 exactKeys（ref `stream-protocol.ts:234-244, 264-286`）；二进制帧 close 1003、非法帧 close 1008、重复 open（同 streamId）close 整条 socket（ref `packages/api/gateway/src/stream-server.ts:150-159, 201-204`）——手机端**只发这四种形状，不要盲探**。
-- 服务端下行只有三种：`{type:'item',streamId,value?}` / `{type:'end',streamId}` / `{type:'error',streamId,error:{code,message,details}}`（ref `stream-protocol.ts:254-257, 293-315`；`end`/`error` 实测出现在逻辑流收尾，`error` 形状见 §6.2 的 `$events/result` 无效流错误路径）。
+- 客户帧全集四个：`open/item/end/cancel`，字段校验 exactKeys（ref `stream-protocol.ts:234-244, 264-286`）。**发送方向的实测成色**：`open` 实测（探针发送并被 0.2.0-rc.2 接受，run-1/3/4）；`item`/`end`/`cancel` 客户端从未发送过＝源码钉死。二进制帧 close 1003、非法帧 close 1008、重复 open（同 streamId）close 整条 socket（ref `packages/api/gateway/src/stream-server.ts:150-159, 201-204`，均为源码钉死）——手机端**只发这四种形状，不要盲探**。
+- 服务端下行只有三种：`{type:'item',streamId,value?}` / `{type:'end',streamId}` / `{type:'error',streamId,error:{code,message,details}}`（ref `stream-protocol.ts:254-257, 293-315`）。**实测成色**：`item` 实测（run-1/3/4 全部帧日志）；mux 级 `end`/`error` 探针未观测到＝源码钉死（实测日志里出现的 `end` 均为 item.value 内层的 assistant-stream end，不是 mux 帧）。
 
 ### 4.2 会话事件流 `session/follow`（手机端读会话的实时通道）
 
 ```
 C→  {"type":"open","streamId":"<uuid>","endpoint":"session/follow",
      "payload":{"args":{"request":{"address":{"kind":"session","sessionId":"session-…"},"assistantStream":true}}}}
-S→  item value = 开窗快照（每连接恰好一次）：
-    {"type":"snapshot","header":{"version":4,"id":"session-…","createdAt":1791917479668,
+S→  item value = 开窗快照（每连接恰好一次；实录自 run-4 `journal.snapshot`，保留日志同目录 probe-run-4.log）：
+    {"type":"snapshot","header":{"version":4,"id":"session-…","createdAt":1791917761143,
       "cwd":"/Users/good/github/threadharbor/.worktrees/mobile-entry","isSeeded":false,
-      "agentPreset":"acp-claude"},
-     "cursor":13,"hasMore":false,"records":[ {…}×14 ],
+      "agentPreset":"standard"},
+     "cursor":2,"hasMore":false,"records":[ {…}×3 ],
      "projections":{"asOfSeq":2,"values":{"title":null,"goal":null,"tokenUsage":{…},…}},
-     "assistantStream":{"revision":106}}
+     "assistantStream":{…}}
 S→  item value = 之后每条落盘事件，一条一帧：
     {"type":"event","event":{"type":"agent/inbox/spliced","seq":3,"time":…,"data":{…}}}
 S→  item value = 助手流式帧（assistantStream:true 时）：
@@ -167,7 +168,7 @@ S→  item value = 助手流式帧（assistantStream:true 时）：
     {"type":"assistant-stream","frame":{"type":"end","attemptId":"…:1","revision":3,"index":1,"outcome":{"kind":"committed","eventType":"assistant/message","seq":…}}}
 ```
 
-（帧形全部实测：run-1 `journal.snapshot`/`journal.items`/mux.frame 实录 + 补测一次带 header 的快照；类型 ref `types.ts:552-563`、`types.ts:494-545`。）
+（帧形实测出处：snapshot/event/assistant-stream 三种 item value 均在保留日志 probe-run-1/3/4.log 的 `journal.snapshot`/`journal.items`/`mux.frame` 行；header 字段自 run-4 起由探针直接输出。类型 ref `types.ts:552-563`、`types.ts:494-545`。）
 
 **append/prepend 澄清（对 Task 8 重要）**：线上**没有** append/prepend 帧——follow 流的下行就是 `snapshot` + 逐条 `event` + `assistant-stream` 三种 item value；「append（活事件追加）还是 prepend（loadOlder 前插）」是浏览器端 `RemoteJournalStream` 按 seq 排序后的分类（ref `packages/api/gateway/src/client/journal-stream.ts:190-215`，`SessionJournalChange` ref `packages/api/session-controller/src/client/transport.ts:50-78`）。手机端照抄这个分类即可，别在协议层找它们。
 
@@ -175,7 +176,7 @@ S→  item value = 助手流式帧（assistantStream:true 时）：
 
 ### 4.3 会话列表的实时性（emit）
 
-两连接同时在线期间实测（run-1/3 `events.inventory`，A、B 完全一致）：`api-session/added`（创建）、`api-session/status`（运行起/停，mount 时有一次 true→false 抖动）、`api-session/activity`（心跳时间戳）、`api-session/error`（消息为可展示字符串）。事件名与参数形状 ref `packages/api/remotes/src/remote-events.ts:20-48`（转发白名单）+ `types.ts:591`（`api-session/added(summary)`）。
+两连接同时在线期间实测（run-1/3 `events.inventory`，A、B 完全一致）：`api-session/added`（创建，挂载即发）、`api-session/status`（运行起/停，跟随回合生命周期——run-3 帧序中 true→false 的翻转与 `api-session/error`（该 preset 无模型凭据）同现，并非独立抖动）、`api-session/activity`（心跳时间戳）、`api-session/error`（消息为可展示字符串）。事件名与参数形状 ref `packages/api/remotes/src/remote-events.ts:20-48`（转发白名单）+ `types.ts:591`（`api-session/added(summary)`）。
 
 ## 5. 问题 (c)：`approval/request` 的到达、应答与回路
 
@@ -196,7 +197,7 @@ S→  item value = 助手流式帧（assistantStream:true 时）：
    "message":"typert gateway: Remote event result identifies no active event stream","details":{}}}
 ```
 
-即：端点存在、`{clientId,eventId,outcome}` 形状校验成立（形状错误会报 `api gateway: invalid Remote event result`，run-2 曾因探针自身双层 args 包装实录过该错误——见 §8.3）、按 clientId 找不到活跃订阅时显式报错而非静默吞掉。
+即：端点存在、`{clientId,eventId,outcome}` 形状校验成立（形状错误会报 `api gateway: invalid Remote event result`，run-1 曾因探针自身双层 args 包装实录过该错误——见 §8.3）、按 clientId 找不到活跃订阅时显式报错而非静默吞掉。
 
 ### 5.3 真实审批为什么没能触发（证据链，不臆测）
 
@@ -234,7 +235,7 @@ S→  item value = 助手流式帧（assistantStream:true 时）：
 | `MUX_PATH` | `'/api/remote.mux'` | §4.1（WS 升级 + ready 帧） | ref `stream-protocol.ts:7`；升级准入 ref `gateway/src/index.ts:245-262` |
 | `EVENTS_STREAM_ENDPOINT` | `'$events'` | §4.1（ready 双 clientId） | ref `stream-protocol.ts:10-19` |
 | `EVENT_RESULT_ENDPOINT` | `'$events/result'` | §5.2（unknown clientId 错误） | ref `stream-protocol.ts:13`、`gateway/src/index.ts:430-444` |
-| `MuxClientFrame` | 四帧型字面量 | §4.1（open/item 被 0.2.0-rc.2 接受） | ref `stream-protocol.ts:234-244, 264-286` |
+| `MuxClientFrame` | 四帧型字面量 | `open` 实测发送并被接受（run-1/3/4）；`item`/`end`/`cancel` 客户端发送＝源码钉死（探针未发送） | ref `stream-protocol.ts:234-244, 264-286` |
 
 ## 8. 偏差、缺陷与遗留记录
 

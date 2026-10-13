@@ -9,8 +9,9 @@
  * to a cited reference-source line — never to a guess.
  *
  * Usage:
- *   node scripts/probe-mobile-wire.mjs <token> [--base http://127.0.0.1:3091]
- *   DSH_PROBE_TOKEN=... node scripts/probe-mobile-wire.mjs
+ *   node scripts/probe-mobile-wire.mjs <token>
+ *   DSH_PROBE_TOKEN=... node scripts/probe-mobile-wire.mjs          # same
+ *   DSH_PROBE_BASE=http://127.0.0.1:3091 …                          # override base URL
  *
  * The token is the process token from the `dsh web:` line of the instance's
  * web.log. The script exchanges it for the browser-session cookie exactly the
@@ -19,7 +20,9 @@
  * /api/remote.mux WebSocket multiplexer with `$events` subscriptions.
  *
  * Output: one compact JSON line per exchange, tagged by phase. Repeatable:
- * each run creates its own probe sessions and leaves no sockets behind.
+ * each run creates its own probe sessions and closes its own sockets; the
+ * sessions it created stay on the instance (they are ordinary durable
+ * sessions, listed by later session/list calls).
  */
 
 const BASE = process.env.DSH_PROBE_BASE ?? 'http://127.0.0.1:3091'
@@ -301,7 +304,10 @@ if (sessionId !== undefined && page?.ok === true) {
 // receive the cancellation frame, and the session journal is tailed for the
 // approval/asked + approval/decided audit pair.
 const escalationPrompts = [
-  '请用 shell 工具运行命令：echo approval-probe > /Users/good/approval-probe.txt && cat /Users/good/approval-probe.txt，并告诉我输出。',
+  // Best-effort ask triggers: an outside-workspace write and a network access.
+  // Whether the agent's own gate asks the host varies by deployment (see the
+  // research note §5.3); the probe records either outcome.
+  `请用 shell 工具运行命令：echo approval-probe > ${process.env.DSH_PROBE_ESCALATE_PATH ?? `${process.env.HOME ?? '~'}/approval-probe.txt`} && cat ${process.env.DSH_PROBE_ESCALATE_PATH ?? `${process.env.HOME ?? '~'}/approval-probe.txt`}，并告诉我输出。`,
   '请用 shell 工具运行命令：curl -m 5 -s https://example.com -o /dev/null; echo exit=$?，并告诉我输出。',
 ]
 const eventsStreamOf = (connection) => connection === connA ? openA.streamId : openB.streamId

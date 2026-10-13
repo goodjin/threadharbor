@@ -10,14 +10,14 @@
  * 纯常量模块：不 import 任何东西，手机端原样照抄打包。
  */
 
-/** 会话列表：POST /api/session/list，payload `{args:{_request:{cursor?}}}`。 */
+/** 会话列表：POST /api/session/list，payload `{args:{_request:{}}}`（`_request` 内可选 `cursor` 字段源码钉死：ref types.ts:248-250，探针未用到）。 */
 export const SESSION_LIST_ENDPOINT = 'session/list'
 
 /**
  * 历史分页读（加载更早）：POST /api/session/page，payload
  * `{args:{request:{address, throughSeq, beforeSeq?, maxMessages?, turnWindow?}}}`。
  * `throughSeq` 是「当前已载入最旧记录之下」的含端截断（最旧为 seq 0 时传 -1，
- * 应答 `{records:[], hasMore:false}`，实测见研究笔记 §4.2）。
+ * 应答 `{records:[], hasMore:false}`，实测见研究笔记 §3.2）。
  */
 export const SESSION_HISTORY_ENDPOINT = 'session/page'
 
@@ -43,16 +43,17 @@ export const EVENTS_STREAM_ENDPOINT = '$events'
 /**
  * waterfall 事件的应答 RPC：POST /api/$events/result，payload
  * `{args:{clientId, eventId, outcome}}`。每个连接用自己 ready 帧里的 clientId
- * 应答；已知 eventId 的首个应答生效（实测与源码双证，见研究笔记 §6）。
+ * 应答。端点与形状校验实测（未知 clientId 显式报错）；「已知 eventId 首答生效、
+ * 其余收 cancel」为源码钉死（gateway/src/index.ts:614-668），见研究笔记 §6。
  */
 export const EVENT_RESULT_ENDPOINT = '$events/result'
 
 /**
- * 多路复用器客户帧（浏览器 → 宿主），四个帧型一字不差
- * （实测：探针 open/item/end 全部被 0.2.0-rc.2 接受；参考源码
- * packages/api/gateway/src/stream-protocol.ts:264-286 的 admit 规则逐字段核对）。
- * 二进制帧与未知帧型会被服务端以 close 1008/1003 拒绝
- * （stream-server.ts:150-159）。
+ * 多路复用器客户帧（浏览器 → 宿主），四个帧型一字不差。证据成色：
+ * `open` 实测（探针发送并被 0.2.0-rc.2 接受，run-1/3/4）；`item`/`end`/`cancel`
+ * 的客户端发送路径为源码钉死（packages/api/gateway/src/stream-protocol.ts:264-286
+ * admit 规则逐字段核对，探针未发送过这三种）。二进制帧与未知帧型会被服务端以
+ * close 1008/1003 拒绝（stream-server.ts:150-159，源码钉死）。
  */
 export type MuxClientFrame =
   | {
