@@ -8,8 +8,11 @@
 | **codex** | ✅ 已实现，已实测 | stdio | [codex.md](./codex.md) |
 | **claude code** | ✅ 已实现，已实测 | stdio | [claude-code.md](./claude-code.md) |
 | **Cursor** | 📄 官方支持，帧形状已实测，未接入 | stdio | [cursor.md](./cursor.md) |
+| **zcode** | 📐 方案已定，未实施 | stdio（自有协议，需自带适配器，见文档） | [zcode.md](./zcode.md) |
 
 已实现的三个共用的代码在 `packages/dsh-acp-agent/`：传输、客户端、投影、审批桥接是共用的，**每个 agent 只提供一个 dialect**。
+
+> **zcode 与四家不同**：它不是 ACP，说的是自有协议，所以除了 dialect 还要一个适配器进程（方案里的新包 `packages/zcode-acp`）。协议事实、适配器设计与停靠点清单都在 [zcode.md](./zcode.md)，底层通道 2026-10-13 实机复核通过。
 
 ## 四家的字段差异对照
 
