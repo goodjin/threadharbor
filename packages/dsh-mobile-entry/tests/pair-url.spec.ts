@@ -5,10 +5,14 @@ import { PAIR_URL_PATH } from '../src/pair-url.ts'
 import type { MobileRouteContext } from '../src/static-serve.ts'
 
 describe('Config 的 mobileOrigin 校验（坏值装载即失败，不静默回退）', () => {
-  it('合规 https 源通过校验，字段缺省也通过', () => {
-    expect(Config({ mobileOrigin: 'https://mac1.example.ts.net' })).toEqual({
-      mobileOrigin: 'https://mac1.example.ts.net',
-    })
+  it.each([
+    ['裸域', 'https://mac1.example.ts.net'],
+    ['带端口', 'https://host:8443'],
+  ])('合规 origin（%s：%s）通过校验', (_label, value) => {
+    expect(Config({ mobileOrigin: value })).toEqual({ mobileOrigin: value })
+  })
+
+  it('字段缺省也通过', () => {
     expect(Config({})).toEqual({})
   })
 
@@ -20,6 +24,8 @@ describe('Config 的 mobileOrigin 校验（坏值装载即失败，不静默回�
     ['带碎片', 'https://mac1.example.ts.net/#m'],
     ['非 https 协议', 'ftp://mac1.example.ts.net'],
     ['空 authority', 'https://'],
+    ['空字符串', ''],
+    ['authority 带制表符（WHATWG 会静默剥掉）', 'https://ho\tst'],
   ])('%s（%s）配置解析抛错', (_label, value) => {
     expect(() => Config({ mobileOrigin: value })).toThrow()
   })
@@ -120,6 +126,39 @@ function call(handler: RouteHandler, req: { method?: string; url?: string; heade
   return state
 }
 
+describe('mobileOrigin 的装载期 URL 语法校验（apply，先于任何注册）', () => {
+  /** 直接跑 apply 并捕获注册调用；装载抛错由用例自己断言。 */
+  function applyCapture(config: MobileEntryConfig | undefined) {
+    const routes: CapturedRoute[] = []
+    const { connection } = fakePairConnection({})
+    const ctx = {
+      effect(factory: () => unknown) {
+        factory()
+      },
+      webServer: {
+        register(route: CapturedRoute) {
+          routes.push(route)
+          return () => {}
+        },
+      },
+      connection,
+    }
+    return { run: () => apply(ctx as unknown as MobileRouteContext, config), routes }
+  }
+
+  it('端口越界（https://host:99999）：形状校验放行，装载大声失败且一条路由都不注册', () => {
+    const { run, routes } = applyCapture({ mobileOrigin: 'https://host:99999' })
+    expect(run).toThrow()
+    expect(routes).toHaveLength(0)
+  })
+
+  it('冗余冒号（https://host:）：解析成功但不是规范化 origin，同样装载失败', () => {
+    const { run, routes } = applyCapture({ mobileOrigin: 'https://host:' })
+    expect(run).toThrow()
+    expect(routes).toHaveLength(0)
+  })
+})
+
 describe('pair-url 路由（先 admit，后应答）', () => {
   const ORIGIN = 'https://mac1.example.ts.net'
   const ADMITTED_HEADERS = { host: 'mac1.example.ts.net', cookie: 'dsh-session=good' }
@@ -184,5 +223,19 @@ describe('pair-url 路由（先 admit，后应答）', () => {
     const state = call(pairRouteOf(routes), { method: 'POST', url: PAIR_URL_PATH, headers: ADMITTED_HEADERS })
     expect(state.status).toBe(405)
     expect(state.headers['allow']).toBe('GET')
+  })
+
+  it('带端口的合规 origin：200 且铸网址输入保留端口', () => {
+    const { routes, calls } = captureAppliedRoutes({ mobileOrigin: 'https://host:8443' })
+    const state = call(pairRouteOf(routes), {
+      method: 'GET',
+      url: PAIR_URL_PATH,
+      headers: { host: 'host', cookie: 'dsh-session=good' },
+    })
+    expect(state.status).toBe(200)
+    const body = JSON.parse(state.body) as { url: string }
+    expect(body.url.startsWith('https://host:8443/threadharbor/mobile/')).toBe(true)
+    expect(new URL(body.url).searchParams.get('token')).toBe('launch-token-xyz')
+    expect(calls.authenticatedUrl).toEqual(['https://host:8443/threadharbor/mobile/'])
   })
 })

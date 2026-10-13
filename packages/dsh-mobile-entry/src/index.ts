@@ -9,7 +9,7 @@
  */
 
 import Schema from '@deepseek-ai/schemastery'
-import { MOBILE_ORIGIN_PATTERN, registerPairUrlRoute } from './pair-url.ts'
+import { assertMobileOrigin, MOBILE_ORIGIN_PATTERN, registerPairUrlRoute } from './pair-url.ts'
 import { registerMobileRoutes, type MobileRouteContext } from './static-serve.ts'
 
 export const name = 'threadharbor-mobile-entry'
@@ -24,8 +24,9 @@ export interface MobileEntryConfig {
 
 /**
  * 配置字段：mobileOrigin 是手机端根网址的源（如 https://mac1.example.ts.net）。
- * 唯一合法形状（https、无路径/查询/碎片、无尾斜杠）钉在 pattern 上：坏值
- * 装载即失败，不做静默回退。
+ * 装载期两道校验：形状（https、无路径/查询/碎片、无尾斜杠、无控制字符）钉在
+ * pattern 上；URL 语法（端口范围、规范化 origin）由 apply 里的
+ * assertMobileOrigin 补第二道。坏值装载即失败，不做静默回退。
  */
 export const Config: Schema = Schema.object({
   mobileOrigin: Schema.string().pattern(MOBILE_ORIGIN_PATTERN).description('手机端根网址的源（如 https://mac1.example.ts.net）'),
@@ -38,6 +39,8 @@ export const Config: Schema = Schema.object({
  * @param config - 校验后的组合配置（mobileOrigin 可缺省）。
  */
 export function apply(ctx: MobileRouteContext, config?: MobileEntryConfig): void {
+  // 语法校验先于任何注册：坏配置装载即失败，不留下半挂的路由。
+  if (config?.mobileOrigin !== undefined) assertMobileOrigin(config.mobileOrigin)
   registerMobileRoutes(ctx, config)
   registerPairUrlRoute(ctx, config?.mobileOrigin)
 }

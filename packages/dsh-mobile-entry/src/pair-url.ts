@@ -9,8 +9,9 @@
  * 官方 authorizeIndex 换 cookie（见 pairing.ts 的封装）。mobileOrigin 未配置
  * 属于部署半途：准入已过，应答 500 + 结构化错误体，桌面端能直接显示原因。
  *
- * mobileOrigin 的唯一合法形状钉在 Config schema 的 pattern 上（见
- * MOBILE_ORIGIN_PATTERN）：坏值装载即失败，不做静默回退。
+ * mobileOrigin 的装载期校验分两道：schema 的 pattern 卡形状（见
+ * MOBILE_ORIGIN_PATTERN），apply 里的 assertMobileOrigin 卡 URL 语法
+ * （端口范围、规范化 origin）。坏值一律装载即失败，不做静默回退。
  */
 
 import type { ServerResponse } from 'node:http'
@@ -20,11 +21,35 @@ import { MOBILE_PREFIX, type MobileRouteContext } from './static-serve.ts'
 export const PAIR_URL_PATH = '/threadharbor/mobile/pair-url'
 
 /**
- * mobileOrigin 的唯一合法形状：https + 仅 authority（可含端口），路径、查询、
- * 碎片与尾斜杠都不允许——后四者都要 `/`、`?`、`#` 之一，authority 段一律
- * 排除；空 authority 也不匹配。挂在 Config 的 pattern 上，坏值装载即失败。
+ * mobileOrigin 的形状校验（Config 的 pattern，装载第一道）：https + 仅
+ * authority 段——路径、查询、碎片、尾斜杠都要 `/`、`?`、`#` 之一，一律排除；
+ * 控制字符与空白（`\x00`–`\x20`）也排除（WHATWG 解析会静默剥掉其中一部分，
+ * 铸出与配置偏移的主机）。语法层（端口范围、规范化 origin）由
+ * {@link assertMobileOrigin} 在 apply 里补第二道；两道都在装载期失败，
+ * 不做静默回退。
  */
-export const MOBILE_ORIGIN_PATTERN = /^https:\/\/[^/?#]+$/
+export const MOBILE_ORIGIN_PATTERN = /^https:\/\/[^\x00-\x20/?#]+$/
+
+/**
+ * mobileOrigin 的装载期 URL 语法校验（apply 在任何注册之前调用）。
+ * schema 的 pattern 只卡形状，语法层要靠这里：`new URL` 解析失败即坏值
+ * （端口越界如 `:99999`）；解析成功但 `url.origin` 与配置值不等也拒绝——
+ * WHATWG 会剥掉冗余冒号、小写化 authority，写非规范化形式意味着运行时
+ * 铸出的网址与配置偏移。两道校验都失败在装载期，不在请求期。
+ * @param value - 已过 schema 形状校验的 mobileOrigin。
+ * @throws 配置值不是合法且规范化的 https origin 时抛错。
+ */
+export function assertMobileOrigin(value: string): void {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    throw new Error(`mobileOrigin 不是合法网址：${value}`)
+  }
+  if (url.origin !== value) {
+    throw new Error(`mobileOrigin 必须写成规范化 origin（https、小写 authority、无冗余端口）：${value} 的规范化形式是 ${url.origin}`)
+  }
+}
 
 /**
  * 注册 pair-url exact 路由，走 DSH 插件的登记样式：
