@@ -27,15 +27,19 @@ const DEFAULT_MOBILE_DIR = fileURLToPath(new URL('../mobile', import.meta.url))
 
 const INDEX_FILE = 'index.html'
 
-const CONTENT_TYPES: Record<string, string> = {
+/**
+ * 静态资源登记表：扩展名 → content-type。只收 utf8 文本能安全服务的类型——
+ * 读取器按文本读文件，二进制资源（图片/字体等）必须先把读取改成 Buffer
+ * 再登记，否则会被 utf8 静默损坏。未登记的扩展名按 application/octet-stream
+ * 兜底返回。
+ */
+export const CONTENT_TYPES: Record<string, string> = {
   '.html': 'text/html',
   '.css': 'text/css',
   '.js': 'text/javascript',
   '.mjs': 'text/javascript',
   '.json': 'application/json',
   '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.ico': 'image/x-icon',
   '.txt': 'text/plain',
 }
 

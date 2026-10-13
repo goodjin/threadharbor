@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
+  CONTENT_TYPES,
   HELLO_PATH,
   MOBILE_PREFIX,
   registerMobileRoutes,
@@ -177,6 +178,22 @@ function call(handler: RouteHandler, req: { method?: string; url?: string }) {
   handler(req as IncomingMessage, res as unknown as ServerResponse)
   return state
 }
+
+/**
+ * 读取器只按 utf8 文本读文件。登记表若出现二进制扩展名（图片/字体等），
+ * 真身资源一进来就会被静默解码损坏。在读取器学会按 Buffer 读之前，
+ * 登记表只许收文本安全类型。
+ */
+describe('CONTENT_TYPES（静态资源登记表）', () => {
+  const textSafe = (contentType: string): boolean =>
+    contentType.startsWith('text/') || contentType === 'application/json' || contentType === 'image/svg+xml'
+
+  it('只登记 utf8 文本能安全服务的类型，二进制扩展名不进表', () => {
+    for (const [ext, contentType] of Object.entries(CONTENT_TYPES)) {
+      expect(textSafe(contentType), `${ext} 登记了 ${contentType}：utf8 读取会静默损坏二进制`).toBe(true)
+    }
+  })
+})
 
 describe('registerMobileRoutes（路由注册与 hello 标记）', () => {
   it('注册 prefix 静态路由与 exact hello 路由，路径与常量一致', () => {
