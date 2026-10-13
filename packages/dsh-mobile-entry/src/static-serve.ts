@@ -2,16 +2,19 @@
  * 手机页静态服务与 hello 标记。
  *
  * 无凭据出口的两类之一都在这里：`mobile/` 下的静态资源与 hello JSON。
- * 资源解析是纯函数 `resolveMobileAsset`：路径归一化 + 逐段校验 + 目录
- * 包含性验证，三道防线保证请求路径只能落在包内 `mobile/` 资源目录里，
- * 目录外（含各种穿越写法）一律 404。手机页不引入构建链，`mobile/` 下
- * 是浏览器原生文件。
+ * index 文档的到访先过配对交换封装（`authorizeMobileIndex`）：查询串带令牌时
+ * 由官方 `connection.authorizeIndex` 完成令牌换 cookie（303 或 401 都由官方
+ * 接管响应），不带令牌时照旧公开服务应用壳。资源解析是纯函数
+ * `resolveMobileAsset`：路径归一化 + 逐段校验 + 目录包含性验证，三道防线保证
+ * 请求路径只能落在包内 `mobile/` 资源目录里，目录外（含各种穿越写法）一律
+ * 404。手机页不引入构建链，`mobile/` 下是浏览器原生文件。
  */
 
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { authorizeMobileIndex, type AuthorizeIndexConnection } from './pairing.ts'
 
 /** 手机页所有路由都挂在这个前缀下，后续任务（pairing / peers）同样如此。 */
 export const MOBILE_PREFIX = '/threadharbor/mobile'
@@ -53,6 +56,8 @@ export interface MobileRouteContext {
   webServer: {
     register(route: MobileRoute): () => void
   }
+  /** 官方 connection 服务面：index 到访的令牌交换经它完成（本任务只用 authorizeIndex）。 */
+  connection: AuthorizeIndexConnection
 }
 
 const NOT_FOUND: MobileAsset = { status: 404 }
@@ -118,11 +123,31 @@ export function resolveMobileAsset(pathname: string, mobileDir: string = DEFAULT
 }
 
 /**
+ * 这条请求是不是 index 文档到访（要过配对交换封装的那类）。
+ * 与 {@link resolveMobileAsset} 的 index 映射同一套归一化（`new URL` 取
+ * pathname 后单次 decode），三种拼写都算：前缀本身、前缀带斜杠、显式
+ * `index.html`。解析不了的畸形路径不算 index，交回普通解析流程按 404 处置。
+ */
+function isMobileIndexRequest(url: string): boolean {
+  let pathname: string
+  try {
+    pathname = decodeURIComponent(new URL(url, 'http://threadharbor.invalid').pathname)
+  } catch {
+    return false
+  }
+  return pathname === MOBILE_PREFIX
+    || pathname === `${MOBILE_PREFIX}/`
+    || pathname === `${MOBILE_PREFIX}/${INDEX_FILE}`
+}
+
+/**
  * 把静态资源 prefix 路由与 hello exact 路由挂上宿主。
  * 走 DSH 插件的登记样式：`ctx.effect(() => ctx.webServer.register(...), 标签)`。
+ * prefix 路由里 index 文档的到访先过配对交换封装（带令牌经官方
+ * `authorizeIndex` 换 cookie，官方接管响应），无令牌与静态资源照旧公开服务。
  * hello 不做准入：GET 直接回固定 JSON，非 GET 回 405。
  *
- * @param ctx - 宿主上下文（effect / webServer）。
+ * @param ctx - 宿主上下文（effect / webServer / connection）。
  * @param _config - 组合配置；本任务无字段，Task 4 起才消费。
  */
 export function registerMobileRoutes(ctx: MobileRouteContext, _config: unknown): void {
@@ -132,7 +157,20 @@ export function registerMobileRoutes(ctx: MobileRouteContext, _config: unknown):
         kind: 'prefix',
         path: MOBILE_PREFIX,
         handler(req, res) {
-          const asset = resolveMobileAsset(req.url ?? '/')
+          const url = req.url ?? '/'
+          if (isMobileIndexRequest(url)) {
+            // index 到访先过配对交换封装：带令牌由官方 authorizeIndex 接管
+            // 响应（303 换 cookie / 401），'owned' 时这里一个字节都不出；
+            // 'serve'（无令牌）落到下面的公开应用壳。headers 按 node:http
+            // 实际形态传入，官方侧自行容错（数组值会被忽略），值不被改动。
+            const outcome = authorizeMobileIndex(
+              { method: req.method ?? '', url, headers: req.headers as Record<string, string> },
+              res,
+              ctx.connection,
+            )
+            if (outcome === 'owned') return
+          }
+          const asset = resolveMobileAsset(url)
           if (asset.status === 404) {
             res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
             res.end('not found')

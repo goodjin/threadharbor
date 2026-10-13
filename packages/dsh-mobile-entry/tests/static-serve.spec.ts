@@ -112,8 +112,39 @@ interface CapturedRoute {
   handler: RouteHandler
 }
 
-function captureRoutes(): { routes: CapturedRoute[]; ctx: MobileRouteContext } {
+/**
+ * fake connection 按官方 authorizeIndex 带令牌分支语义处置（对照 DSH 参考源码
+ * packages/client/connection/src/browser-auth.ts，与 pairing.spec.ts 的 fake 一致）：
+ * GET + 根路径 + 令牌值等于 abc123 → 303 + set-cookie；其余带令牌 → 401；
+ * 都接管响应并记录调用，供测试断言「官方接管」与「调用次数」。
+ */
+function captureRoutes(): { routes: CapturedRoute[]; ctx: MobileRouteContext; connection: { calls: Array<{ request: unknown; response: unknown }> } } {
   const routes: CapturedRoute[] = []
+  const calls: Array<{ request: unknown; response: unknown }> = []
+  const connection = {
+    calls,
+    authorizeIndex(request: unknown, response: unknown): boolean {
+      calls.push({ request, response })
+      const req = request as { method?: string; url?: string }
+      const res = response as {
+        writeHead(status: number, headers?: Record<string, string>): void
+        end(body?: string): void
+      }
+      const url = new URL(req.url ?? '/', 'http://dsh.invalid')
+      const tokens = url.searchParams.getAll('token')
+      if (tokens.length > 0) {
+        if (req.method === 'GET' && url.pathname === '/' && tokens.join('') === 'abc123') {
+          res.writeHead(303, { location: './', 'set-cookie': 'dsh-session=fake-cookie' })
+          res.end()
+          return false
+        }
+        res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end('unauthorized')
+        return false
+      }
+      throw new Error('无令牌请求不应被委托给 connection')
+    },
+  }
   const ctx = {
     effect(factory: () => unknown, _label?: string) {
       factory()
@@ -124,8 +155,9 @@ function captureRoutes(): { routes: CapturedRoute[]; ctx: MobileRouteContext } {
         return () => {}
       },
     },
+    connection,
   }
-  return { routes, ctx: ctx as unknown as MobileRouteContext }
+  return { routes, ctx: ctx as unknown as MobileRouteContext, connection }
 }
 
 /** 直接调用 handler，收下它对响应生命周期的完整处置。 */
@@ -184,5 +216,45 @@ describe('registerMobileRoutes（路由注册与 hello 标记）', () => {
     expect(hit.headers['content-type']).toBe('text/html')
     const miss = call(serve.handler, { method: 'GET', url: '/threadharbor/mobile/missing.html' })
     expect(miss.status).toBe(404)
+  })
+})
+
+describe('prefix 路由的 index 准入（带令牌经官方 authorizeIndex 换 cookie）', () => {
+  it('带令牌的 index 到访：委托官方换 cookie（303 到 ./），不再回应用壳', () => {
+    const { routes, ctx, connection } = captureRoutes()
+    registerMobileRoutes(ctx, {})
+    const serve = routes.find(route => route.kind === 'prefix')!
+    for (const url of ['/threadharbor/mobile/?token=abc123', '/threadharbor/mobile?token=abc123']) {
+      const state = call(serve.handler, { method: 'GET', url })
+      expect(state.status, url).toBe(303)
+      expect(state.headers['location']).toBe('./')
+      expect(state.headers['set-cookie']).toContain('dsh-session=fake-cookie')
+      expect(state.body).toBe('')
+    }
+    expect(connection.calls).toHaveLength(2)
+    const seen = connection.calls[0]!.request as { method: string; url: string }
+    expect(seen.url).toBe('/?token=abc123')
+    expect(seen.method).toBe('GET')
+  })
+
+  it('无令牌的 index 到访：照旧服务应用壳，connection 不被触碰', () => {
+    const { routes, ctx, connection } = captureRoutes()
+    registerMobileRoutes(ctx, {})
+    const serve = routes.find(route => route.kind === 'prefix')!
+    const state = call(serve.handler, { method: 'GET', url: '/threadharbor/mobile/' })
+    expect(state.status).toBe(200)
+    expect(state.headers['content-type']).toBe('text/html')
+    expect(connection.calls).toHaveLength(0)
+  })
+
+  it('非 index 资源即使带令牌也按静态资源解析（不经封装，不委托）', () => {
+    // handler 服务包内真实 mobile/ 目录（与 Task 2 的 handler 用例同一约定），
+    // 这里用不存在的资源：断言点在「带令牌也不触发委托」，不在资源本身。
+    const { routes, ctx, connection } = captureRoutes()
+    registerMobileRoutes(ctx, {})
+    const serve = routes.find(route => route.kind === 'prefix')!
+    const state = call(serve.handler, { method: 'GET', url: '/threadharbor/mobile/app.js?token=abc123' })
+    expect(state.status).toBe(404)
+    expect(connection.calls).toHaveLength(0)
   })
 })
