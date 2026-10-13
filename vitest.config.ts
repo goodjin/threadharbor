@@ -19,6 +19,9 @@ export default defineConfig({
     environment: 'node',
     environmentMatchGlobs: [
       ['packages/dsh-client/tests/panel-mount.spec.ts', 'jsdom'],
+      ['packages/dsh-client/tests/rollup-section.spec.ts', 'jsdom'],
+      ['packages/dsh-client/tests/surface.spec.ts', 'jsdom'],
+      ['packages/dsh-host-federation/tests/rollup-mount.spec.ts', 'jsdom'],
     ],
   },
 })

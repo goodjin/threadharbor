@@ -51,6 +51,8 @@ function setup(overrides: Partial<RollUpSectionDeps> = {}) {
   const deps: RollUpSectionDeps = {
     settings,
     bus,
+    sessions: () => [],
+    sourceNotes: () => [],
     setInterval: handler => { ticks.push(handler); handle += 1; return handle },
     clearInterval: id => { cleared.push(id) },
     report: message => { warnings.push(message) },
@@ -134,7 +136,7 @@ describe('身份变更', () => {
     expect(section.identity().hostId).toBe('gamma')
     const kinds = bus.posted.map(message => message.kind)
     // hello（alpha 启动）、bye（alpha 退场）、hello（gamma 报到）
-    expect(kinds).toEqual(['hello', 'bye', 'hello'])
+    expect(kinds).toEqual(['hello', 'sessions', 'bye', 'hello'])
     section.dispose()
   })
 
@@ -182,7 +184,7 @@ describe('身份变更', () => {
     expect(section.identity().derived).toBe(false)
     const kinds = bus.posted.map(message => message.kind)
     // hello（派生身份启动）、bye（派生身份退场）、hello（配置身份报到）。
-    expect(kinds).toEqual(['hello', 'bye', 'hello'])
+    expect(kinds).toEqual(['hello', 'sessions', 'bye', 'hello'])
     expect(derivedId).not.toBe('workstation')
     section.dispose()
   })

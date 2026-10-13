@@ -77,6 +77,12 @@ class FakeRollUp implements RollUpSection {
 
   rereadIdentity(): void {}
 
+  republish(): void {}
+
+  element(): HTMLDivElement { return document.createElement('div') }
+
+  notices(): readonly string[] { return [] }
+
   dispose(): void {}
 }
 

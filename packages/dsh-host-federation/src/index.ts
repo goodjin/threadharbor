@@ -1,5 +1,16 @@
 export { HostFederation } from './federation.ts'
-export type { Announcement, FederationBus, FederationOptions, HostSnapshot } from './federation.ts'
+export type {
+  Announcement,
+  FederationBus,
+  FederationOptions,
+  HostRoll,
+  HostSession,
+  HostSnapshot,
+  ProjectGroup,
+  RollUp,
+} from './federation.ts'
+export { sessionsFromWorkspaces, UNGROUPED } from './workspace-map.ts'
+export type { SessionLike, WorkspaceLike, WorkspaceSession } from './workspace-map.ts'
 export { browserChannel } from './channel.ts'
 export { hostScopedSettings } from './settings.ts'
 export type { ScopedSettings, SettingStorage } from './settings.ts'
@@ -17,3 +28,13 @@ export {
   TAILSCALE_REFRESH_KEY,
 } from './tailscale-keys.ts'
 export type { TailscalePeer } from './tailscale-keys.ts'
+export { SSH_DEPLOY_ENTRY_ID } from './ssh-deploy.ts'
+export type {
+  SshAccessMode,
+  SshConnectionInput,
+  SshDeployOperationView,
+  SshDeployProgress,
+  SshDeployRequest,
+  SshDeployResult,
+  SshHostKeyCandidate,
+} from './ssh/types.ts'

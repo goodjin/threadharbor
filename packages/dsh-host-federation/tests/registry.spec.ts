@@ -69,6 +69,19 @@ describe('hostRegistry', () => {
     expect(registry.list()[0]?.hostTitle).toBe('bench')
   })
 
+  it('stores launchUrl when it matches the origin and carries a token', () => {
+    const { storage } = fakeStorage()
+    const registry = hostRegistry(storage)
+    const added = registry.add({
+      hostId: 'edge',
+      hostTitle: '边缘',
+      address: 'http://100.64.0.2:3081',
+      launchUrl: 'http://100.64.0.2:3081/?token=abc',
+    })
+    expect(added.ok).toBe(true)
+    expect(registry.list()[0]?.launchUrl).toContain('token=abc')
+  })
+
   it('refuses a duplicate hostId instead of merging two machines', () => {
     const { storage } = fakeStorage()
     const registry = hostRegistry(storage)

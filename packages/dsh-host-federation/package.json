@@ -18,6 +18,22 @@
       "types": "./src/tailscale.ts",
       "default": "./src/tailscale.ts"
     },
+    "./ssh-deploy": {
+      "types": "./src/ssh-deploy.ts",
+      "default": "./src/ssh-deploy.ts"
+    },
+    "./ssh/types": {
+      "types": "./src/ssh/types.ts",
+      "default": "./src/ssh/types.ts"
+    },
+    "./rollup-view": {
+      "types": "./src/rollup-view.ts",
+      "default": "./src/rollup-view.ts"
+    },
+    "./rollup-mount": {
+      "types": "./src/rollup-mount.ts",
+      "default": "./src/rollup-mount.ts"
+    },
     "./package.json": "./package.json"
   },
   "dependencies": {

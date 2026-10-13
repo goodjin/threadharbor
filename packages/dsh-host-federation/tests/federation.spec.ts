@@ -142,14 +142,12 @@ describe('HostFederation presence', () => {
     expect(fed.hosts().map(h => h.hostId)).toEqual(['alpha'])
   })
 
-  it('drops a legacy session announcement instead of listing from it', () => {
-    // 2026-10-11 面板改为主机列表后，'sessions' 报文不再有读者，协议里已撤掉；
-    // 收到这类报文（理论上只剩旧构建的标签页）必须当作坏报文丢弃，而不是据此
-    // 把一台主机加进列表。
+  it('treats a sessions publication as presence and stores its rows', () => {
     const { fed } = setup()
     fed.start()
     fed.receive({ kind: 'sessions', ...THEM, at: 0, sessions: [{ projectId: 'p1', sessionId: 's1', title: 'x' }] })
-    expect(fed.hosts().map(h => h.hostId)).toEqual(['alpha'])
+    expect(fed.hosts().map(h => h.hostId).sort()).toEqual(['alpha', 'beta'])
+    expect(fed.rollUp().hosts.find(h => h.hostId === 'beta')?.sessions).toHaveLength(1)
   })
 })
 

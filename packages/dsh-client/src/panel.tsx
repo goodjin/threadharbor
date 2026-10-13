@@ -35,9 +35,16 @@ import type { AgentDescriptor, GatewayResult } from './gateway.ts'
 import type { ProbeOutcome } from './probe.ts'
 import { probeReach } from './reach.ts'
 import type { ReachOutcome } from './reach.ts'
-import type { HostIdentity, HostRegistration, RegistrationResult } from '@threadharbor/dsh-host-federation'
+import type { HostIdentity, HostRegistration, RegistrationResult, SshAccessMode, SshConnectionInput, SshDeployResult, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
 import type { HostSnapshot } from '@threadharbor/dsh-host-federation'
 import type { HostStorePosture } from './host-store.ts'
+import {
+  inspectSshHost,
+  probeSshDeployApi,
+  startSshDeploy,
+  waitSshDeployOperation,
+} from './ssh-deploy.ts'
+import type { SshDeployOperationView } from '@threadharbor/dsh-host-federation'
 import styles from './panel.module.css'
 
 /**
@@ -84,7 +91,12 @@ export type ProbeStarter = (presetId: string) => Promise<ProbeOutcome>
 /** The host registry, as the panel reads and edits it. */
 export type HostRegistryPort = {
   list(): readonly HostRegistration[]
-  add(input: { readonly hostId: string; readonly hostTitle: string; readonly address: string }): RegistrationResult
+  add(input: {
+    readonly hostId: string
+    readonly hostTitle: string
+    readonly address: string
+    readonly launchUrl?: string
+  }): RegistrationResult
   remove(hostId: string): boolean
 }
 
@@ -96,6 +108,11 @@ export type AgentPanelProps = {
   readonly rollUp: RollUpSection
   /** The registration list for other hosts; owned by the wiring. */
   readonly registry: HostRegistryPort
+  /** Pull remote host session trees via the management server's API. */
+  readonly remoteSessions?: {
+    refresh(registrations: readonly HostRegistration[]): void
+    subscribe(listener: () => void): () => void
+  }
   /**
    * Where the registry and the default identity are stored right now, plus a
    * subscription to its changes. The panel renders the posture as-is: where
@@ -177,6 +194,8 @@ type LoadPhase =
  * the channel's presence (self + whoever announces) and the registration list
  * (the operator's inventory, which knows hosts that are not open right now).
  */
+export type HostConnectionStatus = 'connected' | 'reachable' | 'disconnected' | 'checking'
+
 export type HostListRow = {
   readonly hostId: string
   /** What the row leads with: the operator's registered name, else the host's own. */
@@ -184,10 +203,31 @@ export type HostListRow = {
   readonly self: boolean
   /** Present on the channel right now. */
   readonly online: boolean
+  readonly connection: HostConnectionStatus
   /** When the host was last heard, in the page's clock; only when online. */
   readonly lastSeen?: number
   /** The address the operator registered; only when there is one. */
   readonly address?: string
+  readonly launchUrl?: string
+}
+
+export function deriveHostConnection(
+  row: Pick<HostListRow, 'self' | 'online'>,
+  reach?: ReachOutcome | 'probing',
+): HostConnectionStatus {
+  if (reach === 'probing') return 'checking'
+  if (row.self || row.online) return 'connected'
+  if (reach?.kind === 'reachable') return 'reachable'
+  return 'disconnected'
+}
+
+export function connectionStatusLabel(status: HostConnectionStatus): string {
+  switch (status) {
+    case 'connected': return '已连接'
+    case 'reachable': return '可达未同步'
+    case 'checking': return '检测中'
+    case 'disconnected': return '未连接'
+  }
 }
 
 /**
@@ -204,34 +244,49 @@ export type HostListRow = {
 export function mergeHostRows(
   hosts: readonly HostSnapshot[],
   registrations: readonly HostRegistration[],
+  reaches?: ReadonlyMap<string, ReachOutcome | 'probing'>,
 ): readonly HostListRow[] {
   const byId = new Map<string, HostListRow>()
   for (const host of hosts) {
-    byId.set(host.hostId, {
+    const base = {
       hostId: host.hostId,
       name: nonEmpty(host.hostTitle) ?? host.hostId,
       self: host.self,
       online: true,
       lastSeen: host.lastSeen,
+    }
+    byId.set(host.hostId, {
+      ...base,
+      connection: deriveHostConnection({ self: base.self, online: true }, reaches?.get(host.hostId)),
     })
   }
   for (const registration of registrations) {
     const existing = byId.get(registration.hostId)
     const address = nonEmpty(registration.address)
+    const launchUrl = nonEmpty(registration.launchUrl)
     if (existing === undefined) {
-      byId.set(registration.hostId, {
+      const row = {
         hostId: registration.hostId,
         name: nonEmpty(registration.hostTitle) ?? registration.hostId,
         self: false,
         online: false,
         ...(address === undefined ? {} : { address }),
+        ...(launchUrl === undefined ? {} : { launchUrl }),
+      }
+      byId.set(registration.hostId, {
+        ...row,
+        connection: deriveHostConnection(row, reaches?.get(registration.hostId)),
       })
     } else {
-      byId.set(registration.hostId, {
+      const merged = {
         ...existing,
-        // 登记的名字是这台机器的操作者起的，优先于主机自报的派生名。
         name: nonEmpty(registration.hostTitle) ?? existing.name,
         ...(address === undefined ? {} : { address }),
+        ...(launchUrl === undefined ? {} : { launchUrl }),
+      }
+      byId.set(registration.hostId, {
+        ...merged,
+        connection: deriveHostConnection(merged, reaches?.get(registration.hostId)),
       })
     }
   }
@@ -503,9 +558,13 @@ export function HostRow(props: {
   const ip = hostOf(row.address)
   const status = row.self
     ? { word: '本机', tone: 'self' as const }
-    : row.online
-      ? { word: '在线', tone: 'online' as const }
-      : { word: '未连接', tone: 'offline' as const }
+    : row.connection === 'connected'
+      ? { word: '已连接', tone: 'online' as const }
+      : row.connection === 'reachable'
+        ? { word: '可达', tone: 'online' as const }
+        : row.connection === 'checking'
+          ? { word: '检测中', tone: 'offline' as const }
+          : { word: '未连接', tone: 'offline' as const }
   return (
     <div data-host-row={row.hostId} className={styles.hostRow}>
       <button
@@ -529,6 +588,248 @@ export function HostRow(props: {
             这里的 span 是它的第三列外观，不是又一个独立控件。 */}
         <span data-host-settings="" className={styles.rowSettings} aria-hidden="true">设置</span>
       </button>
+    </div>
+  )
+}
+
+type SshAuthMode = 'identityFile' | 'identityPem' | 'password'
+
+function SshDeploySection(props: {
+  readonly hostId: string
+  readonly hostTitle: string
+  readonly onHostIdChange: (value: string) => void
+  readonly onHostTitleChange: (value: string) => void
+  readonly onDeployed: (result: SshDeployResult) => void
+  readonly onError: (message: string) => void
+}): ReactNode {
+  const [target, setTarget] = useState('')
+  const [port, setPort] = useState('22')
+  const [user, setUser] = useState('')
+  const [proxyJump, setProxyJump] = useState('')
+  const [authMode, setAuthMode] = useState<SshAuthMode>('identityFile')
+  const [identityFile, setIdentityFile] = useState('')
+  const [identityPem, setIdentityPem] = useState('')
+  const [password, setPassword] = useState('')
+  const [remoteWebPort, setRemoteWebPort] = useState('3081')
+  const [keys, setKeys] = useState<readonly SshHostKeyCandidate[]>([])
+  const [approvedFingerprint, setApprovedFingerprint] = useState('')
+  const [busy, setBusy] = useState<'inspect' | 'deploy' | undefined>(undefined)
+  const [progress, setProgress] = useState<SshDeployOperationView | undefined>(undefined)
+  const [accessMode, setAccessMode] = useState<SshAccessMode>('host-ip')
+  const [bindHost, setBindHost] = useState('')
+  const [trustedHost, setTrustedHost] = useState('')
+  const [deployed, setDeployed] = useState<SshDeployResult | undefined>(undefined)
+
+  const sshPayload = (): SshConnectionInput => {
+    const base: SshConnectionInput = { target: target.trim() }
+    const withPort = port.trim() === '' ? base : { ...base, port: Number(port) }
+    const withUser = user.trim() === '' ? withPort : { ...withPort, user: user.trim() }
+    const withJump = proxyJump.trim() === '' ? withUser : { ...withUser, proxyJump: proxyJump.trim() }
+    if (authMode === 'identityFile' && identityFile.trim() !== '') return { ...withJump, identityFile: identityFile.trim() }
+    if (authMode === 'identityPem' && identityPem.trim() !== '') return { ...withJump, identityPem: identityPem.trim() }
+    if (authMode === 'password' && password !== '') return { ...withJump, password }
+    return withJump
+  }
+
+  const runInspect = (): void => {
+    setBusy('inspect')
+    setKeys([])
+    setApprovedFingerprint('')
+    void inspectSshHost(sshPayload()).then(result => {
+      setBusy(undefined)
+      if (!result.ok) {
+        props.onError(result.error)
+        return
+      }
+      setKeys(result.value.keys)
+      const only = result.value.keys[0]
+      if (result.value.keys.length === 1 && only !== undefined) setApprovedFingerprint(only.hostKeyFingerprint)
+    })
+  }
+
+  const runDeploy = (): void => {
+    if (approvedFingerprint === '') {
+      props.onError('请先检查并批准 SSH 主机密钥指纹')
+      return
+    }
+    if (!props.hostId.trim()) {
+      props.onError('请填写主机标识')
+      return
+    }
+    setBusy('deploy')
+    setProgress(undefined)
+    void startSshDeploy({
+      hostId: props.hostId.trim(),
+      hostTitle: props.hostTitle.trim() === '' ? props.hostId.trim() : props.hostTitle.trim(),
+      ssh: { ...sshPayload(), hostKeyFingerprint: approvedFingerprint },
+      ...(remoteWebPort.trim() === '' ? {} : { remoteWebPort: Number(remoteWebPort) }),
+      accessMode,
+      ...(bindHost.trim() === '' ? {} : { bindHost: bindHost.trim() }),
+      ...(trustedHost.trim() === '' ? {} : { trustedHost: trustedHost.trim() }),
+    }).then(started => {
+      if (!started.ok) {
+        setBusy(undefined)
+        props.onError(started.error)
+        return
+      }
+      void waitSshDeployOperation(started.value.operationId, view => { setProgress(view) }).then(done => {
+        setBusy(undefined)
+        if (!done.ok) {
+          props.onError(done.error)
+          return
+        }
+        if (done.value.status !== 'succeeded' || done.value.result === undefined) {
+          props.onError(done.value.error ?? '部署失败')
+          return
+        }
+        setDeployed(done.value.result)
+        props.onDeployed(done.value.result)
+      })
+    })
+  }
+
+  const copyLaunchUrl = (): void => {
+    if (deployed === undefined) return
+    void navigator.clipboard.writeText(deployed.launchUrl)
+  }
+
+  return (
+    <div data-ssh-deploy="" className={styles.sshSection}>
+      <p className={styles.note}>
+        SSH 自动部署在本机（提供 Web 页面的那台机器）上执行：私钥路径指<strong>这台机器</strong>上的绝对路径；
+        粘贴私钥或密码只发给本机 DSH 进程，不会写入日志。非 loopback 绑定不会使用 0.0.0.0，仍依赖 DSH 的 <code>?token=</code> 换 cookie。
+      </p>
+      <fieldset className={styles.accessModes}>
+        <legend className={styles.summary}>访问方式</legend>
+        <label className={styles.sshKeyRow}>
+          <input type="radio" name="access-mode" checked={accessMode === 'host-ip'} onChange={() => { setAccessMode('host-ip') }} />
+          <span>主机 IP（默认：远端自动检测 IP 并绑定，登记 <code>http://&lt;主机IP&gt;:&lt;端口&gt;</code>，不建 SSH 隧道）</span>
+        </label>
+        <label className={styles.sshKeyRow}>
+          <input type="radio" name="access-mode" checked={accessMode === 'tunnel'} onChange={() => { setAccessMode('tunnel') }} />
+          <span>本机 SSH 隧道（远端 127.0.0.1 + 本地端口转发）</span>
+        </label>
+      </fieldset>
+      {accessMode === 'host-ip'
+        ? (
+            <label className={styles.field}>
+              绑定地址（可选，留空则远端自动检测 Tailscale / 网卡 IP）
+              <input className={styles.input} value={bindHost} onChange={event => { setBindHost(event.target.value) }} placeholder="192.168.x.x 或 100.x.x.x" />
+            </label>
+          )
+        : undefined}
+      {accessMode !== 'tunnel'
+        ? (
+            <label className={styles.field}>
+              --trusted-host（可选，MagicDNS 名）
+              <input className={styles.input} value={trustedHost} onChange={event => { setTrustedHost(event.target.value) }} placeholder="mybox.tail1234.ts.net" />
+            </label>
+          )
+        : undefined}
+      <div className={styles.formGrid}>
+        <label className={styles.field}>
+          SSH 主机
+          <input className={styles.input} value={target} onChange={event => { setTarget(event.target.value) }} placeholder="192.168.1.10" />
+        </label>
+        <label className={styles.field}>
+          端口
+          <input className={styles.input} value={port} onChange={event => { setPort(event.target.value) }} />
+        </label>
+        <label className={styles.field}>
+          用户
+          <input className={styles.input} value={user} onChange={event => { setUser(event.target.value) }} placeholder="deploy" />
+        </label>
+        <label className={styles.field}>
+          ProxyJump（可选）
+          <input className={styles.input} value={proxyJump} onChange={event => { setProxyJump(event.target.value) }} />
+        </label>
+        <label className={styles.field}>
+          认证方式
+          <select className={styles.input} value={authMode} onChange={event => { setAuthMode(event.target.value as SshAuthMode) }}>
+            <option value="identityFile">本机私钥路径</option>
+            <option value="identityPem">粘贴私钥 PEM</option>
+            <option value="password">密码（需本机安装 sshpass）</option>
+          </select>
+        </label>
+        {authMode === 'identityFile'
+          ? (
+              <label className={styles.field}>
+                私钥路径（Web 服务主机上）
+                <input className={styles.input} value={identityFile} onChange={event => { setIdentityFile(event.target.value) }} placeholder="/home/me/.ssh/id_ed25519" />
+              </label>
+            )
+          : authMode === 'identityPem'
+            ? (
+                <label className={styles.field}>
+                  私钥 PEM
+                  <textarea className={styles.textarea} value={identityPem} onChange={event => { setIdentityPem(event.target.value) }} rows={4} />
+                </label>
+              )
+            : (
+                <label className={styles.field}>
+                  SSH 密码
+                  <input type="password" className={styles.input} value={password} onChange={event => { setPassword(event.target.value) }} autoComplete="off" />
+                </label>
+              )}
+        <label className={styles.field}>
+          远端 DSH Web 端口
+          <input className={styles.input} value={remoteWebPort} onChange={event => { setRemoteWebPort(event.target.value) }} />
+        </label>
+      </div>
+      <div className={styles.formActions}>
+        <button type="button" className={styles.action} disabled={busy !== undefined} onClick={runInspect}>
+          {busy === 'inspect' ? '正在检查……' : '检查 SSH 主机密钥'}
+        </button>
+        <button type="button" className={styles.actionPrimary} disabled={busy !== undefined} onClick={runDeploy}>
+          {busy === 'deploy' ? '正在部署……' : '部署 DSH 并登记'}
+        </button>
+      </div>
+      {keys.length > 0
+        ? (
+            <div data-ssh-keys="" className={styles.sshKeys}>
+              <p className={styles.stateLine}>请核对指纹后选择要信任的那把钥匙：</p>
+              {keys.map(key => (
+                <label key={key.hostKeyFingerprint} className={styles.sshKeyRow}>
+                  <input
+                    type="radio"
+                    name="ssh-host-key"
+                    checked={approvedFingerprint === key.hostKeyFingerprint}
+                    onChange={() => { setApprovedFingerprint(key.hostKeyFingerprint) }}
+                  />
+                  <span>{key.algorithm} · {key.hostKeyFingerprint}</span>
+                </label>
+              ))}
+            </div>
+          )
+        : undefined}
+      {progress !== undefined
+        ? (
+            <p data-ssh-progress="" className={styles.stateLine}>
+              {progress.progress.detail}
+              {progress.status === 'failed' && progress.error !== undefined ? `（${progress.error}）` : ''}
+            </p>
+          )
+        : undefined}
+      {deployed !== undefined
+        ? (
+            <div data-ssh-launch-url="" className={styles.launchUrlBox}>
+              <p className={styles.stateLine}>打开链接即可换 cookie 上线（已写入登记）：</p>
+              <code className={styles.launchUrlText}>{deployed.launchUrl}</code>
+              <div className={styles.formActions}>
+                <button type="button" className={styles.action} data-action="copy-launch-url" onClick={copyLaunchUrl}>复制链接</button>
+                <a className={styles.actionPrimary} data-action="open-launch-url" href={deployed.launchUrl} target="_blank" rel="noreferrer">打开</a>
+              </div>
+            </div>
+          )
+        : undefined}
+      <label className={styles.field}>
+        主机标识（部署后登记用）
+        <input className={styles.input} value={props.hostId} onChange={event => { props.onHostIdChange(event.target.value) }} />
+      </label>
+      <label className={styles.field}>
+        显示名
+        <input className={styles.input} value={props.hostTitle} onChange={event => { props.onHostTitleChange(event.target.value) }} />
+      </label>
     </div>
   )
 }
@@ -804,6 +1105,14 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   const [, setIdentityRevision] = useState(0)
   const [registryRevision, setRegistryRevision] = useState(0)
   const [formMessage, setFormMessage] = useState<{ readonly tone: 'ok' | 'bad'; readonly text: string } | undefined>(undefined)
+  const [addMode, setAddMode] = useState<'manual' | 'ssh'>('manual')
+  const [addIdDraft, setAddIdDraft] = useState('')
+  const [addTitleDraft, setAddTitleDraft] = useState('')
+  const [addAddressDraft, setAddAddressDraft] = useState('')
+  const [sshDeployAvailable, setSshDeployAvailable] = useState(false)
+  useEffect(() => {
+    void probeSshDeployApi().then(setSshDeployAvailable)
+  }, [])
   const [confirmingRemove, setConfirmingRemove] = useState(false)
   const [reaches, setReaches] = useState<ReadonlyMap<string, ReachOutcome | 'probing'>>(new Map())
   // The host list lives in the section, not in React state; this tick is what
@@ -917,19 +1226,81 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   // Re-read on every render, including every list tick: presence and the
   // registry both change out from under this component.
   const presence = props.rollUp.hosts()
-  const hostRows = mergeHostRows(presence, registrations)
+  const hostRows = mergeHostRows(presence, registrations, reaches)
+
+  useEffect(() => {
+    props.remoteSessions?.refresh(registrations)
+    const timer = window.setInterval(() => { props.remoteSessions?.refresh(registrations) }, 30_000)
+    return () => { window.clearInterval(timer) }
+  }, [props.remoteSessions, registryRevision, registrations])
+
+  useEffect(() => props.remoteSessions?.subscribe(() => { setListTick(tick => tick + 1) }) ?? (() => undefined), [props.remoteSessions])
 
   if (view.page === 'add') {
+    if (sshDeployAvailable && addMode === 'ssh') {
+      return (
+        <div data-threadharbor-panel="" className={styles.root}>
+          <section data-panel-page="add-ssh" className={styles.card}>
+            <div className={styles.cardHead}>
+              <button type="button" className={styles.action} onClick={openList}>‹ 返回</button>
+              <h2 className={styles.title}>SSH 自动部署</h2>
+              <span className={styles.spacer} />
+              <button type="button" className={styles.action} onClick={() => { setAddMode('manual'); setFormMessage(undefined) }}>手动登记</button>
+            </div>
+            <StoragePostureLine posture={props.hostStore?.posture()} />
+            {formMessage !== undefined
+              ? <p data-form-message={formMessage.tone} className={formMessage.tone === 'ok' ? styles.stateLine : styles.stateBad}>{formMessage.text}</p>
+              : undefined}
+            <SshDeploySection
+              hostId={addIdDraft}
+              hostTitle={addTitleDraft}
+              onHostIdChange={setAddIdDraft}
+              onHostTitleChange={setAddTitleDraft}
+              onError={message => { setFormMessage({ tone: 'bad', text: message }) }}
+              onDeployed={deployResult => {
+                const result = props.registry.add({
+                  hostId: addIdDraft.trim(),
+                  hostTitle: addTitleDraft.trim(),
+                  address: deployResult.endpoint,
+                  launchUrl: deployResult.launchUrl,
+                })
+                if (!result.ok) {
+                  setFormMessage({ tone: 'bad', text: result.error.detail })
+                  return
+                }
+                setRegistryRevision(revision => revision + 1)
+                setFormMessage({
+                  tone: 'ok',
+                  text: `已登记 ${deployResult.endpoint}。点「打开」在新标签页完成 token 交换后，跨标签页频道会显示在线。`,
+                })
+              }}
+            />
+          </section>
+        </div>
+      )
+    }
     return (
       <div data-threadharbor-panel="" className={styles.root}>
         <HostFormPage
           key="add"
           mode="new"
           heading="添加新主机"
-          values={{ hostId: '', address: '' }}
+          values={{ hostId: addIdDraft, address: addAddressDraft }}
           message={formMessage}
           postureNote={<StoragePostureLine posture={props.hostStore?.posture()} />}
-          onConfirm={values => confirmAdd(values)}
+          footer={sshDeployAvailable
+            ? (
+                <p className={styles.note}>
+                  也可以在远端自动安装 DSH 与 ThreadHarbor：
+                  <button type="button" data-action="add-host-ssh" className={styles.action} onClick={() => { setAddMode('ssh'); setFormMessage(undefined) }}>SSH 自动部署</button>
+                </p>
+              )
+            : undefined}
+          onConfirm={values => {
+            setAddIdDraft(values.hostId)
+            setAddAddressDraft(values.address)
+            return confirmAdd(values)
+          }}
           onCancel={openList}
           tailscale={props.tailscale}
         />
@@ -982,20 +1353,47 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
             footer={registration !== undefined
               ? (
                   <div data-registry-actions="" className={styles.registryActions}>
-                    {!row.online
+                    <p data-host-connection="" className={styles.stateLine}>
+                      状态：{connectionStatusLabel(row.connection)}
+                      {row.connection === 'disconnected' || row.connection === 'reachable'
+                        ? (
+                            <>
+                              {' '}
+                              <button type="button" data-registry-reach-try="" className={styles.action} onClick={() => { startReach(registration) }}>检测可达</button>
+                            </>
+                          )
+                        : undefined}
+                    </p>
+                    {reach !== undefined && reach !== 'probing' && reach.kind !== 'reachable'
+                      ? <p className={styles.stateBad}>{reach.kind === 'timeout' ? `检测超时（${reach.ms} ms）` : reach.reason}</p>
+                      : undefined}
+                    {registration.launchUrl !== undefined
                       ? (
-                          <p data-registry-reach="" className={styles.stateLine}>
-                            {reach === undefined
-                              ? (
-                                  <button type="button" data-registry-reach-try="" className={styles.action} onClick={() => { startReach(registration) }}>测网络可达</button>
-                                )
-                              : reach === 'probing'
-                                ? '正在测……'
-                                : reach.kind === 'reachable'
-                                  ? `网络可达（${reach.ms} ms 内有应答）。这只是端口上有东西回应，不能确认是 DSH，也不校验 token。`
-                                  : reach.kind === 'timeout'
-                                    ? `测不通：${reach.ms} ms 内无应答（超时）。`
-                                    : `测不通：${reach.reason}。`}
+                          <p data-registry-launch="" className={styles.stateLine}>
+                            <a className={styles.actionPrimary} href={registration.launchUrl} target="_blank" rel="noreferrer">连接（打开含 token 的页面）</a>
+                            <button
+                              type="button"
+                              className={styles.action}
+                              onClick={() => { void navigator.clipboard.writeText(registration.launchUrl ?? '') }}
+                            >复制链接</button>
+                          </p>
+                        )
+                      : undefined}
+                    {sshDeployAvailable && !row.self
+                      ? (
+                          <p className={styles.stateLine}>
+                            <button
+                              type="button"
+                              data-action="redeploy-ssh"
+                              className={styles.actionPrimary}
+                              onClick={() => {
+                                setAddIdDraft(registration.hostId)
+                                setAddTitleDraft(registration.hostTitle)
+                                setAddMode('ssh')
+                                setFormMessage(undefined)
+                                setView({ page: 'add' })
+                              }}
+                            >重新部署 DSH</button>
                           </p>
                         )
                       : undefined}
@@ -1059,7 +1457,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                 <ul data-panel-notices="" className={styles.notices}>
                   <li>「在线」= 这台机器的页面在同一个浏览器的同源标签页里开着并按心跳报数；关闭或崩溃的页面过了静默窗口会自动转为未列出。</li>
                   <li>另一台机器（另一个源）的页面不在这个频道里；它的行以「未连接」出现，靠的是登记。</li>
-                  <li>会话与项目不再在此列出（2026-10-11 决定）：要看某台主机的会话，去那台主机自己的页面。</li>
+                  <li>左侧树按主机列出项目与会话：本机来自 DSH 投影；远端登记主机通过 launchUrl 由管理端拉取（失败时请点「连接」打开远端页面）。</li>
                 </ul>
               </details>
             )}
@@ -1071,36 +1469,48 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
 
   return (
     <div data-threadharbor-panel="" className={styles.root}>
-      <div className={styles.pageHead}>
-        <h2 className={styles.title}>主机</h2>
-        <span className={styles.spacer} />
-        <button
-          type="button"
-          data-action="add-host"
-          className={styles.actionPrimary}
-          onClick={() => { setFormMessage(undefined); setView({ page: 'add' }) }}
-        >添加新主机</button>
-      </div>
-      <StoragePostureLine posture={props.hostStore?.posture()} />
-      {/* 一张正常的表（2026-10-13 用户反馈）：三列（名称、IP、设置）＋ 一行
-          一台主机、行高一致；点行或行尾的设置进主机的设置页。 */}
-      <div data-host-list="" data-panel-page="list" className={styles.hostList}>
-        <div data-host-list-head="" className={styles.hostListHead} aria-hidden="true">
-          <span className={styles.hostListHeadLabel}>名称</span>
-          <span className={styles.hostListHeadLabel}>IP</span>
-          {/* 第三列是每行的设置按钮，表头留空——按钮自己说明自己。 */}
-          <span className={styles.hostListHeadLabel} />
+      <section data-panel-page="list" className={styles.listLayout}>
+        <div data-session-tree="" className={styles.sessionTreePane}>
+          <h2 className={styles.title}>会话（按主机）</h2>
+          <div ref={attachRollUpMount(props.rollUp)} data-rollup-host="" className={styles.rollupHost} />
         </div>
-        {hostRows.length === 0
-          ? <p data-host-list-empty="" className={styles.hostListEmpty}>还没有主机。点「添加新主机」登记第一台。</p>
-          : hostRows.map(row => (
-              <HostRow
-                key={row.hostId}
-                row={row}
-                onOpen={() => { setFormMessage(undefined); setConfirmingRemove(false); setView({ page: 'detail', hostId: row.hostId }) }}
-              />
-            ))}
-      </div>
+        <div data-host-pane="" className={styles.hostPane}>
+          <div className={styles.pageHead}>
+            <h2 className={styles.title}>主机</h2>
+            <span className={styles.spacer} />
+            <button
+              type="button"
+              data-action="add-host"
+              className={styles.actionPrimary}
+              onClick={() => { setFormMessage(undefined); setView({ page: 'add' }) }}
+            >添加新主机</button>
+          </div>
+          <StoragePostureLine posture={props.hostStore?.posture()} />
+          <div data-host-list="" className={styles.hostList}>
+            <div data-host-list-head="" className={styles.hostListHead} aria-hidden="true">
+              <span className={styles.hostListHeadLabel}>名称</span>
+              <span className={styles.hostListHeadLabel}>IP</span>
+              <span className={styles.hostListHeadLabel} />
+            </div>
+            {hostRows.length === 0
+              ? <p data-host-list-empty="" className={styles.hostListEmpty}>还没有主机。点「添加新主机」登记第一台。</p>
+              : hostRows.map(row => (
+                  <HostRow
+                    key={row.hostId}
+                    row={row}
+                    onOpen={() => { setFormMessage(undefined); setConfirmingRemove(false); setView({ page: 'detail', hostId: row.hostId }) }}
+                  />
+                ))}
+          </div>
+        </div>
+      </section>
     </div>
   )
+}
+
+function attachRollUpMount(section: RollUpSection): (node: HTMLDivElement | null) => void {
+  return node => {
+    if (node === null) return
+    node.replaceChildren(section.element())
+  }
 }

@@ -95,12 +95,8 @@ dsh --profile web --dump-config
 ## 首次使用
 
 1. 启动 `dsh --profile web` 并打开页面。
-2. 在 ThreadHarbor 侧栏选择“添加主机 → SSH 自动部署”。
-3. 输入 SSH 目标、用户、端口，以及可选的 Web 服务本机私钥绝对路径和 ProxyJump。
-4. 将页面显示的 SHA256 host-key 指纹与主机管理员提供的指纹核对，确认后部署 hostd。
-5. 刷新 Agent 状态，确认远端已安装的命令能被 hostd 发现。
-6. 对 Codex 或 Grok 点击“登录”，在页面打开授权链接并输入设备码。
-7. 点击“配置”编辑对应 Agent 的用户配置；保存前由远程 hostd 校验语法。
-8. 添加远程项目目录，然后从已安装、已登录且具备 session adapter 的 Agent 创建会话。
+2. 在侧栏 **各主机** 中登记本机与其他主机（手动填写地址，或使用 **SSH 自动部署** 在远端安装 DSH + ThreadHarbor，详见 [ssh-deploy.zh.md](./ssh-deploy.zh.md)）。
+3. 每台主机在各自的浏览器标签页打开（`dsh web` 打印的 URL 与 `?token=…`）；跨标签页频道只汇总 **在线/心跳**，会话仍在各主机自己的页面操作。
+4. 在本机 profile 中配置需要的 ACP agent preset；远端主机上的 agent 需在目标机自行安装并在该机的 profile 中配置。
 
-Claude Code 目前支持发现、登录和配置，但尚未接入 ThreadHarbor 原生会话 adapter，因此不会出现在新会话后端列表中。
+Claude Code / Codex / Grok 的安装与登录方式见 [install-plugins.zh.md](./install-plugins.zh.md)。

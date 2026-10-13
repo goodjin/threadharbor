@@ -29,6 +29,8 @@
     # volatile 字段，就不会多出一个设置页；刷新走 data.dsh.tailscale.refresh。
     - id: threadharbor-tailscale
       name: '@threadharbor/dsh-host-federation/tailscale'
+    - id: threadharbor-ssh-deploy
+      name: '@threadharbor/dsh-host-federation/ssh-deploy'
     # 名册过滤器:下面四个 agent 仍然注册成 preset——急切装载让它们的模型
     # 进全局目录(模型列表可切换),model→preset 跟随、会话交接也都靠注册。
     # 但注册同时会把它们列进 preset 选择器,和模型列表重复。这行在名册的
