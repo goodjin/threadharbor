@@ -8,6 +8,8 @@
  */
 
 import type { AcpStepResult, StepDecisionLike, StepEndReason, TurnContext } from './dispatch.ts'
+import { UNDELIVERED } from './content-writer.ts'
+import type { UndeliveredAttachment } from './content-writer.ts'
 import { projectToolCallFrame } from '@threadharbor/dsh-acp-agent'
 import type { AcpDialect, AcpFrame } from '@threadharbor/dsh-acp-agent'
 
@@ -143,6 +145,82 @@ export function promptText(messages: readonly unknown[]): string {
     }
   }
   return parts.join('\n')
+}
+
+/** An image block as the ACP `session/prompt` payload carries it. */
+export type PromptImage = {
+  readonly type: 'image'
+  readonly data: string
+  readonly mimeType: string
+}
+
+/** What one turn's prompt is made of, after the capability table has spoken. */
+export type PromptContent = {
+  /** The user-authored text, as `promptText` assembles it. */
+  readonly text: string
+  /** Image blocks cleared to ride the prompt, in message order. */
+  readonly images: readonly PromptImage[]
+  /**
+   * Blocks held back from the prompt, in the order they were met.
+   *
+   * An image lands here when the agent's capability table declines it; every
+   * other non-text block (a file, a resource) lands here always — none is sent
+   * to any agent today. The runner hands the list to the writer, which turns it
+   * into the row that tells the user the attachment did not arrive.
+   */
+  readonly undelivered: readonly UndeliveredAttachment[]
+}
+
+/**
+ * Pull the user-authored content out of a step decision's messages, routed by
+ * the capability table.
+ *
+ * A dialect that does not declare `acceptsImageContent` reads as "cannot":
+ * sending what we cannot verify the agent takes is the one outcome this routing
+ * exists to prevent, so an unknown (or absent) dialect never carries images.
+ * Text is extracted exactly as `promptText` does, so a text-only turn builds
+ * the same prompt as before.
+ */
+export function promptContent(messages: readonly unknown[], dialect: AcpDialect | undefined): PromptContent {
+  const parts: string[] = []
+  const images: PromptImage[] = []
+  const undelivered: UndeliveredAttachment[] = []
+  const acceptsImages = dialect?.capabilities.acceptsImageContent === true
+  for (const message of messages as readonly UserText[]) {
+    if (message.role !== undefined && message.role !== 'user') continue
+    const content = message.content
+    if (typeof content === 'string') { parts.push(content); continue }
+    if (!Array.isArray(content)) continue
+    for (const block of content as Record<string, unknown>[]) {
+      const type = typeof block?.['type'] === 'string' ? block['type'] : ''
+      if (type === 'text') {
+        if (typeof block['text'] === 'string') parts.push(block['text'])
+        continue
+      }
+      if (type === 'image') {
+        if (acceptsImages && typeof block['data'] === 'string' && typeof block['mimeType'] === 'string') {
+          images.push({ type: 'image', data: block['data'], mimeType: block['mimeType'] })
+        } else {
+          undelivered.push({
+            kind: 'image',
+            ...(typeof block['mimeType'] === 'string' ? { mimeType: block['mimeType'] } : {}),
+          })
+        }
+        continue
+      }
+      // Any other block kind — a file, a resource — is held back wholesale
+      // (spec §8.1): no agent is sent one today, so it takes the same
+      // undelivered road as a declined image. A block without a recognizable
+      // type is skipped, exactly as the text-only extraction always skipped it.
+      if (type !== '') {
+        undelivered.push({
+          kind: 'file',
+          ...(typeof block['mimeType'] === 'string' ? { mimeType: block['mimeType'] } : {}),
+        })
+      }
+    }
+  }
+  return { text: parts.join('\n'), images, undelivered }
 }
 
 /**
@@ -317,7 +395,7 @@ export class AcpTurnRunner {
     const replayed = handedOver === undefined && firstOpen
       ? this.options.replay?.take(turn.sessionId)
       : undefined
-    const question = promptText(decision.messages)
+    const { text: question, images, undelivered } = promptContent(decision.messages, this.options.dialect)
     const text = handedOver !== undefined
       ? `${handedOver}\n\n${question}`
       : replayed !== undefined
@@ -325,7 +403,10 @@ export class AcpTurnRunner {
         : question
     const params: Record<string, unknown> = {
       sessionId,
-      prompt: [{ type: 'text', text }],
+      // The images ride after the text, in the order the messages carried them;
+      // when the capability table declines them this list is text-only, and the
+      // held-back ones are reported below instead.
+      prompt: [{ type: 'text', text }, ...images],
     }
     // The session's own selection outranks the configured default: it is what
     // the user picked for this conversation.
@@ -396,13 +477,30 @@ export class AcpTurnRunner {
     // each exactly once; anything the mid-turn writer could not track (a frame
     // with no call id) still rides the turn-end write as before.
     const produced = turn.produce(result)
-    const events = liveCards === undefined
-      ? produced
-      : produced.filter(event => {
+    // The held-back attachments are reported ahead of the turn's own content:
+    // the drop happened when the prompt was built, and the writer expands the
+    // marker into a call/result pair that never touches the message sequence
+    // the stream settles on.
+    const notice = undelivered.length === 0
+      ? []
+      : [{
+        type: UNDELIVERED,
+        payload: {
+          turn: turn.position.turn,
+          step: turn.position.step,
+          attachments: undelivered,
+        },
+      }]
+    const events = [
+      ...notice,
+      ...(liveCards === undefined
+        ? produced
+        : produced.filter(event => {
           if (event.type !== 'tool/call') return true
           const callId = recordOf(event.payload)['callId']
           return !(typeof callId === 'string' && liveCards.written.has(callId))
-        })
+        })),
+    ]
     const seq = turn.write(events)
     if (stream === undefined) return result
     if (seq === undefined) stream.abandon()
