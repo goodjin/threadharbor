@@ -72,6 +72,8 @@ function compositionSpecifiers(): string[] {
 const KNOWN_UNWIRED: Readonly<Record<string, string>> = {
   'packages/dsh-preset-dispatch/src/service.ts':
     '早期入口，职能与 entry.ts 重叠。模型目录注册已迁到真机路径（plugin.ts 挂载 registerCatalog），此文件只剩 barrel 导出与测试在用；接线检查把它列为配置字段消费方，删它必须先改那道检查。清掉条件：确认没有外部包再调用 attachAcpDispatch，并从配置消费检查的文件清单移除后整体删除。',
+  'packages/dsh-mobile-entry/src/wire.ts':
+    '线上协议常量记录（Task 6 探针钉死的端点/mux 帧字面量），手机端用的是把值逐条硬编码进去的 mobile/wire.js（静态页不能 import TS），包内只有 tests/wire.spec.ts 在 import 它——测试引用不算产品接线，这正是本登记要说的：它当前是记录，不是被装载的代码。清掉条件：mobile 侧改为从包 src（经构建产物）消费这些常量、或协议常量改由构建步骤生成进 mobile/wire.js 时接上并从登记移除；若常量记录被删除，登记随之删。',
 }
 
 function packageExports(pkg: string): Record<string, unknown> {
