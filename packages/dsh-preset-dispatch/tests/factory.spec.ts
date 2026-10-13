@@ -45,6 +45,34 @@ describe('makeSessionFactory', () => {
     const factory = makeSessionFactory(CONFIG, deps)
     await expect(factory.open('acp-missing', { cwd: '/tmp' })).rejects.toThrow(/no preset named/)
   })
+
+  it('hands the session/new model list to the catalog as the opening preset’s report', async () => {
+    // The picker serves what the agent reported; the factory knows which preset
+    // opened, so it is the seam that keys the report by preset.
+    const transport = recordingTransport()
+    const reports: { presetId: string; models: unknown }[] = []
+    const factory = makeSessionFactory(
+      { presets: { 'acp-grok': { agent: 'grok', url: 'ws://127.0.0.1:2419' } } },
+      { ...deps, transport: () => transport, onRuntimeModels: (presetId, models) => { reports.push({ presetId, models }) } },
+    )
+    const session = await factory.open('acp-grok', { cwd: '/tmp' })
+    void session.run(
+      { kind: 'enter', messages: [] },
+      { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 },
+    )
+    // Answer the handshake in order: initialize, then session/new with the
+    // grok-shaped model list.
+    for (const frame of transport.sent) {
+      const request = JSON.parse(frame) as { id?: number; method?: string }
+      if (request.id === undefined) continue
+      const result = request.method === 'session/new'
+        ? { sessionId: 's1', models: { availableModels: [{ modelId: 'm1', name: 'M1' }] } }
+        : {}
+      transport.receive(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }))
+      await flush()
+    }
+    expect(reports).toEqual([{ presetId: 'acp-grok', models: [{ id: 'm1', name: 'M1' }] }])
+  })
 })
 
 /** A transport a test can kill, holding one death slot like the real ones do. */
@@ -78,13 +106,15 @@ describe('连接死亡的转播', () => {
     const seenBySession: string[] = []
     session.onDead(reason => { seenBySession.push(reason) })
 
-    // One request in flight: its rejection proves the client kept its listener.
+    // One request in flight: its classified failure proves the client kept its
+    // listener (the transport's death reason names the row's reconnect hint).
     const pending = session.run(
       { kind: 'enter', messages: [] },
       { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 },
     )
     transport.die('agent process exited')
-    await expect(pending).rejects.toThrow('agent process exited')
+    const result = await pending
+    expect(result.end).toMatchObject({ kind: 'error', error: { code: 'ACP_CONNECTION' } })
     expect(seenBySession).toEqual(['agent process exited'])
   })
 

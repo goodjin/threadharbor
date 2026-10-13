@@ -15,8 +15,18 @@ import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
 import { AgentSwitchHandoverCard } from '../src/handover-card.ts'
 import type { AgentSwitchHandoverData } from '../src/handover-card.ts'
+import { zh } from '../src/locales.ts'
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+
+/**
+ * The `t` the framework would synthesize, bound to the dictionary's source
+ * language with the documented `{name}` placeholder substitution — the same
+ * copy path the real seat runs, minus the locale registry.
+ */
+function zhT(key: string, params?: Record<string, unknown>): string {
+  return zh[key as keyof typeof zh]!.replace(/\{(\w+)\}/g, (_, name: string) => String(params?.[name] ?? `{${name}}`))
+}
 
 afterEach(() => {
   vi.useRealTimers()
@@ -51,6 +61,7 @@ async function mountCard(face: {
   const data = handoverData()
   const props = {
     node: { data },
+    t: zhT,
     openSession: face.openSession,
     ...(face.prepare === undefined ? {} : { prepare: face.prepare }),
   }
@@ -102,6 +113,13 @@ describe('交接卡片', () => {
     if (button === null) throw new Error('the notice has no button')
     act(() => { button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })) })
     expect(opened).toEqual([data.sessionId])
+    await act(async () => { root.unmount() })
+  })
+
+  it('标题与按钮的文案来自字典，带上新会话的名字', async () => {
+    const { container, root, data } = await mountCard({ openSession: () => {} })
+    expect(container.textContent).toContain(zh['handover.title']!.replace('{target}', data.target))
+    expect(container.querySelector('button')?.textContent).toBe(zh['handover.open'])
     await act(async () => { root.unmount() })
   })
 })

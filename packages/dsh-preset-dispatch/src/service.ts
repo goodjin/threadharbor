@@ -19,7 +19,7 @@ import type { AgentLike } from './dispatch.ts'
 import type { ContentEvent } from './dispatch.ts'
 import { makeSessionFactory } from './factory.ts'
 import type { FactoryDeps } from './factory.ts'
-import { modelsOfPreset, registerCatalog } from './catalog-registration.ts'
+import { modelsOfPreset, registerCatalog, runtimeModels } from './catalog-registration.ts'
 import { buildPresetTable, sessionsRegistry } from './registry.ts'
 import type { PresetConfig } from './registry.ts'
 
@@ -58,13 +58,27 @@ export function attachAcpDispatch(
   config: PresetConfig,
   options: AttachOptions,
 ): void {
-  const factory = makeSessionFactory(config, options)
+  // The agent's own `session/new` reports, per preset, shared by the factory
+  // seam and the catalog registration below, so the picker and the sessions
+  // read the same source.
+  const runtimeModelReports = runtimeModels()
+  const factory = makeSessionFactory(config, {
+    ...options,
+    // No catalog-owning caller supplied a report sink: record into the shared
+    // ledger this attach registered the catalog with.
+    ...(options.onRuntimeModels === undefined
+      ? { onRuntimeModels: (presetId: string, models: readonly { id: string; name: string; description?: string }[]) => { runtimeModelReports.record(presetId, models) } }
+      : {}),
+  })
   const table = buildPresetTable(config, factory, sessionsRegistry())
 
   // What makes the external agent's models appear in DSH's own model picker:
-  // the catalog is global to this Host generation and already read by it.
+  // the catalog is global to this Host generation and already read by it. The
+  // list reads the agent's own report once a session has opened, and degrades
+  // to the configured list until then.
   registerCatalog(ctx, config, {
     modelsOf: presetId => modelsOfPreset(config, factory, presetId),
+    runtimeModelsOf: presetId => runtimeModelReports.modelsOf(presetId),
     dialectOf: presetId => table.get(presetId)?.dialect,
   })
 

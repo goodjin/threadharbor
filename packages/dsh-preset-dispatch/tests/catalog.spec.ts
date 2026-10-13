@@ -14,6 +14,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { catalogAdapter, presetForModel, providerRoute } from '../src/catalog.ts'
+import { runtimeModels } from '../src/catalog-registration.ts'
 import { grokDialect } from '@threadharbor/dsh-acp-agent'
 import type { PresetConfig } from '../src/registry.ts'
 
@@ -144,6 +145,96 @@ describe('catalogAdapter', () => {
     await expect(failToStream(hooked.stream({
       provider: providerRoute('acp-grok'), model: 'grok-4.7',
     }))).rejects.toThrow(/takeover did not happen/)
+  })
+})
+
+/**
+ * The picker serves what the AGENT reported once it has reported, not the
+ * operator's configured guess. `runtimeModelsOf` carries the models read off a
+ * live `session/new` reply; `undefined` (no session has opened on this host
+ * generation yet) degrades to the configured list, while a reported EMPTY list
+ * is served as empty — the agent's own word beats a stale configuration.
+ */
+describe('catalogAdapter — model list from the live runtime', () => {
+  it('serves the runtime report once one has arrived, replacing the configured list', async () => {
+    const adapter = catalogAdapter(CONFIG, {
+      modelsOf,
+      dialectOf: () => grokDialect,
+      runtimeModelsOf: presetId => presetId === 'acp-grok'
+        ? [{ id: 'grok-5', name: 'Grok 5' }, { id: 'grok-5-fast', name: 'Grok 5 Fast' }]
+        : undefined,
+    })
+    expect(await adapter.listModels(providerRoute('acp-grok'))).toEqual([
+      { provider: providerRoute('acp-grok'), id: 'grok-5', name: 'Grok 5' },
+      { provider: providerRoute('acp-grok'), id: 'grok-5-fast', name: 'Grok 5 Fast' },
+    ])
+  })
+
+  it('serves a reported-empty list as empty — the stale configured list must not resurrect', async () => {
+    // The agent answered the question "what do you serve" with "nothing".
+    // Showing the configured models anyway would advertise sessions that
+    // cannot run.
+    const adapter = catalogAdapter(CONFIG, {
+      modelsOf,
+      dialectOf: () => grokDialect,
+      runtimeModelsOf: presetId => presetId === 'acp-grok' ? [] : undefined,
+    })
+    expect(await adapter.listModels(providerRoute('acp-grok'))).toEqual([])
+  })
+
+  it('degrades to the configured list while no session has reported yet', async () => {
+    // Before the first turn there is no runtime answer; the operator's
+    // declaration keeps the picker usable instead of showing a dead group.
+    const adapter = catalogAdapter(CONFIG, {
+      modelsOf,
+      dialectOf: () => grokDialect,
+      runtimeModelsOf: () => undefined,
+    })
+    const models = await adapter.listModels(providerRoute('acp-grok'))
+    expect(models.map(model => model.id)).toEqual(['grok-4.7', 'grok-4.7-fast'])
+  })
+
+  it('resolves an advertised runtime model against the runtime metadata', async () => {
+    const adapter = catalogAdapter(CONFIG, {
+      modelsOf,
+      dialectOf: () => grokDialect,
+      runtimeModelsOf: presetId => presetId === 'acp-grok'
+        ? [{ id: 'grok-5', name: 'Grok 5', description: 'from the agent' }]
+        : undefined,
+    })
+    expect(await adapter.resolveModel(providerRoute('acp-grok'), 'grok-5')).toEqual({
+      provider: providerRoute('acp-grok'),
+      id: 'grok-5',
+      name: 'Grok 5',
+      description: 'from the agent',
+    })
+  })
+})
+
+describe('runtimeModels holder', () => {
+  it('keeps each preset’s report apart and replaces it on a later report', () => {
+    const models = runtimeModels()
+    expect(models.modelsOf('acp-grok')).toBeUndefined()
+    models.record('acp-grok', [{ id: 'grok-5', name: 'Grok 5' }])
+    models.record('acp-codex', [{ id: 'gpt-6', name: 'GPT-6' }])
+    expect(models.modelsOf('acp-grok')).toEqual([{ id: 'grok-5', name: 'Grok 5' }])
+    expect(models.modelsOf('acp-codex')).toEqual([{ id: 'gpt-6', name: 'GPT-6' }])
+    // A later session/new replaces the list wholesale — a re-opened external
+    // conversation reports what it serves now, not what it served before.
+    models.record('acp-grok', [])
+    expect(models.modelsOf('acp-grok')).toEqual([])
+  })
+
+  it('keeps only model-shaped entries the agent actually named', () => {
+    // A frame field of the wrong shape is not a model; advertising it would
+    // put a broken row in the picker.
+    const models = runtimeModels()
+    models.record('acp-grok', [
+      { id: 'grok-5', name: 'Grok 5' },
+      { name: 'no id' },
+      { id: 7, name: 'numeric id' },
+    ] as unknown as readonly { id: string; name: string }[])
+    expect(models.modelsOf('acp-grok')).toEqual([{ id: 'grok-5', name: 'Grok 5' }])
   })
 })
 

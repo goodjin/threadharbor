@@ -47,6 +47,15 @@ export type FactoryDeps = {
    * to itself, which leaves nothing to assert against.
    */
   transport?(preset: { url?: string; command?: string }): AcpTransport
+  /**
+   * Receive the model list the agent reported when a session of this preset
+   * opened.
+   *
+   * The factory is the seam that knows which preset opened, so it keys the
+   * report; the catalog adapter serves the latest report per preset. Optional:
+   * a caller without a catalog to feed skips the wiring and nothing changes.
+   */
+  onRuntimeModels?(presetId: string, models: readonly { id: string; name: string; description?: string }[]): void
 }
 
 /** Which frame dialect an agent speaks. Unknown agents are not ours. */
@@ -151,8 +160,13 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
 
       // The dialect lets the runner write each tool card as its first frame
       // arrives; without it the runner would keep writing everything at turn
-      // end.
-      const runner = new AcpTurnRunner(adaptClient(client, dialect), { ...options, dialect })
+      // end. The same dialect reads the reply's model list, which rides to the
+      // catalog keyed by the preset that opened.
+      const runner = new AcpTurnRunner(adaptClient(client, dialect), {
+        ...options,
+        dialect,
+        ...(deps.onRuntimeModels === undefined ? {} : { onModels: models => { deps.onRuntimeModels!(presetId, models) } }),
+      })
       return {
         run: async (decision, turn) => await runner.run(decision, turn),
         // Drops the connection itself, not just the runner's bookkeeping: a

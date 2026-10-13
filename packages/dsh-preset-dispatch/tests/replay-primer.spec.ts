@@ -113,7 +113,10 @@ describe('AcpTurnRunner — 历史回灌', () => {
     expect((result.end as { error: { message: string } }).error.message).toContain('prompt too long')
   })
 
-  it('没有回灌时提问失败照旧抛出', async () => {
+  it('没有回灌时提问失败按类别收尾，而不是抛原始错误', async () => {
+    // The failure ends the turn as a classified error row ('agent died' is a
+    // transport death → reconnect hint), the same seam every other failed
+    // turn takes; the replay path alone keeps its own named ending.
     const client = fakeClient()
     client.request = async (method, params) => {
       client.calls.push({ method, params })
@@ -123,7 +126,8 @@ describe('AcpTurnRunner — 历史回灌', () => {
     }
     const runner = new AcpTurnRunner(client, { cwd: '/tmp', replay: { take: () => undefined } })
 
-    await expect(runner.run(decision('继续'), TURN)).rejects.toThrow(/agent died/)
+    const result = await runner.run(decision('继续'), TURN)
+    expect(result.end).toMatchObject({ kind: 'error', error: { code: 'ACP_CONNECTION' } })
   })
 
   it('移交优先：有移交的回合不再取回灌', async () => {

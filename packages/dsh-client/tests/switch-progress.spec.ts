@@ -23,8 +23,18 @@ import {
   startSwitchProgressSurface,
 } from '../src/switch-progress.ts'
 import type { SwitchProgressPhase, SwitchProgressStore } from '../src/switch-progress.ts'
+import { zh } from '../src/locales.ts'
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+
+/**
+ * The `t` the framework would synthesize, bound to the dictionary's source
+ * language with the documented `{name}` placeholder substitution — the same
+ * copy path the real seat runs, minus the locale registry.
+ */
+function zhT(key: string, params?: Record<string, unknown>): string {
+  return zh[key as keyof typeof zh]!.replace(/\{(\w+)\}/g, (_, name: string) => String(params?.[name] ?? `{${name}}`))
+}
 
 afterEach(() => {
   vi.useRealTimers()
@@ -220,7 +230,7 @@ describe('进度条画出来的东西', () => {
     let root: Root | undefined
     act(() => {
       root = createRoot(host)
-      root.render(createElement(SwitchProgressLayer, { progress: store } as never))
+      root.render(createElement(SwitchProgressLayer, { progress: store, t: zhT } as never))
     })
     return { host, dispose: () => { act(() => { root?.unmount() }); host.remove() } }
   }
@@ -232,11 +242,14 @@ describe('进度条画出来的东西', () => {
     dispose()
   })
 
-  it('切换中写出阶段与目标会话', () => {
+  it('切换中写出阶段与目标会话，文案来自字典', () => {
     const store = createSwitchProgressStore()
     const { host, dispose } = paint(store)
     act(() => { store.actions.begin({ sessionId: 'session-new', target: 'acp-claude' }) })
     expect(host.textContent).toContain('acp-claude')
+    // The line is the dictionary's own copy, not a string baked in the layer:
+    // this is what the locale wiring is for.
+    expect(host.textContent).toContain(zh['progress.preparing']!.replace('{target}', 'acp-claude'))
     expect(host.querySelectorAll('[role="progressbar"]').length).toBeGreaterThan(0)
     dispose()
   })

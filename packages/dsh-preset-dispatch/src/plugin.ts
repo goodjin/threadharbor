@@ -27,7 +27,7 @@ import type {
 import { buildPresetTable, openSessionsOf, sessionsRegistry } from './registry.ts'
 import type { AcpPresetConfig, PresetConfig } from './registry.ts'
 import { makeSessionFactory } from './factory.ts'
-import { modelsOfPreset, registerCatalog } from './catalog-registration.ts'
+import { modelsOfPreset, registerCatalog, runtimeModels } from './catalog-registration.ts'
 import { mountSwitchOnForeignModelRequest, servicesOf } from './switch-mount.ts'
 import { followModelSelection, followPresetSelection } from './follow.ts'
 import { switchShared } from './switch-shared.ts'
@@ -189,8 +189,15 @@ export function applyAcpPlugin(
   // the function the loaded entry actually calls — a registration anywhere
   // else is the catalogue bug again. Silent when the host has no registry; the
   // picker then simply shows nothing of ours.
+  //
+  // The picker's list reads the agent's own `session/new` report once a
+  // session has opened (the runner feeds `runtimeModels` through the factory);
+  // until then it degrades to the configured list, so a working agent never
+  // shows an empty group just because nobody has asked it a question yet.
+  const runtimeModelReports = runtimeModels()
   const catalogDeps: CatalogDeps = {
     modelsOf: presetId => modelsOfPreset(presets, factory, presetId),
+    runtimeModelsOf: presetId => runtimeModelReports.modelsOf(presetId),
     dialectOf: presetId => table.get(presetId)?.dialect,
   }
   // A model request landing on one of these routes for a session this row does

@@ -117,6 +117,17 @@ export type RunnerOptions = {
    * as before.
    */
   readonly abort?: () => AbortSignal | undefined
+  /**
+   * The model list the agent reported with this session, as the dialect read
+   * it off the `session/new` reply.
+   *
+   * The model picker serves what the agent serves, and only an opened session
+   * can answer that — so every open reports, an empty list included: an agent
+   * that serves nothing must be able to say so, and swallowing the report
+   * would leave a stale answer standing. Absent means nobody listens; the
+   * open proceeds exactly as before.
+   */
+  readonly onModels?: (models: readonly { id: string; name: string; description?: string }[]) => void
 }
 
 /** Long enough for a cold process to start, short enough to not strand a turn. */
@@ -251,6 +262,55 @@ function toEndReason(stopReason: unknown): StepEndReason {
   }
 }
 
+/** The prefix the client puts on every JSON-RPC error reply before it reaches here. */
+const ACP_ERROR_PREFIX = 'acp error: '
+
+/**
+ * An agent refusal about authorization, not about the transport.
+ *
+ * The JSON-RPC error reply carries no structured class this side can read, so
+ * the classification reads the reply's own text for the authorization
+ * vocabulary the agents document (cursor's login requirement, claude's
+ * permission errors, codex's auth updates). Anything matching ends the turn
+ * with the approval hint; a JSON-RPC error without the signal keeps the raw
+ * string — the spec's third bucket.
+ */
+const PERMISSION_SIGNAL = /auth|permission|login|unauthorized|forbidden|denied/i
+
+/**
+ * Map a turn failure onto the error end the loop records, with copy the
+ * turn-error row can show as advice rather than as a raw string.
+ *
+ * The row renders `error.message` verbatim, so this is where the spec's
+ * mapping lives: a dead or never-established connection points at resending
+ * (the next turn opens a fresh session on its own); an authorization refusal
+ * points at approving or logging in; anything else stays the agent's own
+ * words. Every message keeps the original detail — a hint without the cause
+ * is a dead end for diagnosis.
+ */
+export function failureEndOf(error: unknown): StepEndReason {
+  const detail = messageOf(error)
+  if (detail.startsWith(ACP_ERROR_PREFIX)) {
+    if (PERMISSION_SIGNAL.test(detail)) {
+      return {
+        kind: 'error',
+        error: {
+          code: 'ACP_PERMISSION',
+          message: `外部 agent 需要授权：${detail}。完成 agent 登录或在审批中放行后，重新发送即可。`,
+        },
+      }
+    }
+    return { kind: 'error', error: { code: 'ACP_ERROR', message: detail } }
+  }
+  return {
+    kind: 'error',
+    error: {
+      code: 'ACP_CONNECTION',
+      message: `外部 agent 连接已断开：${detail}。重新发送这条消息即可重试，下一次会自动连接新的外部会话。`,
+    },
+  }
+}
+
 export class AcpTurnRunner {
   private sessionId: string | undefined
   private dshSessionId: string | undefined
@@ -369,7 +429,15 @@ export class AcpTurnRunner {
     // replayed into it. Only that first request carries the history — a later
     // request would read it to the agent a second time.
     const firstOpen = this.dshSessionId !== turn.sessionId || this.sessionId === undefined
-    const sessionId = await this.open(turn.sessionId)
+    let sessionId: string
+    try {
+      sessionId = await this.open(turn.sessionId)
+    } catch (error: unknown) {
+      // An agent that never opened (missing binary, handshake timeout, refused
+      // login) is the reconnect case just as much as one that died mid-turn:
+      // the turn ends as a classified error instead of a thrown raw one.
+      return { frames: [], end: failureEndOf(error) }
+    }
     this.turnFrames = []
     this.aborted = false
     // Bound before the prompt goes out: a tool frame only arrives once the
@@ -426,8 +494,8 @@ export class AcpTurnRunner {
     try {
       reply = await this.client.request('session/prompt', params)
     } catch (error: unknown) {
-      // Remember it, settle what was streamed, then rethrow: the caller owns the
-      // error handling, and a turn that failed must not leave a stream hanging.
+      // Remember it and settle the listeners; the classification below turns
+      // it into the end the turn-error row can show as advice.
       failure = error
     } finally {
       // A listener must not outlive its turn, or a later turn would inherit
@@ -442,9 +510,7 @@ export class AcpTurnRunner {
     this.stream = undefined
 
     if (failure !== undefined) {
-      // The turn produced nothing worth keeping; close the stream without
-      // claiming a commit that will not happen.
-      stream?.abandon()
+      // The handover goes back first: a retry must keep the history.
       if (handedOver !== undefined) this.options.primer?.restore(turn.sessionId, handedOver)
       if (replayed !== undefined) {
         // The transcript rode this very prompt, so it is the likeliest reason
@@ -454,6 +520,7 @@ export class AcpTurnRunner {
         // the record and reads why the answer never came, rather than watching
         // the turn vanish into an opaque failure. Not classified further — any
         // failure of a prompt that carried the replay says so here.
+        stream?.abandon()
         return {
           frames: [...this.turnFrames],
           end: {
@@ -465,17 +532,21 @@ export class AcpTurnRunner {
           },
         }
       }
-      throw failure
+      // Everything else falls through to the shared tail: the frames the agent
+      // sent before failing are produced and written like any turn's, and the
+      // end names the failure class with copy the row can show as advice.
     }
 
     const result: AcpStepResult = {
       frames: [...this.turnFrames],
-      // The stop outranks whatever the agent replied: once the turn was
-      // stopped and the agent told to cancel, the turn is what the user made
-      // it — stopped — whatever raced out of the agent on the way down.
+      // The stop outranks whatever the agent replied — or whatever failure
+      // raced out of the dying connection: once the turn was stopped and the
+      // agent told to cancel, the turn is what the user made it — stopped.
       end: this.aborted
         ? { kind: 'aborted', reason: 'the turn was stopped; the agent was asked to cancel' }
-        : toEndReason(stopReason),
+        : failure !== undefined
+          ? failureEndOf(failure)
+          : toEndReason(stopReason),
       ...(stream === undefined ? {} : { stream: stream.records() }),
     }
     // Produce after the run, write after that, and only then announce the end:
@@ -596,6 +667,12 @@ export class AcpTurnRunner {
     })) as { sessionId?: unknown } | null
     if (typeof reply?.sessionId !== 'string') {
       throw new Error('acp session/new returned no sessionId')
+    }
+    // The picker serves what the agent reported; the dialect knows where the
+    // list lives. Reported even when empty — an agent that serves nothing must
+    // be able to replace whatever was believed before.
+    if (this.options.dialect !== undefined && this.options.onModels !== undefined) {
+      this.options.onModels(this.options.dialect.readModels(reply))
     }
     if (this.options.modeId !== undefined) {
       await this.client.request('session/set_mode', { sessionId: reply.sessionId, modeId: this.options.modeId })
