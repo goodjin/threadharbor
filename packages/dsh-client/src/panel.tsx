@@ -4,8 +4,10 @@
  * 2026-10-13 用户反馈定下的形状（覆盖 2026-10-12 的三界面骨架）：三个界面，
  * 列表页之外都是独立的页面——
  *
- * 1. 列表页：一张正常的表。「名称 / IP / 状态」三列表头，一行一台主机，
- *    点行进详情页；上方一个「添加新主机」按钮，别的什么都不放。
+ * 1. 列表页：一张正常的表。「名称 / IP / 设置」三列表头（第三列留空，按钮
+ *    自己说明自己），一行一台主机、行高一致；状态以名称旁的圆点标示，不
+ *    单占一列。点行或行尾的设置按钮进那台主机的设置页；上方一个「添加
+ *    新主机」按钮，别的什么都不放。
  * 2. 详情页：与添加页共用同一套表单（HostFormPage 的 view 模式）。主机只有
  *    「名称」「IP」两个字段（显示名撤销：主机标识改名「名称」并兼任显示名，
  *    登记存储里 hostTitle 留空、落库回落到 hostId）。主机自己报的事实（在线
@@ -483,9 +485,11 @@ function VerdictLine(props: {
 }
 
 /**
- * One host row in the list. The row is a line in a table — name, IP, status —
- * and the whole row is the button that opens the host's detail page. Nothing
- * else rides on it: details live on the detail page.
+ * One host row in the list. The row is a line in a table — name, IP, a
+ * settings affordance — and the whole row is the button that opens the
+ * host's detail (settings) page; every row is one fixed height so the list
+ * reads as a table (2026-10-13 用户反馈：三列＝名称、IP、设置按钮，行高一致).
+ * Status rides along as the dot before the name, not a column of its own.
  * @param props - the merged row and the open handler.
  * @returns the row.
  */
@@ -497,7 +501,7 @@ export function HostRow(props: {
   // 本机没有登记地址（它的地址就是这个标签页自己的 URL），IP 列以 — 占位，
   // 不硬塞内部标识充数。
   const ip = hostOf(row.address)
-  const badge = row.self
+  const status = row.self
     ? { word: '本机', tone: 'self' as const }
     : row.online
       ? { word: '在线', tone: 'online' as const }
@@ -510,9 +514,20 @@ export function HostRow(props: {
         className={styles.hostRowButton}
         onClick={props.onOpen}
       >
-        <strong data-host-name="" className={styles.hostName}>{row.name}</strong>
+        <span className={styles.hostNameCell}>
+          <span
+            data-host-status={status.tone}
+            className={styles.hostStatusDot}
+            title={status.word}
+            aria-label={status.word}
+            role="img"
+          />
+          <strong data-host-name="" className={styles.hostName}>{row.name}</strong>
+        </span>
         <span data-host-ip="" className={styles.hostIp} title={ip ?? undefined}>{ip ?? '—'}</span>
-        <span data-host-badge={badge.tone} className={styles.hostBadge}>{badge.word}</span>
+        {/* 设置按钮是这一行的动作（打开主机的设置页）。整行都是这个按钮，
+            这里的 span 是它的第三列外观，不是又一个独立控件。 */}
+        <span data-host-settings="" className={styles.rowSettings} aria-hidden="true">设置</span>
       </button>
     </div>
   )
@@ -1067,13 +1082,14 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
         >添加新主机</button>
       </div>
       <StoragePostureLine posture={props.hostStore?.posture()} />
-      {/* 一张正常的表（2026-10-13 用户反馈）：三列表头 + 一行一台主机，
-          点行进详情页。 */}
+      {/* 一张正常的表（2026-10-13 用户反馈）：三列（名称、IP、设置）＋ 一行
+          一台主机、行高一致；点行或行尾的设置进主机的设置页。 */}
       <div data-host-list="" data-panel-page="list" className={styles.hostList}>
         <div data-host-list-head="" className={styles.hostListHead} aria-hidden="true">
           <span className={styles.hostListHeadLabel}>名称</span>
           <span className={styles.hostListHeadLabel}>IP</span>
-          <span className={styles.hostListHeadLabel}>状态</span>
+          {/* 第三列是每行的设置按钮，表头留空——按钮自己说明自己。 */}
+          <span className={styles.hostListHeadLabel} />
         </div>
         {hostRows.length === 0
           ? <p data-host-list-empty="" className={styles.hostListEmpty}>还没有主机。点「添加新主机」登记第一台。</p>

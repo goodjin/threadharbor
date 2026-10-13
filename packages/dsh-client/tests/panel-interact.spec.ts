@@ -189,7 +189,7 @@ function type(container: HTMLElement, selector: string, value: string): void {
 }
 
 describe('面板点击行为：列表、详情、添加三个界面', () => {
-  it('初始是列表页：三列表头 + 主机行；agent 区不在列表页', async () => {
+  it('初始是列表页：表头（名称、IP）+ 主机行（圆点、名称、IP、设置按钮）；agent 区不在列表页', async () => {
     const { container, root } = await mountPanel(makeRegistry([
       { hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' },
     ]))
@@ -197,12 +197,17 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
       expect(q(container, '[data-panel-page="list"]')).toBeTruthy()
       expect(q(container, '[data-action="add-host"]').textContent).toContain('添加新主机')
       const head = q(container, '[data-host-list-head]')
-      expect(head.textContent).toContain('名称')
-      expect(head.textContent).toContain('IP')
-      expect(head.textContent).toContain('状态')
+      const labels = [...head.querySelectorAll('span')].map(span => span.textContent)
+      expect(labels[0]).toBe('名称')
+      expect(labels[1]).toBe('IP')
+      // 第三列是设置按钮，表头留空，不再有「状态」列。
+      expect(labels[2]).toBe('')
+      expect(head.textContent).not.toContain('状态')
       expect(q(container, '[data-host-row="bench"]')).toBeTruthy()
       expect(q(container, '[data-host-row="bench"] [data-host-name]').textContent).toBe('测试机')
       expect(q(container, '[data-host-row="bench"] [data-host-ip]').textContent).toBe('192.168.1.20')
+      expect(q(container, '[data-host-row="bench"] [data-host-settings]').textContent).toBe('设置')
+      expect(q(container, '[data-host-row="bench"] [data-host-status]').getAttribute('data-host-status')).toBe('offline')
       expect(container.querySelector('[data-agent-section]')).toBeNull()
       expect(container.querySelector('[data-panel-page="detail"]')).toBeNull()
     } finally {
@@ -417,9 +422,10 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
       const row = q(container, '[data-host-row="gamma"]')
       expect(row.querySelector('[data-host-name]')?.textContent).toBe('gamma')
       expect(row.querySelector('[data-host-ip]')?.textContent).toBe('192.168.1.30')
-      const badge = row.querySelector('[data-host-badge]')
-      expect(badge?.getAttribute('data-host-badge')).toBe('offline')
-      expect(badge?.textContent).toBe('未连接')
+      // 状态不再占一列：以名称旁的圆点标示（title 里带词）。
+      const dot = row.querySelector('[data-host-status]')
+      expect(dot?.getAttribute('data-host-status')).toBe('offline')
+      expect(dot?.getAttribute('title')).toBe('未连接')
       // IP 字段不带协议：入库时补上 http://。
       expect(registry.list()).toMatchObject([
         { hostId: 'gamma', hostTitle: 'gamma', address: 'http://192.168.1.30:3081' },

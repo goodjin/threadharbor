@@ -2,8 +2,9 @@
  * The agent panel's pieces, without a browser in the loop.
  *
  * 2026-10-13 用户反馈定下的形状：面板是三个界面——
- * 1. 列表页：一张正常的表（名称/IP/状态 三列，一行一台主机），上方一个
- *    「添加新主机」按钮；点行进详情页，别的什么都不放。
+ * 1. 列表页：一张正常的表（名称、IP、设置按钮 三列，行高一致；状态以
+ *    名称旁的圆点标示），上方一个「添加新主机」按钮；点行或设置按钮进
+ *    那台主机的设置页，别的什么都不放。
  * 2. 详情页：和添加页是同一套表单的两种模式——主机只有「名称」「IP」两个
  *    字段（显示名撤销，名称就是原来的主机标识）；主机自己报的事实（在线
  *    状态、心跳、自报标识）只在详情模式出现；本机的 agent 列表属于本机
@@ -466,34 +467,36 @@ describe('面板三个界面', () => {
     expect(html).not.toContain('data-host-details')
   })
 
-  it('列表页的主行是三列：名称、IP、徽标；完整地址不出现', () => {
+  it('列表页的主行是三列：状态圆点+名称、IP、设置按钮；完整地址不出现', () => {
     const html = renderToString(createElement(HostRow, {
       row: { hostId: 'bench', name: '测试机', self: false, online: false, address: 'http://192.168.1.20:3081' },
       onOpen: () => {},
     }))
     expect(html).toContain('data-host-open="bench"')
     expect(html).toContain('data-host-name=""')
+    expect(html).toContain('data-host-status="offline"')
     expect(html).toContain('data-host-ip=""')
     expect(html).toContain('192.168.1.20')
-    expect(html).toContain('data-host-badge="offline"')
+    expect(html).toContain('data-host-settings=""')
+    expect(html).toContain('设置')
     expect(html).not.toContain('http://192.168.1.20:3081')
     expect(html).not.toContain('最近心跳')
   })
 
-  it('没有登记地址的行（本机）IP 列以 — 占位', () => {
+  it('没有登记地址的行（本机）IP 列以 — 占位，圆点是本机色', () => {
     const html = renderToString(createElement(HostRow, {
       row: { hostId: 'self', name: '本机', self: true, online: true },
       onOpen: () => {},
     }))
-    expect(html).toContain('data-host-badge="self"')
+    expect(html).toContain('data-host-status="self"')
     expect(html).toContain('—')
   })
 
-  it('徽标分三色：本机、在线、未连接', () => {
+  it('状态圆点分三色：本机、在线、未连接', () => {
     const cases: [HostListRow, string][] = [
-      [{ hostId: 'self', name: '本机', self: true, online: true }, 'data-host-badge="self"'],
-      [{ hostId: 'beta', name: 'b', self: false, online: true }, 'data-host-badge="online"'],
-      [{ hostId: 'bench', name: 'b', self: false, online: false }, 'data-host-badge="offline"'],
+      [{ hostId: 'self', name: '本机', self: true, online: true }, 'data-host-status="self"'],
+      [{ hostId: 'beta', name: 'b', self: false, online: true }, 'data-host-status="online"'],
+      [{ hostId: 'bench', name: 'b', self: false, online: false }, 'data-host-status="offline"'],
     ]
     for (const [row, marker] of cases) {
       const html = renderToString(createElement(HostRow, { row, onOpen: () => {} }))
