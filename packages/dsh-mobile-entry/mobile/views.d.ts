@@ -97,6 +97,8 @@ export interface ApprovalItem {
   toolName: string
   displayReason?: string
   reason?: string
+  /** 应答在途：该横幅的批准/拒绝按钮渲染为 disabled。 */
+  pending?: boolean
 }
 
 export declare function renderApprovalBanners(items: readonly ApprovalItem[]): string

@@ -233,6 +233,18 @@ describe('renderApprovalBanners（待批权限横幅）', () => {
     const bare = renderApprovalBanners([{ eventId: 'e2', toolName: 'bash' }])
     expect(bare).toContain('请求执行工具')
   })
+
+  it('在途应答（pending）的横幅按钮禁用，未在途的照常可点', () => {
+    const html = renderApprovalBanners([
+      { eventId: 'e1', toolName: 'bash', pending: true },
+      { eventId: 'e2', toolName: 'write' },
+    ])
+    // e1 的批准/拒绝都禁用（防双击重复应答）；e2 的都可用。
+    expect(html.match(/<button type="button" disabled/g)).toHaveLength(2)
+    const enabledSection = html.split('data-event-id="e2"')[1] ?? ''
+    expect(enabledSection).not.toContain('disabled')
+    expect(html).toContain('data-action="approve"')
+  })
 })
 
 describe('stateFold（事件归并，幂等）', () => {

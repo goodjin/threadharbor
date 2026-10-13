@@ -254,7 +254,9 @@ export function renderConversation(state) {
 }
 
 /**
- * 待批权限横幅（可多张叠放）。每项 {eventId, toolName, displayReason?, reason?}。
+ * 待批权限横幅（可多张叠放）。每项 {eventId, toolName, displayReason?, reason?,
+ * pending?}。pending 为真时该横幅的批准/拒绝禁用——应答在途，UI 不邀双击
+ * （首答生效语义在宿主侧兜底，但按钮不该看起来还能按）。
  * 动作钩子只放在按钮上（data-action + data-event-id），app.js 委托后经
  * MuxConnection.answer 应答。
  */
@@ -266,13 +268,14 @@ export function renderApprovalBanners(items) {
       : typeof item.reason === 'string' && item.reason.length > 0
         ? item.reason
         : '请求执行工具'
+    const disabled = item.pending === true ? ' disabled' : ''
     return [
       '<div class="approval">',
       `<p class="approval-title">待批准：工具 ${escapeHtml(item.toolName)}</p>`,
       `<p class="approval-reason">${escapeHtml(reason)}</p>`,
       '<div class="approval-actions">'
-      + `<button type="button" data-action="approve" data-event-id="${eventId}">批准</button>`
-      + `<button type="button" data-action="reject" data-event-id="${eventId}">拒绝</button>`
+      + `<button type="button"${disabled} data-action="approve" data-event-id="${eventId}">批准</button>`
+      + `<button type="button"${disabled} data-action="reject" data-event-id="${eventId}">拒绝</button>`
       + '</div>',
       '</div>',
     ].join('')

@@ -39,5 +39,22 @@ export interface BootDeps {
   WebSocketCtor?: (new (url: string) => unknown) | undefined
 }
 
+/** 滚动锚点：上一次渲染的消息列表的阅读位与高度。 */
+export interface ScrollAnchor {
+  top: number
+  height: number
+}
+
+/**
+ * 滚动决策（纯函数，导出仅为测试）：restore（「加载更早」prepend）按高度差
+ * 补偿锚点，keep 原样，bottom 贴新高；anchor 为 null 或未知意图一律贴新高；
+ * 负值钳到 0。
+ */
+export declare function nextScrollTop(
+  mode: 'bottom' | 'keep' | 'restore',
+  anchor: ScrollAnchor | null,
+  newHeight: number,
+): number
+
 /** 启动应用：建壳、探测配对、渲染、挂事件。boot 完成后首屏已渲染。 */
 export declare function bootApp(root: HTMLElement, deps?: BootDeps): Promise<void>

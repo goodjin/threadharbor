@@ -125,6 +125,19 @@ function maxSeqOf(conv) {
 }
 
 /**
+ * 滚动决策（纯函数，导出仅为测试）：三种意图 → 重建后的 scrollTop。
+ * - restore（「加载更早」prepend）：内容整体下移，按高度差补偿锚点，阅读位不动；
+ * - keep（横幅/错误行等无关重渲染）：原样保持；
+ * - bottom（首开、有新消息追加）：贴到最新一条。
+ * 负值钳到 0。
+ */
+export function nextScrollTop(mode, anchor, newHeight) {
+  if (mode === 'restore' && anchor !== null) return Math.max(0, anchor.top + (newHeight - anchor.height))
+  if (mode === 'keep' && anchor !== null) return anchor.top
+  return newHeight
+}
+
+/**
  * 启动应用：建壳、探测配对、渲染、挂事件。state 全部收在闭包里，一次
  * bootApp 一份（测试可各自起一份互不串扰）。
  */
@@ -136,6 +149,11 @@ export async function bootApp(root, deps = {}) {
   let connection = null
   let refreshTimer = null
   let refreshingSessions = false
+  // 会话代际：每次打开会话/返回/重boot 都递增。会话内容的一切在途应答在
+  // 兑现点核对代际，过期即丢弃——慢探测/慢倒页落到新会话上就是静默错数据。
+  let convGeneration = 0
+  // 滚动意图：由改状态的代码声明，render 消费后归 keep。
+  let convScrollIntent = 'bottom'
 
   const state = {
     screen: 'boot',
@@ -151,6 +169,7 @@ export async function bootApp(root, deps = {}) {
     olderLoading: false,
     draft: '',
     approvals: new Map(),
+    pendingAnswers: new Set(),
     mux: 'connecting',
     muxDetail: '',
   }
@@ -198,7 +217,9 @@ export async function bootApp(root, deps = {}) {
     }
     const banners = root.querySelector('#banners')
     if (banners !== null) {
-      banners.innerHTML = renderApprovalBanners([...state.approvals.values()])
+      banners.innerHTML = renderApprovalBanners(
+        [...state.approvals.values()].map(item => ({ ...item, pending: state.pendingAnswers.has(item.eventId) })),
+      )
       banners.hidden = state.approvals.size === 0
     }
     const main = root.querySelector('#main')
@@ -229,6 +250,8 @@ export async function bootApp(root, deps = {}) {
         tabbar.innerHTML = tabbarHtml('sessions')
         break
       case 'conversation': {
+        // 重建前抓旧列表的滚动锚点；重建后按意图落位（nextScrollTop）。
+        const anchor = readConvAnchor(main)
         const summary = currentSummary()
         main.innerHTML = renderConversation({
           session: {
@@ -241,6 +264,7 @@ export async function bootApp(root, deps = {}) {
           loading: state.convLoading,
           error: state.convError,
         })
+        applyConvScroll(main, anchor)
         tabbar.innerHTML = ''
         break
       }
@@ -250,8 +274,21 @@ export async function bootApp(root, deps = {}) {
       input.value = state.draft
       if (activeId === 'prompt-input') input.focus()
     }
+  }
+
+  function readConvAnchor(main) {
     const list = main.querySelector('.msg-list')
-    if (list !== null) list.scrollTop = list.scrollHeight
+    return list === null ? null : { top: list.scrollTop, height: list.scrollHeight }
+  }
+
+  function applyConvScroll(main, anchor) {
+    const list = main.querySelector('.msg-list')
+    if (list === null) {
+      convScrollIntent = 'keep'
+      return
+    }
+    list.scrollTop = nextScrollTop(convScrollIntent, anchor, list.scrollHeight)
+    convScrollIntent = 'keep'
   }
 
   function tabbarHtml(activeTab) {
@@ -268,7 +305,9 @@ export async function bootApp(root, deps = {}) {
       connection.close()
       connection = null
     }
+    convGeneration += 1 // 重 boot 使一切在途会话应答过期
     state.approvals.clear()
+    state.pendingAnswers.clear()
     state.mux = 'connecting'
     state.muxDetail = ''
     state.screen = 'boot'
@@ -410,6 +449,7 @@ export async function bootApp(root, deps = {}) {
   /**
    * 把最新页并进对话状态：只追加比已有更新的记录（append 归并幂等）；一轮
    * 新增超过一页出现空洞时，窗口整体换成最新页——宁可少显历史，不显示断层。
+   * 追加了新内容 → 滚动意图 bottom（贴到最新）；没有变化 → keep。
    */
   function mergeLatestPage(page) {
     const maxSeq = maxSeqOf(state.conv)
@@ -419,8 +459,12 @@ export async function bootApp(root, deps = {}) {
     const hole = maxSeq !== undefined && tail.length > 0 && seqOf(tail[0]) > maxSeq + 1
     if (hole) {
       state.conv = stateFold(null, { kind: 'append', records: page.records })
+      convScrollIntent = 'bottom'
     } else if (tail.length > 0) {
       state.conv = stateFold(state.conv, { kind: 'append', records: tail })
+      convScrollIntent = 'bottom'
+    } else {
+      convScrollIntent = 'keep'
     }
     if (state.conv === null) {
       state.conv = { records: [], streams: [], hasMore: false }
@@ -429,13 +473,17 @@ export async function bootApp(root, deps = {}) {
   }
 
   async function openSession(sessionId) {
+    const generation = ++convGeneration
     state.screen = 'conversation'
     state.sessionId = sessionId
     state.conv = null
     state.convError = undefined
     state.convLoading = true
+    convScrollIntent = 'bottom'
     render()
     const page = await fetchLatestPage(sessionId)
+    // 兑现点核对代际：用户已换会话/返回/重 boot 的话，这版应答整体丢弃。
+    if (generation !== convGeneration) return
     state.convLoading = false
     if (page.status === 'ok') {
       mergeLatestPage(page)
@@ -451,7 +499,9 @@ export async function bootApp(root, deps = {}) {
 
   async function refreshConversation() {
     if (state.sessionId === null) return
+    const generation = convGeneration
     const page = await fetchLatestPage(state.sessionId)
+    if (generation !== convGeneration || state.sessionId === null) return
     if (page.status === 'ok') {
       mergeLatestPage(page)
       state.convError = undefined
@@ -466,6 +516,7 @@ export async function bootApp(root, deps = {}) {
 
   async function loadOlder() {
     if (state.olderLoading || state.sessionId === null) return
+    const generation = convGeneration
     const oldest = state.conv === null ? undefined : seqOf(state.conv.records[0])
     if (typeof oldest !== 'number') return
     const throughSeq = oldest - 1
@@ -473,12 +524,19 @@ export async function bootApp(root, deps = {}) {
     // 空页即到底，按钮直接消失。
     if (throughSeq < 0) {
       state.conv = { ...state.conv, hasMore: false }
+      convScrollIntent = 'keep'
       render()
       return
     }
     state.olderLoading = true
     render()
     const outcome = await rpcSessionPage(state.sessionId, throughSeq, PAGE_SIZE, 'older')
+    // 兑现点核对代际：用户已换会话的话，这页更早记录绝不并入新会话；
+    // olderLoading 仍要放掉，否则残留的 true 会卡死新会话的「加载更早」。
+    if (generation !== convGeneration) {
+      state.olderLoading = false
+      return
+    }
     state.olderLoading = false
     if (outcome.ok === true) {
       state.conv = stateFold(state.conv, {
@@ -486,8 +544,10 @@ export async function bootApp(root, deps = {}) {
         records: Array.isArray(outcome.result?.records) ? outcome.result.records : [],
         hasMore: outcome.result?.hasMore === true,
       })
+      convScrollIntent = 'restore'
       state.convError = undefined
     } else {
+      convScrollIntent = 'keep'
       const reason = guidanceReasonForKind(outcome.kind)
       if (reason !== null) {
         state.guideReason = reason
@@ -615,11 +675,15 @@ export async function bootApp(root, deps = {}) {
   // ---------- 应答 ----------
 
   async function answerApproval(eventId, approve) {
-    if (connection === null) return
+    if (connection === null || state.pendingAnswers.has(eventId)) return
+    // 在途标记：横幅按钮渲染成 disabled（UI 不邀双击），重复派发在此拦下。
+    state.pendingAnswers.add(eventId)
+    render()
     const outcome = await connection.answer(eventId, {
       kind: 'result',
       value: approve ? 'allowed-once' : 'rejected',
     })
+    state.pendingAnswers.delete(eventId)
     if (outcome.ok === true) {
       state.approvals.delete(eventId)
     } else {
@@ -657,6 +721,7 @@ export async function bootApp(root, deps = {}) {
         break
       }
       case 'back':
+        convGeneration += 1 // 返回即作废在途的会话内容应答
         state.screen = 'sessions'
         state.sessionId = null
         state.conv = null
