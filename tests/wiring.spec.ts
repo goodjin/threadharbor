@@ -84,6 +84,8 @@ const KNOWN_UNWIRED: Readonly<Record<string, string>> = {
     'Task 6 的单机协议常量（与 dsh-mobile-entry/src/wire.ts 同值，注释互相指认）。目前只有 tests/machine-client.spec.ts 在 import 它，产品消费方是同包 machine-client.ts 与后续转发面。清掉条件：转发面（或 machine-client 之外的接线方）import 本模块、把两个新模块一起带进装载链后，从本登记移除；wire.ts 本身会随 machine-client.ts 的接线一并可达。',
   'packages/dsh-mobile-relay/src/machine-client.ts':
     'Task 6 的单机客户端（对一台机器 DSH 的带 cookie RPC + $events 订阅 + 退避重连）。目前只有 tests/machine-client.spec.ts 在 import 它，产品消费方是 Task 7 的转发面（每机一个 MachineClient，凭据与隧道池经它聚合）。清掉条件：中转转发面 import 本模块后，从本登记移除。',
+  'packages/dsh-mobile-relay/src/hosts.ts':
+    'Task 7a 的主机清单算子（tailnet 发现 + 经隧道探 hello + 换凭据，5s 探测缓存）。目前只有 tests/hosts.spec.ts 在 import 它；产品消费方是 Task 7b 的装配（apply 构造 HostRegistry 并挂 /threadharbor/relay/hosts）。清掉条件：中转 apply import 本模块后，从本登记移除——同一次接线会把 tunnels.ts 与 credentials.ts 一并带进装载链，那两条随之清掉。',
 }
 
 function packageExports(pkg: string): Record<string, unknown> {
