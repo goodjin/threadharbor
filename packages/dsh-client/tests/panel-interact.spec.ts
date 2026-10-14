@@ -195,7 +195,7 @@ function type(container: HTMLElement, selector: string, value: string): void {
 }
 
 describe('面板点击行为：列表、详情、添加三个界面', () => {
-  it('初始是列表页：表头（名称、IP）+ 主机行（圆点、名称、IP、设置按钮）；agent 区不在列表页', async () => {
+  it('初始是列表页：表头（名称、状态、IP）+ 主机行（圆点、名称、IP、设置按钮）；agent 区不在列表页', async () => {
     const { container, root } = await mountPanel(makeRegistry([
       { hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' },
     ]))
@@ -205,10 +205,11 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
       const head = q(container, '[data-host-list-head]')
       const labels = [...head.querySelectorAll('span')].map(span => span.textContent)
       expect(labels[0]).toBe('名称')
-      expect(labels[1]).toBe('IP')
-      // 第三列是设置按钮，表头留空，不再有「状态」列。
-      expect(labels[2]).toBe('')
-      expect(head.textContent).not.toContain('状态')
+      // 状态列由主机状态工作加入：表头四列——名称/状态/IP/设置。
+      expect(labels[1]).toBe('状态')
+      expect(labels[2]).toBe('IP')
+      // 第四列是设置按钮，表头留空。
+      expect(labels[3]).toBe('')
       expect(q(container, '[data-host-row="bench"]')).toBeTruthy()
       expect(q(container, '[data-host-row="bench"] [data-host-name]').textContent).toBe('测试机')
       expect(q(container, '[data-host-row="bench"] [data-host-ip]').textContent).toBe('192.168.1.20')
