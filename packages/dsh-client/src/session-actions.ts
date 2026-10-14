@@ -9,22 +9,22 @@
 
 type CtxLike = { get(name: string): unknown }
 
-const asOpenSession = (value: unknown): ((sessionId: string) => void) | undefined =>
-  typeof (value as { openSession?: unknown } | undefined)?.['openSession'] === 'function'
-    ? (value as { openSession: (sessionId: string) => void }).openSession
-    : undefined
+/** Call through the receiver: these are prototype methods, and a detached call loses `this`. */
+type WithOpenSession = { readonly openSession: (sessionId: string) => void }
+type WithStartSession = { readonly startSession: (workspaceId: string) => void }
 
-const asStartSession = (value: unknown): ((workspaceId: string) => void) | undefined =>
-  typeof (value as { startSession?: unknown } | undefined)?.['startSession'] === 'function'
-    ? (value as { startSession: (workspaceId: string) => void }).startSession
-    : undefined
+const hasOpenSession = (value: unknown): value is WithOpenSession =>
+  typeof (value as { openSession?: unknown } | null | undefined)?.['openSession'] === 'function'
+
+const hasStartSession = (value: unknown): value is WithStartSession =>
+  typeof (value as { startSession?: unknown } | null | undefined)?.['startSession'] === 'function'
 
 /** Open an existing session. `false` means: not dispatched, caller shows why. */
 export function openLocalSession(ctx: CtxLike, sessionId: string): boolean {
-  const openSession = asOpenSession(ctx.get('uiWorkspace'))
-  if (openSession === undefined) return false
+  const ui = ctx.get('uiWorkspace')
+  if (!hasOpenSession(ui)) return false
   try {
-    openSession(sessionId)
+    ui.openSession(sessionId)
     return true
   } catch {
     return false
@@ -33,10 +33,10 @@ export function openLocalSession(ctx: CtxLike, sessionId: string): boolean {
 
 /** Start a new session inside a project. `false` means: not dispatched. */
 export function startSessionInProject(ctx: CtxLike, workspaceId: string): boolean {
-  const startSession = asStartSession(ctx.get('uiWorkspace'))
-  if (startSession === undefined) return false
+  const ui = ctx.get('uiWorkspace')
+  if (!hasStartSession(ui)) return false
   try {
-    startSession(workspaceId)
+    ui.startSession(workspaceId)
     return true
   } catch {
     return false

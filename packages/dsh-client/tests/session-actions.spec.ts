@@ -39,3 +39,25 @@ describe('startSessionInProject', () => {
     expect(startSessionInProject(ctx, 'w-9')).toBe(false)
   })
 })
+
+describe('方法不脱离宿主对象（原型方法依赖 this）', () => {
+  class PrototypeService {
+    readonly opened: string[] = []
+    readonly started: string[] = []
+    openSession(sessionId: string): void { this.opened.push(sessionId) }
+    startSession(workspaceId: string): void { this.started.push(workspaceId) }
+  }
+  class Ctx {
+    private readonly service = new PrototypeService()
+    get(name: string): unknown { return name === 'uiWorkspace' ? this.service : undefined }
+  }
+
+  it('经宿主对象派发：this 不丢，记录真实落账', () => {
+    const ctx = new Ctx()
+    const ui = ctx.get('uiWorkspace') as { opened: string[]; started: string[] }
+    expect(openLocalSession(ctx, 's-9')).toBe(true)
+    expect(startSessionInProject(ctx, 'w-9')).toBe(true)
+    expect(ui.opened).toEqual(['s-9'])
+    expect(ui.started).toEqual(['w-9'])
+  })
+})
