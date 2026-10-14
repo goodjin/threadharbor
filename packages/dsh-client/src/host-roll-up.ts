@@ -2,7 +2,7 @@ import type { HostRegistration, HostSession, RollUp } from '@threadharbor/dsh-ho
 import { rollUpView } from '@threadharbor/dsh-host-federation'
 import type { RollUpView } from '@threadharbor/dsh-host-federation'
 
-function groupByProject(sessions: readonly HostSession[]): RollUp['hosts'][number]['projects'] {
+export function groupByProject(sessions: readonly HostSession[]): RollUp['hosts'][number]['projects'] {
   const byProject = new Map<string, { projectTitle?: string; sessions: HostSession[] }>()
   for (const session of sessions) {
     const bucket = byProject.get(session.projectId) ?? { sessions: [] }

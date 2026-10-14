@@ -720,6 +720,20 @@ describe('从 Tailscale 选：表单前面的选择器', () => {
   })
 })
 
+describe('侧栏树跳转：threadharbor:focus-host 事件打开对应主机详情页', () => {
+  it('广播定位事件 → 面板切到该主机的详情页', async () => {
+    const registry = makeRegistry([{ hostId: 'mini', hostTitle: '迷你主机', address: 'http://192.168.1.20:3081' }])
+    const { container, root } = await mountPanel(registry)
+    try {
+      expect(container.querySelector('[data-host-detail]')).toBeNull()
+      act(() => { window.dispatchEvent(new CustomEvent('threadharbor:focus-host', { detail: { hostId: 'mini' } })) })
+      expect(container.querySelector('[data-use-section]')?.textContent ?? '').toContain('使用这台主机')
+    } finally {
+      await unmount(root)
+    }
+  })
+})
+
 describe('主机详情：使用这台主机 + 远程部署（状态机如实呈现）', () => {
   const SSH_SEED = {
     target: 'mini.tailb6790d.ts.net',

@@ -1,0 +1,183 @@
+/**
+ * 遮蔽注册与回退开关：maybeRegisterSidebarTree 只在开关开启时以更低
+ * 优先级数值注册 sidebar.workspaces（槽位机制：数值最小者渲染，原生
+ * 占位者被遮蔽）。组件容器 ShadowTreeHost 组装本机读取、远端轮询与
+ * 登记簿合成，喂给 HostSessionTree；自身不发请求的纯渲染树已在
+ * host-session-tree.spec 覆盖，这里测的是接线。
+ *
+ * @vitest-environment jsdom
+ */
+
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
+import { act, createElement } from 'react'
+import { createRoot } from 'react-dom/client'
+import type { Root } from 'react-dom/client'
+import { maybeRegisterSidebarTree, ShadowTreeHost, TREE_STORAGE_KEY, type TreeSlotHost } from '../src/sidebar-tree.ts'
+import { HostSessionTree } from '../src/host-session-tree.tsx'
+import { hostRegistry } from '@threadharbor/dsh-host-federation'
+import { zh } from '../src/locales.ts'
+
+Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+
+function zhT(key: string, params?: Record<string, unknown>): string {
+  return zh[key as keyof typeof zh]!.replace(/\{(\w+)\}/g, (_, name: string) => String(params?.[name] ?? `{${name}}`))
+}
+
+/** 内存真登记簿（与 panel-interact 同款）：add 写存储、list 读存储，语义不走仿造。 */
+function makeRegistry(entries: readonly { hostId: string; hostTitle: string; address: string; launchUrl?: string }[] = []) {
+  const map = new Map<string, string>()
+  const registry = hostRegistry({
+    getItem: key => map.get(key) ?? null,
+    setItem: (key, value) => { map.set(key, value) },
+  })
+  for (const entry of entries) {
+    const result = registry.add(entry)
+    if (!result.ok) throw new Error(`seed failed for ${entry.hostId}: ${result.error.detail}`)
+  }
+  return registry
+}
+
+const makeSlots = (): TreeSlotHost & { registered: Array<{ name: string; priority?: number }> } => {
+  const registered: Array<{ name: string; priority?: number }> = []
+  return {
+    registered,
+    inject: (_slot: string, callback: () => () => void) => callback(),
+    register: (options: { name: string; priority?: number }, _component: unknown) => {
+      registered.push({ name: options.name, priority: options.priority })
+      return () => {}
+    },
+  }
+}
+
+beforeEach(() => { localStorage.clear() })
+
+describe('maybeRegisterSidebarTree（遮蔽注册与开关）', () => {
+  it('开关默认开启：以更低优先级数值注册 sidebar.workspaces', () => {
+    const slots = makeSlots()
+    maybeRegisterSidebarTree(slots, { get: () => undefined })
+    expect(slots.registered).toEqual([{ name: 'sidebar.workspaces', priority: -10 }])
+  })
+
+  it('开关 off：完全不注册，原生列表照常', () => {
+    localStorage.setItem(TREE_STORAGE_KEY, 'off')
+    const slots = makeSlots()
+    maybeRegisterSidebarTree(slots, { get: () => undefined })
+    expect(slots.registered).toEqual([])
+  })
+
+  it('同一槽位重复注册（HMR 场景）：第二次静默跳过', () => {
+    const slots = makeSlots()
+    maybeRegisterSidebarTree(slots, { get: () => undefined })
+    maybeRegisterSidebarTree(slots, { get: () => undefined })
+    expect(slots.registered).toHaveLength(1)
+  })
+})
+
+/** 按真实投影形状造假：快照在 list.getSnapshot()，会话是 ids + byId。 */
+class FakeWorkspaces {
+  readonly list = {
+    getSnapshot: () => ({
+      state: 'ready',
+      items: [{ workspaceId: 'w1', title: '研究', path: '/r', sessionIds: ['s1'] }],
+      archivedSessionIds: [] as string[],
+    }),
+  }
+}
+class FakeSessions {
+  readonly list = {
+    getSnapshot: () => ({
+      ids: ['s1'],
+      byId: { s1: { displayTitle: '会话 1' } } as Record<string, { displayTitle?: string; title?: string }>,
+    }),
+  }
+}
+
+describe('ShadowTreeHost（容器接线）', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
+  it('本机服务就绪 + 登记簿远端主机：合成视图喂树，本机会话真实可见', async () => {
+    const registry = makeRegistry([{ hostId: 'mini', hostTitle: '迷你主机', address: 'http://127.0.0.1:1' }])
+    const services = { workspaces: new FakeWorkspaces(), sessions: new FakeSessions() }
+    const ctx = { get: (name: string) => (name === 'workspaces' || name === 'sessions' ? services[name] : undefined) }
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(ShadowTreeHost, {
+        ctx, registry, t: zhT, fetchNow: async () => ({ sessions: [] }),
+      }))
+    })
+    try {
+      expect(container.querySelector('[data-session-row="s1"]')?.textContent).toContain('会话 1')
+      expect(container.querySelector('[data-host-node="mini"]')?.getAttribute('data-undeployed')).toBe('true')
+    } finally {
+      await act(async () => { root.unmount() })
+    }
+  })
+
+  it('本机服务缺失：树不空白，显示未就绪原因', async () => {
+    const registry = makeRegistry()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(ShadowTreeHost, {
+        ctx: { get: () => undefined }, registry, t: zhT, fetchNow: async () => ({ sessions: [] }),
+      }))
+    })
+    try {
+      expect(container.querySelector('[data-host-tree]')?.textContent).toContain('读不到项目列表')
+    } finally {
+      await act(async () => { root.unmount() })
+    }
+  })
+
+  it('点未部署主机行：切到面板并广播定位事件', async () => {
+    const registry = makeRegistry([{ hostId: 'mini', hostTitle: '迷你主机', address: 'http://127.0.0.1:1' }])
+    const services = { workspaces: new FakeWorkspaces(), sessions: new FakeSessions() }
+    const ctx = { get: (name: string) => (name === 'workspaces' || name === 'sessions' ? services[name] : undefined) }
+    const selectPanel = vi.fn()
+    const events: Event[] = []
+    const listener = (event: Event): void => { events.push(event) }
+    window.addEventListener('threadharbor:focus-host', listener)
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(ShadowTreeHost, {
+        ctx, registry, t: zhT, selectPanel, fetchNow: async () => ({ sessions: [] }),
+      }))
+    })
+    try {
+      const toggle = container.querySelector<HTMLElement>('[data-host-node="mini"] [data-host-toggle]')
+      toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      expect(selectPanel).toHaveBeenCalledWith('threadharbor-rollup')
+      expect(events).toHaveLength(1)
+    } finally {
+      window.removeEventListener('threadharbor:focus-host', listener)
+      await act(async () => { root.unmount() })
+    }
+  })
+
+  it('远端主机有 launchUrl：挂载即发起一次拉取，失败原文入树', async () => {
+    const registry = makeRegistry([{ hostId: 'mini', hostTitle: '迷你主机', address: 'http://127.0.0.1:45000', launchUrl: 'http://127.0.0.1:45000/?token=x' }])
+    const services = { workspaces: new FakeWorkspaces(), sessions: new FakeSessions() }
+    const ctx = { get: (name: string) => (name === 'workspaces' || name === 'sessions' ? services[name] : undefined) }
+    const fetchNow = vi.fn(async () => ({ failed: 'HTTP 500' }))
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(ShadowTreeHost, { ctx, registry, t: zhT, fetchNow }))
+    })
+    try {
+      expect(fetchNow).toHaveBeenCalledWith('http://127.0.0.1:45000/?token=x')
+      expect(container.querySelector('[data-host-error]')?.textContent).toContain('HTTP 500')
+    } finally {
+      await act(async () => { root.unmount() })
+    }
+  })
+})

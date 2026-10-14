@@ -77,7 +77,7 @@ function seedShell(core: SlotCore): void {
     () => createElement('div'),
   )
   core.register(
-    { name: 'sidebar', children: { 'sidebar.panellist': { kind: 'list', scope: 'root' } } },
+    { name: 'sidebar', children: { 'sidebar.panellist': { kind: 'list', scope: 'root' }, 'sidebar.workspaces': { kind: 'single', scope: 'root' } } },
     () => createElement('div'),
   )
 }

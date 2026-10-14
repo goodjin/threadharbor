@@ -244,6 +244,7 @@ export const zh = {
   'panel.tree.noSessions': '这台主机还没有拉到会话。',
   'panel.tree.newSession': '在本项目下新建会话',
   'panel.tree.noHosts': '还没有任何主机。',
+  'panel.tree.selfHost': '本机',
   /** 详情页「远程部署与插件」折叠区。 */
   'panel.deploy.expand': '远程部署与插件（展开）',
   'panel.deploy.collapse': '收起部署区',
@@ -467,6 +468,7 @@ export const en = {
   'panel.tree.noSessions': 'No sessions fetched from this host yet.',
   'panel.tree.newSession': 'Start a new session in this project',
   'panel.tree.noHosts': 'No hosts yet.',
+  'panel.tree.selfHost': 'This machine',
   'panel.deploy.expand': 'Remote deploy and plugins (expand)',
   'panel.deploy.collapse': 'Collapse deploy area',
   'panel.ssh.httpInvalid': 'Invalid response (HTTP {status})',

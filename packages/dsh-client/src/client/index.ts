@@ -52,6 +52,7 @@ import type { AgentDescriptor, GatewayResult, SessionGateway } from '../gateway.
 import { runSessionProbe } from '../probe.ts'
 import type { ProbeOutcome } from '../probe.ts'
 import { layeredIdentitySettings, IDENTITY_STORAGE_KEY } from '../settings-source.ts'
+import { maybeRegisterSidebarTree } from '../sidebar-tree.ts'
 import { HOST_REGISTRY_KEY, HOST_STORE_ENTRY_ID, TAILSCALE_ERROR_KEY, TAILSCALE_PEERS_KEY, TAILSCALE_REFRESHED_KEY, TAILSCALE_REFRESH_KEY, hostRegistry } from '@threadharbor/dsh-host-federation'
 import type { TailscalePeer } from '@threadharbor/dsh-host-federation'
 import { startHostStore } from '../host-store.ts'
@@ -379,6 +380,11 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
     },
   }
   registerPanelSlots(ctx.slots, face, () => t('panel.label'))
+
+  // 阶段 L：以更低优先级数值遮蔽原生工作区列表，接管为「主机 → 项目 →
+  // 会话」树（§8.5）。开关 threadharbor.sidebarTree=off 时跳过注册，原生
+  // 列表照常——升级漂移时的一键退路。
+  maybeRegisterSidebarTree(ctx.slots, ctx)
 
   // 手机配对 section：和主机面板同一套侧栏注册面（sidebar.panellist + main），
   // 数据只有一条同源 GET（pair-url）。带令牌的网址只进面板状态、只画在这台

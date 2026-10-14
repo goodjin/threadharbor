@@ -45,7 +45,7 @@ function shellWith(core: SlotCore): void {
   core.register(
     {
       name: 'sidebar',
-      children: { 'sidebar.panellist': { kind: 'list', scope: 'root' } },
+      children: { 'sidebar.panellist': { kind: 'list', scope: 'root' }, 'sidebar.workspaces': { kind: 'single', scope: 'root' } },
     },
     () => createElement('div'),
   )
