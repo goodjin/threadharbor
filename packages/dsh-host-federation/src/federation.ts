@@ -38,6 +38,37 @@ export type HostSnapshot = {
   readonly self: boolean
 }
 
+/** One session as a host reports it. */
+export type HostSession = {
+  readonly projectId: string
+  readonly sessionId: string
+  readonly title: string
+  /** The project's own name, when the host knows it. */
+  readonly projectTitle?: string
+}
+
+export type ProjectGroup = {
+  readonly projectId: string
+  /**
+   * The project's name, taken from whichever session first carried it.
+   *
+   * Sessions cross the channel one at a time and only some of them know the
+   * name, so the first one that does supplies it — better one project's worth of
+   * rows reading "Web" and the rest reading its id.
+   */
+  readonly projectTitle?: string
+  readonly sessions: readonly HostSession[]
+}
+
+export type HostRoll = HostSnapshot & {
+  readonly projects: readonly ProjectGroup[]
+  readonly sessions: readonly HostSession[]
+}
+
+export type RollUp = {
+  readonly hosts: readonly HostRoll[]
+}
+
 export type FederationOptions = {
   /** A host silent for this long is treated as gone. */
   readonly staleMs: number

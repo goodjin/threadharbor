@@ -11,6 +11,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { HostFederation } from '../src/federation.ts'
+import { fetchRemoteSessions } from '../src/host-remote-sessions.ts'
 import type { FederationBus } from '../src/federation.ts'
 import type { HostIdentity } from '../src/identity.ts'
 
@@ -173,5 +174,52 @@ describe('HostFederation renameSelf', () => {
     fed.renameSelf('Renamed')
     expect(bus.posted.some(message => message.kind === 'bye')).toBe(false)
     expect(fed.hosts().map(h => h.hostId)).toEqual(['alpha', 'beta'])
+  })
+})
+
+describe('远端会话拉取（host-remote-sessions）', () => {
+  const stubFetch = (handler: (url: string) => { status: number; body?: unknown } | undefined): void => {
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const found = handler(String(input))
+      if (found === undefined) return new Response('not found', { status: 404 })
+      if (found.status !== 200) return new Response('err', { status: found.status })
+      return Response.json(found.body)
+    }) as typeof fetch
+  }
+
+  it('launchUrl 缺 token：返回空清单并说明原因，不请求网络', async () => {
+    const calls: string[] = []
+    stubFetch(url => { calls.push(url); return undefined })
+    const snap = await fetchRemoteSessions('http://127.0.0.1:4000/')
+    expect(snap.sessions).toEqual([])
+    expect(snap.note).toContain('token')
+    expect(calls).toEqual([])
+  })
+
+  it('launchUrl 无效：空清单 + 说明，不抛', async () => {
+    stubFetch(() => undefined)
+    const snap = await fetchRemoteSessions('::::not-a-url')
+    expect(snap.sessions).toEqual([])
+    expect(snap.note).toContain('无效')
+  })
+
+  it('两个候选端点先 404 后 200：解析出会话与项目名', async () => {
+    stubFetch(url => {
+      if (url.includes('/api/workspace/list')) return { status: 404 }
+      if (url.includes('/api/workspaces')) {
+        return { status: 200, body: { workspaces: [{ workspaceId: 'w1', title: '研究', path: '/r', sessionIds: ['s1', 's2'] }] } }
+      }
+      return undefined
+    })
+    const snap = await fetchRemoteSessions('http://127.0.0.1:4000/?token=tk')
+    expect(snap.sessions.map(s => s.sessionId)).toEqual(['s1', 's2'])
+    expect(snap.sessions.every(s => s.projectId === 'w1')).toBe(true)
+  })
+
+  it('两个端点都失败：空清单 + 原始状态码说明', async () => {
+    stubFetch(() => ({ status: 500 }))
+    const snap = await fetchRemoteSessions('http://127.0.0.1:4000/?token=tk')
+    expect(snap.sessions).toEqual([])
+    expect(snap.note).toContain('500')
   })
 })
