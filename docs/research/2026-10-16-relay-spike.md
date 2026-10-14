@@ -82,14 +82,14 @@
 ## 5. 探针脚本用法
 
 ```sh
-# 离线自测（12 条夹具断言，不碰网络；TDD 先红后绿的「测试」部分）
+# 离线自测（13 条夹具断言，不碰网络；TDD 先红后绿的「测试」部分）
 node scripts/probe-relay-wire.mjs --self-test          # 退出码 0=全过
 
 # 真机链路（在「云主机视角」所在机器上执行）
 node scripts/probe-relay-wire.mjs \
   --machine <ssh目标>        # ~/.ssh/config 别名或 user@host
   --port <远端DSH端口>       # 对端机器上 DSH 监听的回环端口
-  [--remote-log <路径>]      # 对端启动日志绝对路径；缺省尝试生产候选路径
+  [--remote-log <路径>]      # 对端启动日志绝对路径；缺省尝试生产候选路径（候选里的 ~ 以远端 "$HOME" 展开后下发，不依赖远端 shell 的波浪号展开）
   [--ws-from <目录>]         # 额外的 ws 包解析目录（缺省从本机 DSH 安装解析）
   [--request-timeout <ms>]   # 单步超时，默认 20000
 
@@ -102,7 +102,7 @@ node /root/probe-relay-wire.mjs --machine good@100.108.29.119 --port 3082 \
   --remote-log /Users/good/.local/state/threadharbor/relay-spike/dsh-web.log
 ```
 
-输出：每条检查一行 JSON（`tag=check.<名>`，含 `ok` 与脱敏明细），末行 `summary`（`ok`/`passed`/`failed`/`premiseInversions`）。退出码：0=全部通过。脚本自证不泄密：启动即剥离全部代理环境变量（`NODE_USE_ENV_PROXY` 陷阱）；令牌/cookie 只输出「是否取到、长度、名字、属性」；内置 12 条自测含金丝雀泄密扫描。Mac 上跑须 `env -u https_proxy -u http_proxy -u NODE_USE_ENV_PROXY node …`（双保险，脚本内部亦剥离）。
+输出：每条检查一行 JSON（`tag=check.<名>`，含 `ok` 与脱敏明细），末行 `summary`（`ok`/`passed`/`failed`/`premiseInversions`）。退出码：0=全部通过。脚本自证不泄密：启动即剥离全部代理环境变量（`NODE_USE_ENV_PROXY` 陷阱）；令牌/cookie 只输出「是否取到、长度、名字、属性」；内置 13 条自测含金丝雀泄密扫描。Mac 上跑须 `env -u https_proxy -u http_proxy -u NODE_USE_ENV_PROXY node …`（双保险，脚本内部亦剥离）。
 
 ## 6. 证据原文（探针完整输出，JSON 行，无凭据）
 
@@ -139,6 +139,8 @@ node /root/probe-relay-wire.mjs --machine good@100.108.29.119 --port 3082 \
 ### 探针开发过程（TDD）
 
 自测先红：`--self-test` 12/12 失败（全部因桩函数「尚未实现」，退出码 1）→ 实现后 12/12 通过（退出码 0）。实跑还抓出并修复了两个实现层问题：隧道检查输出引用错变量名（Run B 第一次实跑暴露）；非追加式日志重定向导致 `LAUNCH_URL=` 标记被服务日志覆写（运维要求，见 §3.2）。
+
+评审修复轮 1（2026-10-16）：补第 13 条自测「缺省候选路径的 ~ 在远端命令里展开为 $HOME」先红后绿——单引号里的 ~ 不会被远端 shell 展开，缺省候选路径原先恒打不中；修法是候选里的 ~ 以远端 `"$HOME"` 形式下发（展开成的是远端用户家目录）。真机复跑不带 `--remote-log` 验证缺省候选命中（marker=LAUNCH_URL，7/7，exit 0）。
 
 ### 诊断过程的中间实测（tencent01 本机 curl，2026-10-16）
 

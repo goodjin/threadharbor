@@ -50,10 +50,18 @@ export function buildSshTunnelArgs({ machine, localPort, remotePort }) {
   ]
 }
 
-/** 构造远端读日志命令：只输出目标标记行，取最后一行（生产 readLaunchUrl 语义）。 */
+/**
+ * 构造远端读日志命令：只输出目标标记行，取最后一行（生产 readLaunchUrl 语义）。
+ * 缺省候选是 ~ 前缀的生产路径，而单引号里的 ~ 不会被远端 shell 展开——必须以
+ * "$HOME/…" 形式交给远端展开（展开成远端用户家目录，不是本地家目录）；
+ * 绝对路径仍单引号原样传递。
+ */
 export function remoteLogReadCommand(candidates, marker) {
   const pattern = marker === 'LAUNCH_URL' ? '^LAUNCH_URL=' : '^dsh web: '
-  const list = candidates.map((candidate) => `'${candidate}'`).join(' ')
+  const remotePath = (candidate) => candidate.startsWith('~/')
+    ? `"$HOME/${candidate.slice(2)}"`
+    : `'${candidate}'`
+  const list = candidates.map(remotePath).join(' ')
   return `for f in ${list}; do if [ -f "$f" ]; then grep -h '${pattern}' "$f"; fi; done | tail -1`
 }
 
@@ -191,6 +199,12 @@ function selfTests() {
       assertTrue(cmd.includes('tail -1'), '应取最后一行')
       const cmd2 = remoteLogReadCommand(['/Users/good/.dsh/web.log'], 'dsh-web')
       assertTrue(cmd2.includes("grep -h '^dsh web: '"), '应 grep dsh web: 行')
+    }],
+    ['缺省候选路径的 ~ 在远端命令里展开为 $HOME（单引号内不展开）', () => {
+      const cmd = remoteLogReadCommand(['~/.local/state/threadharbor/stable/dsh-web.log', '/root/x/dsh-web.log'], 'LAUNCH_URL')
+      assertTrue(cmd.includes('"$HOME/.local/state/threadharbor/stable/dsh-web.log"'), '~ 应以 "$HOME/…" 形式交给远端展开')
+      assertTrue(!cmd.includes("'~"), '不得把 ~ 留在单引号里（远端不展开，缺省路径恒打不中）')
+      assertTrue(cmd.includes("'/root/x/dsh-web.log'"), '绝对路径仍应单引号原样传递')
     }],
     ['标记解析：两行取最后一行', () => {
       const stdout = 'LAUNCH_URL=http://a/?token=first\nLAUNCH_URL=http://b/?token=second\n'
