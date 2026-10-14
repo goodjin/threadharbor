@@ -165,6 +165,24 @@ describe('applyAcpPlugin', () => {
     expect(calls).toBe(2)
   })
 
+  it('leaves a zcode session on the native loop and still registers its models', () => {
+    const registered: { routes: string[] }[] = []
+    const context = {
+      ...ctx(),
+      get: (key: string) => key === 'llm'
+        ? { registerAdapter: (routes: string[]) => { registered.push({ routes }) } }
+        : undefined,
+    }
+    const patched: unknown[] = []
+    applyAcpPlugin(context, 'acp-zcode', {
+      agent: 'zcode',
+      models: [{ id: 'GLM-5.3', name: 'GLM 5.3' }],
+    }, { install: agent => { patched.push(agent) } })
+    context.created(session('acp-zcode'))
+    expect(patched).toEqual([])
+    expect(registered[0]?.routes).toEqual(['acp:acp-zcode'])
+  })
+
   it('registers its model route with the host catalog', () => {
     // The catalogue is what makes the agent's models appear in the picker;
     // mounted here because this is the function the loaded entry calls.

@@ -230,23 +230,19 @@
               presetId: acp-zcode
               agent: zcode
               hideFromRoster: true
-              # zcode 与其余四家不同：它的 ACP 侧是我们自己的适配器
-              # （packages/zcode-acp）。stdio 拉起这个单文件可执行，由它
-              # 再去 spawn 本机 ZCode 桌面版自带的 app-server（ZCode
-              # Protocol，非 JSON-RPC），做协议翻译与账号握手。凭证从
-              # ~/.zcode 解密注入，适配器内存持有、不落日志。
-              command: /Users/good/github/threadharbor/packages/zcode-acp/lib/zcode-acp.js
-              cwd: /Users/good/github/threadharbor
-              # 清单 = 2026-10-13 真机探针读到的 GLM Coding Plan 可用
-              # 模型（适配器 session/new 也报同一份）。GLM-5.3 必须
-              # reasoningLevel（适配器默认 high，ZCODE_ACP_LEVEL 可调）。
+              # zcode 是模型插件，不是 ACP 进程。本机 ZCode 登录密钥解密后，
+              # 对话按 Coding Plan 的地址发给 GLM；读文件、跑命令、审批、
+              # 取消和会话记录仍由 DSH 自己的循环处理。模型出现在列表的
+              # ZCode 这一组里。默认推理档是 high；选 none 会关掉思考。
+              # 国际站账号把 ZCODE_GLM_BASE_URL 设成
+              # https://api.z.ai/api/anthropic 。
               models:
                 - id: GLM-5.3
                   name: GLM 5.3
-                  description: GLM Coding Plan via the local ZCode app
+                  description: GLM Coding Plan
                 - id: GLM-5.3-Flash
                   name: GLM 5.3-Flash
-                  description: GLM Coding Plan via the local ZCode app
+                  description: GLM Coding Plan
                 - id: GLM-5.2
                   name: GLM 5.2
-                  description: GLM Coding Plan via the local ZCode app
+                  description: GLM Coding Plan

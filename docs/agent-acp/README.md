@@ -8,25 +8,25 @@
 | **codex** | ✅ 已实现，已实测 | stdio | [codex.md](./codex.md) |
 | **claude code** | ✅ 已实现，已实测 | stdio | [claude-code.md](./claude-code.md) |
 | **Cursor** | ✅ 已实现，已实测 | stdio | [cursor.md](./cursor.md) |
-| **zcode** | ✅ 已实现，已实测 | stdio（自有协议，适配器 `packages/zcode-acp`） | [zcode.md](./zcode.md) |
+| **zcode** | ✅ 模型插件 | 直连 GLM，不走 ACP | [zcode.md](./zcode.md) |
 
-已实现的五个共用的代码在 `packages/dsh-acp-agent/`：传输、客户端、投影、审批桥接是共用的，**每个 agent 只提供一个 dialect**。
+已实现的四家共用的代码在 `packages/dsh-acp-agent/`：传输、客户端、投影、审批桥接是共用的，**每个 agent 只提供一个 dialect**。
 
-> **zcode 与其余四家不同**：它说的不是 ACP 而是自有协议，所以除了 dialect 还有一个适配器进程 `packages/zcode-acp`（2026-10-13 实现已实测：真机握手、模型清单、工具帧、消息、usage、密钥零泄漏）。协议事实与适配器设计都在 [zcode.md](./zcode.md)。
+> **zcode 不在这张表里。** 它是模型列表里单独的一组 GLM，对话由 DSH 自己的循环处理。见 [zcode.md](./zcode.md)。
 
-## 五家的字段差异对照
+## 四家的字段差异对照
 
-差异都在「读哪个字段」，协议本身一致。这张表是分出 dialect 的全部理由。
+差异都在「读哪个字段」，协议本身一致。这张表是分出 dialect 的全部理由。zcode 不是 ACP，不在表里。
 
-| | grok | codex | claude | **Cursor** | **zcode** |
-|---|---|---|---|---|---|
-| **工具名** | `title`（**仅第一帧**） | `kind`（如 `execute`） | `_meta.claudeCode.toolName` | `kind`（如 `execute`） | `title`（适配器每帧都带） |
-| **工具输出** | `content`（**双层嵌套**） | `rawOutput.formatted_output` | `content` / `rawOutput` / `_meta…toolResponse.stdout` | `rawOutput.stdout` | `content`（ZCode 不暴露工具输出，恒为空） |
-| **模型列表** | `models.availableModels` | `models.availableModels` | `configOptions[id=model].options` | `models.availableModels` | `models.availableModels`（适配器自报） |
-| **token 数** | 更新帧 `params._meta.totalTokens` | `session/prompt` 响应 | `session/prompt` 响应 | **不提供** | `session/prompt` 响应（usage.delta 汇总） |
-| **权限请求 id** | 非 0 | 非 0 | 非 0 | **0（假值）** | 非 0 |
-| **终端子协议** | **要**（五个方法全实现） | 未观察到 | 未观察到 | 未观察到 | 未观察到 |
-| **额外前置** | — | — | 须切 `default` 模式 | **须先 `authenticate`** | —（适配器内部消化账号握手） |
+| | grok | codex | claude | **Cursor** |
+|---|---|---|---|---|
+| **工具名** | `title`（**仅第一帧**） | `kind`（如 `execute`） | `_meta.claudeCode.toolName` | `kind`（如 `execute`） |
+| **工具输出** | `content`（**双层嵌套**） | `rawOutput.formatted_output` | `content` / `rawOutput` / `_meta…toolResponse.stdout` | `rawOutput.stdout` |
+| **模型列表** | `models.availableModels` | `models.availableModels` | `configOptions[id=model].options` | `models.availableModels` |
+| **token 数** | 更新帧 `params._meta.totalTokens` | `session/prompt` 响应 | `session/prompt` 响应 | **不提供** |
+| **权限请求 id** | 非 0 | 非 0 | 非 0 | **0（假值）** |
+| **终端子协议** | **要**（五个方法全实现） | 未观察到 | 未观察到 | 未观察到 |
+| **额外前置** | — | — | 须切 `default` 模式 | **须先 `authenticate`** |
 
 **共用的一条铁律**：工具名必须**锁定**——各家都会在后续帧覆写名字或标题，不锁定就会被冲掉。
 
@@ -44,7 +44,7 @@
 
 ## 公共接口总览
 
-五家共用同一套 ACP 协议，差别在**能力声明**和**帧里的字段名**。外部四家为 2026-09-14 实测；zcode 的 ACP 侧是自有适配器，2026-10-13 实测。
+四家共用同一套 ACP 协议，差别在**能力声明**和**帧里的字段名**。2026-09-14 实测。
 
 ### 完整流程
 
@@ -69,7 +69,7 @@ agent  → client:  session/prompt 响应 { stopReason, usage? }
 { "fs": { "readTextFile": true, "writeTextFile": true }, "terminal": true }
 ```
 
-实测各家都接受这一组（zcode 的适配器直接接受）。声明了 `fs`/`terminal` 意味着客户端**愿意**服务对应的 `fs/*`、`terminal/*` 调用——不声明就不该期待 agent 发起。
+实测各家都接受这一组。声明了 `fs`/`terminal` 意味着客户端**愿意**服务对应的 `fs/*`、`terminal/*` 调用——不声明就不该期待 agent 发起。
 
 ### `initialize` 的能力声明（实测，差异很大）
 
@@ -133,7 +133,7 @@ agent 可能发标准之外的方法，本项目的客户端对不认识的会�
 2. `packages/dsh-preset-dispatch/src/factory.ts` — 在 `DIALECTS` 里登记
 3. preset 配置里声明 `agent` / `command`（或 `url`）
 4. **实测抓帧**，存进 `tests/fixtures/captured-frames.json`，补一份本文档式的说明
-5. 若目标说的不是 ACP（如 zcode）：先写适配器包（spawn 子进程 + 协议翻译，参照 `packages/zcode-acp`），preset 的 `command` 指向构建出的可执行文件
+5. 若目标只是一家模型、工具仍用 DSH：参照 zcode，做成模型插件，不要再包一层 ACP
 
 第 4 步不能省。四家的差异全都不是从代码或文档里能看出来的——codex 把输出放在 `rawOutput` 里且 `set_model` 是坏的、grok 的工具名只在第一帧、claude 自己跟自己不一致、Cursor 的权限请求 id 是 0——全是跑起来才看见的。
 

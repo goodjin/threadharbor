@@ -1,6 +1,6 @@
 # ThreadHarbor
 
-ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 ACP agent（grok、codex、claude code、cursor、zcode）接进 DSH：每个 agent 是一条 preset 组合行，会话仍是 DSH 原生会话，由原生的侧栏、会话界面和模型基础设施直接呈现。没有独立的 daemon——agent 子进程与连接由提供页面的那台机器上的 DSH 进程持有。
+ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 agent 接进 DSH：grok、codex、claude code、cursor 走 ACP，zcode 是模型列表里单独的一组 GLM。每个都是一条 preset，会话仍是 DSH 原生会话，由原生的侧栏、会话界面和模型基础设施直接呈现。没有独立的 daemon——连接由提供页面的那台机器上的 DSH 进程持有。
 
 它不是 DeepSeek Harness 的 fork，也不包含 Harness 源码。开发用的 Harness checkout 位于被 Git 忽略的 `reference/deepseek-harness/`。
 
@@ -12,7 +12,7 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 ACP agent（g
 
 以下每条都以当前代码为准（核对时间 2026-10-13；「真机可达」按 `tests/wiring.spec.ts` 从宿主加载入口做的传递可达性检查口径）：
 
-- 五个 agent 走同一套通用 ACP 接入层（`@threadharbor/dsh-acp-agent`）：stdio 与 WebSocket 两种传输、各家的帧方言（工具名/输出/模型列表位置各家不同，分别实现）、帧到 DSH 会话事件的投影、终端与文件两个子协议的应答。zcode 说的不是 ACP 而是本机 ZCode 桌面版的自有协议，由适配器包 `packages/zcode-acp` 翻译（凭证解密注入、密钥不落日志）。
+- 四个 agent（grok、codex、claude code、cursor）走同一套通用 ACP 接入层（`@threadharbor/dsh-acp-agent`）：stdio 与 WebSocket 两种传输、各家的帧方言、帧到 DSH 会话事件的投影、终端与文件两个子协议的应答。zcode 不走这条路：它在模型列表里单独成一组 GLM，用本机 ZCode 的登录密钥直连 Coding Plan，文字和工具调用交回 DSH 自己的循环。
 - 权限请求桥接到 DSH 审批服务：请求在回合内发起，应答是回带同一 id 的 JSON-RPC 响应帧；宿主没有审批服务时一律拒绝并在启动自报里写明 `approvals=refuse-all`。
 - 流式：回合进行中经 `agent/assistant-stream` 通道增量下发，回合结束后落一条内嵌压缩流的持久 `assistant/message`；两段靠同一 attemptId 对上。
 - 断连与进程退出会判明并结束回合，不再无限等待；会话按会话 id 隔离外部对话，一个会话一个外部会话。

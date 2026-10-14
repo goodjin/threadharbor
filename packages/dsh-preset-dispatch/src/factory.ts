@@ -16,7 +16,6 @@ import {
   codexDialect,
   cursorDialect,
   grokDialect,
-  zcodeDialect,
 } from '@threadharbor/dsh-acp-agent'
 import type {
   AcpDialect,
@@ -65,9 +64,6 @@ const DIALECTS: Readonly<Record<string, AcpDialect>> = {
   claude: claudeDialect,
   codex: codexDialect,
   cursor: cursorDialect,
-  // zcode's ACP side is our own adapter (packages/zcode-acp), spawned as the
-  // preset's command; the dialect still reads its frames like any other.
-  zcode: zcodeDialect,
 }
 
 /**
@@ -114,6 +110,9 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
     open: async (presetId, options): Promise<AcpSession> => {
       const preset = config.presets[presetId]
       if (preset === undefined) throw new Error(`acp dispatch: no preset named ${presetId}`)
+      if (preset.agent === 'zcode') {
+        throw new Error('zcode answers as a model inside the native loop; it is not opened as an ACP session')
+      }
 
       // grok is reached over a `grok agent serve` WebSocket this transport starts
       // and owns (random port + secret, ready-wait, kill on close) — unlike the

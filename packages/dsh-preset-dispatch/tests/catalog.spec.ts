@@ -369,3 +369,39 @@ describe('presetForModel', () => {
     expect(presetForModel(CODEX, codexDeps, providerRoute('acp-codex'), 'gpt-5')).toBeUndefined()
   })
 })
+
+describe('zcode model plugin', () => {
+  it('names ZCode in the picker and streams tool calls without the gateway', async () => {
+    const { gateway, seen } = fakeGateway()
+    const asked: { purpose?: unknown; tools?: unknown }[] = []
+    const adapter = catalogAdapter(
+      { presets: { 'acp-zcode': { agent: 'zcode', models: [{ id: 'GLM-5.3', name: 'GLM 5.3' }] } } },
+      {
+        modelsOf: () => [{ id: 'GLM-5.3', name: 'GLM 5.3' }],
+        dialectOf: () => undefined,
+        gateway,
+        modelStream: (_presetId, request) => {
+          asked.push({ purpose: request.purpose, tools: request.tools })
+          return (async function* () {
+            yield { type: 'tool-call-delta' as const, index: 0, id: 'c1', name: 'read', argumentsDelta: '{}' }
+            yield { type: 'finish' as const, reason: { kind: 'tool-calls' as const } }
+          })()
+        },
+      },
+    )
+    expect(adapter.providerInfo(providerRoute('acp-zcode'))).toEqual({ id: 'acp:acp-zcode', name: 'ZCode' })
+    const chunks = await readStream(adapter.stream({
+      provider: providerRoute('acp-zcode'),
+      model: 'GLM-5.3',
+      sessionId: 's1',
+      purpose: 'compaction',
+      tools: [{ name: 'read', description: 'Read a file', parameters: { type: 'object' } }],
+    }))
+    expect(chunks.map(chunk => chunk.type)).toEqual(['tool-call-delta', 'finish'])
+    expect(asked).toEqual([{
+      purpose: 'compaction',
+      tools: [{ name: 'read', description: 'Read a file', parameters: { type: 'object' } }],
+    }])
+    expect(seen).toEqual([])
+  })
+})

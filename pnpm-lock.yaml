@@ -129,6 +129,9 @@ importers:
       '@threadharbor/dsh-acp-agent':
         specifier: workspace:^
         version: link:../dsh-acp-agent
+      '@threadharbor/zcode-acp':
+        specifier: workspace:^
+        version: link:../zcode-acp
 
   packages/zcode-acp: {}
 

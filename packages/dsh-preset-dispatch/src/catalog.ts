@@ -13,6 +13,7 @@
  */
 
 import type { AcpDialect } from '@threadharbor/dsh-acp-agent'
+import type { GlmStreamChunk } from '@threadharbor/zcode-acp'
 import type { PresetConfig } from './registry.ts'
 import { baseIdOf } from './selection.ts'
 import { GatewayChunkQueue } from './gateway.ts'
@@ -193,6 +194,12 @@ export type CatalogDeps = {
       readonly signal?: AbortSignal
     }, sink: GatewaySink): Promise<void>
   }
+  /**
+   * A preset that is itself a model. Returning a stream answers the request
+   * here — tools included — and the native loop keeps the turn. Returning
+   * `undefined` leaves the request on the gateway path.
+   */
+  modelStream?(presetId: string, request: CatalogTurnRequest): AsyncIterable<GlmStreamChunk> | undefined
 }
 
 const ROUTE_PREFIX = 'acp:'
@@ -239,18 +246,40 @@ const DISPLAY: Readonly<Record<string, string>> = {
   claude: 'Claude',
   codex: 'Codex',
   cursor: 'Cursor',
+  zcode: 'ZCode',
 }
+
+/**
+ * What a native model request carries into `stream`.
+ *
+ * The loop passes a full generate request. ACP routes only need the fields
+ * the gateway already forwarded; a model plugin also needs the tools, the
+ * system text, and the output cap, because it is the model.
+ */
+export type CatalogTurnRequest = {
+  readonly provider: string
+  readonly model: string
+  readonly reasoningEffort?: unknown
+  readonly sessionId?: unknown
+  readonly messages?: readonly unknown[]
+  readonly purpose?: unknown
+  readonly signal?: unknown
+  readonly tools?: readonly { readonly name: string; readonly description?: string; readonly parameters?: Record<string, unknown> }[]
+  readonly system?: unknown
+  readonly maxTokens?: unknown
+}
+
+/** Chunks a catalog stream may yield: the gateway's text, or a real model's tool calls. */
+export type CatalogStreamChunk = GatewayChunk | GlmStreamChunk
 
 /**
  * The catalog-facing adapter.
  *
- * Deliberately implements only the display side. `stream` never produces a
- * stream: an external turn is driven by the replaced step and never by a model
- * request, so reaching this method means the takeover did not happen. When a
- * switch hook is wired the request is treated as a switch first — planned,
- * applied or refused by name — and the stream still ends in an error naming
- * what happened, because a session that looks healthy while doing nothing is
- * worse than one that says so.
+ * ACP agents only advertise models here. Their turns are driven by the
+ * replaced step, so `stream` for those routes borrows the agent through the
+ * gateway and refuses anything that is not a conversation. A model plugin is
+ * the exception: its `stream` is the model call, tool calls included, and the
+ * native loop keeps the turn.
  */
 export function catalogAdapter(config: PresetConfig, deps: CatalogDeps): CatalogAdapterLike {
   // One source of truth for every catalog-facing answer: the agent's own
@@ -321,8 +350,19 @@ export function catalogAdapter(config: PresetConfig, deps: CatalogDeps): Catalog
     // async, and the generator's rejection surfaces to the loop as the turn's
     // error — loud, and never a silently empty answer.
     providerRetryPolicy: (): undefined => undefined,
-    stream: function stream(options: { provider: string; model: string; reasoningEffort?: unknown; sessionId?: unknown; messages?: readonly unknown[]; purpose?: unknown; signal?: unknown }): AsyncIterable<GatewayChunk> {
-      return (async function* foreignModelRequest(): AsyncIterable<GatewayChunk> {
+    stream: function stream(options: CatalogTurnRequest): AsyncIterable<CatalogStreamChunk> {
+      return (async function* foreignModelRequest(): AsyncIterable<CatalogStreamChunk> {
+        const presetId = presetOfRoute(options.provider)
+        // A model plugin answers as the model. Background calls (a title, a
+        // compaction) are ordinary requests for it, and tool chunks go back
+        // to the loop that asked.
+        if (presetId !== undefined && deps.modelStream !== undefined) {
+          const direct = deps.modelStream(presetId, options)
+          if (direct !== undefined) {
+            yield* direct
+            return
+          }
+        }
         // Background housekeeping (session titles, compaction) borrows the
         // session's route but is not a conversation turn: prompting the
         // external agent for a title would double-bill and drift the
@@ -335,7 +375,11 @@ export function catalogAdapter(config: PresetConfig, deps: CatalogDeps): Catalog
             `acp catalog: ${options.provider}/${options.model} does not serve background ${options.purpose} requests — only a conversation turn may reach the external agent`,
           )
         }
-        const presetId = presetOfRoute(options.provider)
+        if (presetId === undefined) {
+          throw new Error(
+            `acp catalog: ${options.provider}/${options.model} never streams on its own — an external turn is either driven by the replaced step or answered in place through the gateway`,
+          )
+        }
         if (typeof options.sessionId !== 'string' || presetId === undefined || deps.gateway === undefined) {
           // Sessions our rows drive never reach a native model request — the
           // takeover replaces the step — so a request arriving here without a
@@ -402,9 +446,9 @@ export type CatalogAdapterLike = {
    */
   prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<{
     model: CatalogModel
-    stream(options: { provider: string; model: string; reasoningEffort?: unknown; sessionId?: unknown; messages?: readonly unknown[]; purpose?: unknown; signal?: unknown }): AsyncIterable<GatewayChunk>
+    stream(options: CatalogTurnRequest): AsyncIterable<CatalogStreamChunk>
   }>
-  stream(options: { provider: string; model: string; reasoningEffort?: unknown; sessionId?: unknown; messages?: readonly unknown[]; purpose?: unknown; signal?: unknown }): AsyncIterable<GatewayChunk>
+  stream(options: CatalogTurnRequest): AsyncIterable<CatalogStreamChunk>
   /**
    * The runtime asks every registered adapter for this, without checking that
    * it exists — an adapter that omits it takes down every route, not just its

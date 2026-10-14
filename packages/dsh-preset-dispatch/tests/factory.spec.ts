@@ -31,6 +31,14 @@ describe('makeSessionFactory', () => {
     expect(factory.dialectFor('acp-codex', CONFIG.presets['acp-codex']!)).toBe(codexDialect)
   })
 
+  it('does not open zcode as an ACP process', async () => {
+    const factory = makeSessionFactory({
+      presets: { 'acp-zcode': { agent: 'zcode', models: [{ id: 'GLM-5.3', name: 'GLM 5.3' }] } },
+    }, deps)
+    expect(factory.dialectFor('acp-zcode', { agent: 'zcode' })).toBeUndefined()
+    await expect(factory.open('acp-zcode', { cwd: '/tmp' })).rejects.toThrow(/native loop/)
+  })
+
   it('refuses an agent it does not drive, rather than guessing a dialect', () => {
     // Guessing here would parse a native session's frames as ACP and write
     // whatever came out into its log.

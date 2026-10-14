@@ -22,7 +22,8 @@
     "ignoreDeprecations": "5.0",
     "paths": {
       "@threadharbor/dsh-client": ["packages/dsh-client/src/index.ts"],
-      "@threadharbor/dsh-acp-agent": ["packages/dsh-acp-agent/src/index.ts"]
+      "@threadharbor/dsh-acp-agent": ["packages/dsh-acp-agent/src/index.ts"],
+      "@threadharbor/zcode-acp": ["packages/zcode-acp/src/index.ts"]
     }
   }
 }

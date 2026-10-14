@@ -2,5 +2,5 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "outDir": "lib", "rootDir": "." },
   "include": ["src/**/*.ts", "tests/**/*.ts"],
-  "references": [{ "path": "../dsh-acp-agent" }]
+  "references": [{ "path": "../dsh-acp-agent" }, { "path": "../zcode-acp" }]
 }

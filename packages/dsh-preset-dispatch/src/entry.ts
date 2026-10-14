@@ -196,8 +196,11 @@ export function apply(ctx: unknown, config: Config): void {
   const questions = (foundQuestions === null || typeof foundQuestions !== 'object'
     ? undefined
     : foundQuestions as { ask(request: unknown): Promise<unknown> })
+  const transport = config.agent === 'zcode'
+    ? 'model'
+    : config.url === undefined ? 'process' : 'websocket'
   const summary = `acp row mounted: preset=${config.presetId} agent=${config.agent} `
-    + `transport=${config.url === undefined ? 'process' : 'websocket'} `
+    + `transport=${transport} `
     + `host=${hostId} `
     + `preset-reading=${readProjection(host) === undefined ? 'header-only' : 'projection'} `
     + `approvals=${host.get?.('approval') === undefined ? 'refuse-all' : 'host'} `

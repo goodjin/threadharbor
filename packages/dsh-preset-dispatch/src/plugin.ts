@@ -34,6 +34,7 @@ import { followModelSelection, followPresetSelection } from './follow.ts'
 import { switchShared } from './switch-shared.ts'
 import { selectionOf } from './selection.ts'
 import type { CatalogDeps } from './catalog.ts'
+import { zcodeModelStream } from './zcode-model.ts'
 import type { AcpPresetBinding } from './dispatch.ts'
 import type { AcpDialect, AcpTransport } from '@threadharbor/dsh-acp-agent'
 
@@ -146,10 +147,12 @@ export function applyAcpPlugin(
     onRuntimeModels: (reportedPresetId, models) => { runtimeModelReports.record(reportedPresetId, models) },
   })
   const dialect = factory.dialectFor(presetId, config)
-  // An unknown agent is a configuration mistake. Taking sessions over anyway
-  // would hand them to a dialect that does not exist; better to leave them on
-  // the native agent, where they still work.
-  if (dialect === undefined) return
+  // zcode is a model inside the native loop: it still registers, and it does
+  // not take the step over. An unknown agent is a configuration mistake, and
+  // taking those sessions over would hand them to a dialect that does not
+  // exist; better to leave them on the native agent, where they still work.
+  const modelBacked = config.agent === 'zcode'
+  if (dialect === undefined && !modelBacked) return
   // The models this preset offers the picker — the same list the host's model
   // selector reads, and the list the preset→model follow selects from.
   const pickerModels = modelsOfPreset(presets, factory, presetId)
@@ -208,6 +211,7 @@ export function applyAcpPlugin(
     modelsOf: presetId => modelsOfPreset(presets, factory, presetId),
     runtimeModelsOf: presetId => runtimeModelReports.modelsOf(presetId),
     dialectOf: presetId => table.get(presetId)?.dialect,
+    modelStream: zcodeModelStream(presets),
   }
   // A model request landing on one of these routes for a session this row does
   // not drive is answered in place: the gateway borrows the agent as a model,
@@ -248,6 +252,11 @@ export function applyAcpPlugin(
     try {
       const agent = payload.agent as AgentLike
       if (presetIdOf(agent, deps.presetOf) !== presetId) return
+      if (modelBacked) {
+        void followPresetSelection(servicesOf(ctx), presetId, pickerModels, agentIdentifier(agent) ?? '?', agent, reportOf(deps))
+        return
+      }
+      if (dialect === undefined) return
       const binding = table.get(presetId)
       if (binding === undefined) return
       if (holdsAcpDispatch(agent, binding)) return
@@ -298,19 +307,28 @@ export function applyAcpPlugin(
       if ((data as { agentPreset: unknown }).agentPreset !== presetId) return
       const binding = table.get(presetId)
       const sessionId = sessionIdentifier(session)
-      if (binding === undefined || sessionId === undefined) return
+      if (sessionId === undefined) return
+      if (!modelBacked && binding === undefined) return
       const registry = ctx.get?.('agents')
       if (typeof registry !== 'object' || registry === null
         || typeof (registry as { get?: unknown }).get !== 'function') {
         // `select` resolves the agent before it can append the event, so a host
         // that could select at all always has the registry here. Silence would
         // make a takeover that never happens look exactly like one that did.
-        deps.report?.(`acp ${presetId}: preset selected for session ${sessionId} but this host exposes no agents registry — the takeover cannot reach the live agent`)
+        // A model plugin has no process to take over; it only aligns the picker.
+        if (!modelBacked) {
+          deps.report?.(`acp ${presetId}: preset selected for session ${sessionId} but this host exposes no agents registry — the takeover cannot reach the live agent`)
+        }
         return
       }
       const agent = liveAgentOf(registry, sessionId)
       // A cold session has no live agent, which is normal.
       if (agent === undefined) return
+      if (modelBacked) {
+        void followPresetSelection(servicesOf(ctx), presetId, pickerModels, sessionId, agent, reportOf(deps))
+        return
+      }
+      if (dialect === undefined || binding === undefined) return
       if (holdsAcpDispatch(agent, binding)) return
       deps.install(agent, presetId, dialect, table)
       void followPresetSelection(servicesOf(ctx), presetId, pickerModels, sessionId, agent, reportOf(deps))

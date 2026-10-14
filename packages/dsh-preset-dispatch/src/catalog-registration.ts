@@ -75,7 +75,9 @@ export function modelsOfPreset(
   if (preset === undefined) return []
   const dialect = factory.dialectFor(presetId, preset)
   // Not ours, or an agent that publishes nothing: no models to advertise.
-  if (dialect === undefined) return []
+  // zcode is a model plugin, so it has no frame dialect and the configured
+  // list is the catalog — that is what the picker offers.
+  if (dialect === undefined && preset.agent !== 'zcode') return []
   return preset.models ?? []
 }
 

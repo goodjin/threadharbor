@@ -1,7 +1,7 @@
 {
   "name": "@threadharbor/zcode-acp",
   "version": "0.1.0",
-  "description": "ACP adapter for the ZCode app-server: ACP JSON-RPC on stdio, ZCode Protocol to the spawned child",
+  "description": "GLM Coding Plan model plugin: decrypts the local ZCode login and streams text and tool calls",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/goodjin/threadharbor.git",
