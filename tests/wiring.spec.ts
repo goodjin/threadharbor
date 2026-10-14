@@ -80,6 +80,10 @@ const KNOWN_UNWIRED: Readonly<Record<string, string>> = {
     'Task 4 的凭据层（启动令牌换 cookie、0600 持久化、401 判脏后自愈一次）。目前只有 tests/credentials.spec.ts 在 import 它，产品侧的消费者（转发面带 Cookie 代理、apply 装载时构造 MachineCredentials）在后续任务。清掉条件：中转的转发面或 apply import 本模块后，从本登记移除。',
   'packages/dsh-mobile-relay/src/tunnels.ts':
     'Task 5 的隧道池（本地端口固定分配并落盘、同实例去重、指纹未登记不建隧道）。目前只有 tests/tunnels.spec.ts 在 import 它，产品消费方是 Task 7 的主机清单（HostRegistry 持有 TunnelPool）与转发面装配。清掉条件：中转 apply（经 hosts.ts 等接线）import 本模块后，从本登记移除。',
+  'packages/dsh-mobile-relay/src/wire.ts':
+    'Task 6 的单机协议常量（与 dsh-mobile-entry/src/wire.ts 同值，注释互相指认）。目前只有 tests/machine-client.spec.ts 在 import 它，产品消费方是同包 machine-client.ts 与后续转发面。清掉条件：转发面（或 machine-client 之外的接线方）import 本模块、把两个新模块一起带进装载链后，从本登记移除；wire.ts 本身会随 machine-client.ts 的接线一并可达。',
+  'packages/dsh-mobile-relay/src/machine-client.ts':
+    'Task 6 的单机客户端（对一台机器 DSH 的带 cookie RPC + $events 订阅 + 退避重连）。目前只有 tests/machine-client.spec.ts 在 import 它，产品消费方是 Task 7 的转发面（每机一个 MachineClient，凭据与隧道池经它聚合）。清掉条件：中转转发面 import 本模块后，从本登记移除。',
 }
 
 function packageExports(pkg: string): Record<string, unknown> {

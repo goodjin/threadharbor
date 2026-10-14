@@ -15,6 +15,7 @@
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.4",
     "@threadharbor/dsh-host-federation": "workspace:^",
-    "@threadharbor/dsh-mobile-entry": "workspace:^"
+    "@threadharbor/dsh-mobile-entry": "workspace:^",
+    "ws": "^8.21.0"
   }
 }
