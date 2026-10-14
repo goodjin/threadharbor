@@ -43,8 +43,12 @@ describe('DshSshManager', () => {
     expect(source).toContain('port_busy')
     expect(source).toContain('dsh plugin --profile web add')
     expect(source).toContain('threadharbor-dsh-web')
-    expect(source).toContain('tailscale ip -4')
+    expect(source).toContain('bind_host="127.0.0.1"')
+    expect(source).not.toContain('tailscale ip')
     expect(source).toContain('LAUNCH_URL=')
+    expect(source).toContain('peer.json')
+    expect(source).toContain('threadharbor-remote-agents.patch.yml')
+    expect(source).toContain('--patch $agents_patch')
     expect(source).not.toContain('hostd')
   })
 

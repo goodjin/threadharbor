@@ -53,7 +53,7 @@ dsh --profile web
 
 装好后 agent 不会自动出现：每个 agent 需要在 profile 组合里加一条 preset 行（`@deepseek-ai/dsh-agent-preset` 内嵌 `@threadharbor/dsh-preset-dispatch`），写明 `presetId`、`agent` 与连接方式。注意：起子进程的 agent 目前只能给一个裸 `command`，配置里**没有 `args` 字段**，要带参数得自己包一层脚本。
 
-preset 行注册后，agent 的模型会进全局模型目录，从模型列表即可切换；默认补丁另有一行 `threadharbor-roster-filter` 把这些 preset 从选择器名册里隐藏（切换机制依赖注册本身，不能直接删行），细节见 [docs/install-plugins.zh.md](docs/install-plugins.zh.md)。
+preset 行注册后，agent 的模型会进全局模型目录，从模型列表即可切换；binding 上的 `hideFromRoster: true` 让 `threadharbor-roster-filter` 按标记把这些 preset 从选择器名册里隐藏（切换机制依赖注册本身，不能直接删行），细节见 [docs/install-plugins.zh.md](docs/install-plugins.zh.md)。
 
 ## 真机活测
 

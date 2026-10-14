@@ -4,9 +4,9 @@
  * 2026-10-13 用户反馈定下的形状（覆盖 2026-10-12 的三界面骨架）：三个界面，
  * 列表页之外都是独立的页面——
  *
- * 1. 列表页：一张正常的表。「名称 / IP / 设置」三列表头（第三列留空，按钮
- *    自己说明自己），一行一台主机、行高一致；状态以名称旁的圆点标示，不
- *    单占一列。点行或行尾的设置按钮进那台主机的设置页；上方一个「添加
+ * 1. 列表页：一张正常的表。「名称 / 状态 / IP / 设置」四列，一行一台主机、
+ *    行高一致；名称旁仍保留状态圆点，状态列显示文字。点行或行尾的设置按钮
+ *    进那台主机的设置页；上方一个「添加
  *    新主机」按钮，别的什么都不放。
  * 2. 详情页：与添加页共用同一套表单（HostFormPage 的 view 模式）。主机只有
  *    「名称」「IP」两个字段（显示名撤销：主机标识改名「名称」并兼任显示名，
@@ -35,12 +35,14 @@ import type { AgentDescriptor, GatewayResult } from './gateway.ts'
 import type { ProbeOutcome } from './probe.ts'
 import { probeReach } from './reach.ts'
 import type { ReachOutcome } from './reach.ts'
-import type { HostIdentity, HostRegistration, RegistrationResult, SshAccessMode, SshConnectionInput, SshDeployResult, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
+import type { HostIdentity, HostRegistration, PeerStatus, RegistrationResult, RemoteAgentDeploySelection, SshConnectionInput, SshDeployResult, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
+import { REMOTE_DEPLOY_AGENT_SPECS } from '@threadharbor/dsh-host-federation'
 import type { HostSnapshot } from '@threadharbor/dsh-host-federation'
 import type { HostStorePosture } from './host-store.ts'
 import {
   inspectSshHost,
   probeSshDeployApi,
+  readRemotePeer,
   startSshDeploy,
   waitSshDeployOperation,
 } from './ssh-deploy.ts'
@@ -540,11 +542,9 @@ function VerdictLine(props: {
 }
 
 /**
- * One host row in the list. The row is a line in a table — name, IP, a
- * settings affordance — and the whole row is the button that opens the
- * host's detail (settings) page; every row is one fixed height so the list
- * reads as a table (2026-10-13 用户反馈：三列＝名称、IP、设置按钮，行高一致).
- * Status rides along as the dot before the name, not a column of its own.
+ * One host row in the list. The row is a line in a table — name, status, IP,
+ * settings — and the whole row is the button that opens the host's detail page;
+ * every row is one fixed height so the list reads as a table.
  * @param props - the merged row and the open handler.
  * @returns the row.
  */
@@ -561,10 +561,11 @@ export function HostRow(props: {
     : row.connection === 'connected'
       ? { word: '已连接', tone: 'online' as const }
       : row.connection === 'reachable'
-        ? { word: '可达', tone: 'online' as const }
+        ? { word: connectionStatusLabel('reachable'), tone: 'online' as const }
         : row.connection === 'checking'
-          ? { word: '检测中', tone: 'offline' as const }
-          : { word: '未连接', tone: 'offline' as const }
+          ? { word: connectionStatusLabel('checking'), tone: 'offline' as const }
+          : { word: connectionStatusLabel('disconnected'), tone: 'offline' as const }
+  const connection = row.self ? '本机' : connectionStatusLabel(row.connection)
   return (
     <div data-host-row={row.hostId} className={styles.hostRow}>
       <button
@@ -583,6 +584,7 @@ export function HostRow(props: {
           />
           <strong data-host-name="" className={styles.hostName}>{row.name}</strong>
         </span>
+        <span data-host-connection="" className={styles.hostConnection} title={status.word}>{connection}</span>
         <span data-host-ip="" className={styles.hostIp} title={ip ?? undefined}>{ip ?? '—'}</span>
         {/* 设置按钮是这一行的动作（打开主机的设置页）。整行都是这个按钮，
             这里的 span 是它的第三列外观，不是又一个独立控件。 */}
@@ -613,12 +615,13 @@ function SshDeploySection(props: {
   const [remoteWebPort, setRemoteWebPort] = useState('3081')
   const [keys, setKeys] = useState<readonly SshHostKeyCandidate[]>([])
   const [approvedFingerprint, setApprovedFingerprint] = useState('')
-  const [busy, setBusy] = useState<'inspect' | 'deploy' | undefined>(undefined)
+  const [busy, setBusy] = useState<'inspect' | 'peer' | 'deploy' | undefined>(undefined)
   const [progress, setProgress] = useState<SshDeployOperationView | undefined>(undefined)
-  const [accessMode, setAccessMode] = useState<SshAccessMode>('host-ip')
-  const [bindHost, setBindHost] = useState('')
-  const [trustedHost, setTrustedHost] = useState('')
+  const [peer, setPeer] = useState<PeerStatus | undefined>(undefined)
   const [deployed, setDeployed] = useState<SshDeployResult | undefined>(undefined)
+  const [remoteAgents, setRemoteAgents] = useState<RemoteAgentDeploySelection>(() => (
+    Object.fromEntries(REMOTE_DEPLOY_AGENT_SPECS.map(spec => [spec.key, true])) as RemoteAgentDeploySelection
+  ))
 
   const sshPayload = (): SshConnectionInput => {
     const base: SshConnectionInput = { target: target.trim() }
@@ -647,6 +650,22 @@ function SshDeploySection(props: {
     })
   }
 
+  const runReadPeer = (): void => {
+    if (approvedFingerprint === '') {
+      props.onError('请先检查并批准 SSH 主机密钥指纹')
+      return
+    }
+    setBusy('peer')
+    void readRemotePeer({ ...sshPayload(), hostKeyFingerprint: approvedFingerprint }).then(result => {
+      setBusy(undefined)
+      if (!result.ok) {
+        props.onError(result.error)
+        return
+      }
+      setPeer(result.value)
+    })
+  }
+
   const runDeploy = (): void => {
     if (approvedFingerprint === '') {
       props.onError('请先检查并批准 SSH 主机密钥指纹')
@@ -663,9 +682,8 @@ function SshDeploySection(props: {
       hostTitle: props.hostTitle.trim() === '' ? props.hostId.trim() : props.hostTitle.trim(),
       ssh: { ...sshPayload(), hostKeyFingerprint: approvedFingerprint },
       ...(remoteWebPort.trim() === '' ? {} : { remoteWebPort: Number(remoteWebPort) }),
-      accessMode,
-      ...(bindHost.trim() === '' ? {} : { bindHost: bindHost.trim() }),
-      ...(trustedHost.trim() === '' ? {} : { trustedHost: trustedHost.trim() }),
+      accessMode: 'tunnel',
+      remoteAgents,
     }).then(started => {
       if (!started.ok) {
         setBusy(undefined)
@@ -696,36 +714,8 @@ function SshDeploySection(props: {
   return (
     <div data-ssh-deploy="" className={styles.sshSection}>
       <p className={styles.note}>
-        SSH 自动部署在本机（提供 Web 页面的那台机器）上执行：私钥路径指<strong>这台机器</strong>上的绝对路径；
-        粘贴私钥或密码只发给本机 DSH 进程，不会写入日志。非 loopback 绑定不会使用 0.0.0.0，仍依赖 DSH 的 <code>?token=</code> 换 cookie。
+        对方的 DSH 只听 127.0.0.1。任意一台已安装 ThreadHarbor 的主机都可以 SSH 到另一台，读取对方是否已装插件和带 token 的地址，再在本机打开 SSH 隧道访问。私钥路径指<strong>当前这台机器</strong>上的绝对路径；粘贴的私钥或密码只发给本机 DSH 进程，不会写入日志。
       </p>
-      <fieldset className={styles.accessModes}>
-        <legend className={styles.summary}>访问方式</legend>
-        <label className={styles.sshKeyRow}>
-          <input type="radio" name="access-mode" checked={accessMode === 'host-ip'} onChange={() => { setAccessMode('host-ip') }} />
-          <span>主机 IP（默认：远端自动检测 IP 并绑定，登记 <code>http://&lt;主机IP&gt;:&lt;端口&gt;</code>，不建 SSH 隧道）</span>
-        </label>
-        <label className={styles.sshKeyRow}>
-          <input type="radio" name="access-mode" checked={accessMode === 'tunnel'} onChange={() => { setAccessMode('tunnel') }} />
-          <span>本机 SSH 隧道（远端 127.0.0.1 + 本地端口转发）</span>
-        </label>
-      </fieldset>
-      {accessMode === 'host-ip'
-        ? (
-            <label className={styles.field}>
-              绑定地址（可选，留空则远端自动检测 Tailscale / 网卡 IP）
-              <input className={styles.input} value={bindHost} onChange={event => { setBindHost(event.target.value) }} placeholder="192.168.x.x 或 100.x.x.x" />
-            </label>
-          )
-        : undefined}
-      {accessMode !== 'tunnel'
-        ? (
-            <label className={styles.field}>
-              --trusted-host（可选，MagicDNS 名）
-              <input className={styles.input} value={trustedHost} onChange={event => { setTrustedHost(event.target.value) }} placeholder="mybox.tail1234.ts.net" />
-            </label>
-          )
-        : undefined}
       <div className={styles.formGrid}>
         <label className={styles.field}>
           SSH 主机
@@ -776,9 +766,28 @@ function SshDeploySection(props: {
           <input className={styles.input} value={remoteWebPort} onChange={event => { setRemoteWebPort(event.target.value) }} />
         </label>
       </div>
+      <fieldset className={styles.accessModes} data-ssh-remote-agents="">
+        <legend className={styles.summary}>远端 Agent（ACP preset）</legend>
+        <p className={styles.note}>
+          勾选的 agent 会在远端 DSH 组合中启用（命令走 PATH，需目标机已安装对应二进制）；未勾选的将在部署后禁用。
+        </p>
+        {REMOTE_DEPLOY_AGENT_SPECS.map(spec => (
+          <label key={spec.key} className={styles.sshKeyRow}>
+            <input
+              type="checkbox"
+              checked={remoteAgents[spec.key] !== false}
+              onChange={event => { setRemoteAgents(prev => ({ ...prev, [spec.key]: event.target.checked })) }}
+            />
+            <span>{spec.label}（<code>{spec.presetId}</code>）</span>
+          </label>
+        ))}
+      </fieldset>
       <div className={styles.formActions}>
         <button type="button" className={styles.action} disabled={busy !== undefined} onClick={runInspect}>
           {busy === 'inspect' ? '正在检查……' : '检查 SSH 主机密钥'}
+        </button>
+        <button type="button" className={styles.action} disabled={busy !== undefined} onClick={runReadPeer}>
+          {busy === 'peer' ? '正在读取……' : '通过 SSH 读取对方状态'}
         </button>
         <button type="button" className={styles.actionPrimary} disabled={busy !== undefined} onClick={runDeploy}>
           {busy === 'deploy' ? '正在部署……' : '部署 DSH 并登记'}
@@ -800,6 +809,17 @@ function SshDeploySection(props: {
                 </label>
               ))}
             </div>
+          )
+        : undefined}
+      {peer !== undefined
+        ? (
+            <p data-ssh-peer="" className={styles.stateLine}>
+              {peer.pluginsInstalled
+                ? peer.listen === 'loopback'
+                  ? `对方已安装插件，DSH 听在 127.0.0.1。打开页面会走本机 SSH 隧道。${peer.launchUrl ?? ''}`
+                  : '对方这份记录不是回环监听。重新部署会改成只听 127.0.0.1，并由本机隧道访问。'
+                : '对方还没有 ThreadHarbor 的 peer 记录（尚未安装，或安装后还没成功启动）。可以在这里部署。'}
+            </p>
           )
         : undefined}
       {progress !== undefined
@@ -1457,7 +1477,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                 <ul data-panel-notices="" className={styles.notices}>
                   <li>「在线」= 这台机器的页面在同一个浏览器的同源标签页里开着并按心跳报数；关闭或崩溃的页面过了静默窗口会自动转为未列出。</li>
                   <li>另一台机器（另一个源）的页面不在这个频道里；它的行以「未连接」出现，靠的是登记。</li>
-                  <li>左侧树按主机列出项目与会话：本机来自 DSH 投影；远端登记主机通过 launchUrl 由管理端拉取（失败时请点「连接」打开远端页面）。</li>
+                  <li>左侧树按主机列出项目与会话：本机来自 DSH 投影；其他主机用登记里的 launchUrl 拉取（失败时请点「连接」打开那台机器的页面）。各主机对等，没有单独的管理机。</li>
                 </ul>
               </details>
             )}
@@ -1489,6 +1509,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
           <div data-host-list="" className={styles.hostList}>
             <div data-host-list-head="" className={styles.hostListHead} aria-hidden="true">
               <span className={styles.hostListHeadLabel}>名称</span>
+              <span className={styles.hostListHeadLabel}>状态</span>
               <span className={styles.hostListHeadLabel}>IP</span>
               <span className={styles.hostListHeadLabel} />
             </div>

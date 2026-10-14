@@ -108,10 +108,12 @@ DSH 的 agent preset 本身**就是一个组合**（一组插件行）：
 已开场的会话走交接），preset 选择器里的同名条目就是重复的门。DSH 没有
 「注册但不上名册」的开关，所以补丁里加了一行 `threadharbor-roster-filter`
 （`@threadharbor/dsh-preset-dispatch/roster-filter`）：在名册的**客户端出口**
-`remoteExportList` 上包一层，把 `hide` 点名的 preset id 从返回里去掉。网关是
-调用时在实例上按名字取方法的（`dsh-api-gateway` 的 `prepareInvocation` 用
-`Reflect.get`），所以实例级包裹能拦到；注册表内部的 `list()` 不动——模型→preset
-跟随、会话内切换、交接都靠它，滤掉会把切换整个拒掉。
+`remoteExportList` 上包一层。要藏的 preset 不写进过滤器的名单，而是在该
+preset 的 binding 上打 `hideFromRoster: true`；过滤器只认这个标记。新增
+agent 只要打同样的标记。网关是调用时在实例上按名字取方法的
+（`dsh-api-gateway` 的 `prepareInvocation` 用 `Reflect.get`），所以实例级包裹
+能拦到；注册表内部的 `list()` 不动——模型→preset 跟随、会话内切换、交接都靠它，
+滤掉会把切换整个拒掉。
 
 已知代价：正在跑这些 agent 的会话，头部 preset 标签会兜底显示原始 id（如
 `acp-grok`）——名册里没这条，标签只能用 id；旁边模型芯片仍显示 Grok。

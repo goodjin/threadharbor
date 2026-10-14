@@ -15,6 +15,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { hideFromRoster, visibleRoster } from '../src/roster-filter.ts'
+import { clearRosterMarks, markRosterHidden } from '../src/roster-marks.ts'
 
 const ROSTER = {
   presets: [
@@ -47,6 +48,16 @@ describe('visibleRoster', () => {
     const before = JSON.stringify(ROSTER)
     visibleRoster(ROSTER, ['acp-grok'])
     expect(JSON.stringify(ROSTER)).toBe(before)
+  })
+
+  it('drops a row that carries the hideFromRoster mark', () => {
+    const visible = visibleRoster({
+      presets: [
+        { id: 'standard' },
+        { id: 'acp-future', hideFromRoster: true },
+      ],
+    }, [])
+    expect(visible.presets.map(row => row.id)).toEqual(['standard'])
   })
 
   it('names an absent id without inventing rows', () => {
@@ -90,6 +101,16 @@ describe('hideFromRoster', () => {
     expect(done).toBe(false)
     expect(lines.length).toBe(1)
     expect(lines[0]).toContain('remoteExportList')
+  })
+
+  it('hides ids recorded by a binding mark, without a name list', async () => {
+    clearRosterMarks()
+    markRosterHidden('acp-codex')
+    const service = makeService()
+    hideFromRoster(service, [], () => {})
+    const roster = await service.remoteExportList()
+    expect(roster.presets.map(row => row.id)).toEqual(['standard', 'superpowers', 'acp-grok'])
+    clearRosterMarks()
   })
 
   it('passes an answer it does not recognise through untouched', async () => {

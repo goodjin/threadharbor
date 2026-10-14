@@ -33,6 +33,7 @@ export type { TailscalePeer } from './tailscale-keys.ts'
 // 先例；`ssh-deploy-id.ts` 是纯字符串模块）。
 export { SSH_DEPLOY_ENTRY_ID } from './ssh-deploy-id.ts'
 export type {
+  RemoteAgentDeploySelection,
   SshAccessMode,
   SshConnectionInput,
   SshDeployOperationView,
@@ -41,3 +42,5 @@ export type {
   SshDeployResult,
   SshHostKeyCandidate,
 } from './ssh/types.ts'
+export type { PeerListen, PeerStatus } from './ssh/peer-status.ts'
+export { REMOTE_DEPLOY_AGENT_SPECS } from './ssh/remote-agents.ts'

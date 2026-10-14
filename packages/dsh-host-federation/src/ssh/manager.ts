@@ -6,13 +6,15 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type { SshAccessMode, SshConnectionConfig, SshDeployProgress, SshDeployRequest, SshDeployResult, SshHostKeyCandidate } from './types.ts'
-import { composeLaunchUrl, parseAccessMode, parseDeployMarkers, validateBindHost, optionalHost } from './access.ts'
+import type { SshConnectionConfig, SshDeployProgress, SshDeployRequest, SshDeployResult, SshHostKeyCandidate } from './types.ts'
+import { composeLaunchUrl, parseAccessMode, parseDeployMarkers } from './access.ts'
 import { run, runWithEnv } from './run.ts'
 import { freePort, portListening } from './port.ts'
 import { deploymentChannel, destination, parseSshInput, shellQuote } from './parse.ts'
 import { readReleaseVersion, resolveReleaseDirectory } from './release.ts'
 import { DEFAULT_REMOTE_DSH_PLUGINS } from './deploy-plugins.ts'
+import { buildRemoteAgentsPatchYaml } from './remote-agents.ts'
+import { parsePeerStatus, type PeerStatus } from './peer-status.ts'
 
 export type SshManagerOptions = {
   readonly knownHostsPath: string
@@ -70,18 +72,42 @@ export class DshSshManager {
     return await this.scan(config)
   }
 
+  /**
+   * Read the peer record another host wrote for itself.
+   *
+   * Any machine with SSH credentials can do this; the file says whether
+   * ThreadHarbor is installed and which URL / listen mode to use.
+   */
+  async readPeer(config: SshConnectionConfig): Promise<PeerStatus> {
+    if (config.hostKeyFingerprint === 'unapproved') throw new Error('hostKeyFingerprint is required')
+    const approved = config
+    const scans = await this.scan(approved)
+    const scan = scans.find(candidate => candidate.hostKeyFingerprint === approved.hostKeyFingerprint)
+    if (scan === undefined) throw new Error('SSH host key changed or does not match the approved fingerprint')
+    this.persistKnownHost(approved, scan.knownHostLine)
+    const materialized = await this.materializeAuth(approved)
+    try {
+      const probe = await this.remoteExec(
+        materialized,
+        'cat "$HOME/.local/state/threadharbor/peer.json" 2>/dev/null || true',
+        this.handshakeBudgetMs(),
+      )
+      if (probe.code === 255) {
+        throw new Error(`无法使用当前 SSH 凭据连接目标主机：${probe.stderr.trim() || 'ssh 退出码 255'}`)
+      }
+      if (probe.code !== 0) return { pluginsInstalled: false }
+      return parsePeerStatus(probe.stdout)
+    } finally {
+      this.cleanupTempKeys()
+    }
+  }
+
   async deploy(
     request: SshDeployRequest,
     onProgress: (progress: SshDeployProgress) => void = () => undefined,
   ): Promise<SshDeployResult> {
     const config = this.parseApprovedConfig(request.ssh)
     const accessMode = parseAccessMode(request.accessMode)
-    const bindOverride = optionalHost(request.bindHost, 'bindHost')
-    const trustedHost = optionalHost(request.trustedHost, 'trustedHost')
-    if (accessMode === 'custom' && bindOverride === undefined) {
-      throw new Error('custom 访问模式必须提供 bindHost（具体 IP 或主机名，不能是 0.0.0.0）')
-    }
-    if (bindOverride !== undefined) validateBindHost(bindOverride)
     const remotePort = request.remoteWebPort ?? this.options.defaultRemoteWebPort
     const channel = this.options.deploymentChannel
     const releaseRoot = resolveReleaseDirectory(this.options.releaseDirectory)
@@ -160,11 +186,9 @@ export class DshSshManager {
         hostId: request.hostId,
         hostTitle: request.hostTitle,
         upgrade: request.upgrade === true,
-        accessMode,
         installFromGithub,
         remotePlugins,
-        ...(bindOverride === undefined ? {} : { bindOverride }),
-        ...(trustedHost === undefined ? {} : { trustedHost }),
+        remoteAgentsPatch: buildRemoteAgentsPatchYaml(request.remoteAgents),
       })
       const install = await this.remoteExec(materialized, installScript, this.options.installTimeoutMs)
       if (install.code !== 0) {
@@ -173,7 +197,7 @@ export class DshSshManager {
       }
       const markers = parseDeployMarkers(install.stdout)
       const alreadyRunning = markers.alreadyRunning
-      const bindHost = markers.bindHost ?? (accessMode === 'tunnel' ? '127.0.0.1' : bindOverride ?? '127.0.0.1')
+      const bindHost = '127.0.0.1'
       const remoteLaunch = markers.launchUrl
       if (remoteLaunch === undefined || remoteLaunch === '') {
         throw new Error('未能从远端日志读取带 ?token= 的 dsh web 启动 URL；请查看远端 dsh-web.log 或勾选升级后重试')
@@ -181,26 +205,16 @@ export class DshSshManager {
 
       onProgress({ phase: 'starting', detail: alreadyRunning ? '远端服务已在运行，已读取现有启动 URL。' : '正在启动远端 DSH Web。' })
 
-      let endpoint: string
-      if (accessMode === 'tunnel') {
-        onProgress({ phase: 'opening-tunnel', detail: '正在建立本机到远端 loopback 的 SSH 端口转发。' })
-        endpoint = await this.ensureTunnelWithAuth(materialized, remotePort)
-      } else {
-        endpoint = originForBind(bindHost, remotePort)
-        onProgress({ phase: 'verifying', detail: `正在确认 ${endpoint} 可访问（请确保本机与该地址网络互通，例如同一 Tailscale 网）。` })
-      }
+      onProgress({ phase: 'opening-tunnel', detail: '正在建立本机到远端 loopback 的 SSH 端口转发。' })
+      const endpoint = await this.ensureTunnelWithAuth(materialized, remotePort)
 
       onProgress({ phase: 'verifying', detail: '正在确认 DSH Web 健康检查。' })
       const healthy = await this.waitRemoteHealthy(endpoint)
       if (!healthy) {
-        throw new Error(accessMode === 'tunnel'
-          ? '部署后远端 DSH Web 未通过健康检查（本机隧道端口无响应）'
-          : `部署后无法在管理机上访问 ${endpoint}（请检查 Tailscale/防火墙与 --trusted-host）`)
+        throw new Error('部署后远端 DSH Web 未通过健康检查（本机隧道端口无响应）')
       }
 
-      const launchUrl = accessMode === 'tunnel'
-        ? composeLaunchUrl(endpoint, remoteLaunch)
-        : remoteLaunch
+      const launchUrl = composeLaunchUrl(endpoint, remoteLaunch)
 
       onProgress({ phase: 'succeeded', detail: '部署完成。' })
       return {
@@ -456,11 +470,6 @@ function commandExists(name: string): boolean {
   return result.status === 0
 }
 
-function originForBind(bindHost: string, port: number): string {
-  const host = bindHost.includes(':') && !bindHost.startsWith('[') ? `[${bindHost}]` : bindHost
-  return `http://${host}:${port}`
-}
-
 function buildInstallScript(input: {
   readonly channel: string
   readonly releaseDir: string
@@ -469,20 +478,16 @@ function buildInstallScript(input: {
   readonly hostId: string
   readonly hostTitle: string
   readonly upgrade: boolean
-  readonly accessMode: SshAccessMode
   readonly installFromGithub: boolean
   readonly remotePlugins: readonly string[]
-  readonly bindOverride?: string
-  readonly trustedHost?: string
+  readonly remoteAgentsPatch: string
 }): string {
   const {
-    channel, releaseDir, nodePath, remotePort, hostId, hostTitle, upgrade, accessMode, installFromGithub, remotePlugins,
-    bindOverride, trustedHost,
+    channel, releaseDir, nodePath, remotePort, hostId, hostTitle, upgrade, installFromGithub, remotePlugins,
+    remoteAgentsPatch,
   } = input
   const pluginPayload = shellQuote(remotePlugins.join('\n'))
-  const bindOverrideQ = bindOverride === undefined ? '' : shellQuote(bindOverride)
-  const trustedQ = trustedHost === undefined ? '' : shellQuote(trustedHost)
-  const accessQ = shellQuote(accessMode)
+  const agentsPatchPayload = shellQuote(remoteAgentsPatch)
   return [
     'set -eu',
     `channel=${shellQuote(channel)}`,
@@ -491,9 +496,6 @@ function buildInstallScript(input: {
     `port=${remotePort}`,
     `host_id=${shellQuote(hostId)}`,
     `host_title=${shellQuote(hostTitle)}`,
-    `access_mode=${accessQ}`,
-    bindOverrideQ === '' ? 'bind_override=' : `bind_override=${bindOverrideQ}`,
-    trustedQ === '' ? 'trusted_extra=' : `trusted_extra=${trustedQ}`,
     'node_dir="$(dirname "$node")"',
     'common_path="$node_dir:$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"',
     'export PATH="$common_path"',
@@ -511,27 +513,16 @@ function buildInstallScript(input: {
     installFromGithub
       ? 'printf \'%s\\n\' "$plugin_specs" | while IFS= read -r spec; do [ -z "$spec" ] && continue; dsh plugin --profile web add "$spec" || dsh plugin --profile web add "$spec"; done'
       : 'dsh plugin --profile web add "link:$release" || dsh plugin --profile web add "link:$release"',
+    `agents_patch_yaml=${agentsPatchPayload}`,
+    'agents_patch="$dsh_home/profiles/web/threadharbor-remote-agents.patch.yml"',
+    'mkdir -p "$(dirname "$agents_patch")"',
+    'printf \'%s\' "$agents_patch_yaml" > "$agents_patch"',
     'bind_host="127.0.0.1"',
-    'if [ "$access_mode" = "tunnel" ]; then',
-    '  bind_host="127.0.0.1"',
-    'elif [ "$access_mode" = "host-ip" ]; then',
-    '  if [ -n "$bind_override" ]; then bind_host="$bind_override"; else bind_host="$(tailscale ip -4 2>/dev/null | head -1 || true)"; fi',
-    '  if [ -z "$bind_host" ]; then bind_host="$(hostname -I 2>/dev/null | awk \'{print $1}\' || true)"; fi',
-    '  if [ -z "$bind_host" ]; then echo "未能自动检测主机 IP；请在表单填写绑定地址" >&2; exit 1; fi',
-    'elif [ "$access_mode" = "tailscale" ]; then',
-    '  if [ -n "$bind_override" ]; then bind_host="$bind_override"; else bind_host="$(tailscale ip -4 2>/dev/null | head -1 || true)"; fi',
-    '  if [ -z "$bind_host" ]; then echo "未检测到 Tailscale IPv4；请安装 tailscale 或在表单填写绑定地址" >&2; exit 1; fi',
-    'elif [ "$access_mode" = "custom" ]; then',
-    '  bind_host="$bind_override"',
-    'fi',
     'identity_file="$dsh_home/profiles/web/threadharbor-identity.env"',
     'printf \'DSH_HOST_ID=%s\\nDSH_HOST_TITLE=%s\\n\' "$host_id" "$host_title" > "$identity_file"',
     'case "$bind_host" in (0.0.0.0|"") echo "refusing wildcard bind" >&2; exit 1;; esac',
     'dsh_bin="$(command -v dsh)"',
-    'dsh_args="--profile web --no-open --port $port --host $bind_host"',
-    'if [ "$bind_host" != "127.0.0.1" ] && [ "$bind_host" != "::1" ]; then',
-    '  if [ -n "$trusted_extra" ]; then dsh_args="$dsh_args --trusted-host $trusted_extra"; else dsh_args="$dsh_args --trusted-host $bind_host"; fi',
-    'fi',
+    'dsh_args="--profile web --no-open --port $port --host $bind_host --patch $agents_patch"',
     'service_name="threadharbor-dsh-web-$channel.service"',
     'service="$HOME/.config/systemd/user/$service_name"',
     'printf \'%s\\n\' \'[Unit]\' "Description=ThreadHarbor DSH Web ($channel)" \'After=network-online.target\' \'\' \'[Service]\' "Environment=PATH=$common_path" "Environment=DSH_HOME=$dsh_home" "EnvironmentFile=-$identity_file" "ExecStart=$dsh_bin $dsh_args" \'Restart=on-failure\' \'RestartSec=2\' \'\' \'[Install]\' \'WantedBy=default.target\' > "$service"',
@@ -549,6 +540,8 @@ function buildInstallScript(input: {
     '  if [ -z "$url" ]; then echo "missing launch url in log" >&2; exit 1; fi',
     '  echo "BIND_HOST=$bind_host"',
     '  echo "LAUNCH_URL=$url"',
+    '  mkdir -p "$HOME/.local/state/threadharbor"',
+    '  PEER_URL="$url" PEER_BIND="$bind_host" PEER_PORT="$port" "$node" -e \'const fs=require("fs");const os=require("os");const path=require("path");const body={pluginsInstalled:true,listen:"loopback",port:Number(process.env.PEER_PORT),bindHost:process.env.PEER_BIND,launchUrl:process.env.PEER_URL};const file=path.join(os.homedir(),".local/state/threadharbor/peer.json");fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,JSON.stringify(body),{mode:384});\'',
     '  exit 0',
     '}',
     'already=0',

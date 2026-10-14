@@ -6,10 +6,12 @@ import type { SshAccessMode } from './types.ts'
 
 const FORBIDDEN_BIND = new Set(['0.0.0.0', '::', '[::]', '*', '0'])
 
+/** Deploy always listens on loopback and is reached through an SSH tunnel. */
 export function parseAccessMode(value: unknown): SshAccessMode {
-  if (value === undefined || value === null || value === 'host-ip') return 'host-ip'
-  if (value === 'tunnel' || value === 'tailscale' || value === 'custom') return value
-  throw new Error('accessMode must be host-ip, tunnel, tailscale, or custom')
+  if (value === undefined || value === null || value === 'tunnel' || value === 'host-ip' || value === 'tailscale' || value === 'custom') {
+    return 'tunnel'
+  }
+  throw new Error('accessMode must be tunnel')
 }
 
 export function validateBindHost(input: string): string {
