@@ -12,7 +12,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
-import { maybeRegisterSidebarTree, ShadowTreeHost, TREE_STORAGE_KEY, type TreeSlotHost } from '../src/sidebar-tree.ts'
+import { maybeRegisterSidebarTree, ShadowTreeHost, TREE_STORAGE_KEY, consumePendingFocus, type TreeSlotHost } from '../src/sidebar-tree.ts'
 import { HostSessionTree } from '../src/host-session-tree.tsx'
 import { hostRegistry } from '@threadharbor/dsh-host-federation'
 import { zh } from '../src/locales.ts'
@@ -42,8 +42,8 @@ const makeSlots = (): TreeSlotHost & { registered: Array<{ name: string; priorit
   return {
     registered,
     inject: (_slot: string, callback: () => () => void) => callback(),
-    register: (options: { name: string; priority?: number }, _component: unknown) => {
-      registered.push({ name: options.name, priority: options.priority })
+    register: (options: { name: string; priority?: number; locale?: string }, _component: unknown) => {
+      registered.push({ name: options.name, priority: options.priority, ...(options.locale === undefined ? {} : { locale: options.locale }) })
       return () => {}
     },
   }
@@ -52,10 +52,10 @@ const makeSlots = (): TreeSlotHost & { registered: Array<{ name: string; priorit
 beforeEach(() => { localStorage.clear() })
 
 describe('maybeRegisterSidebarTree（遮蔽注册与开关）', () => {
-  it('开关默认开启：以更低优先级数值注册 sidebar.workspaces', () => {
+  it('开关默认开启：以更低优先级数值与 locale 声明注册 sidebar.workspaces', () => {
     const slots = makeSlots()
     maybeRegisterSidebarTree(slots, { get: () => undefined })
-    expect(slots.registered).toEqual([{ name: 'sidebar.workspaces', priority: -10 }])
+    expect(slots.registered).toEqual([{ name: 'sidebar.workspaces', priority: -10, locale: 'threadharborClient' }])
   })
 
   it('开关 off：完全不注册，原生列表照常', () => {
@@ -91,6 +91,49 @@ class FakeSessions {
     }),
   }
 }
+
+describe('槽位组件在无注入 props 时的生产真相', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
+  const captureComponent = (ctx: { get(name: string): unknown }): (props: Record<string, unknown>) => unknown => {
+    const slots = makeSlots()
+    const registry = makeRegistry([{ hostId: 'mini', hostTitle: '迷你主机', address: 'http://127.0.0.1:1' }])
+    let component: (props: Record<string, unknown>) => unknown = () => null
+    const originalRegister = slots.register
+    ;(slots as { register: typeof slots.register }).register = (options, comp) => {
+      component = comp as (props: Record<string, unknown>) => unknown
+      return originalRegister(options, comp)
+    }
+    maybeRegisterSidebarTree(slots, ctx, registry)
+    return component
+  }
+
+  it('无 selectPanel 注入：经 layout 服务切面板，并把定位意图存给面板挂载后消费', async () => {
+    const layoutCalls: string[] = []
+    const services = {
+      workspaces: new FakeWorkspaces(),
+      sessions: new FakeSessions(),
+      layout: { selectPanel: (id: string) => { layoutCalls.push(id) } },
+    }
+    const component = captureComponent({ get: (name: string) => services[name as keyof typeof services] })
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(component as never, {}))
+    })
+    try {
+      // 组件树内部经 ctx 读 layout —— 通过捕获组件的子树点击验证
+      const el = container.querySelector<HTMLElement>('[data-host-node="mini"] [data-host-toggle]')
+      if (el === null) throw new Error('mini row missing')
+      act(() => { el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })) })
+      expect(layoutCalls).toEqual(['threadharbor-rollup'])
+      expect(consumePendingFocus()).toEqual({ hostId: 'mini' })
+    } finally {
+      await act(async () => { root.unmount() })
+    }
+  })
+})
 
 describe('ShadowTreeHost（容器接线）', () => {
   afterEach(() => { vi.restoreAllMocks() })

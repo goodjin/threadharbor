@@ -22,7 +22,7 @@ import type { SessionRead } from './session-source.ts'
 import { fetchHostSessions } from './remote-session-poll.ts'
 import type { HostSessionsResult } from './remote-session-poll.ts'
 import type { RuntimeT } from './locales.ts'
-import { fallbackT } from './locales.ts'
+import { NAMESPACE, fallbackT } from './locales.ts'
 
 /** The kill switch: `off` restores DSH's native workspace list. */
 export const TREE_STORAGE_KEY = 'threadharbor.sidebarTree'
@@ -31,12 +31,44 @@ export const TREE_STORAGE_KEY = 'threadharbor.sidebarTree'
 const PANEL_ID = 'threadharbor-rollup'
 export const FOCUS_HOST_EVENT = 'threadharbor:focus-host'
 
+/**
+ * A click's intent, parked for the panel to read when it mounts.
+ *
+ * `main` renders only the ACTIVE panel, so the panel — and its focus-host
+ * listener — does not exist yet at click time: selectPanel activates it, and
+ * the freshly mounted panel consumes this instead of having missed the event.
+ */
+type PendingFocus = { readonly hostId: string }
+let pendingFocus: PendingFocus | undefined
+export function recordPendingFocus(hostId: string): void { pendingFocus = { hostId } }
+export function consumePendingFocus(): PendingFocus | undefined {
+  const taken = pendingFocus
+  pendingFocus = undefined
+  return taken
+}
+
+const tryGet = (ctx: ServicesCtx, name: string): unknown => {
+  try {
+    return ctx.get(name)
+  } catch {
+    return undefined
+  }
+}
+
+/** Switch panels through whichever channel this registrant actually has. */
+const selectPanelThrough = (ctx: ServicesCtx, fallback?: (id: string) => void): ((id: string) => void) | undefined => {
+  if (typeof fallback === 'function') return fallback
+  const layout = tryGet(ctx, 'layout')
+  const selectPanel = (layout as { selectPanel?: unknown } | null | undefined)?.['selectPanel']
+  return typeof selectPanel === 'function' ? (layout as { selectPanel: (id: string) => void }).selectPanel.bind(layout) : undefined
+}
+
 /** The slot face the client entry hands in; tests build a recording fake. */
 export type TreeSlotHost = {
   inject(slot: string, callback: () => unknown): unknown
   // The real register takes the full options table (children/locale/store/…);
   // this module only ever passes name+priority, and the return is a dispose.
-  register(options: { name: string; priority?: number }, component: unknown): () => void
+  register(options: { name: string; priority?: number; locale?: string }, component: unknown): () => void
 }
 
 type ServicesCtx = { get(name: string): unknown }
@@ -71,14 +103,16 @@ export function maybeRegisterSidebarTree(slots: TreeSlotHost, ctx: ServicesCtx, 
   // would silently disagree with what the panel shows.
   const bound: RegistryLike = registry ?? hostRegistry(safeStorage())
   slots.inject('sidebar.workspaces', () => slots.register(
-    { name: 'sidebar.workspaces', priority: -10 },
-    (props: { readonly t?: RuntimeT; readonly selectPanel?: (id: string) => void }) =>
-      createElement(ShadowTreeHost, {
+    { name: 'sidebar.workspaces', priority: -10, locale: NAMESPACE },
+    (props: { readonly t?: RuntimeT; readonly selectPanel?: (id: string) => void }) => {
+      const via = selectPanelThrough(ctx, props.selectPanel)
+      return createElement(ShadowTreeHost, {
         ctx,
         registry: bound,
         ...(props.t === undefined ? {} : { t: props.t }),
-        ...(props.selectPanel === undefined ? {} : { selectPanel: props.selectPanel }),
-      }),
+        ...(typeof via === 'function' ? { selectPanel: via } : {}),
+      })
+    },
   ))
 }
 
@@ -164,6 +198,7 @@ export function ShadowTreeHost({ ctx, registry, t = fallbackT, selectPanel, fetc
 
   const onOpenHostPage = useCallback((hostId: string) => {
     selectPanel?.(PANEL_ID)
+    recordPendingFocus(hostId)
     window.dispatchEvent(new CustomEvent(FOCUS_HOST_EVENT, { detail: { hostId } }))
   }, [selectPanel])
 
