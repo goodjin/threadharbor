@@ -14,6 +14,9 @@
  * 就能断言画面，不需要浏览器。
  */
 
+// qrcode 的包主入口按 Node 解析：它会带上写 PNG 文件的渲染器（require('fs')），
+// 混进浏览器包就把整页带崩。打包侧在 tsdown 配置里把 qrcode 定点映射到包自带的
+// 浏览器入口（canvas 渲染，无 fs），源码与 Node 测试继续走正常入口。
 import { toDataURL } from 'qrcode'
 import { createElement, useSyncExternalStore } from 'react'
 import type { CSSProperties } from 'react'

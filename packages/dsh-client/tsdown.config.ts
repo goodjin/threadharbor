@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { basename } from 'node:path'
 import { isAbsolute, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -17,6 +18,18 @@ const externals = new Set([
   '@deepseek-ai/dsh-client-ui-layout/client',
   '@deepseek-ai/dsh-client-ui-primitives',
 ])
+
+// Packages whose PUBLISHED main entry resolves Node-first must ship their own
+// browser entry to this bundle by name. `qrcode` is the case that bit us: its
+// main entry pulls the PNG-to-file renderer, whose bare `require('fs')` takes
+// the whole page down at materialization ("missed the module table") — and a
+// bare builtin name slips past any `node:`-prefix grep, so the resolver, not
+// the source, pins the browser entry here. verify-build.mjs refuses every
+// builtin spelling either way; if this mapping ever drifts, the gate goes red.
+const require_ = createRequire(import.meta.url)
+const browserEntries: Record<string, string> = {
+  qrcode: require_.resolve('qrcode/package.json').replace(/package\.json$/, 'lib/browser.js'),
+}
 
 export default defineConfig([
   {
@@ -44,6 +57,7 @@ export default defineConfig([
     // otherwise stay as require() against a missing module-table entry.
     external: [...externals],
     noExternal: (specifier: string) => !externals.has(specifier),
+    alias: browserEntries,
     plugins: [{
       name: 'threadharbor-css-modules',
       resolveId(source: string, importer?: string) {

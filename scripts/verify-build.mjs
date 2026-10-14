@@ -35,16 +35,32 @@ if (chunks.length > 0 || relativeChunk !== null) {
  * No node builtins in the browser artifact.
  *
  * The platform seed table handed to the module loader lists react and the
- * client UI packages — no `node:*` words. A host-side module pulled into the
- * browser graph (through a package root that re-exports it) puts a
- * `require("node:os")` into the factory, and materialization dies with the
- * same "missed the module table" error. The browser half must import shared
- * constants from node-free modules, never from behavioral entries.
+ * client UI packages — no node builtins of any spelling. A host-side module
+ * pulled into the browser graph puts a require of one into the factory, and
+ * materialization dies with the same "missed the module table" error.
+ *
+ * Two spellings must both be refused. `node:os` survives minification as a
+ * plain string. A bare `fs` does not appear as a bare word to grep for — the
+ * minifier renames the callee — but the argument literal survives inside the
+ * call parens, so each builtin name is matched as a call whose sole argument
+ * is that quoted name. (A package that routes Node-only code by its `browser`
+ * field only half-works: the resolver can still pull the Node entry in — the
+ * `qrcode` PNG renderer shipped a bare `require('fs')` this exact way.)
  */
+import { builtinModules } from 'node:module'
+const bareBuiltins = [...new Set(builtinModules.map(name => (name.startsWith('node:') ? name.slice(5) : name)))]
 const nodeBuiltin = client.match(/["'`]node:[^"'`]+["'`]/g)
 if (nodeBuiltin !== null) {
   throw new Error(
     `DSH browser artifact requires node builtins the module table cannot resolve: ${[...new Set(nodeBuiltin)].join(', ')}`,
+  )
+}
+const callShapeBuiltin = bareBuiltins
+  .map(name => ({ name, hit: client.match(new RegExp(`\\((["'\`])${name}\\1\\)`, 'g')) }))
+  .filter(entry => entry.hit !== null)
+if (callShapeBuiltin.length > 0) {
+  throw new Error(
+    `DSH browser artifact calls node builtins by bare name (minified require keeps the argument literal): ${callShapeBuiltin.map(entry => entry.name).join(', ')}`,
   )
 }
 
@@ -132,7 +148,11 @@ for (const name of names) {
   const requested = new Set()
   const tabledRequire = (spec) => {
     requested.add(spec)
-    if (spec.startsWith('./') || spec.startsWith('node:')) {
+    // The real module loader refuses file paths and node builtins; a stub that
+    // quietly hands back a universal for bare `fs` would bless the very bundle
+    // that takes the page down (the qrcode PNG renderer shipped that way).
+    const bareName = spec.startsWith('node:') ? spec.slice(5) : spec
+    if (spec.startsWith('./') || builtinModules.includes(bareName)) {
       throw new Error(`client-modules: require("${spec}") missed the module table — not a platform seed word, not a materialized module, and no registered package factory`)
     }
     return universal
