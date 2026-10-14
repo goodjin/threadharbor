@@ -74,6 +74,10 @@ const KNOWN_UNWIRED: Readonly<Record<string, string>> = {
     '早期入口，职能与 entry.ts 重叠。模型目录注册已迁到真机路径（plugin.ts 挂载 registerCatalog），此文件只剩 barrel 导出与测试在用；接线检查把它列为配置字段消费方，删它必须先改那道检查。清掉条件：确认没有外部包再调用 attachAcpDispatch，并从配置消费检查的文件清单移除后整体删除。',
   'packages/dsh-mobile-entry/src/wire.ts':
     '线上协议常量记录（Task 6 探针钉死的端点/mux 帧字面量），手机端用的是把值逐条硬编码进去的 mobile/wire.js（静态页不能 import TS），包内只有 tests/wire.spec.ts 在 import 它——测试引用不算产品接线，这正是本登记要说的：它当前是记录，不是被装载的代码。清掉条件：mobile 侧改为从包 src（经构建产物）消费这些常量、或协议常量改由构建步骤生成进 mobile/wire.js 时接上并从登记移除；若常量记录被删除，登记随之删。',
+  'packages/dsh-mobile-relay/src/state.ts':
+    'Task 4 产出的共用状态文档读改写面（凭据与端口分配同住一份 statePath 文件，整份读-改-写）。目前只有凭据层（credentials.ts）与测试在用，而 credentials.ts 自身也未接线——真正的消费方是后续任务的隧道池（tunnels 段）与中转装载。清掉条件：中转 apply 或隧道池 import 本模块（经 credentials.ts 的传递 import 也算）后，从本登记移除。',
+  'packages/dsh-mobile-relay/src/credentials.ts':
+    'Task 4 的凭据层（启动令牌换 cookie、0600 持久化、401 判脏后自愈一次）。目前只有 tests/credentials.spec.ts 在 import 它，产品侧的消费者（转发面带 Cookie 代理、apply 装载时构造 MachineCredentials）在后续任务。清掉条件：中转的转发面或 apply import 本模块后，从本登记移除。',
 }
 
 function packageExports(pkg: string): Record<string, unknown> {
