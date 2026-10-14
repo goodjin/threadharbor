@@ -15,7 +15,6 @@ import { deploymentChannel, redactSshForLog } from './ssh/parse.ts'
 import type { SshDeployOperationView, SshDeployRequest } from './ssh/types.ts'
 import { isValidHostId } from './identity.ts'
 import { parseAccessMode } from './ssh/access.ts'
-import { fetchRemoteSessions } from './host-remote-sessions.ts'
 import { DEFAULT_REMOTE_DSH_PLUGINS, normalizePluginSpecs } from './ssh/deploy-plugins.ts'
 import { parseRemoteAgentSelection } from './ssh/remote-agents.ts'
 
@@ -27,7 +26,6 @@ export const inject = ['connection']
 export const ROUTE_INSPECT = '/api/threadharbor.host-ssh.inspect'
 export const ROUTE_DEPLOY = '/api/threadharbor.host-ssh.deploy'
 export const ROUTE_OPERATION = '/api/threadharbor.host-ssh.operation'
-export const ROUTE_REMOTE_SESSIONS = '/api/threadharbor.host-remote.sessions'
 export const ROUTE_PEER = '/api/threadharbor.host-ssh.peer'
 
 export type Config = {
@@ -150,13 +148,6 @@ export function apply(ctx: unknown, config: Config = {}): void {
     const keys = await manager.inspectAll(ssh)
     log.info('ssh inspect', redactSshForLog(ssh))
     return { keys }
-  })
-
-  register(ROUTE_REMOTE_SESSIONS, async body => {
-    const record = body as Record<string, unknown>
-    const launchUrl = typeof record['launchUrl'] === 'string' ? record['launchUrl'] : ''
-    if (launchUrl.trim() === '') throw new Error('launchUrl 必填')
-    return await fetchRemoteSessions(launchUrl)
   })
 
   register(ROUTE_DEPLOY, async body => {

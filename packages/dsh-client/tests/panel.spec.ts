@@ -170,9 +170,6 @@ class FakeRollUpSection implements RollUpSection {
   }
   setIdentity(_value: ConfiguredIdentity): void {}
   rereadIdentity(): void {}
-  republish(): void {}
-  element(): HTMLDivElement { return document.createElement('div') }
-  notices(): readonly string[] { return [] }
   dispose(): void {}
 }
 

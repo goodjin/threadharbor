@@ -19,7 +19,7 @@
  * fallback when no locale service is present; that contract is pinned by
  * runtime-locale.spec.ts rather than scanned here. The same blind spot exists
  * in a handful of other `.ts` modules (gateway.ts, host-store.ts, reach.ts,
- * rollup-section.ts, session-source.ts) whose copy also reaches the screen —
+ * rollup-section.ts) whose copy also reaches the screen —
  * they are a known, deliberately-undeferred scope item, not cleared. Adding
  * any `.ts` file to OWNED_SOURCES would be a no-op (the rule is `.tsx`-only), so
  * none are listed.

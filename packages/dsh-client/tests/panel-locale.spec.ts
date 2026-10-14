@@ -40,7 +40,6 @@ const PANEL_KEYS: readonly string[] = [
   'panel.title.selfAgents',
   'panel.title.connectionCare',
   'panel.title.notes',
-  'panel.title.sessionTree',
   // Buttons.
   'panel.button.probe',
   'panel.button.confirm',
@@ -128,7 +127,6 @@ const PANEL_KEYS: readonly string[] = [
   'panel.notes.selfHeal',
   'panel.notes.onlineMeaning',
   'panel.notes.otherSource',
-  'panel.notes.sessionTree',
   // The list page's empty state.
   'panel.list.empty',
   // The ssh-deploy section (inspect / deploy / progress / result).

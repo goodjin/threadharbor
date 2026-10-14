@@ -59,7 +59,6 @@ export const zh = {
   'panel.title.selfAgents': '本机 agent',
   'panel.title.connectionCare': '连接由谁照看',
   'panel.title.notes': '说明',
-  'panel.title.sessionTree': '会话（按主机）',
   /** 按钮。 */
   'panel.button.probe': '探测',
   'panel.button.confirm': '确定',
@@ -162,7 +161,6 @@ export const zh = {
   'panel.notes.selfHeal': '连接由主机自己照看：发现断了会自动丢弃并在下一次对话时自动重连，无需在这里操作。',
   'panel.notes.onlineMeaning': '「在线」= 这台机器的页面在同一个浏览器的同源标签页里开着并按心跳报数；关闭或崩溃的页面过了静默窗口会自动转为未列出。',
   'panel.notes.otherSource': '另一台机器（另一个源）的页面不在这个频道里；它的行以「未连接」出现，靠的是登记。',
-  'panel.notes.sessionTree': '左侧树按主机列出项目与会话：本机来自 DSH 投影；其他主机用登记里的 launchUrl 拉取（失败时请点「连接」打开那台机器的页面）。各主机对等，没有单独的管理机。',
   /** 列表页的空态。 */
   'panel.list.empty': '还没有主机。点「添加新主机」登记第一台。',
   /**
@@ -278,7 +276,6 @@ export const en = {
   'panel.title.selfAgents': 'Agents on this machine',
   'panel.title.connectionCare': 'Who minds the connection',
   'panel.title.notes': 'Notes',
-  'panel.title.sessionTree': 'Sessions (by host)',
   'panel.button.probe': 'Probe',
   'panel.button.confirm': 'OK',
   'panel.button.save': 'Save',
@@ -358,7 +355,6 @@ export const en = {
   'panel.notes.selfHeal': 'The host minds its own connections: a broken one is dropped on its own and reconnected at the next turn — nothing to do here.',
   'panel.notes.onlineMeaning': '"Online" = this machine\'s page is open in a same-origin tab of the same browser and announcing on its heartbeat; a closed or crashed page drops out of the list on its own after the quiet window.',
   'panel.notes.otherSource': "Another machine's page (another origin) is not on this channel; its row shows up as \"Not connected\", carried by the registration.",
-  'panel.notes.sessionTree': 'The tree on the left lists projects and sessions per host: this machine\'s come from DSH\'s projection; other hosts are fetched via launchUrl in the registry (if that fails, press "Connect" to open that machine\'s page). Every host is a peer — there is no separate management machine.',
   'panel.list.empty': 'No hosts yet. Press "Add a new host" to register the first one.',
   // The ssh-deploy section. The intro is two keys because one sentence mixes
   // a <strong> and a <code> segment and richSegments wraps one kind per call;

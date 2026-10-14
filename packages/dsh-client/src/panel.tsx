@@ -115,11 +115,6 @@ export type AgentPanelBusinessProps = {
   readonly rollUp: RollUpSection
   /** The registration list for other hosts; owned by the wiring. */
   readonly registry: HostRegistryPort
-  /** Pull remote host session trees via the management server's API. */
-  readonly remoteSessions?: {
-    refresh(registrations: readonly HostRegistration[]): void
-    subscribe(listener: () => void): () => void
-  }
   /**
    * Where the registry and the default identity are stored right now, plus a
    * subscription to its changes. The panel renders the posture as-is: where
@@ -1286,18 +1281,10 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
 
   const identity = props.rollUp.identity()
   const registrations = props.registry.list()
-  // Re-read on every render, including every list tick: presence and the
-  // registry both change out from under this component.
+  // Re-read on every render: presence and the registry both change out from
+  // under this component.
   const presence = props.rollUp.hosts()
   const hostRows = mergeHostRows(presence, registrations, reaches)
-
-  useEffect(() => {
-    props.remoteSessions?.refresh(registrations)
-    const timer = window.setInterval(() => { props.remoteSessions?.refresh(registrations) }, 30_000)
-    return () => { window.clearInterval(timer) }
-  }, [props.remoteSessions, registryRevision, registrations])
-
-  useEffect(() => props.remoteSessions?.subscribe(() => { setListTick(tick => tick + 1) }) ?? (() => undefined), [props.remoteSessions])
 
   if (view.page === 'add') {
     if (sshDeployAvailable && addMode === 'ssh') {
@@ -1524,7 +1511,6 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                 <ul data-panel-notices="" className={styles.notices}>
                   <li>{props.t('panel.notes.onlineMeaning')}</li>
                   <li>{props.t('panel.notes.otherSource')}</li>
-                  <li>{props.t('panel.notes.sessionTree')}</li>
                 </ul>
               </details>
             )}
@@ -1536,50 +1522,39 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
 
   return (
     <div data-threadharbor-panel="" className={styles.root}>
-      <section data-panel-page="list" className={styles.listLayout}>
-        <div data-session-tree="" className={styles.sessionTreePane}>
-          <h2 className={styles.title}>{props.t('panel.title.sessionTree')}</h2>
-          <div ref={attachRollUpMount(props.rollUp)} data-rollup-host="" className={styles.rollupHost} />
+      {/* 2026-10-14 用户确认：面板回到单区域——没有左侧会话树（2026-10-11
+          §8.3 的决定），要看某台主机的会话，去那台主机自己的页面。 */}
+      <div data-panel-page="list">
+        <div className={styles.pageHead}>
+          <h2 className={styles.title}>{props.t('panel.title.hosts')}</h2>
+          <span className={styles.spacer} />
+          <button
+            type="button"
+            data-action="add-host"
+            className={styles.actionPrimary}
+            onClick={() => { setFormMessage(undefined); setView({ page: 'add' }) }}
+          >{props.t('panel.title.addHost')}</button>
         </div>
-        <div data-host-pane="" className={styles.hostPane}>
-          <div className={styles.pageHead}>
-            <h2 className={styles.title}>{props.t('panel.title.hosts')}</h2>
-            <span className={styles.spacer} />
-            <button
-              type="button"
-              data-action="add-host"
-              className={styles.actionPrimary}
-              onClick={() => { setFormMessage(undefined); setView({ page: 'add' }) }}
-            >{props.t('panel.title.addHost')}</button>
+        <StoragePostureLine posture={props.hostStore?.posture()} t={props.t} />
+        <div data-host-list="" className={styles.hostList}>
+          <div data-host-list-head="" className={styles.hostListHead} aria-hidden="true">
+            <span className={styles.hostListHeadLabel}>{props.t('panel.form.fieldName')}</span>
+            <span className={styles.hostListHeadLabel}>{props.t('panel.form.fieldStatus')}</span>
+            <span className={styles.hostListHeadLabel}>{props.t('panel.form.fieldIp')}</span>
+            <span className={styles.hostListHeadLabel} />
           </div>
-          <StoragePostureLine posture={props.hostStore?.posture()} t={props.t} />
-          <div data-host-list="" className={styles.hostList}>
-            <div data-host-list-head="" className={styles.hostListHead} aria-hidden="true">
-              <span className={styles.hostListHeadLabel}>{props.t('panel.form.fieldName')}</span>
-              <span className={styles.hostListHeadLabel}>{props.t('panel.form.fieldStatus')}</span>
-              <span className={styles.hostListHeadLabel}>{props.t('panel.form.fieldIp')}</span>
-              <span className={styles.hostListHeadLabel} />
-            </div>
-            {hostRows.length === 0
-              ? <p data-host-list-empty="" className={styles.hostListEmpty}>{props.t('panel.list.empty')}</p>
-              : hostRows.map(row => (
-                  <HostRow
-                    key={row.hostId}
-                    row={row}
-                    onOpen={() => { setFormMessage(undefined); setConfirmingRemove(false); setView({ page: 'detail', hostId: row.hostId }) }}
-                    t={props.t}
-                  />
-                ))}
-          </div>
+          {hostRows.length === 0
+            ? <p data-host-list-empty="" className={styles.hostListEmpty}>{props.t('panel.list.empty')}</p>
+            : hostRows.map(row => (
+                <HostRow
+                  key={row.hostId}
+                  row={row}
+                  onOpen={() => { setFormMessage(undefined); setConfirmingRemove(false); setView({ page: 'detail', hostId: row.hostId }) }}
+                  t={props.t}
+                />
+              ))}
         </div>
-      </section>
+      </div>
     </div>
   )
-}
-
-function attachRollUpMount(section: RollUpSection): (node: HTMLDivElement | null) => void {
-  return node => {
-    if (node === null) return
-    node.replaceChildren(section.element())
-  }
 }

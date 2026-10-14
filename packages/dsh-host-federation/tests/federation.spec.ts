@@ -142,12 +142,13 @@ describe('HostFederation presence', () => {
     expect(fed.hosts().map(h => h.hostId)).toEqual(['alpha'])
   })
 
-  it('treats a sessions publication as presence and stores its rows', () => {
+  it('drops a sessions publication on the floor: the channel is presence-only', () => {
+    // 2026-10-14 撤会话树：`sessions` 报文不再存在，收到了也只当噪音丢掉，
+    // 不得把一个只剩半截的旧报文当成有效在场来源。
     const { fed } = setup()
     fed.start()
     fed.receive({ kind: 'sessions', ...THEM, at: 0, sessions: [{ projectId: 'p1', sessionId: 's1', title: 'x' }] })
-    expect(fed.hosts().map(h => h.hostId).sort()).toEqual(['alpha', 'beta'])
-    expect(fed.rollUp().hosts.find(h => h.hostId === 'beta')?.sessions).toHaveLength(1)
+    expect(fed.hosts().map(h => h.hostId)).toEqual(['alpha'])
   })
 })
 

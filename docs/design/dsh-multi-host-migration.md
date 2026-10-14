@@ -1319,6 +1319,34 @@ IP、设置按钮。落地：
   check-freshness 因此拒绝打包——这不是误报，是它在阻止旧代码静默上线；
   先 `tsc -b --force` 重写全部产物再打包即可。
 
+### 落地记录：会话树二次撤销（2026-10-14）
+
+用户反馈「现在点开各主机，出现左右区域，左边是会话列表，这不是原先设计
+的」。来源查明：2026-10-13 晚合入主干的 SSH 部署分支
+（cursor/ssh-deploy-dsh-6dfb）把 2026-10-11 已按用户决定撤掉的会话树整个
+加了回来——左侧「会话（按主机）」树 + 右侧主机表的双栏布局。本轮按
+§8.3 的既有决定再次撤销，这次连代码一起清干净：
+
+- **面板回单区域**：列表页只剩主机表一栏；data-session-tree /
+  data-rollup-host / data-host-pane 全部消失，说明区只剩「在线的含义」与
+  「另一台机器不在频道里」两条。
+- **随树撤掉的代码**（先查读者再删，全部只服务于那棵树）：
+  客户端 session-source（DSH 投影读本机会话）、remote-session-store（远端
+  会话缓存）、host-roll-up（树视图合成）、surface（树的挂载生命周期）；
+  联邦侧 workspace-map / rollup-view / rollup-mount（树的渲染与分组）、
+  host-remote-sessions（按 launchUrl 拉远端会话）及其 host-ssh 路由
+  （/api/threadharbor.host-remote.sessions，浏览器侧的
+  fetchRemoteHostSessions 一并删除）。
+- **频道协议回纯在场**：Announcement 只剩 hello/heartbeat/bye；收到旧版
+  客户端发来的 sessions 报文按噪音丢弃（测试钉死这一行为）。
+  listSessions/publishSessions/rollUp 分组等会话面 API 全撤。
+- **保留的 SSH 分支功能**：SSH 自动部署、主机连接状态列（已连接/可达/
+  检测中/未连接）、peer 探测、Tailscale 桥——它们不依赖会话树。
+- inject 里 workspaces 一并除名：会话树撤销后无人再读它（sessions 仍留，
+  会话切换进度条在读）。
+- 验证：npm run check 全绿（939 通过）；3081 真机浏览器确认单区域、
+  四列表头（名称/状态/IP/设置）与行内容正常、详情页可进。
+
 ### 已知限制（2026-10-12 核对，文档化，未修）
 
 - **「已切换」卡片不在重访时渲染**：跨 preset 切换（§9.2）后，目标会话会显示一张
