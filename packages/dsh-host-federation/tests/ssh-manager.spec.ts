@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createServer } from 'node:net'
 import { portListening } from '../src/ssh/port.ts'
 import { DshSshManager } from '../src/ssh/manager.ts'
@@ -37,6 +37,12 @@ describe('DshSshManager', () => {
     }
   })
 
+  it('the operation route answers HEAD so the availability probe can see it', () => {
+    const source = readFileSync(new URL('../src/ssh-deploy.ts', import.meta.url), 'utf8')
+    expect(source).toContain("methods: ['GET', 'HEAD']")
+    expect(source).toContain("request.method === 'HEAD'")
+  })
+
   it('includes portable port reclaim and DSH web health wait in the remote install script', () => {
     const source = readFileSync(new URL('../src/ssh/manager.ts', import.meta.url), 'utf8')
     expect(source).toContain('port_pids()')
@@ -63,5 +69,79 @@ describe('DshSshManager', () => {
       await new Promise<void>(resolve => server.close(() => resolve()))
     }
     expect(await portListening(port, 2)).toBe(false)
+  })
+
+  describe('connect — reach an already-deployed peer without redeploying', () => {
+    const makeManager = (): DshSshManager => new DshSshManager({
+      knownHostsPath: '/dev/null',
+      connectTimeoutMs: 10,
+      installTimeoutMs: 10,
+      deploymentChannel: 'test',
+      defaultRemoteWebPort: 3081,
+      releaseDirectory: '/dev/null',
+    })
+    const approved = { target: 'mini.ts.net', hostKeyFingerprint: 'SHA256:abc' }
+
+    it('tunnels a loopback peer and composes the tokenized launch URL', async () => {
+      const manager = makeManager()
+      const readPeer = vi.spyOn(manager, 'readPeer').mockResolvedValue({
+        pluginsInstalled: true, listen: 'loopback', port: 3081,
+        launchUrl: 'http://127.0.0.1:3081/?token=secret',
+      })
+      const ensureTunnel = vi.spyOn(manager, 'ensureTunnel').mockResolvedValue('http://127.0.0.1:45555')
+      try {
+        const result = await manager.connect(approved)
+        expect(ensureTunnel).toHaveBeenCalledWith(approved, 3081)
+        expect(result).toEqual({
+          endpoint: 'http://127.0.0.1:45555',
+          launchUrl: 'http://127.0.0.1:45555/?token=secret',
+          mode: 'tunnel',
+          peer: { pluginsInstalled: true, listen: 'loopback', port: 3081, launchUrl: 'http://127.0.0.1:3081/?token=secret' },
+        })
+        expect(readPeer).toHaveBeenCalled()
+      } finally {
+        manager.close()
+      }
+    })
+
+    it('refuses to connect when nothing is installed, without touching the tunnel', async () => {
+      const manager = makeManager()
+      vi.spyOn(manager, 'readPeer').mockResolvedValue({ pluginsInstalled: false })
+      const ensureTunnel = vi.spyOn(manager, 'ensureTunnel').mockResolvedValue('http://127.0.0.1:1')
+      try {
+        await expect(manager.connect(approved)).rejects.toThrow('远端还没有 ThreadHarbor 部署记录')
+        expect(ensureTunnel).not.toHaveBeenCalled()
+      } finally {
+        manager.close()
+      }
+    })
+
+    it('opens a legacy direct-listening peer as-is, no tunnel', async () => {
+      const manager = makeManager()
+      vi.spyOn(manager, 'readPeer').mockResolvedValue({
+        pluginsInstalled: true, listen: 'tailscale', port: 3081, bindHost: '100.64.0.2',
+        launchUrl: 'http://100.64.0.2:3081/?token=s',
+      })
+      const ensureTunnel = vi.spyOn(manager, 'ensureTunnel').mockResolvedValue('http://127.0.0.1:1')
+      try {
+        const result = await manager.connect(approved)
+        expect(result.mode).toBe('direct')
+        expect(result.endpoint).toBe('http://100.64.0.2:3081')
+        expect(result.launchUrl).toBe('http://100.64.0.2:3081/?token=s')
+        expect(ensureTunnel).not.toHaveBeenCalled()
+      } finally {
+        manager.close()
+      }
+    })
+
+    it('passes a raw SSH failure through untouched', async () => {
+      const manager = makeManager()
+      vi.spyOn(manager, 'readPeer').mockRejectedValue(new Error('ssh: connect to host mini.ts.net port 22: Connection refused'))
+      try {
+        await expect(manager.connect(approved)).rejects.toThrow('Connection refused')
+      } finally {
+        manager.close()
+      }
+    })
   })
 })

@@ -3,8 +3,48 @@
  */
 
 import type { SshAccessMode } from './types.ts'
+import type { PeerStatus } from './peer-status.ts'
 
 const FORBIDDEN_BIND = new Set(['0.0.0.0', '::', '[::]', '*', '0'])
+
+/** One honest decision about how this peer can be used right now. */
+export type ConnectionPlan = {
+  /** `tunnel` opens a local SSH forward; `direct` opens the recorded origin as-is. */
+  readonly mode: 'tunnel' | 'direct'
+  /** The remote port a tunnel must forward. */
+  readonly remotePort: number
+  /** The tokenized launch URL the plan is built from. */
+  readonly launchUrl: string
+}
+
+/**
+ * Decide how to reach a peer from the facts its record states — no guessing.
+ *
+ * Every refusal names the next operator action: install first, redeploy for a
+ * token, or name a port to forward to. Refusals throw; the route passes the
+ * text on untouched.
+ */
+export function planConnection(
+  peer: PeerStatus,
+  callerPort: number | undefined,
+  defaultPort: number | undefined,
+): ConnectionPlan {
+  if (!peer.pluginsInstalled) {
+    throw new Error('远端还没有 ThreadHarbor 部署记录（未安装或未成功启动）；请先执行一次部署')
+  }
+  const launchUrl = peer.launchUrl
+  if (launchUrl === undefined || launchUrl === '') {
+    throw new Error('远端记录里没有带令牌的启动网址；请重新部署（可勾选升级）以刷新记录')
+  }
+  if (peer.listen === 'tailscale') {
+    return { mode: 'direct', remotePort: peer.port ?? defaultPort ?? 0, launchUrl }
+  }
+  const remotePort = peer.port ?? callerPort ?? defaultPort
+  if (remotePort === undefined) {
+    throw new Error('记录里没有远端网页端口，也没有可用的默认端口；请重新部署')
+  }
+  return { mode: 'tunnel', remotePort, launchUrl }
+}
 
 /** Deploy always listens on loopback and is reached through an SSH tunnel. */
 export function parseAccessMode(value: unknown): SshAccessMode {

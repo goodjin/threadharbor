@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { composeLaunchUrl, parseDeployMarkers, validateBindHost } from '../src/ssh/access.ts'
+import { composeLaunchUrl, parseAccessMode, parseDeployMarkers, planConnection, validateBindHost } from '../src/ssh/access.ts'
 
 describe('ssh access helpers', () => {
   it('rejects wildcard bind hosts', () => {
@@ -22,3 +22,49 @@ describe('ssh access helpers', () => {
     expect(markers.launchUrl).toContain('token=secret')
   })
 })
+
+describe('planConnection — how to reach a deployed peer', () => {
+  const loopbackPeer = {
+    pluginsInstalled: true,
+    listen: 'loopback' as const,
+    port: 3081,
+    launchUrl: 'http://127.0.0.1:3081/?token=secret',
+  }
+
+  it('a loopback peer plans a tunnel on the port its record names', () => {
+    const plan = planConnection(loopbackPeer, 9999, 3081)
+    expect(plan).toEqual({ mode: 'tunnel', remotePort: 3081, launchUrl: 'http://127.0.0.1:3081/?token=secret' })
+  })
+
+  it('a loopback record without a port falls back to the caller default', () => {
+    const plan = planConnection({ pluginsInstalled: true, listen: 'loopback', launchUrl: 'http://127.0.0.1:3081/?token=s' }, 4242, 3081)
+    expect(plan).toEqual({ mode: 'tunnel', remotePort: 4242, launchUrl: 'http://127.0.0.1:3081/?token=s' })
+  })
+
+  it('a peer with no install record refuses with the reason the operator can act on', () => {
+    expect(() => planConnection({ pluginsInstalled: false }, undefined, 3081))
+      .toThrow('远端还没有 ThreadHarbor 部署记录')
+  })
+
+  it('a loopback record without a tokenized URL says redeploy instead of guessing', () => {
+    expect(() => planConnection({ pluginsInstalled: true, listen: 'loopback', port: 3081 }, undefined, 3081))
+      .toThrow('带令牌的启动网址')
+  })
+
+  it('a legacy direct-listening peer plans a direct open, no tunnel', () => {
+    const plan = planConnection({
+      pluginsInstalled: true,
+      listen: 'tailscale',
+      port: 3081,
+      bindHost: '100.64.0.2',
+      launchUrl: 'http://100.64.0.2:3081/?token=s',
+    }, undefined, 3081)
+    expect(plan).toEqual({ mode: 'direct', remotePort: 3081, launchUrl: 'http://100.64.0.2:3081/?token=s' })
+  })
+
+  it('a record naming no port anywhere refuses rather than forwarding to nothing', () => {
+    expect(() => planConnection({ pluginsInstalled: true, listen: 'loopback', launchUrl: 'http://127.0.0.1:3081/?token=s' }, undefined, undefined))
+      .toThrow('端口')
+  })
+})
+

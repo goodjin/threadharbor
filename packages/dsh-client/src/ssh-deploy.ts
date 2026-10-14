@@ -2,7 +2,7 @@
  * Browser client for ThreadHarbor SSH auto-deploy routes on the serving host.
  */
 
-import type { PeerStatus, SshConnectionInput, SshDeployOperationView, SshDeployRequest, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
+import type { PeerStatus, SshConnectResult, SshConnectionInput, SshDeployOperationView, SshDeployRequest, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
 import type { RuntimeT } from './locales.ts'
 import { fallbackT } from './locales.ts'
 
@@ -10,6 +10,7 @@ export const ROUTE_INSPECT = '/api/threadharbor.host-ssh.inspect'
 export const ROUTE_DEPLOY = '/api/threadharbor.host-ssh.deploy'
 export const ROUTE_OPERATION = '/api/threadharbor.host-ssh.operation'
 export const ROUTE_PEER = '/api/threadharbor.host-ssh.peer'
+export const ROUTE_CONNECT = '/api/threadharbor.host-ssh.connect'
 
 type ApiResult<T> =
   | { readonly ok: true; readonly value: T }
@@ -46,6 +47,15 @@ export async function readRemotePeer(
   t: RuntimeT = fallbackT,
 ): Promise<ApiResult<PeerStatus>> {
   return await postJson(ROUTE_PEER, { ssh }, t)
+}
+
+/** Reach an already-deployed host: read its record, ensure the route, get the URL to open. */
+export async function connectRemoteHost(
+  ssh: SshConnectionInput & { readonly hostKeyFingerprint: string },
+  remoteWebPort?: number,
+  t: RuntimeT = fallbackT,
+): Promise<ApiResult<SshConnectResult>> {
+  return await postJson(ROUTE_CONNECT, { ssh, ...(remoteWebPort === undefined ? {} : { remoteWebPort }) }, t)
 }
 
 export async function startSshDeploy(request: SshDeployRequest, t: RuntimeT = fallbackT): Promise<ApiResult<{ readonly operationId: string }>> {

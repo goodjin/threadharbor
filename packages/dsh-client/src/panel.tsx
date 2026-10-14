@@ -35,18 +35,19 @@ import type { AgentDescriptor, GatewayResult } from './gateway.ts'
 import type { ProbeOutcome } from './probe.ts'
 import { probeReach } from './reach.ts'
 import type { ReachOutcome } from './reach.ts'
-import type { HostIdentity, HostRegistration, PeerStatus, RegistrationResult, RemoteAgentDeploySelection, SshConnectionInput, SshDeployResult, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
+import type { HostIdentity, HostRegistration, HostSshInfo, PeerStatus, RegistrationResult, RemoteAgentDeploySelection, SshConnectionInput, SshDeployResult, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
 import { REMOTE_DEPLOY_AGENT_SPECS } from '@threadharbor/dsh-host-federation'
 import type { HostSnapshot } from '@threadharbor/dsh-host-federation'
 import type { HostStorePosture } from './host-store.ts'
 import {
+  connectRemoteHost,
   inspectSshHost,
   probeSshDeployApi,
   readRemotePeer,
   startSshDeploy,
   waitSshDeployOperation,
 } from './ssh-deploy.ts'
-import type { SshDeployOperationView } from '@threadharbor/dsh-host-federation'
+import type { SshDeployOperationView, SshDeployProgress } from '@threadharbor/dsh-host-federation'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { NAMESPACE } from './locales.ts'
 import styles from './panel.module.css'
@@ -100,6 +101,7 @@ export type HostRegistryPort = {
     readonly hostTitle: string
     readonly address: string
     readonly launchUrl?: string
+    readonly ssh?: HostSshInfo
   }): RegistrationResult
   remove(hostId: string): boolean
 }
@@ -431,6 +433,9 @@ const ALL_FIELDS: HostFormFieldPolicy = { id: true, address: true }
 export type RegistrationEditInput = {
   readonly hostId?: string
   readonly address: string
+  readonly hostTitle?: string
+  readonly launchUrl?: string
+  readonly ssh?: HostSshInfo
 }
 
 /**
@@ -443,12 +448,15 @@ export type RegistrationEditInput = {
  * The name is editable too — that is exactly how a filled-in name gets
  * corrected to the one the machine actually announces. A row that is present
  * but never registered (another same-origin tab) has nothing to edit, so this
- * is simply an add. The stored hostTitle is left empty on every write: the
- * storage layer falls it back to the hostId, which is the name — 显示名已
- * 撤销（2026-10-13），旧登记里不一样的 hostTitle 在下一次保存时被名称取代.
+ * is simply an add. Facts the input does not mention carry over from the
+ * previous entry (title, launchUrl, ssh); a launchUrl that no longer matches
+ * the new address is dropped rather than erroring — the connect flow
+ * regenerates it. 显示名已撤销（2026-10-13），旧登记里不一样的 hostTitle 在
+ * 下一次保存时被名称取代.
  * @param registry - the registry port as the wiring provides it.
  * @param previousId - which registration to replace.
- * @param input - the new name (omit to keep the old one) and address.
+ * @param input - the new name (omit to keep the old one) and address, plus any
+ *   facts to refresh (launchUrl from a connect, ssh from a deploy).
  * @returns the add's result, whatever it was.
  */
 export function applyRegistrationEdit(
@@ -459,13 +467,35 @@ export function applyRegistrationEdit(
   const previous = registry.list().find(entry => entry.hostId === previousId)
   const nextId = input.hostId !== undefined && input.hostId.trim() !== '' ? input.hostId.trim() : previousId
   if (previous === undefined) {
-    return registry.add({ hostId: nextId, hostTitle: '', address: input.address })
+    return registry.add({ hostId: nextId, hostTitle: input.hostTitle ?? '', address: input.address })
   }
+  const restore = (): void => {
+    registry.add({
+      hostId: previous.hostId,
+      hostTitle: previous.hostTitle,
+      address: previous.address,
+      ...(previous.launchUrl === undefined ? {} : { launchUrl: previous.launchUrl }),
+      ...(previous.ssh === undefined ? {} : { ssh: previous.ssh }),
+    })
+  }
+  let launchUrl = input.launchUrl ?? previous.launchUrl
+  if (launchUrl !== undefined) {
+    try {
+      if (new URL(launchUrl).origin !== new URL(input.address).origin) launchUrl = undefined
+    } catch {
+      launchUrl = undefined
+    }
+  }
+  const ssh = input.ssh ?? previous.ssh
   registry.remove(previousId)
-  const result = registry.add({ hostId: nextId, hostTitle: '', address: input.address })
-  if (!result.ok) {
-    registry.add({ hostId: previous.hostId, hostTitle: previous.hostTitle, address: previous.address })
-  }
+  const result = registry.add({
+    hostId: nextId,
+    hostTitle: input.hostTitle ?? '',
+    address: input.address,
+    ...(launchUrl === undefined ? {} : { launchUrl }),
+    ...(ssh === undefined ? {} : { ssh }),
+  })
+  if (!result.ok) restore()
   return result
 }
 
@@ -630,29 +660,50 @@ export function richSegments(template: string, tag: 'code' | 'strong'): ReactNod
     index % 2 === 0 ? part : createElement(tag, { key: index }, part))
 }
 
+/** The non-secret ssh facts a deploy can hand its caller for the registry. */
+export type SshSeedFacts = {
+  readonly target: string
+  readonly port?: number
+  readonly user?: string
+  readonly proxyJump?: string
+  readonly authMode: SshAuthMode
+  readonly identityFile?: string
+  readonly hostKeyFingerprint?: string
+  readonly remoteWebPort?: number
+}
+
 function SshDeploySection(props: {
   readonly hostId: string
   readonly hostTitle: string
   readonly onHostIdChange: (value: string) => void
   readonly onHostTitleChange: (value: string) => void
-  readonly onDeployed: (result: SshDeployResult) => void
+  readonly onDeployed: (result: SshDeployResult, sshFacts: SshSeedFacts) => void
   readonly onError: (message: string) => void
+  /** Pre-fill from a stored registration (detail page); absent on first add. */
+  readonly initial?: SshSeedFacts | undefined
+  /** Detail page locks the host identity: no hostId/hostTitle inputs. */
+  readonly lockHost?: boolean | undefined
+  /** When provided, a connect-without-redeploy button joins the actions. */
+  readonly onConnect?: ((ssh: SshConnectionInput & { readonly hostKeyFingerprint: string }, facts: SshSeedFacts) => void) | undefined
   /** The locale seat, threaded from the panel. */
   readonly t: PanelT
 }): ReactNode {
-  const [target, setTarget] = useState('')
-  const [port, setPort] = useState('22')
-  const [user, setUser] = useState('')
-  const [proxyJump, setProxyJump] = useState('')
-  const [authMode, setAuthMode] = useState<SshAuthMode>('identityFile')
-  const [identityFile, setIdentityFile] = useState('')
+  const [target, setTarget] = useState(props.initial?.target ?? '')
+  const [port, setPort] = useState(props.initial?.port === undefined ? '22' : String(props.initial.port))
+  const [user, setUser] = useState(props.initial?.user ?? '')
+  const [proxyJump, setProxyJump] = useState(props.initial?.proxyJump ?? '')
+  const [authMode, setAuthMode] = useState<SshAuthMode>(props.initial?.authMode ?? 'identityFile')
+  const [identityFile, setIdentityFile] = useState(props.initial?.identityFile ?? '')
   const [identityPem, setIdentityPem] = useState('')
   const [password, setPassword] = useState('')
-  const [remoteWebPort, setRemoteWebPort] = useState('3081')
+  const [remoteWebPort, setRemoteWebPort] = useState(props.initial?.remoteWebPort === undefined ? '3081' : String(props.initial.remoteWebPort))
+  const [upgrade, setUpgrade] = useState(false)
   const [keys, setKeys] = useState<readonly SshHostKeyCandidate[]>([])
-  const [approvedFingerprint, setApprovedFingerprint] = useState('')
+  const [approvedFingerprint, setApprovedFingerprint] = useState(props.initial?.hostKeyFingerprint ?? '')
   const [busy, setBusy] = useState<'inspect' | 'peer' | 'deploy' | undefined>(undefined)
-  const [progress, setProgress] = useState<SshDeployOperationView | undefined>(undefined)
+  // 部署过程逐行留痕：不是只显示最后一行，每一阶段的原话都留在面上。
+  const [progressLog, setProgressLog] = useState<readonly SshDeployProgress[]>([])
+  const [opError, setOpError] = useState<string | undefined>(undefined)
   const [peer, setPeer] = useState<PeerStatus | undefined>(undefined)
   const [deployed, setDeployed] = useState<SshDeployResult | undefined>(undefined)
   const [remoteAgents, setRemoteAgents] = useState<RemoteAgentDeploySelection>(() => (
@@ -712,35 +763,60 @@ function SshDeploySection(props: {
       return
     }
     setBusy('deploy')
-    setProgress(undefined)
+    setProgressLog([])
+    setOpError(undefined)
     void startSshDeploy({
       hostId: props.hostId.trim(),
       hostTitle: props.hostTitle.trim() === '' ? props.hostId.trim() : props.hostTitle.trim(),
       ssh: { ...sshPayload(), hostKeyFingerprint: approvedFingerprint },
       ...(remoteWebPort.trim() === '' ? {} : { remoteWebPort: Number(remoteWebPort) }),
+      upgrade,
       accessMode: 'tunnel',
       remoteAgents,
     }, props.t).then(started => {
       if (!started.ok) {
         setBusy(undefined)
+        setOpError(started.error)
         props.onError(started.error)
         return
       }
-      void waitSshDeployOperation(started.value.operationId, view => { setProgress(view) }, undefined, props.t).then(done => {
+      void waitSshDeployOperation(started.value.operationId, view => {
+        // 逐行留痕：同一阶段的重复心跳只留一条，阶段一换就另起一行。
+        setProgressLog(log => {
+          const last = log[log.length - 1]
+          return last !== undefined && last.phase === view.progress.phase && last.detail === view.progress.detail
+            ? log
+            : [...log, view.progress]
+        })
+      }, undefined, props.t).then(done => {
         setBusy(undefined)
         if (!done.ok) {
+          setOpError(done.error)
           props.onError(done.error)
           return
         }
         if (done.value.status !== 'succeeded' || done.value.result === undefined) {
-          props.onError(done.value.error ?? props.t('panel.ssh.deployFailed'))
+          setOpError(done.value.error ?? props.t('panel.ssh.deployFailed'))
           return
         }
         setDeployed(done.value.result)
-        props.onDeployed(done.value.result)
+        setOpError(undefined)
+        props.onDeployed(done.value.result, seedFacts())
       })
     })
   }
+
+  /** What a successful deploy should remember in the registry: no secrets. */
+  const seedFacts = (): SshSeedFacts => ({
+    target: target.trim(),
+    ...(port.trim() === '' ? {} : { port: Number(port) }),
+    ...(user.trim() === '' ? {} : { user: user.trim() }),
+    ...(proxyJump.trim() === '' ? {} : { proxyJump: proxyJump.trim() }),
+    authMode,
+    ...(authMode === 'identityFile' && identityFile.trim() !== '' ? { identityFile: identityFile.trim() } : {}),
+    hostKeyFingerprint: approvedFingerprint,
+    ...(remoteWebPort.trim() === '' ? {} : { remoteWebPort: Number(remoteWebPort) }),
+  })
 
   const copyLaunchUrl = (): void => {
     if (deployed === undefined) return
@@ -755,7 +831,7 @@ function SshDeploySection(props: {
       <div className={styles.formGrid}>
         <label className={styles.field}>
           {props.t('panel.ssh.targetLabel')}
-          <input className={styles.input} value={target} onChange={event => { setTarget(event.target.value) }} placeholder={props.t('panel.ssh.targetPlaceholder')} />
+          <input data-ssh-target="" className={styles.input} value={target} onChange={event => { setTarget(event.target.value) }} placeholder={props.t('panel.ssh.targetPlaceholder')} />
         </label>
         <label className={styles.field}>
           {props.t('panel.ssh.portLabel')}
@@ -781,7 +857,7 @@ function SshDeploySection(props: {
           ? (
               <label className={styles.field}>
                 {props.t('panel.ssh.identityFileLabel')}
-                <input className={styles.input} value={identityFile} onChange={event => { setIdentityFile(event.target.value) }} placeholder={props.t('panel.ssh.identityFilePlaceholder')} />
+                <input data-ssh-identity-file="" className={styles.input} value={identityFile} onChange={event => { setIdentityFile(event.target.value) }} placeholder={props.t('panel.ssh.identityFilePlaceholder')} />
               </label>
             )
           : authMode === 'identityPem'
@@ -802,6 +878,15 @@ function SshDeploySection(props: {
           <input className={styles.input} value={remoteWebPort} onChange={event => { setRemoteWebPort(event.target.value) }} />
         </label>
       </div>
+      <label className={styles.sshKeyRow}>
+        <input
+          type="checkbox"
+          data-ssh-upgrade=""
+          checked={upgrade}
+          onChange={event => { setUpgrade(event.target.checked) }}
+        />
+        <span>{props.t('panel.ssh.upgrade')}</span>
+      </label>
       <fieldset className={styles.accessModes} data-ssh-remote-agents="">
         <legend className={styles.summary}>{props.t('panel.ssh.remoteAgentsLegend')}</legend>
         <p className={styles.note}>
@@ -819,13 +904,24 @@ function SshDeploySection(props: {
         ))}
       </fieldset>
       <div className={styles.formActions}>
-        <button type="button" className={styles.action} disabled={busy !== undefined} onClick={runInspect}>
+        <button type="button" className={styles.action} data-action="ssh-inspect" disabled={busy !== undefined} onClick={runInspect}>
           {busy === 'inspect' ? props.t('panel.ssh.inspecting') : props.t('panel.ssh.inspect')}
         </button>
-        <button type="button" className={styles.action} disabled={busy !== undefined} onClick={runReadPeer}>
+        <button type="button" className={styles.action} data-action="ssh-peer" disabled={busy !== undefined} onClick={runReadPeer}>
           {busy === 'peer' ? props.t('panel.ssh.readingPeer') : props.t('panel.ssh.readPeer')}
         </button>
-        <button type="button" className={styles.actionPrimary} disabled={busy !== undefined} onClick={runDeploy}>
+        {props.onConnect !== undefined
+          ? (
+              <button
+                type="button"
+                className={styles.action}
+                data-action="ssh-connect"
+                disabled={busy !== undefined || approvedFingerprint === ''}
+                onClick={() => { props.onConnect?.({ ...sshPayload(), hostKeyFingerprint: approvedFingerprint }, seedFacts()) }}
+              >{props.t('panel.ssh.connectOnly')}</button>
+            )
+          : undefined}
+        <button type="button" className={styles.actionPrimary} data-action="ssh-deploy" disabled={busy !== undefined} onClick={runDeploy}>
           {busy === 'deploy' ? props.t('panel.ssh.deploying') : props.t('panel.ssh.deploy')}
         </button>
       </div>
@@ -834,7 +930,7 @@ function SshDeploySection(props: {
             <div data-ssh-keys="" className={styles.sshKeys}>
               <p className={styles.stateLine}>{props.t('panel.ssh.pickKeyPrompt')}</p>
               {keys.map(key => (
-                <label key={key.hostKeyFingerprint} className={styles.sshKeyRow}>
+                <label key={key.hostKeyFingerprint} data-ssh-key-row="" className={styles.sshKeyRow}>
                   <input
                     type="radio"
                     name="ssh-host-key"
@@ -858,12 +954,25 @@ function SshDeploySection(props: {
             </p>
           )
         : undefined}
-      {progress !== undefined
+      {progressLog.length > 0
         ? (
-            <p data-ssh-progress="" className={styles.stateLine}>
-              {progress.progress.detail}
-              {progress.status === 'failed' && progress.error !== undefined ? props.t('panel.ssh.progressFailed', { error: progress.error }) : ''}
-            </p>
+            <div data-ssh-progress-log="" className={styles.sshKeys}>
+              <p className={styles.summary}>{props.t('panel.ssh.progressLogTitle')}</p>
+              {progressLog.map((line, index) => (
+                <p key={index} className={styles.stateLine} data-ssh-progress-line={line.phase}>{line.detail}</p>
+              ))}
+            </div>
+          )
+        : undefined}
+      {opError !== undefined
+        ? (
+            <div data-ssh-error="" className={styles.launchUrlBox}>
+              <p className={styles.stateBad}>{props.t('panel.ssh.failedTitle')}</p>
+              <code className={styles.launchUrlText}>{opError}</code>
+              <div className={styles.formActions}>
+                <button type="button" className={styles.action} data-action="ssh-deploy-retry" disabled={busy !== undefined} onClick={runDeploy}>{props.t('panel.ssh.retry')}</button>
+              </div>
+            </div>
           )
         : undefined}
       {deployed !== undefined
@@ -878,15 +987,91 @@ function SshDeploySection(props: {
             </div>
           )
         : undefined}
-      <label className={styles.field}>
-        {props.t('panel.ssh.hostIdLabel')}
-        <input className={styles.input} value={props.hostId} onChange={event => { props.onHostIdChange(event.target.value) }} />
-      </label>
-      <label className={styles.field}>
-        {props.t('panel.form.fieldTitle')}
-        <input className={styles.input} value={props.hostTitle} onChange={event => { props.onHostTitleChange(event.target.value) }} />
-      </label>
+      {props.lockHost === true
+        ? undefined
+        : (
+            <>
+              <label className={styles.field}>
+                {props.t('panel.ssh.hostIdLabel')}
+                <input data-ssh-hostid="" className={styles.input} value={props.hostId} onChange={event => { props.onHostIdChange(event.target.value) }} />
+              </label>
+              <label className={styles.field}>
+                {props.t('panel.form.fieldTitle')}
+                <input className={styles.input} value={props.hostTitle} onChange={event => { props.onHostTitleChange(event.target.value) }} />
+              </label>
+            </>
+          )}
     </div>
+  )
+}
+
+/**
+ * 「使用这台主机」：把登记里的连接方式变成一跳可达的操作。状态如实：
+ * 隧道在线/未连通/未检查三种说法各配各的按钮；连接失败给原文和重试。
+ * 密码/粘贴私钥无法免输入重连，如实说明并指到部署区块。
+ */
+function HostUseSection(props: {
+  readonly sshInfo: HostSshInfo | undefined
+  readonly launchUrl: string | undefined
+  readonly tunnel: 'unknown' | 'checking' | 'online' | 'offline'
+  readonly connecting: boolean
+  readonly error: string | undefined
+  readonly onConnect: () => void
+  readonly onCheckTunnel: () => void
+  readonly onOpenDeploy: () => void
+  readonly t: PanelT
+}): ReactNode {
+  const { sshInfo, launchUrl } = props
+  const canAutoConnect = sshInfo !== undefined && sshInfo.authMode === 'identityFile' && sshInfo.hostKeyFingerprint !== undefined
+  const tunnelWord = props.t(`panel.use.tunnel.${props.tunnel}`)
+  return (
+    <section data-use-section="" className={styles.sshSection}>
+      <h3 className={styles.summary}>{props.t('panel.use.title')}</h3>
+      {sshInfo === undefined
+        ? (
+            <>
+              <p className={styles.stateLine}>{props.t('panel.use.noSsh')}</p>
+              <div className={styles.formActions}>
+                <button type="button" className={styles.actionPrimary} data-action="open-deploy" onClick={props.onOpenDeploy}>{props.t('panel.use.fillSsh')}</button>
+              </div>
+            </>
+          )
+        : (
+            <>
+              <p data-use-tunnel={props.tunnel} className={styles.stateLine}>{tunnelWord}</p>
+              <div className={styles.formActions}>
+                {launchUrl !== undefined
+                  ? <a className={styles.action} data-action="open-page" href={launchUrl} target="_blank" rel="noreferrer">{props.t('panel.use.open')}</a>
+                  : undefined}
+                <button type="button" className={styles.action} data-action="tunnel-check" disabled={props.connecting || launchUrl === undefined} onClick={props.onCheckTunnel}>
+                  {props.tunnel === 'checking' ? props.t('panel.use.checking') : props.t('panel.use.check')}
+                </button>
+                {canAutoConnect
+                  ? (
+                      <button type="button" className={styles.actionPrimary} data-action="connect-open" disabled={props.connecting} onClick={props.onConnect}>
+                        {props.connecting ? props.t('panel.use.connecting') : props.t(props.tunnel === 'online' ? 'panel.use.reconnect' : 'panel.use.connect')}
+                      </button>
+                    )
+                  : <p className={styles.stateLine}>{props.t('panel.use.secretHint')}</p>}
+              </div>
+            </>
+          )}
+      {props.error !== undefined
+        ? (
+            <div data-use-error="" className={styles.launchUrlBox}>
+              <p className={styles.stateBad}>{props.t('panel.use.failedTitle')}</p>
+              <code className={styles.launchUrlText}>{props.error}</code>
+              {canAutoConnect
+                ? (
+                    <div className={styles.formActions}>
+                      <button type="button" className={styles.action} data-action="connect-retry" disabled={props.connecting} onClick={props.onConnect}>{props.t('panel.use.retry')}</button>
+                    </div>
+                  )
+                : undefined}
+            </div>
+          )
+        : undefined}
+    </section>
   )
 }
 
@@ -1279,6 +1464,68 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
     })
   }
 
+  // 「使用这台主机」的状态：隧道检查按主机分开记（列表里点进点出互不串台），
+  // 连接一次只跑一条，错误跟着主机走，原文照登。
+  const [tunnelChecks, setTunnelChecks] = useState<ReadonlyMap<string, 'checking' | 'online' | 'offline'>>(new Map())
+  const [connectBusyId, setConnectBusyId] = useState<string | undefined>(undefined)
+  const [connectError, setConnectError] = useState<{ readonly hostId: string; readonly text: string } | undefined>(undefined)
+  const [deployOpenId, setDeployOpenId] = useState<string | undefined>(undefined)
+
+  const storedSshInput = (info: HostSshInfo): (SshConnectionInput & { readonly hostKeyFingerprint: string }) | undefined => {
+    // 密码/粘贴私钥不落盘：免输入重连只对密钥文件方式成立。
+    if (info.authMode !== 'identityFile' || info.hostKeyFingerprint === undefined || info.identityFile === undefined) return undefined
+    return {
+      target: info.target,
+      ...(info.port === undefined ? {} : { port: info.port }),
+      ...(info.user === undefined ? {} : { user: info.user }),
+      ...(info.proxyJump === undefined ? {} : { proxyJump: info.proxyJump }),
+      identityFile: info.identityFile,
+      hostKeyFingerprint: info.hostKeyFingerprint,
+    }
+  }
+
+  const checkTunnel = (registration: HostRegistration): void => {
+    if (registration.launchUrl === undefined) return
+    setTunnelChecks(previous => new Map(previous).set(registration.hostId, 'checking'))
+    void probeReach((input, init) => fetch(input, init), registration.launchUrl ?? '', 3000).then(outcome => {
+      setTunnelChecks(previous => new Map(previous).set(registration.hostId, outcome.kind === 'reachable' ? 'online' : 'offline'))
+    })
+  }
+
+  const runConnect = (
+    registration: HostRegistration,
+    sshInput?: SshConnectionInput & { readonly hostKeyFingerprint: string },
+    facts?: SshSeedFacts | undefined,
+  ): void => {
+    const stored = registration.ssh
+    const ssh = sshInput ?? (stored === undefined ? undefined : storedSshInput(stored))
+    if (ssh === undefined) {
+      // 没有可直接复用的凭据（未存方式，或密码/私钥）：如实说明并指去部署区块。
+      setConnectError({ hostId: registration.hostId, text: props.t('panel.use.noCredential') })
+      setDeployOpenId(registration.hostId)
+      return
+    }
+    setConnectBusyId(registration.hostId)
+    setConnectError(previous => previous?.hostId === registration.hostId ? undefined : previous)
+    void connectRemoteHost(ssh, stored?.remoteWebPort, props.t).then(result => {
+      setConnectBusyId(undefined)
+      if (!result.ok) {
+        setTunnelChecks(previous => new Map(previous).set(registration.hostId, 'offline'))
+        setConnectError({ hostId: registration.hostId, text: result.error })
+        return
+      }
+      setTunnelChecks(previous => new Map(previous).set(registration.hostId, 'online'))
+      setConnectError(previous => previous?.hostId === registration.hostId ? undefined : previous)
+      const edit = applyRegistrationEdit(props.registry, registration.hostId, {
+        address: result.value.endpoint,
+        launchUrl: result.value.launchUrl,
+        ...(facts === undefined ? {} : { ssh: facts }),
+      })
+      if (edit.ok) setRegistryRevision(revision => revision + 1)
+      window.open(result.value.launchUrl, '_blank', 'noopener')
+    })
+  }
+
   const identity = props.rollUp.identity()
   const registrations = props.registry.list()
   // Re-read on every render: presence and the registry both change out from
@@ -1307,12 +1554,13 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
               onHostIdChange={setAddIdDraft}
               onHostTitleChange={setAddTitleDraft}
               onError={message => { setFormMessage({ tone: 'bad', text: message }) }}
-              onDeployed={deployResult => {
+              onDeployed={(deployResult, sshFacts) => {
                 const result = props.registry.add({
                   hostId: addIdDraft.trim(),
                   hostTitle: addTitleDraft.trim(),
                   address: deployResult.endpoint,
                   launchUrl: deployResult.launchUrl,
+                  ssh: sshFacts,
                 })
                 if (!result.ok) {
                   setFormMessage({ tone: 'bad', text: result.error.detail })
@@ -1405,63 +1653,105 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
             t={props.t}
             footer={registration !== undefined
               ? (
-                  <div data-registry-actions="" className={styles.registryActions}>
-                    <p data-host-connection="" className={styles.stateLine}>
-                      {props.t('panel.facts.status', { status: connectionStatusLabel(row.connection, props.t) })}
-                      {row.connection === 'disconnected' || row.connection === 'reachable'
+                  <>
+                    <div data-registry-actions="" className={styles.registryActions}>
+                      <p data-host-connection="" className={styles.stateLine}>
+                        {props.t('panel.facts.status', { status: connectionStatusLabel(row.connection, props.t) })}
+                        {row.connection === 'disconnected' || row.connection === 'reachable'
+                          ? (
+                              <>
+                                {' '}
+                                <button type="button" data-registry-reach-try="" className={styles.action} onClick={() => { startReach(registration) }}>{props.t('panel.button.reachTry')}</button>
+                              </>
+                            )
+                          : undefined}
+                      </p>
+                      {reach !== undefined && reach !== 'probing' && reach.kind !== 'reachable'
+                        ? <p className={styles.stateBad}>{reach.kind === 'timeout' ? props.t('panel.reach.probeTimeout', { ms: reach.ms }) : reach.reason}</p>
+                        : undefined}
+                      {registration.launchUrl !== undefined
                         ? (
-                            <>
-                              {' '}
-                              <button type="button" data-registry-reach-try="" className={styles.action} onClick={() => { startReach(registration) }}>{props.t('panel.button.reachTry')}</button>
-                            </>
+                            <p data-registry-launch="" className={styles.stateLine}>
+                              <a className={styles.actionPrimary} href={registration.launchUrl} target="_blank" rel="noreferrer">{props.t('panel.registry.launchLink')}</a>
+                              <button
+                                type="button"
+                                className={styles.action}
+                                onClick={() => { void navigator.clipboard.writeText(registration.launchUrl ?? '') }}
+                              >{props.t('panel.button.copyLink')}</button>
+                            </p>
                           )
                         : undefined}
-                    </p>
-                    {reach !== undefined && reach !== 'probing' && reach.kind !== 'reachable'
-                      ? <p className={styles.stateBad}>{reach.kind === 'timeout' ? props.t('panel.reach.probeTimeout', { ms: reach.ms }) : reach.reason}</p>
-                      : undefined}
-                    {registration.launchUrl !== undefined
+                      {!confirmingRemove
+                        ? (
+                            <button type="button" data-registry-remove-ask="" className={styles.action} onClick={() => { setConfirmingRemove(true) }}>{props.t('panel.button.deleteRegistration')}</button>
+                          )
+                        : (
+                            <span data-registry-confirm="" className={styles.confirmBox}>
+                              {props.t('panel.registry.removeNote')}
+                              <button type="button" data-registry-remove-confirm="" className={styles.action} onClick={() => { removeRegistration(row.hostId); openList() }}>{props.t('panel.button.confirmRemove')}</button>
+                              <button type="button" data-registry-remove-cancel="" className={styles.action} onClick={() => { setConfirmingRemove(false) }}>{props.t('panel.button.cancel')}</button>
+                            </span>
+                          )}
+                    </div>
+                    {!row.self
                       ? (
-                          <p data-registry-launch="" className={styles.stateLine}>
-                            <a className={styles.actionPrimary} href={registration.launchUrl} target="_blank" rel="noreferrer">{props.t('panel.registry.launchLink')}</a>
-                            <button
-                              type="button"
-                              className={styles.action}
-                              onClick={() => { void navigator.clipboard.writeText(registration.launchUrl ?? '') }}
-                            >{props.t('panel.button.copyLink')}</button>
-                          </p>
+                          <HostUseSection
+                            sshInfo={registration.ssh}
+                            launchUrl={registration.launchUrl}
+                            tunnel={tunnelChecks.get(row.hostId) ?? 'unknown'}
+                            connecting={connectBusyId === row.hostId}
+                            error={connectError?.hostId === row.hostId ? connectError.text : undefined}
+                            onConnect={() => { runConnect(registration) }}
+                            onCheckTunnel={() => { checkTunnel(registration) }}
+                            onOpenDeploy={() => { setDeployOpenId(deployOpenId === row.hostId ? undefined : row.hostId) }}
+                            t={props.t}
+                          />
                         )
                       : undefined}
                     {sshDeployAvailable && !row.self
                       ? (
-                          <p className={styles.stateLine}>
-                            <button
-                              type="button"
-                              data-action="redeploy-ssh"
-                              className={styles.actionPrimary}
-                              onClick={() => {
-                                setAddIdDraft(registration.hostId)
-                                setAddTitleDraft(registration.hostTitle)
-                                setAddMode('ssh')
-                                setFormMessage(undefined)
-                                setView({ page: 'add' })
-                              }}
-                            >{props.t('panel.ssh.redeploy')}</button>
-                          </p>
+                          <section data-deploy-section="" className={styles.sshSection}>
+                            <div className={styles.formActions}>
+                              <button
+                                type="button"
+                                className={deployOpenId === row.hostId ? styles.action : styles.actionPrimary}
+                                data-action={deployOpenId === row.hostId ? 'close-deploy' : 'open-deploy'}
+                                onClick={() => { setDeployOpenId(deployOpenId === row.hostId ? undefined : row.hostId) }}
+                              >{deployOpenId === row.hostId ? props.t('panel.deploy.collapse') : props.t('panel.deploy.expand')}</button>
+                            </div>
+                            {deployOpenId === row.hostId
+                              ? (
+                                  <SshDeploySection
+                                    hostId={row.hostId}
+                                    hostTitle={row.name}
+                                    lockHost
+                                    initial={registration.ssh}
+                                    onHostIdChange={() => undefined}
+                                    onHostTitleChange={() => undefined}
+                                    onDeployed={(result, facts) => {
+                                      const edit = applyRegistrationEdit(props.registry, row.hostId, {
+                                        address: result.endpoint,
+                                        launchUrl: result.launchUrl,
+                                        ssh: facts,
+                                      })
+                                      if (!edit.ok) {
+                                        setFormMessage({ tone: 'bad', text: edit.error.detail })
+                                        return
+                                      }
+                                      setRegistryRevision(revision => revision + 1)
+                                      setTunnelChecks(previous => new Map(previous).set(row.hostId, 'online'))
+                                      setFormMessage(undefined)
+                                    }}
+                                    onConnect={(ssh, facts) => { runConnect(registration, ssh, facts) }}
+                                    onError={message => { setFormMessage({ tone: 'bad', text: message }) }}
+                                    t={props.t}
+                                  />
+                                )
+                              : undefined}
+                          </section>
                         )
                       : undefined}
-                    {!confirmingRemove
-                      ? (
-                          <button type="button" data-registry-remove-ask="" className={styles.action} onClick={() => { setConfirmingRemove(true) }}>{props.t('panel.button.deleteRegistration')}</button>
-                        )
-                      : (
-                          <span data-registry-confirm="" className={styles.confirmBox}>
-                            {props.t('panel.registry.removeNote')}
-                            <button type="button" data-registry-remove-confirm="" className={styles.action} onClick={() => { removeRegistration(row.hostId); openList() }}>{props.t('panel.button.confirmRemove')}</button>
-                            <button type="button" data-registry-remove-cancel="" className={styles.action} onClick={() => { setConfirmingRemove(false) }}>{props.t('panel.button.cancel')}</button>
-                          </span>
-                        )}
-                  </div>
+                  </>
                 )
               : undefined}
             agents={row.self

@@ -29,14 +29,41 @@ export type HostRegistration = {
    * UI can open the host without hunting stderr; origin must match `address`.
    */
   readonly launchUrl?: string
+  /**
+   * Optional non-secret SSH facts for the deploy/connect flows: where to ssh,
+   * as whom, with which key file and approved host-key fingerprint. Passwords
+   * and pasted private keys never live here — they are session-only.
+   */
+  readonly ssh?: HostSshInfo
   /** When the registration was made, in the page's clock. */
   readonly createdAt: number
+}
+
+/** The SSH facts worth remembering between sessions; secrets excluded. */
+export type HostSshInfo = {
+  /** Host or IP to ssh to. */
+  readonly target: string
+  /** SSH port; 22 when omitted. */
+  readonly port?: number
+  /** Login user. */
+  readonly user?: string
+  /** Optional ProxyJump hop. */
+  readonly proxyJump?: string
+  /** How the session authenticates; pem/password still need re-entry. */
+  readonly authMode: 'identityFile' | 'identityPem' | 'password'
+  /** Absolute path of the private key on this machine (identityFile only). */
+  readonly identityFile?: string
+  /** The approved host-key fingerprint, so later connects need no re-approval. */
+  readonly hostKeyFingerprint?: string
+  /** The remote DSH web port the deploy used. */
+  readonly remoteWebPort?: number
 }
 
 /** Why an addition was refused; each kind maps to one actionable sentence. */
 export type RegistrationError =
   | { readonly kind: 'bad-id'; readonly detail: string }
   | { readonly kind: 'bad-address'; readonly detail: string }
+  | { readonly kind: 'bad-ssh'; readonly detail: string }
   | { readonly kind: 'duplicate'; readonly detail: string }
 
 export type RegistrationResult =
@@ -75,6 +102,9 @@ export function normalizeAddress(input: string): { readonly ok: true; readonly o
   return { ok: true, origin: parsed.origin }
 }
 
+/** What callers may hand to add-time validation: typed callers cannot construct the secret fields at all. */
+type SshInfoInput = HostSshInfo & { readonly password?: unknown; readonly identityPem?: unknown }
+
 /**
  * The registry over a Web Storage.
  * @param storage - localStorage or a stand-in with the same two methods.
@@ -88,6 +118,8 @@ export function hostRegistry(storage: RegistryStorage, now: () => number = Date.
     readonly hostTitle: string
     readonly address: string
     readonly launchUrl?: string
+    /** May carry smuggled secrets from untyped callers; validation refuses them by name. */
+    readonly ssh?: SshInfoInput
   }): RegistrationResult
   remove(hostId: string): boolean
 } {
@@ -131,6 +163,12 @@ export function hostRegistry(storage: RegistryStorage, now: () => number = Date.
         if (!parsed.ok) return { ok: false, error: { kind: 'bad-address', detail: parsed.detail } }
         launchUrl = parsed.url
       }
+      let ssh: HostSshInfo | undefined
+      if (input.ssh !== undefined) {
+        const parsed = validateSshInfo(input.ssh)
+        if (!parsed.ok) return { ok: false, error: { kind: 'bad-ssh', detail: parsed.detail } }
+        ssh = parsed.value
+      }
       const entries = read()
       if (entries.some(entry => entry.hostId === hostId)) {
         return {
@@ -143,6 +181,7 @@ export function hostRegistry(storage: RegistryStorage, now: () => number = Date.
         hostTitle: input.hostTitle.trim() === '' ? hostId : input.hostTitle.trim(),
         address: address.origin,
         ...(launchUrl === undefined ? {} : { launchUrl }),
+        ...(ssh === undefined ? {} : { ssh }),
         createdAt: now(),
       }
       write([...entries, entry])
@@ -168,12 +207,93 @@ function parseEntry(item: unknown): HostRegistration | undefined {
   const hostTitle = record['hostTitle']
   const createdAt = record['createdAt']
   const launchUrl = record['launchUrl']
+  const ssh = parseSshInfo(record['ssh'])
   return {
     hostId,
     hostTitle: typeof hostTitle === 'string' && hostTitle !== '' ? hostTitle : hostId,
     address,
     ...(typeof launchUrl === 'string' && launchUrl !== '' ? { launchUrl } : {}),
+    ...(ssh === undefined ? {} : { ssh }),
     createdAt: typeof createdAt === 'number' && Number.isFinite(createdAt) ? createdAt : 0,
+  }
+}
+
+const SSH_AUTH_MODES = ['identityFile', 'identityPem', 'password'] as const
+
+const isUsablePort = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 65_535
+
+const nonEmptyString = (value: unknown): string | undefined =>
+  typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
+
+const asAuthMode = (value: unknown): HostSshInfo['authMode'] | undefined =>
+  typeof value === 'string' && (SSH_AUTH_MODES as readonly string[]).includes(value)
+    ? value as HostSshInfo['authMode']
+    : undefined
+
+/**
+ * Strict add-time validation: the registry only accepts the non-secret facts,
+ * and says so by name when a password or pasted key tries to move in.
+ */
+function validateSshInfo(input: SshInfoInput): { readonly ok: true; readonly value: HostSshInfo } | { readonly ok: false; readonly detail: string } {
+  const record = input as Record<string, unknown>
+  if ('password' in record || 'identityPem' in record) {
+    return { ok: false, detail: '登记簿不保存密码或粘贴的私钥：它们只在当次部署里使用，请改用密钥文件路径或重新输入' }
+  }
+  const target = nonEmptyString(record['target'])
+  if (target === undefined) return { ok: false, detail: 'SSH 地址不能为空' }
+  const authMode = asAuthMode(record['authMode'])
+  if (authMode === undefined) {
+    return { ok: false, detail: `SSH 认证方式要属于 ${SSH_AUTH_MODES.join(' / ')}` }
+  }
+  if (isUsablePort(record['port']) === false && record['port'] !== undefined) {
+    return { ok: false, detail: 'SSH 端口要在 1–65535 之间' }
+  }
+  if (isUsablePort(record['remoteWebPort']) === false && record['remoteWebPort'] !== undefined) {
+    return { ok: false, detail: '远端网页端口要在 1–65535 之间' }
+  }
+  const user = nonEmptyString(record['user'])
+  const proxyJump = nonEmptyString(record['proxyJump'])
+  const identityFile = nonEmptyString(record['identityFile'])
+  const hostKeyFingerprint = nonEmptyString(record['hostKeyFingerprint'])
+  const value: HostSshInfo = {
+    target,
+    ...(isUsablePort(record['port']) ? { port: record['port'] } : {}),
+    ...(user === undefined ? {} : { user }),
+    ...(proxyJump === undefined ? {} : { proxyJump }),
+    authMode,
+    ...(identityFile === undefined ? {} : { identityFile }),
+    ...(hostKeyFingerprint === undefined ? {} : { hostKeyFingerprint }),
+    ...(isUsablePort(record['remoteWebPort']) ? { remoteWebPort: record['remoteWebPort'] } : {}),
+  }
+  return { ok: true, value }
+}
+
+/**
+ * Tolerant read-side parsing: legacy entries carry no ssh block, hand-edited
+ * ones may carry junk. Secrets never come back; a block missing its core
+ * facts drops entirely rather than half-remembering a host.
+ */
+function parseSshInfo(item: unknown): HostSshInfo | undefined {
+  if (typeof item !== 'object' || item === null) return undefined
+  const record = item as Record<string, unknown>
+  const target = nonEmptyString(record['target'])
+  if (target === undefined) return undefined
+  const authMode = asAuthMode(record['authMode'])
+  if (authMode === undefined) return undefined
+  const user = nonEmptyString(record['user'])
+  const proxyJump = nonEmptyString(record['proxyJump'])
+  const identityFile = nonEmptyString(record['identityFile'])
+  const hostKeyFingerprint = nonEmptyString(record['hostKeyFingerprint'])
+  return {
+    target,
+    ...(isUsablePort(record['port']) ? { port: record['port'] } : {}),
+    ...(user === undefined ? {} : { user }),
+    ...(proxyJump === undefined ? {} : { proxyJump }),
+    authMode,
+    ...(identityFile === undefined ? {} : { identityFile }),
+    ...(hostKeyFingerprint === undefined ? {} : { hostKeyFingerprint }),
+    ...(isUsablePort(record['remoteWebPort']) ? { remoteWebPort: record['remoteWebPort'] } : {}),
   }
 }
 

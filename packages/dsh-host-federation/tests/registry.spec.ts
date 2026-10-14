@@ -133,4 +133,135 @@ describe('hostRegistry', () => {
     const { storage } = fakeStorage({ [HOST_REGISTRY_KEY]: 'not json' })
     expect(hostRegistry(storage).list()).toEqual([])
   })
+
+  describe('ssh connection info', () => {
+    it('stores non-secret ssh facts and reads them back through storage', () => {
+      const { storage } = fakeStorage()
+      const registry = hostRegistry(storage, () => 100)
+      const added = registry.add({
+        hostId: 'bench',
+        hostTitle: '测试机',
+        address: 'http://192.168.1.20:3081',
+        ssh: {
+          target: '192.168.1.20',
+          port: 22,
+          user: 'deploy',
+          proxyJump: 'jump.example',
+          authMode: 'identityFile',
+          identityFile: '/Users/me/.ssh/id_ed25519',
+          hostKeyFingerprint: 'SHA256:abc',
+          remoteWebPort: 3081,
+        },
+      })
+      expect(added.ok).toBe(true)
+      const again = hostRegistry(storage).list()
+      expect(again).toEqual([{
+        hostId: 'bench',
+        hostTitle: '测试机',
+        address: 'http://192.168.1.20:3081',
+        ssh: {
+          target: '192.168.1.20',
+          port: 22,
+          user: 'deploy',
+          proxyJump: 'jump.example',
+          authMode: 'identityFile',
+          identityFile: '/Users/me/.ssh/id_ed25519',
+          hostKeyFingerprint: 'SHA256:abc',
+          remoteWebPort: 3081,
+        },
+        createdAt: 100,
+      }])
+    })
+
+    it('refuses a stored password by name', () => {
+      const { storage } = fakeStorage()
+      const registry = hostRegistry(storage)
+      const result = registry.add({
+        hostId: 'bench',
+        hostTitle: '',
+        address: 'http://192.168.1.20:3081',
+        ssh: { target: '192.168.1.20', authMode: 'password', password: 'hunter2' },
+      })
+      expect(result.ok).toBe(false)
+      if (!result.ok) {
+        expect(result.error.kind).toBe('bad-ssh')
+        expect(result.error.detail).toContain('密码')
+      }
+      expect(registry.list()).toEqual([])
+    })
+
+    it('refuses a pasted pem the same way', () => {
+      const { storage } = fakeStorage()
+      const registry = hostRegistry(storage)
+      const result = registry.add({
+        hostId: 'bench',
+        hostTitle: '',
+        address: 'http://192.168.1.20:3081',
+        ssh: { target: '192.168.1.20', authMode: 'identityPem', identityPem: '-----BEGIN' },
+      })
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.error.kind).toBe('bad-ssh')
+    })
+
+    it('refuses an ssh block without a target or with unusable ports', () => {
+      const { storage } = fakeStorage()
+      const registry = hostRegistry(storage)
+      const noTarget = registry.add({
+        hostId: 'bench', hostTitle: '', address: 'http://192.168.1.20:3081',
+        ssh: { target: '  ', authMode: 'identityFile' },
+      })
+      expect(noTarget.ok).toBe(false)
+      if (!noTarget.ok) expect(noTarget.error.kind).toBe('bad-ssh')
+      const badPort = registry.add({
+        hostId: 'bench', hostTitle: '', address: 'http://192.168.1.20:3081',
+        ssh: { target: '192.168.1.20', port: 70000, authMode: 'identityFile' },
+      })
+      expect(badPort.ok).toBe(false)
+      if (!badPort.ok) expect(badPort.error.kind).toBe('bad-ssh')
+      const badWebPort = registry.add({
+        hostId: 'bench', hostTitle: '', address: 'http://192.168.1.20:3081',
+        ssh: { target: '192.168.1.20', remoteWebPort: 0, authMode: 'identityFile' },
+      })
+      expect(badWebPort.ok).toBe(false)
+      if (!badWebPort.ok) expect(badWebPort.error.kind).toBe('bad-ssh')
+    })
+
+    it('refuses an unknown auth mode', () => {
+      const { storage } = fakeStorage()
+      const registry = hostRegistry(storage)
+      const result = registry.add({
+        hostId: 'bench', hostTitle: '', address: 'http://192.168.1.20:3081',
+        ssh: { target: '192.168.1.20', authMode: 'agent' as never },
+      })
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.error.kind).toBe('bad-ssh')
+    })
+
+    it('entries without ssh keep parsing (legacy records)', () => {
+      const { storage } = fakeStorage({ [HOST_REGISTRY_KEY]: JSON.stringify([
+        { hostId: 'old', hostTitle: '旧', address: 'http://192.168.1.20:3081', createdAt: 5 },
+      ]) })
+      expect(hostRegistry(storage).list()[0]?.ssh).toBeUndefined()
+    })
+
+    it('a hand-edited record smuggling a password loses the secret on read', () => {
+      const { storage } = fakeStorage({ [HOST_REGISTRY_KEY]: JSON.stringify([
+        {
+          hostId: 'sneaky', hostTitle: '手改', address: 'http://192.168.1.20:3081', createdAt: 5,
+          ssh: { target: '192.168.1.20', authMode: 'password', password: 'hunter2', identityPem: 'x' },
+        },
+      ]) })
+      const entry = hostRegistry(storage).list()[0]
+      expect(entry?.ssh).toEqual({ target: '192.168.1.20', authMode: 'password' })
+    })
+
+    it('a stored ssh block missing required facts drops the block on read, keeping the entry', () => {
+      const { storage } = fakeStorage({ [HOST_REGISTRY_KEY]: JSON.stringify([
+        { hostId: 'thin', hostTitle: '', address: 'http://192.168.1.20:3081', createdAt: 5, ssh: { authMode: 'identityFile' } },
+      ]) })
+      const entry = hostRegistry(storage).list()[0]
+      expect(entry?.hostId).toBe('thin')
+      expect(entry?.ssh).toBeUndefined()
+    })
+  })
 })

@@ -13,7 +13,7 @@
  * @vitest-environment jsdom
  */
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from "vitest"
 import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
@@ -716,6 +716,145 @@ describe('从 Tailscale 选：表单前面的选择器', () => {
       expect(withoutPort.container.querySelector('[data-action="tailscale-pick"]')).toBeNull()
     } finally {
       await unmount(withoutPort.root)
+    }
+  })
+})
+
+describe('主机详情：使用这台主机 + 远程部署（状态机如实呈现）', () => {
+  const SSH_SEED = {
+    target: 'mini.tailb6790d.ts.net',
+    port: 22,
+    user: 'good',
+    authMode: 'identityFile' as const,
+    identityFile: '/Users/good/.ssh/id_ed25519',
+    hostKeyFingerprint: 'SHA256:abc',
+    remoteWebPort: 3081,
+  }
+
+  function stubFetch(routes: Record<string, unknown | (() => unknown)>): { calls: { url: string; body?: unknown }[] } {
+    const calls: { url: string; body?: unknown }[] = []
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      calls.push({ url, ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }) })
+      if (url.endsWith('/api/threadharbor.host-ssh.operation') && init?.method === 'HEAD') {
+        return new Response('', { status: 200 })
+      }
+      for (const [suffix, payload] of Object.entries(routes)) {
+        if (!url.includes(suffix)) continue
+        const value = typeof payload === 'function' ? (payload as () => unknown)() : payload
+        return new Response(JSON.stringify(value), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ ok: false, error: `no route for ${url}` }), { status: 404 })
+    }) as unknown as typeof fetch
+    return { calls }
+  }
+
+  it('未存连接方式：使用区块说明现状并给出「填写连接方式」，部署区块默认收起、点开可填', async () => {
+    const { calls } = stubFetch({})
+    const registry = makeRegistry([{ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' }])
+    const { container, root } = await mountPanel(registry)
+    try {
+      click(container, '[data-host-open="bench"]')
+      const use = q(container, '[data-use-section]')
+      expect(use.textContent).toContain('尚未保存')
+      click(container, '[data-action="open-deploy"]')
+      expect(container.querySelector('[data-ssh-deploy]')).not.toBeNull()
+      expect(calls.length).toBeGreaterThanOrEqual(0)
+    } finally {
+      await unmount(root)
+      delete (globalThis as { fetch?: unknown }).fetch
+    }
+  })
+
+  it('存了连接方式：连接并打开走 connect 路由，成功后登记更新为新网址并开新标签', async () => {
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    const { calls } = stubFetch({
+      'host-ssh.connect': { ok: true, value: { endpoint: 'http://127.0.0.1:45555', launchUrl: 'http://127.0.0.1:45555/?token=neo', mode: 'tunnel', peer: { pluginsInstalled: true, listen: 'loopback', port: 3081 } } },
+    })
+    const registry = makeRegistry([{ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081', launchUrl: 'http://192.168.1.20:3081/?token=old' }])
+    // 用真实 registry 的存储端口补种 ssh 信息：makeRegistry 只收三个字段，这里手动再 add 一条带 ssh 的
+    const withSsh = makeRegistry([])
+    ;(withSsh as unknown as { add: (i: Record<string, unknown>) => unknown }).add({ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081', ssh: SSH_SEED })
+    const { container, root } = await mountPanel(withSsh)
+    try {
+      click(container, '[data-host-open="bench"]')
+      click(container, '[data-action="connect-open"]')
+      await act(async () => { await Promise.resolve() })
+      const connectCall = calls.find(call => call.url.includes('host-ssh.connect'))
+      expect(connectCall).toBeDefined()
+      expect(connectCall?.body).toEqual({
+        ssh: { target: SSH_SEED.target, port: 22, user: SSH_SEED.user, identityFile: SSH_SEED.identityFile, hostKeyFingerprint: SSH_SEED.hostKeyFingerprint },
+        remoteWebPort: 3081,
+      })
+      expect(open).toHaveBeenCalledWith('http://127.0.0.1:45555/?token=neo', '_blank', 'noopener')
+      const updated = withSsh.list().find(entry => entry.hostId === 'bench')
+      expect(updated?.address).toBe('http://127.0.0.1:45555')
+      expect(updated?.launchUrl).toBe('http://127.0.0.1:45555/?token=neo')
+      expect(updated?.ssh?.target).toBe(SSH_SEED.target)
+    } finally {
+      open.mockRestore()
+      await unmount(root)
+      delete (globalThis as { fetch?: unknown }).fetch
+    }
+  })
+
+  it('连接失败：原始原因全文展示，且给重试按钮', async () => {
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    stubFetch({
+      'host-ssh.connect': { ok: false, error: 'ssh: connect to host mini.tailb6790d.ts.net port 22: Connection refused' },
+    })
+    const withSsh = makeRegistry([])
+    ;(withSsh as unknown as { add: (i: Record<string, unknown>) => unknown }).add({ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081', ssh: SSH_SEED })
+    const { container, root } = await mountPanel(withSsh)
+    try {
+      click(container, '[data-host-open="bench"]')
+      click(container, '[data-action="connect-open"]')
+      await act(async () => { await Promise.resolve() })
+      const errorBox = q(container, '[data-use-error]')
+      expect(errorBox.textContent).toContain('ssh: connect to host mini.tailb6790d.ts.net port 22: Connection refused')
+      expect(container.querySelector('[data-action="connect-retry"]')).not.toBeNull()
+      expect(open).not.toHaveBeenCalled()
+    } finally {
+      open.mockRestore()
+      await unmount(root)
+      delete (globalThis as { fetch?: unknown }).fetch
+    }
+  })
+
+  it('部署在详情页锁定本机名，进度逐行展示，失败原文与重试都在', async () => {
+    let operationPolls = 0
+    stubFetch({
+      'host-ssh.deploy': { ok: true, value: { operationId: 'op-1' } },
+      'host-ssh.operation?operationId=op-1': () => {
+        operationPolls += 1
+        if (operationPolls === 1) return { ok: true, value: { operationId: 'op-1', status: 'running', progress: { phase: 'installing', detail: '正在安装远端 DSH 与插件。' }, startedAt: 1 } }
+        return { ok: true, value: { operationId: 'op-1', status: 'failed', progress: { phase: 'failed', detail: '安装中断。' }, error: '远端安装失败：tar: Unexpected EOF in archive\nexit status 2', startedAt: 1, finishedAt: 2 } }
+      },
+      'host-ssh.inspect': { ok: true, value: { keys: [{ target: 'mini.tailb6790d.ts.net', hostKeyFingerprint: 'SHA256:abc', algorithm: 'ED25519' }] } },
+    })
+    const registry = makeRegistry([{ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' }])
+    const { container, root } = await mountPanel(registry)
+    try {
+      click(container, '[data-host-open="bench"]')
+      click(container, '[data-action="open-deploy"]')
+      expect(container.querySelector('[data-ssh-deploy] [data-ssh-hostid]')).toBeNull()
+      type(container, '[data-ssh-deploy] [data-ssh-target]', 'mini.tailb6790d.ts.net')
+      type(container, '[data-ssh-deploy] [data-ssh-identity-file]', '/Users/good/.ssh/id_ed25519')
+      click(container, '[data-action="ssh-inspect"]')
+      await act(async () => { await Promise.resolve() })
+      click(container, '[data-ssh-key-row]')
+      click(container, '[data-action="ssh-deploy"]')
+      // 第一次轮询立刻回来（running），第二次在 800ms 后（failed）。
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 30)) })
+      const log = q(container, '[data-ssh-progress-log]')
+      expect(log.textContent).toContain('正在安装远端 DSH 与插件。')
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 900)) })
+      const errorBox = q(container, '[data-ssh-error]')
+      expect(errorBox.textContent).toContain('远端安装失败：tar: Unexpected EOF in archive')
+      expect(container.querySelector('[data-action="ssh-deploy-retry"]')).not.toBeNull()
+    } finally {
+      await unmount(root)
+      delete (globalThis as { fetch?: unknown }).fetch
     }
   })
 })

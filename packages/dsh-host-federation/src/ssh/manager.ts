@@ -6,8 +6,8 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type { SshConnectionConfig, SshDeployProgress, SshDeployRequest, SshDeployResult, SshHostKeyCandidate } from './types.ts'
-import { composeLaunchUrl, parseAccessMode, parseDeployMarkers } from './access.ts'
+import type { SshConnectionConfig, SshConnectResult, SshDeployProgress, SshDeployRequest, SshDeployResult, SshHostKeyCandidate } from './types.ts'
+import { composeLaunchUrl, parseAccessMode, parseDeployMarkers, planConnection } from './access.ts'
 import { run, runWithEnv } from './run.ts'
 import { freePort, portListening } from './port.ts'
 import { deploymentChannel, destination, parseSshInput, shellQuote } from './parse.ts'
@@ -238,6 +238,21 @@ export class DshSshManager {
     } finally {
       this.cleanupTempKeys()
     }
+  }
+
+  /**
+   * Reach an already-deployed peer: read its record, plan the honest route
+   * (tunnel or direct), and hand back the tokenized URL to open. Refusals
+   * throw with the reason and next action; SSH failures pass through raw.
+   */
+  async connect(config: SshConnectionConfig, remoteWebPort?: number): Promise<SshConnectResult> {
+    const peer = await this.readPeer(config)
+    const plan = planConnection(peer, remoteWebPort, this.options.defaultRemoteWebPort)
+    if (plan.mode === 'direct') {
+      return { endpoint: new URL(plan.launchUrl).origin, launchUrl: plan.launchUrl, mode: 'direct', peer }
+    }
+    const endpoint = await this.ensureTunnel(config, plan.remotePort)
+    return { endpoint, launchUrl: composeLaunchUrl(endpoint, plan.launchUrl), mode: 'tunnel', peer }
   }
 
   releaseTunnel(config: SshConnectionConfig): void {

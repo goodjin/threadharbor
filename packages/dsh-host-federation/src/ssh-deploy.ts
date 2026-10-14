@@ -27,6 +27,7 @@ export const ROUTE_INSPECT = '/api/threadharbor.host-ssh.inspect'
 export const ROUTE_DEPLOY = '/api/threadharbor.host-ssh.deploy'
 export const ROUTE_OPERATION = '/api/threadharbor.host-ssh.operation'
 export const ROUTE_PEER = '/api/threadharbor.host-ssh.peer'
+export const ROUTE_CONNECT = '/api/threadharbor.host-ssh.connect'
 
 export type Config = {
   knownHostsPath?: string
@@ -143,6 +144,15 @@ export function apply(ctx: unknown, config: Config = {}): void {
     return peer
   })
 
+  register(ROUTE_CONNECT, async body => {
+    const record = body as Record<string, unknown>
+    const ssh = manager.parseApprovedConfig(record['ssh'])
+    const remoteWebPort = typeof record['remoteWebPort'] === 'number' ? record['remoteWebPort'] : undefined
+    const result = await manager.connect(ssh, remoteWebPort)
+    log.info('ssh connect', { target: ssh.target, mode: result.mode, endpoint: result.endpoint, installed: result.peer.pluginsInstalled })
+    return result
+  })
+
   register(ROUTE_INSPECT, async body => {
     const ssh = manager.parseInspectionConfig((body as Record<string, unknown>)['ssh'])
     const keys = await manager.inspectAll(ssh)
@@ -160,9 +170,12 @@ export function apply(ctx: unknown, config: Config = {}): void {
 
   disposers.push(connection.fetch.register({
     path: ROUTE_OPERATION,
-    methods: ['GET'],
+    // HEAD serves the availability probe (probeSshDeployApi): a method mismatch
+    // would 404 there and the whole SSH UI would never show up.
+    methods: ['GET', 'HEAD'],
     requestBody: 'buffered',
     fetch: async (request) => {
+      if (request.method === 'HEAD') return new Response(null, { status: 200 })
       const id = new URL(request.url).searchParams.get('operationId')
       if (id === null || id === '') {
         return Response.json({ ok: false, error: 'operationId is required' }, { status: 400 })

@@ -88,6 +88,14 @@ export type SshDeployResult = {
   readonly alreadyRunning: boolean
 }
 
+/** What `connect` hands the UI: where to open, with what token, and the peer facts it used. */
+export type SshConnectResult = {
+  readonly endpoint: string
+  readonly launchUrl: string
+  readonly mode: 'tunnel' | 'direct'
+  readonly peer: import('./peer-status.ts').PeerStatus
+}
+
 export type SshDeployOperationView = {
   readonly operationId: string
   readonly status: 'queued' | 'running' | 'succeeded' | 'failed'
