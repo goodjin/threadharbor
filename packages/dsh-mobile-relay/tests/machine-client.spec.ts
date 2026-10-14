@@ -238,7 +238,7 @@ describe('MachineClient.call（带 cookie 的 RPC）', () => {
 })
 
 describe('MachineClient 事件流（$events 订阅与审批应答）', () => {
-  it('④ 假 socket 收 ready 帧后，answer 用该 clientId POST /api/$events/result，payload {args:{clientId,eventId,outcome}}', async () => {
+  it('④ 假 socket 收 ready 帧后，answer 用该 clientId POST /api/$events/result：完整 client-request 信封（宿主对每个 /api POST 过 clientRequestSchema，$events/result 无旁路）', async () => {
     const { calls, fetchLike } = fetchFake(jsonResponse(200, { result: { ok: true, value: null } }))
     const { sockets, openSocket } = socketSpy()
     const client = new MachineClient({ origin: ORIGIN, getCookie: cookieOk, fetchLike, openSocket })
@@ -257,9 +257,13 @@ describe('MachineClient 事件流（$events 订阅与审批应答）', () => {
     expect(new URL(sent.url).toString()).toBe(`${ORIGIN}/api/${EVENT_RESULT_ENDPOINT}`)
     expect(sent.init?.method).toBe('POST')
     expect(new Headers(sent.init?.headers).get('cookie')).toBe(COOKIE)
-    expect(JSON.parse(String(sent.init?.body))).toEqual({
-      args: { clientId: 'client-uuid-0001', eventId: 'evt-1', outcome },
-    })
+    // 信封逐字：裸体 {args:…} 过不了宿主的 clientRequestSchema（gateway/bad-request）
+    const envelope = JSON.parse(String(sent.init?.body)) as Record<string, unknown>
+    expect(envelope['type']).toBe('client-request')
+    expect(envelope['method']).toBe('$events/result')
+    expect(typeof envelope['rpcId']).toBe('string')
+    expect(String(envelope['rpcId']).length).toBeGreaterThan(0)
+    expect(envelope['payload']).toEqual({ args: { clientId: 'client-uuid-0001', eventId: 'evt-1', outcome } })
   })
 
   it('⑥ answer 在 ready 之前调用：返回 {ok:false} 且不发请求（客户端身份未知，无法应答）', async () => {
@@ -298,6 +302,31 @@ describe('MachineClient 事件流（$events 订阅与审批应答）', () => {
     expect(second.ok).toBe(false)
     expect(second.message).toBe('unknown clientId')
     expect(calls).toHaveLength(2)
+    // 两条 answer 走的都是完整信封（与 call 同一形状），不是裸体 args
+    for (const sent of calls) {
+      const envelope = JSON.parse(String(sent.init?.body)) as Record<string, unknown>
+      expect(envelope['type']).toBe('client-request')
+      expect(envelope['method']).toBe('$events/result')
+      expect(envelope['payload']).toMatchObject({ args: { eventId: expect.any(String) } })
+    }
+  })
+
+  it('connect() 在建连窗口内幂等：取 cookie 期间重复 connect 不开第二个 socket（I1）', async () => {
+    const { fetchLike } = fetchFake()
+    const { sockets, openSocket } = socketSpy()
+    // cookie 回源走 SSH 换取时窗口以秒计：用受控 promise 把「取 cookie 中」钉住
+    let releaseCookie: (value: { ok: true; cookie: string } | { ok: false; reason: string }) => void = () => {}
+    const gate = new Promise<{ ok: true; cookie: string } | { ok: false; reason: string }>(resolve => {
+      releaseCookie = resolve
+    })
+    const getCookie = (): Promise<{ ok: true; cookie: string } | { ok: false; reason: string }> => gate
+    const client = new MachineClient({ origin: ORIGIN, getCookie, fetchLike, openSocket })
+    client.connect()
+    client.connect() // 窗口内的第二次 connect：必须被挡住
+    client.connect()
+    releaseCookie({ ok: true, cookie: COOKIE })
+    await settle()
+    expect(sockets).toHaveLength(1) // 旧实现这里会开出 3 个（先到的没人 close，成僵尸连接）
   })
 
   it('openSocket 收到 ws://<origin>/api/remote.mux 与整对 cookie（升级请求带 Cookie 头由适配器用该实参实现）', async () => {

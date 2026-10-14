@@ -81,6 +81,13 @@ export class MachineClient {
   private readonly openSocket: (url: string, cookie: string) => WireSocket
   private readonly listeners = new Map<string, Set<(value: unknown) => void>>()
   private currentSocket: WireSocket | null = null
+  /**
+   * 「正在建连」标志：openSession 入口同步置位、成功/失败/关闭三路清除。
+   * 没有它，currentSocket 要到取完 cookie 才赋值，凭据回源走 SSH 时窗口以
+   * 秒计，窗口内的第二次 connect() 会双双通过守卫，openSocket 被调两次，
+   * 先到的 socket 永远没人 close，成僵尸连接。
+   */
+  private connecting = false
   private streamId: string | null = null
   /** 当前连接 ready 帧给的审批应答身份；断线即清，ready 前为 null。 */
   private clientId: string | null = null
@@ -168,20 +175,24 @@ export class MachineClient {
   /**
    * 开始订阅 $events。同步返回，建连（取 cookie → 升级 WS → 发 open 帧）
    * 在后台走；取不到 cookie 或建连失败按一次断线处理进退避，不向上抛。
-   * 已在连接/重连途中时是幂等空操作。
+   * 已在建连（connecting）、已连接（currentSocket）或重连排队
+   * （reconnectTimer）时是幂等空操作。
    */
   connect(): void {
     this.closed = false
-    if (this.currentSocket !== null || this.reconnectTimer !== null) return
+    if (this.currentSocket !== null || this.connecting || this.reconnectTimer !== null) return
     this.attempts = 0 // 全新会话从阶梯头起步
     void this.openSession()
   }
 
   /**
    * 应答一条 waterfall 事件（如审批）。走 HTTP $events/result（不占 WS 客户
-   * 帧通道），payload {args:{clientId,eventId,outcome}}，clientId 取当前连接
-   * ready 帧的值。从不 reject：ready 之前（身份未知，无法应答）、宿主报迟到
-   * （首答已生效，良性）、传输失败都折成 {ok:false}，不影响连接。
+   * 帧通道），与 call 同一个 client-request 信封，payload {args:{clientId,
+   * eventId,outcome}}——宿主对每个 /api POST 都过 clientRequestSchema 且
+   * method 须逐字等于路径端点（rpc-host.ts:253/257），$events/result 没有旁
+   * 路，裸体 args 会被 gateway/bad-request 拒掉。clientId 取当前连接 ready
+   * 帧的值。从不 reject：ready 之前（身份未知，无法应答）、宿主报迟到（首
+   * 答已生效，良性）、传输失败都折成 {ok:false}，不影响连接。
    */
   async answer(eventId: string, outcome: EventOutcome): Promise<{ ok: boolean; message?: string }> {
     const clientId = this.clientId
@@ -197,7 +208,12 @@ export class MachineClient {
       response = await this.fetchLike(new URL(`/api/${EVENT_RESULT_ENDPOINT}`, this.origin), {
         method: 'POST',
         headers: { 'content-type': 'application/json', cookie: cred.cookie },
-        body: JSON.stringify({ args: { clientId, eventId, outcome } }),
+        body: JSON.stringify({
+          type: 'client-request',
+          rpcId: `relay-rpc-${++seq}`,
+          method: EVENT_RESULT_ENDPOINT,
+          payload: { args: { clientId, eventId, outcome } },
+        }),
       })
     } catch {
       return { ok: false, message: 'answer 传输失败（按良性迟到应答处理，不影响连接）' }
@@ -223,6 +239,7 @@ export class MachineClient {
   /** 关闭当前连接并停止一切重连；之后再 connect() 会作为全新会话重启。 */
   close(): void {
     this.closed = true
+    this.connecting = false
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
@@ -246,8 +263,12 @@ export class MachineClient {
   /** 一轮建连：取 cookie → 开 socket →（onopen 后）发 open 订阅帧。任何一步失败都按断线进退避。 */
   private async openSession(): Promise<void> {
     if (this.closed) return
+    // 标志必须在首个 await 之前同步置位：connect() 的幂等守卫靠它挡住「取
+    // cookie 的窗口」里的重复调用（async 函数体在被调用时同步执行到首个
+    // await，所以置位与 connect() 同步生效）。
+    this.connecting = true
     const cred = await this.cookieSafe()
-    if (this.closed) return // 等待 cookie 期间被 close
+    if (this.closed) return // 等待 cookie 期间被 close（close 已清 connecting）
     if (!cred.ok) {
       this.scheduleReconnect()
       return
@@ -261,6 +282,7 @@ export class MachineClient {
     }
     const streamId = `relay-stream-${++seq}`
     this.currentSocket = socket
+    this.connecting = false // 建连结束，改由 currentSocket 表达「已连接」
     this.streamId = streamId
     socket.onopen = () => {
       if (socket !== this.currentSocket) return
@@ -290,10 +312,13 @@ export class MachineClient {
 
   /**
    * 断线调度重连：按阶梯取延迟（ready 后归零，所以稳定连接后的断线仍从
-   * 1s 起步），close() 已把 closed 置真时直接不动。
+   * 1s 起步），close() 已把 closed 置真时直接不动。建连失败的路径都汇到这
+   * 里，所以「正在建连」标志在此一并清除——重连排队期改由 reconnectTimer
+   * 表达。
    */
   private scheduleReconnect(): void {
     if (this.closed) return
+    this.connecting = false
     const delay = BACKOFF_STEPS_MS[this.attempts] ?? BACKOFF_CAP_MS
     this.attempts += 1
     this.reconnectTimer = setTimeout(() => {
