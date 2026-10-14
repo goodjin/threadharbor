@@ -17,6 +17,8 @@
 
 import { sessionsFromWorkspaces } from '@threadharbor/dsh-host-federation'
 import type { SessionLike, WorkspaceLike } from '@threadharbor/dsh-host-federation'
+import { fallbackT } from './locales.ts'
+import type { RuntimeT } from './locales.ts'
 
 /** One session as the roll-up publishes and lists it. */
 export type SourceSession = {
@@ -251,20 +253,23 @@ export function currentSessionId(sessions: SessionListSource | undefined): strin
  * rows instead of looking caught up when it never read anything.
  * @param workspaces - the workspace projection, or undefined while absent.
  * @param sessions - the session projection, or undefined while absent.
+ * @param t - reads the not-ready notes in the active language; absent
+ * (tests, no locale service) it falls back to the dictionary's source text.
  * @returns rows grouped host-side into projects, or the reason there are none.
  */
 export function buildHostSessions(
   workspaces: WorkspaceListSource | undefined,
   sessions: SessionListSource | undefined,
+  t: RuntimeT = fallbackT,
 ): SessionRead {
   if (workspaces === undefined) {
-    return { ok: false, note: '读不到项目列表：主机上没有 workspaces 服务（可能还没加载完）。' }
+    return { ok: false, note: t('panel.session.noWorkspacesService') }
   }
   if (workspaces.state === 'error') {
-    return { ok: false, note: '项目列表读取失败：主机报了错误，稍后会随订阅自动重试。' }
+    return { ok: false, note: t('panel.session.readFailed') }
   }
   if (workspaces.state === 'loading') {
-    return { ok: false, note: '项目列表还在加载。' }
+    return { ok: false, note: t('panel.session.stillLoading') }
   }
   const workspacesLike: readonly WorkspaceLike[] = workspaces.items.map(row => ({
     workspaceId: row.workspaceId,

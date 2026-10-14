@@ -27,6 +27,9 @@
  *   the page's newer intent wins), never clobbered by it.
  */
 
+import { fallbackT } from './locales.ts'
+import type { RuntimeT } from './locales.ts'
+
 /** One per-key change to push to the machine. */
 export type StoreOp =
   | { readonly kind: 'set'; readonly key: string; readonly value: string }
@@ -88,7 +91,15 @@ export type HostStoreDeps = {
   log(message: string): void
 }
 
-export function startHostStore(deps: HostStoreDeps): HostStorePort {
+/**
+ * Start the machine-backed storage.
+ * @param deps - the page-supplied ports; see {@link HostStoreDeps}.
+ * @param t - reads the degraded details in the active language; absent
+ * (tests, no locale service) it falls back to the dictionary's source text.
+ * The details land in the `degraded` posture the panel renders as-is.
+ * @returns the port the panel and the wiring read.
+ */
+export function startHostStore(deps: HostStoreDeps, t: RuntimeT = fallbackT): HostStorePort {
   const listeners = new Set<() => void>()
   let posture: HostStorePosture = { kind: 'loading' }
   const mirror = new Map<string, string>()
@@ -149,7 +160,7 @@ export function startHostStore(deps: HostStoreDeps): HostStorePort {
         // row is missing on this host, so writes cannot land either.
         doc = {}
         mergeUnderTouched()
-        setPosture({ kind: 'degraded', detail: '这台机器的设置通道里没有 threadharbor-host-store 命名空间（组合里缺 threadharbor-host-store 行）；名单这次存不进这台机器' })
+        setPosture({ kind: 'degraded', detail: t('panel.posture.degradedNoNamespace') })
       } else {
         doc = { ...loaded }
         mergeUnderTouched()
@@ -158,7 +169,7 @@ export function startHostStore(deps: HostStoreDeps): HostStorePort {
       }
     } catch (error) {
       if (initial) markReady()
-      setPosture({ kind: 'degraded', detail: `读不到这台机器上已存的名单：${messageOf(error)}` })
+      setPosture({ kind: 'degraded', detail: t('panel.posture.degradedReadFailed', { message: messageOf(error) }) })
       deps.log(`host store: hydrate failed: ${messageOf(error)}`)
     }
     notify()
@@ -262,7 +273,7 @@ export function startHostStore(deps: HostStoreDeps): HostStorePort {
       // write (or refresh) retries everything still marked dirty. A failed
       // flush does NOT re-arm here on its own: an automatic retry would hide
       // the failure and hammer a host that cannot answer.
-      setPosture({ kind: 'degraded', detail: `没存进这台机器：${messageOf(error)}` })
+      setPosture({ kind: 'degraded', detail: t('panel.posture.degradedWriteFailed', { message: messageOf(error) }) })
       deps.log(`host store: flush failed: ${messageOf(error)}`)
     } finally {
       flushing = false

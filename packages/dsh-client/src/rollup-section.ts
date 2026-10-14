@@ -16,126 +16,19 @@
 import { HostFederation, browserChannel, resolveHostIdentity } from '@threadharbor/dsh-host-federation'
 import type { FederationBus, HostIdentity, HostSnapshot } from '@threadharbor/dsh-host-federation'
 import type { ConfiguredIdentity, IdentitySettings } from './settings-source.ts'
-
-/** Everything the section needs from the page around it. */
-export type RollUpSectionDeps = {
-  /** The panel's identity form: what this host is called and where it is kept. */
-  settings: IdentitySettings
-  /** Cross-tab channel; absent means the section opens a BroadcastChannel. */
-  bus?: FederationBus
-  setInterval(handler: () => void, ms: number): number
-  clearInterval(handle: number): void
-  /** Where failures are said out loud instead of swallowed. */
-  report(message: string): void
-  heartbeatMs: number
-  staleMs: number
-}
-
-/** The host list, as the panel renders it. */
-export type RollUpSection = {
-  /** Who this tab currently says it is. */
-  identity(): HostIdentity
-  /** Every host in sight: this tab, plus whoever is present on the channel. */
-  hosts(): readonly HostSnapshot[]
-  /** The hostIds currently present on the channel, this tab's included. */
-  onlineHostIds(): readonly string[]
-  /** Save a new identity; an id change re-announces under the new one. */
-  setIdentity(value: ConfiguredIdentity): void
-  /**
-   * Re-read the identity from settings without writing. The settings can
-   * change underneath the section — host-side settings hydrate asynchronously
-   * after mount — and the section must take the configured identity the
-   * moment it appears, retiring the derived one it started with.
-   */
-  rereadIdentity(): void
-  /** Stop the heartbeat and say goodbye. */
-  dispose(): void
-}
-
-/** The channel name one host list shares; one name means one list. */
-const CHANNEL_NAME = 'dsh-host-federation'
-
-/**
- * Start the host list section.
- * @param deps - the page-supplied ports; see {@link RollUpSectionDeps}.
- * @returns the section; dispose stops the heartbeat and says goodbye.
- */
-export function startRollUpSection(deps: RollUpSectionDeps): RollUpSection {
-  let identity = resolveIdentity()
-  let federation = open(identity)
-  // Announced up front: a tab that only said hello would leave its own row
-  // empty in every other tab, and nothing is going to come and ask.
-  federation.start()
-  const timer = deps.setInterval(() => { beat() }, deps.heartbeatMs)
-
-  function beat(): void {
-    // Expiry first: a crashed tab never says goodbye, so silence past the
-    // window is the only honest way for it to leave the list — and 「在线」
-    // must not be a claim that can never become false.
-    try {
-      federation.expire(Date.now())
-    } catch (error: unknown) {
-      deps.report(`host expiry failed: ${messageOf(error)}`)
-    }
-    try {
-      federation.emitHeartbeat()
-    } catch (error: unknown) {
-      deps.report(`host heartbeat failed: ${messageOf(error)}`)
-    }
-  }
-
-  function resolveIdentity(): HostIdentity {
-    let configured: ConfiguredIdentity
-    try {
-      configured = deps.settings.read()
-    } catch (error: unknown) {
-      // A settings read that fails is an ordinary not-configured-yet, not a
-      // reason to take the host list down.
-      configured = {}
-      deps.report(`host settings could not be read: ${messageOf(error)}`)
-    }
-    return resolveHostIdentity({
-      configuredHostId: configured.hostId,
-      configuredHostTitle: configured.hostTitle,
-      origin: typeof location === 'undefined' ? '' : location.origin,
-      pathname: typeof location === 'undefined' ? '/' : location.pathname,
-      userAgent: typeof navigator === 'undefined' ? '' : navigator.userAgent,
-    })
-  }
-
-  function open(next: HostIdentity): HostFederation {
-    const bus = deps.bus ?? openChannel()
-    return new HostFederation(next, bus, { staleMs: deps.staleMs })
-  }
-
-  function openChannel(): FederationBus {
-    const bus = browserChannel(CHANNEL_NAME)
-    // The channel is how other tabs hear about this host at all; a page
-    // without one must not look like a working host list that shows nobody.
-    if (typeof BroadcastChannel === 'undefined') {
-      deps.report('no BroadcastChannel on this page: the cross-tab host list stays empty and other hosts will not appear')
-    }
-    return bus
-  }
-
-  return {
-    identity: () => identity,
-    hosts: () => federation.hosts(),
-    onlineHostIds: () => federation.hosts().map(host => host.hostId),
-    setIdentity: value => {
-      deps.settings.write(value)
-      applyIdentity()
-    },
-    rereadIdentity: () => {
-      applyIdentity()
-    },
-    dispose: () => {
-      // The timer first: a heartbeat left running after the panel is gone
-      // would keep announcing a host nobody is listening for.
-      deps.clearInterval(timer)
-      federation.dispose()
-    },
-  }
+    ...(deps.onSelectSession === undefined ? {} : { onSelect: deps.onSelectSession }),
+    mount: (container, read) => mountRollUp(container, read, {
+      ...(deps.onSelectSession === undefined ? {} : { onSelect: deps.onSelectSession }),
+      hostNote: host => {
+        if (host.self) {
+          const notes = deps.sourceNotes()
+          return notes.length > 0 ? notes.join(' ') : undefined
+        }
+        return host.empty ? say('panel.rollup.emptySessions') : undefined
+      },
+    }),
+  })
+  onChange = () => { surface?.refresh() }
 
   /**
    * Take the identity settings now hold, whether because the operator saved
@@ -160,6 +53,40 @@ export function startRollUpSection(deps: RollUpSectionDeps): RollUpSection {
     identity = next
     federation = open(identity)
     federation.start()
+    onChange()
+  }
+
+  return {
+    element: () => surface?.element() ?? document.createElement('div'),
+    identity: () => identity,
+    notices: () => [
+      ...deps.sourceNotes(),
+      say('panel.rollup.crossSourceNote'),
+    ],
+    setIdentity: value => {
+      deps.settings.write(value)
+      applyIdentity(resolveIdentity())
+    },
+    rereadIdentity: () => {
+      applyIdentity(resolveIdentity())
+    },
+    hosts: () => federation.hosts(),
+    onlineHostIds: () => federation.hosts().map(host => host.hostId),
+    republish: () => {
+      try {
+        federation.publishSessions(deps.sessions())
+      } catch (error: unknown) {
+        deps.report(`session publish failed: ${messageOf(error)}`)
+      }
+      onChange()
+    },
+    dispose: () => {
+      // The timer first: a heartbeat left running after the panel is gone
+      // would keep announcing a host nobody is listening for.
+      deps.clearInterval(timer)
+      surface?.dispose()
+      federation.dispose()
+    },
   }
 }
 
