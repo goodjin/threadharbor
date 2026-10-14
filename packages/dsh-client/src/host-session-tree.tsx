@@ -37,6 +37,8 @@ function readExpanded(): string[] {
 }
 
 export function HostSessionTree({ view, ctx, onOpenHostPage, initialExpanded, t }: Props) {
+  const [openFailed, setOpenFailed] = useState(false)
+
   const [expanded, setExpanded] = useState<readonly string[]>(() => {
     const stored = readExpanded()
     return stored.length > 0 || initialExpanded === undefined ? stored : [...initialExpanded]
@@ -113,7 +115,7 @@ export function HostSessionTree({ view, ctx, onOpenHostPage, initialExpanded, t 
                     className={styles.sessionRow}
                     data-session-row={session.sessionId}
                     onClick={() => {
-                      if (host.self) openLocalSession(ctx, session.sessionId)
+                      if (host.self) setOpenFailed(openLocalSession(ctx, session.sessionId) === false)
                       else onOpenHostPage(host.hostId)
                     }}
                   >
@@ -125,6 +127,9 @@ export function HostSessionTree({ view, ctx, onOpenHostPage, initialExpanded, t 
           </section>
         )
       })}
+      {openFailed
+        ? <p className={styles.error} data-open-failed>{t('panel.tree.openFailed')}</p>
+        : null}
       {view.hosts.length === 0
         ? <p className={styles.note}>{t('panel.tree.noHosts')}</p>
         : null}

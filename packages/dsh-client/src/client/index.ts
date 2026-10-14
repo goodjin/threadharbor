@@ -384,7 +384,7 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // 阶段 L：以更低优先级数值遮蔽原生工作区列表，接管为「主机 → 项目 →
   // 会话」树（§8.5）。开关 threadharbor.sidebarTree=off 时跳过注册，原生
   // 列表照常——升级漂移时的一键退路。
-  maybeRegisterSidebarTree(ctx.slots, ctx)
+  maybeRegisterSidebarTree(ctx.slots, ctx, registry)
 
   // 手机配对 section：和主机面板同一套侧栏注册面（sidebar.panellist + main），
   // 数据只有一条同源 GET（pair-url）。带令牌的网址只进面板状态、只画在这台

@@ -56,7 +56,7 @@ const safeStorage = (): Storage | { getItem(): null; setItem(): void; removeItem
  * Register the tree once per slot host, at a priority that shadows the native
  * workspace list. HMR re-runs land in the WeakSet guard and stay silent.
  */
-export function maybeRegisterSidebarTree(slots: TreeSlotHost, ctx: ServicesCtx): void {
+export function maybeRegisterSidebarTree(slots: TreeSlotHost, ctx: ServicesCtx, registry?: RegistryLike): void {
   if (registeredHosts.has(slots)) return
   registeredHosts.add(slots)
   let off = false
@@ -66,13 +66,16 @@ export function maybeRegisterSidebarTree(slots: TreeSlotHost, ctx: ServicesCtx):
     off = false
   }
   if (off) return
-  const registry: RegistryLike = hostRegistry(safeStorage())
+  // The entry hands in the panel's own registry (the settings-channel storage);
+  // the localStorage default only serves tests and standalone mounts, and
+  // would silently disagree with what the panel shows.
+  const bound: RegistryLike = registry ?? hostRegistry(safeStorage())
   slots.inject('sidebar.workspaces', () => slots.register(
     { name: 'sidebar.workspaces', priority: -10 },
     (props: { readonly t?: RuntimeT; readonly selectPanel?: (id: string) => void }) =>
       createElement(ShadowTreeHost, {
         ctx,
-        registry,
+        registry: bound,
         ...(props.t === undefined ? {} : { t: props.t }),
         ...(props.selectPanel === undefined ? {} : { selectPanel: props.selectPanel }),
       }),

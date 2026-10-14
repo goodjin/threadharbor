@@ -1440,3 +1440,26 @@ IP、设置按钮。落地：
   展开（主机名锁定）、对迷你主机真实 SSH 检查列出三枚真实指纹、连接被真实拒绝
   时原始原因（Permission denied (publickey,password,keyboard-interactive)）
   原样上屏。
+
+### 8.5 落地记录：阶段 L 左树接管（2026-10-15 深夜）
+
+- **接管方式**：优先级 -10 注册进 `sidebar.workspaces` 遮蔽原生工作区列表
+  （槽位机制官方语义：同优先级才冲突，数值最小者渲染）。回退开关
+  `localStorage.threadharbor.sidebarTree = 'off'`：跳过注册，原生列表回来。
+- **组件分工**：HostSessionTree 纯渲染（不发请求，全部 data-* 钩子可点可测）；
+  ShadowTreeHost 容器负责本机 30 秒读（cordis 服务 workspaces/sessions 经
+  buildHostSessions）、部署过的远端 60 秒拉（ROUTE_REMOTE_SESSIONS，失败原文
+  入树）、登记簿合成 RollUpView。
+- **阶段 L 过渡**：点远端/未部署主机行 → 切到面板并广播 focus-host 事件打开
+  该机详情页（阶段 R 换成主区直接展示会话）；本机项目行内「新会话」经
+  uiWorkspace.startSession；远端项目暂无新建（阶段 N）。
+- **过程中修掉的真缺陷**：①session-actions 把方法拆离宿主对象裸调丢 this；
+  ②cordis 对未授予服务 ctx.get 抛异常（当年代码有 tryRead，漏抄）；
+  ③容器 effect 依赖每帧新建数组致远端拉取死循环；④根出口 re-export 服务端
+  路由常量把 node 内建拖进浏览器包（verify-build 拦下）。①②③均有回归测试。
+- **真机验证（3081）**：原生列表被遮蔽；本机五个真实项目、真实会话全列出；
+  点本机会话主区真的打开（hero 出现、输入框出现）；jinmac 灰显未部署+提示；
+  开关 off 刷新后原生列表回归；临时注入渲染抛错 → 树消失、页面与侧栏存活、
+  原生列表自动顶回（槽位失败即弃权机制），探针已撤并复原。
+- 已知边界：外观为复刻简化（无搜索框/右键菜单/归档过滤，后续按需补）；
+  远端「边生成边显示」不在本阶段（§8.5 已声明）。

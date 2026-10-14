@@ -45,4 +45,3 @@ export type { RollUpView, HostViewRow, ProjectView, SessionView } from './rollup
 export { sessionsFromWorkspaces, UNGROUPED } from './workspace-map.ts'
 export type { WorkspaceLike, SessionLike, WorkspaceSession } from './workspace-map.ts'
 export { fetchRemoteSessions } from './host-remote-sessions.ts'
-export { ROUTE_REMOTE_SESSIONS } from './ssh-deploy.ts'

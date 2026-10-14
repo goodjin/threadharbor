@@ -138,6 +138,14 @@ describe('HostSessionTree', () => {
     } finally { await unmount(root) }
   })
 
+  it('本机打开派发失败：树上如实说，不静默', async () => {
+    const { container, root } = await mountTree({ ctx: { get: () => undefined } })
+    try {
+      click(container, '[data-session-row="s1"]')
+      expect(container.querySelector('[data-open-failed]')?.textContent).toContain('打开会话失败')
+    } finally { await unmount(root) }
+  })
+
   it('展开态记忆：本机默认展开，远端展开后写入 localStorage', async () => {
     const first = await mountTree()
     try {

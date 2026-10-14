@@ -9,6 +9,15 @@
 
 type CtxLike = { get(name: string): unknown }
 
+/** cordis throws for a service it has not granted yet; that is "not yet", not a crash. */
+const tryGet = (ctx: CtxLike, name: string): unknown => {
+  try {
+    return ctx.get(name)
+  } catch {
+    return undefined
+  }
+}
+
 /** Call through the receiver: these are prototype methods, and a detached call loses `this`. */
 type WithOpenSession = { readonly openSession: (sessionId: string) => void }
 type WithStartSession = { readonly startSession: (workspaceId: string) => void }
@@ -21,7 +30,7 @@ const hasStartSession = (value: unknown): value is WithStartSession =>
 
 /** Open an existing session. `false` means: not dispatched, caller shows why. */
 export function openLocalSession(ctx: CtxLike, sessionId: string): boolean {
-  const ui = ctx.get('uiWorkspace')
+  const ui = tryGet(ctx, 'uiWorkspace')
   if (!hasOpenSession(ui)) return false
   try {
     ui.openSession(sessionId)
@@ -33,7 +42,7 @@ export function openLocalSession(ctx: CtxLike, sessionId: string): boolean {
 
 /** Start a new session inside a project. `false` means: not dispatched. */
 export function startSessionInProject(ctx: CtxLike, workspaceId: string): boolean {
-  const ui = ctx.get('uiWorkspace')
+  const ui = tryGet(ctx, 'uiWorkspace')
   if (!hasStartSession(ui)) return false
   try {
     ui.startSession(workspaceId)

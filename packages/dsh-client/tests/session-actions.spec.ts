@@ -61,3 +61,11 @@ describe('方法不脱离宿主对象（原型方法依赖 this）', () => {
     expect(ui.started).toEqual(['w-9'])
   })
 })
+
+describe('cordis 未授予的服务：get 抛异常而不是返回空', () => {
+  it('get 抛错按缺失处理，不炸树', () => {
+    const ctx = { get: () => { throw new Error('service not ready') } }
+    expect(openLocalSession(ctx, 's-1')).toBe(false)
+    expect(startSessionInProject(ctx, 'w-1')).toBe(false)
+  })
+})

@@ -245,6 +245,7 @@ export const zh = {
   'panel.tree.newSession': '在本项目下新建会话',
   'panel.tree.noHosts': '还没有任何主机。',
   'panel.tree.selfHost': '本机',
+  'panel.tree.openFailed': '打开会话失败：本机界面服务未就绪或拒绝了这次调用。',
   /** 详情页「远程部署与插件」折叠区。 */
   'panel.deploy.expand': '远程部署与插件（展开）',
   'panel.deploy.collapse': '收起部署区',
@@ -469,6 +470,7 @@ export const en = {
   'panel.tree.newSession': 'Start a new session in this project',
   'panel.tree.noHosts': 'No hosts yet.',
   'panel.tree.selfHost': 'This machine',
+  'panel.tree.openFailed': 'Could not open the session: the local UI service is not ready or refused the call.',
   'panel.deploy.expand': 'Remote deploy and plugins (expand)',
   'panel.deploy.collapse': 'Collapse deploy area',
   'panel.ssh.httpInvalid': 'Invalid response (HTTP {status})',
