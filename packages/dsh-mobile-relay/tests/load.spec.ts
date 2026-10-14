@@ -76,7 +76,7 @@ describe('Config 的形状校验（schemastery，装载第一道门）', () => {
     ['sshKnownHostsPath 为空', { sshKnownHostsPath: '', statePath: '/s', machines: [] }],
     ['statePath 为空', { sshKnownHostsPath: '/k', statePath: '', machines: [] }],
   ])('%s解析抛错', (_label, config) => {
-    expect(() => Config(config as MobileRelayConfig)).toThrow()
+    expect(() => Config(config as unknown as MobileRelayConfig)).toThrow()
   })
 })
 
@@ -202,6 +202,9 @@ describe('apply 的装载行为', () => {
     const { run, routes } = captureAppliedRoutes(undefined)
     expect(run).toThrow(/缺配置/)
     expect(routes).toHaveLength(0)
+    const { run: runNull, routes: routesNull } = captureAppliedRoutes(null as unknown as MobileRelayConfig)
+    expect(runNull).toThrow(/缺配置/)
+    expect(routesNull).toHaveLength(0)
   })
 
   it.each([

@@ -163,15 +163,14 @@ describe('装配缝不会静默吃掉参数（评审 I2）', () => {
     // 第一版的缝是「命中即早退」：先给 tailscalePeers 就把 probeStatus 丢了，
     // 而真网络恰好快速失败、断言照样绿——这种缝比没有缝更坏，它让人以为
     // 用例验过了。
-    let probed = 0
     const { ctx, routes } = host()
     apply(ctx, configOf(), {
       ssh: fakeSsh().facade,
       tailscalePeers: [{ name: 'gooddemacbook-pro', online: true }],
       probeStatus: 200,
-      // 这里借 registry 缝的入口不行——要用真装配，所以额外给一个会记数的探测：
-      // probeStatus 只固定状态码，因此用「状态码是 200」之外的证据：让探测
-      // 走真实注入路径，靠 running 字段是否为 true 证明它没落到真 fetch。
+      // 判据就是 running 为 true：真 fetch 打 127.0.0.1:<落盘号> 会连不上（那个口
+      // 没人听），2s race 判假；只有注入了的探测假件会回 200。复评已对抗验证过：
+      // 把 overrides 退回「命中即早退」，这条必红。
     })
     const handler = routes.find(route => route.path === RELAY_HOSTS_PATH)?.handler
     if (handler === undefined) throw new Error('hosts 路由未挂上')
@@ -179,7 +178,6 @@ describe('装配缝不会静默吃掉参数（评审 I2）', () => {
 
     const hosts = JSON.parse(state.body).hosts as { running: boolean }[]
     expect(hosts[0]?.running).toBe(true)
-    expect(probed).toBe(0)
   })
 })
 

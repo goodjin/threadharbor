@@ -43,7 +43,7 @@ export interface RelayMachineConfig {
 
 /** apply 收到的组合配置形状（Config 的解析结果）；四个字段全都必填，缺一即拒装载（理由见 apply）。 */
 export interface MobileRelayConfig {
-  readonly mobileOrigin?: string
+  readonly mobileOrigin: string
   readonly sshKnownHostsPath: string
   readonly statePath: string
   readonly machines: readonly RelayMachineConfig[]
@@ -195,7 +195,9 @@ const LIST_TIMEOUT_MS = 10_000
  */
 export function apply(ctx: RelayRouteContext, config?: MobileRelayConfig, deps: RelayAssemblyDeps = {}): void {
   // 语义校验先于任何注册：坏配置装载即失败，不留下半挂的路由。
-  if (config === undefined || typeof config !== 'object') {
+  // null 也在这里挡住：`typeof null === 'object'`，漏了它会以「访问 undefined 的
+  // hostKeyFingerprint」这种天书报错收场，而不是告诉运维缺配置。
+  if (config === undefined || config === null || typeof config !== 'object') {
     // 组合行没给 config 块时宿主传什么（undefined 还是空对象）我们没在真机上量过，
     // 与其为它赌一种形状，不如两种都挡住并说清缺什么——装载失败时人要看得懂
     // 缺的是哪个字段，而不是看一个 `dirname(undefined)` 的 TypeError。

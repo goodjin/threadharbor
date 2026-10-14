@@ -229,9 +229,9 @@ export class TunnelPool {
     return undefined
   }
 
-  /** 由机器配置拼 SSH 连接面；缺省字段不出现（与 RelayMachineConfig 的可选语义一致）。 */
   /**
-   * 这台机器的 SSH 连接配置（指纹已登记时），没有则 undefined。
+   * 这台机器的 SSH 连接配置（指纹已登记时），没有则 undefined。缺省字段不出现
+   * （与 RelayMachineConfig 的可选语义一致）。
    *
    * 装配层要靠它去读启动日志（凭据自愈那一步），而指纹解析只有这一处——
    * 让装配层再解析一遍就是两份真相，登记规则一改两处就会分家。所以这里只暴露
