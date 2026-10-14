@@ -9,8 +9,8 @@ import { describe, expect, it, vi } from 'vitest'
 import type { TailscaleStatusRun } from '@threadharbor/dsh-host-federation/tailscale'
 import { HostRegistry, RELAY_HOSTS_PATH, type HostProbeFetch, type HostRegistryDeps } from '../src/hosts.ts'
 
-const MACHINE_A = { hostId: 'mac-a', target: 'mac-a', remotePort: 3081 }
-const MACHINE_B = { hostId: 'linux-b', target: 'linux-b', remotePort: 3081 }
+const MACHINE_A = { hostId: 'mac-a', target: 'mac-a', remotePort: 3081, logPath: '/l.log' }
+const MACHINE_B = { hostId: 'linux-b', target: 'linux-b', remotePort: 3081, logPath: '/l.log' }
 
 /** 假 Tailscale 执行面：stdout 是一份 `tailscale status --json` 样式文本。 */
 function runWith(names: readonly string[], offline: readonly string[] = []): TailscaleStatusRun {
@@ -71,7 +71,7 @@ function probeWith(status: number | ((url: string) => number), onCall?: (url: st
   return { urls, fetch }
 }
 
-const READ_LAUNCH_URL = async (): Promise<string | undefined> => undefined
+const READ_LAUNCH_URL = async (_hostId: string): Promise<string | undefined> => undefined
 
 function makeRegistry(deps: Partial<HostRegistryDeps> & Pick<HostRegistryDeps, 'machines'>): HostRegistry {
   return new HostRegistry({

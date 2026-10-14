@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { mkdtempSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import {
   apply,
@@ -21,7 +24,7 @@ describe('Config 的形状校验（schemastery，装载第一道门）', () => {
     const config = {
       sshKnownHostsPath: '/home/relay/.ssh/known_hosts',
       statePath: '/home/relay/.threadharbor-relay/state.json',
-      machines: [{ hostId: 'gooddemacbook-pro', target: '100.64.0.2', remotePort: 3081 }],
+      machines: [{ hostId: 'gooddemacbook-pro', target: '100.64.0.2', remotePort: 3081, logPath: '/var/log/dsh.log' }],
     }
     expect(Config(config)).toEqual(config)
   })
@@ -44,10 +47,10 @@ describe('Config 的形状校验（schemastery，装载第一道门）', () => {
   })
 
   it.each([
-    ['hostId 为空字符串', { hostId: '', target: '100.64.0.2', remotePort: 3081 }],
-    ['hostId 含空白', { hostId: 'good macbook', target: '100.64.0.2', remotePort: 3081 }],
-    ['target 为空字符串', { hostId: 'gooddemacbook-pro', target: '', remotePort: 3081 }],
-    ['target 含空白', { hostId: 'gooddemacbook-pro', target: '100.64.0.2 -J jump', remotePort: 3081 }],
+    ['hostId 为空字符串', { hostId: '', target: '100.64.0.2', remotePort: 3081, logPath: '/var/log/dsh.log' }],
+    ['hostId 含空白', { hostId: 'good macbook', target: '100.64.0.2', remotePort: 3081, logPath: '/var/log/dsh.log' }],
+    ['target 为空字符串', { hostId: 'gooddemacbook-pro', target: '', remotePort: 3081, logPath: '/var/log/dsh.log' }],
+    ['target 含空白', { hostId: 'gooddemacbook-pro', target: '100.64.0.2 -J jump', remotePort: 3081, logPath: '/var/log/dsh.log' }],
     ['remotePort 为 0', { hostId: 'gooddemacbook-pro', target: '100.64.0.2', remotePort: 0 }],
     ['remotePort 越界 65536', { hostId: 'gooddemacbook-pro', target: '100.64.0.2', remotePort: 65536 }],
     ['remotePort 非整数', { hostId: 'gooddemacbook-pro', target: '100.64.0.2', remotePort: 3081.5 }],
@@ -117,15 +120,19 @@ function captureAppliedRoutes(config: MobileRelayConfig | undefined, options: Re
   }
 }
 
+/**
+ * 真实装配会构造 SSH 管理器，它在装载期就要把 known_hosts 的目录建出来——所以
+ * 这里的路径必须可写（临时目录），别用 `/home/relay` 这种装起来必然失败的值。
+ */
 const VALID_CONFIG: MobileRelayConfig = {
   mobileOrigin: 'https://relay.example.com',
-  sshKnownHostsPath: '/home/relay/.ssh/known_hosts',
-  statePath: '/home/relay/.threadharbor-relay/state.json',
-  machines: [{ hostId: 'gooddemacbook-pro', target: '100.64.0.2', remotePort: 3081 }],
+  sshKnownHostsPath: join(mkdtempSync(join(tmpdir(), 'relay-load-')), 'known_hosts'),
+  statePath: join(mkdtempSync(join(tmpdir(), 'relay-load-state-')), 'state.json'),
+  machines: [{ hostId: 'gooddemacbook-pro', target: '100.64.0.2', remotePort: 3081, logPath: '/var/log/dsh.log' }],
 }
 
 describe('apply 的装载行为', () => {
-  it('导出名与注入面和组合行对齐；合法配置只挂 /threadharbor/relay/hosts 一条占位路由', () => {
+  it('导出名与注入面和组合行对齐；合法配置只挂 /threadharbor/relay/hosts 一条路由', () => {
     expect(name).toBe('threadharbor-mobile-relay')
     expect(inject).toContain('webServer')
     expect(inject).toContain('connection')
@@ -147,8 +154,8 @@ describe('apply 的装载行为', () => {
     const config: MobileRelayConfig = {
       ...VALID_CONFIG,
       machines: [
-        { hostId: 'gooddemacbook-pro', target: '100.64.0.2', remotePort: 3081 },
-        { hostId: 'gooddemacbook-pro', target: '100.64.0.3', remotePort: 3082 },
+        { hostId: 'gooddemacbook-pro', target: '100.64.0.2', remotePort: 3081, logPath: '/var/log/dsh.log' },
+        { hostId: 'gooddemacbook-pro', target: '100.64.0.3', remotePort: 3082, logPath: '/var/log/dsh.log' },
       ],
     }
     const { run, routes } = captureAppliedRoutes(config)
@@ -161,7 +168,43 @@ describe('apply 的装载行为', () => {
     ['含尾点', 'gooddemacbook-pro.'],
     ['含空白', 'good macbook'],
   ])('hostId %s：装载抛错且一条路由都不注册', (_label, hostId) => {
-    const { run, routes } = captureAppliedRoutes({ ...VALID_CONFIG, machines: [{ hostId, target: '100.64.0.2', remotePort: 3081 }] })
+    const { run, routes } = captureAppliedRoutes({ ...VALID_CONFIG, machines: [{ hostId, target: '100.64.0.2', remotePort: 3081, logPath: '/var/log/dsh.log' }] })
+    expect(run).toThrow()
+    expect(routes).toHaveLength(0)
+  })
+
+  it('mobileOrigin 缺省：装载抛错且一条路由都不注册（没有 origin 就没法做 origin 绑定）', () => {
+    const { run, routes } = captureAppliedRoutes({ ...VALID_CONFIG, mobileOrigin: undefined as unknown as string })
+    expect(run).toThrow(/mobileOrigin/)
+    expect(routes).toHaveLength(0)
+  })
+
+  it.each([
+    ['user 含 shell 元字符', { user: 'hello; rm -rf /' }],
+    ['identityFile 含 shell 元字符', { identityFile: '/k; touch /tmp/pwn' }],
+    ['identityFile 含反引号', { identityFile: '`id`' }],
+  ])('%s：装载抛错且一条路由都不注册', (_label, extra) => {
+    const { run, routes } = captureAppliedRoutes({
+      ...VALID_CONFIG,
+      machines: [{ hostId: 'gooddemacbook-pro', target: '100.64.0.2', remotePort: 3081, logPath: '/l.log', ...extra } as RelayMachineConfig],
+    })
+    expect(run).toThrow()
+    expect(routes).toHaveLength(0)
+  })
+
+  it('logPath 缺省：形状门就拒（每台的启动日志路径不统一，不给默认值猜）', () => {
+    expect(() =>
+      Config({
+        mobileOrigin: 'https://relay.example.com',
+        sshKnownHostsPath: '/k',
+        statePath: '/s',
+        machines: [{ hostId: 'gooddemacbook-pro', target: '100.64.0.2', remotePort: 3081 }],
+      }),
+    ).toThrow()
+  })
+
+  it('sshKnownHostsPath 含 shell 元字符：装载抛错', () => {
+    const { run, routes } = captureAppliedRoutes({ ...VALID_CONFIG, sshKnownHostsPath: '/k; touch /tmp/pwn' })
     expect(run).toThrow()
     expect(routes).toHaveLength(0)
   })
@@ -183,7 +226,7 @@ function call(handler: RouteHandler, req: { method?: string; url?: string; heade
   return state
 }
 
-describe('/threadharbor/relay/hosts 占位路由（Task 7 换真实现，先钉住骨架契约）', () => {
+describe('/threadharbor/relay/hosts 的准入与方法处置（骨架契约，装配行为在 assemble.spec.ts）', () => {
   function hostsHandlerOf(config: MobileRelayConfig | undefined = VALID_CONFIG, options: RelayConnectionOptions = {}) {
     const { run, routes } = captureAppliedRoutes(config, options)
     run()
@@ -191,14 +234,6 @@ describe('/threadharbor/relay/hosts 占位路由（Task 7 换真实现，先钉�
     if (route === undefined) throw new Error('hosts 路由未挂上')
     return route.handler
   }
-
-  it('已准入的 GET → 200 JSON 空清单（占位）', () => {
-    const state = call(hostsHandlerOf(), { method: 'GET', url: RELAY_HOSTS_PATH, headers: { host: 'relay.example.com' } })
-    expect(state.status).toBe(200)
-    expect(state.headers['content-type']).toBe('application/json')
-    expect(state.headers['cache-control']).toBe('no-store')
-    expect(JSON.parse(state.body)).toEqual({ hosts: [] })
-  })
 
   it('admit 拒绝 401 → 短体 unauthorized（官方写法）', () => {
     const state = call(hostsHandlerOf(VALID_CONFIG, { rejection: 401 }), {

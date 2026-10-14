@@ -74,18 +74,10 @@ const KNOWN_UNWIRED: Readonly<Record<string, string>> = {
     '早期入口，职能与 entry.ts 重叠。模型目录注册已迁到真机路径（plugin.ts 挂载 registerCatalog），此文件只剩 barrel 导出与测试在用；接线检查把它列为配置字段消费方，删它必须先改那道检查。清掉条件：确认没有外部包再调用 attachAcpDispatch，并从配置消费检查的文件清单移除后整体删除。',
   'packages/dsh-mobile-entry/src/wire.ts':
     '线上协议常量记录（Task 6 探针钉死的端点/mux 帧字面量），手机端用的是把值逐条硬编码进去的 mobile/wire.js（静态页不能 import TS），包内只有 tests/wire.spec.ts 在 import 它——测试引用不算产品接线，这正是本登记要说的：它当前是记录，不是被装载的代码。清掉条件：mobile 侧改为从包 src（经构建产物）消费这些常量、或协议常量改由构建步骤生成进 mobile/wire.js 时接上并从登记移除；若常量记录被删除，登记随之删。',
-  'packages/dsh-mobile-relay/src/state.ts':
-    'Task 4 产出的共用状态文档读改写面（凭据与端口分配同住一份 statePath 文件，整份读-改-写）。凭据层（credentials.ts）与隧道池（tunnels.ts）都在用，但两者自身也未接线——中转 apply 的 import 链还没带上任何一方，本模块从宿主入口仍不可达。清掉条件：中转 apply 经任一消费方（apply→tunnels.ts / apply→credentials.ts）把本模块带进装载链后，从本登记移除。',
-  'packages/dsh-mobile-relay/src/credentials.ts':
-    'Task 4 的凭据层（启动令牌换 cookie、0600 持久化、401 判脏后自愈一次）。目前只有 tests/credentials.spec.ts 在 import 它，产品侧的消费者（转发面带 Cookie 代理、apply 装载时构造 MachineCredentials）在后续任务。清掉条件：中转的转发面或 apply import 本模块后，从本登记移除。',
-  'packages/dsh-mobile-relay/src/tunnels.ts':
-    'Task 5 的隧道池（本地端口固定分配并落盘、同实例去重、指纹未登记不建隧道）。目前只有 tests/tunnels.spec.ts 在 import 它，产品消费方是 Task 7 的主机清单（HostRegistry 持有 TunnelPool）与转发面装配。清掉条件：中转 apply（经 hosts.ts 等接线）import 本模块后，从本登记移除。',
   'packages/dsh-mobile-relay/src/wire.ts':
     'Task 6 的单机协议常量（与 dsh-mobile-entry/src/wire.ts 同值，注释互相指认）。目前只有 tests/machine-client.spec.ts 在 import 它，产品消费方是同包 machine-client.ts 与后续转发面。清掉条件：转发面（或 machine-client 之外的接线方）import 本模块、把两个新模块一起带进装载链后，从本登记移除；wire.ts 本身会随 machine-client.ts 的接线一并可达。',
   'packages/dsh-mobile-relay/src/machine-client.ts':
     'Task 6 的单机客户端（对一台机器 DSH 的带 cookie RPC + $events 订阅 + 退避重连）。目前只有 tests/machine-client.spec.ts 在 import 它，产品消费方是 Task 7 的转发面（每机一个 MachineClient，凭据与隧道池经它聚合）。清掉条件：中转转发面 import 本模块后，从本登记移除。',
-  'packages/dsh-mobile-relay/src/hosts.ts':
-    'Task 7a 的主机清单算子（tailnet 发现 + 经隧道探 hello + 换凭据，5s 探测缓存）。目前只有 tests/hosts.spec.ts 在 import 它；产品消费方是 Task 7b 的装配（apply 构造 HostRegistry 并挂 /threadharbor/relay/hosts）。清掉条件：中转 apply import 本模块后，从本登记移除——同一次接线会把 tunnels.ts 与 credentials.ts 一并带进装载链，那两条随之清掉。',
 }
 
 function packageExports(pkg: string): Record<string, unknown> {

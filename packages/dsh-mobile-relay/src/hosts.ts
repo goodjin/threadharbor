@@ -79,8 +79,11 @@ export interface HostRegistryDeps {
   machines: readonly RelayMachineConfig[]
   tunnels: HostRegistryTunnels
   credentials: HostRegistryCredentials
-  /** 凭据自愈时要读的启动网址（经 SSH 读远端启动日志）。 */
-  readLaunchUrl: () => Promise<string | undefined>
+  /**
+   * 凭据自愈时要读的启动网址（经 SSH 读远端启动日志），按 hostId 给——
+   * 各台机的日志路径不共用一个值，回调拿不到机器就无从查起。
+   */
+  readLaunchUrl: (hostId: string) => Promise<string | undefined>
   /** tailscale 命令执行面；缺省走联邦包的真 execFile。 */
   run?: TailscaleStatusRun
   /** 探测用 fetch；缺省走全局 fetch。 */
@@ -150,7 +153,7 @@ export class HostRegistry {
       return { hostId: machine.hostId, online, running: false, reachable: false, credential: 'missing' }
     }
     const { origin } = tunnel.handle
-    const credential = (await this.deps.credentials.resolve(machine.hostId, origin, this.deps.readLaunchUrl)).ok ? 'ok' : 'missing'
+    const credential = (await this.deps.credentials.resolve(machine.hostId, origin, () => this.deps.readLaunchUrl(machine.hostId))).ok ? 'ok' : 'missing'
     return {
       hostId: machine.hostId,
       online,

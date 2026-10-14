@@ -12,6 +12,13 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import Schema from '@deepseek-ai/schemastery'
 import { assertMobileOrigin, MOBILE_ORIGIN_PATTERN } from '@threadharbor/dsh-mobile-entry/pair-url'
+import { HostRegistry, RELAY_HOSTS_PATH, type HostRegistryDeps, type RelayHost } from './hosts.ts'
+import { TunnelPool, type TunnelEnsureResult } from './tunnels.ts'
+import { CredentialStore, MachineCredentials } from './credentials.ts'
+import type { SshConnectionConfig } from '@threadharbor/dsh-host-federation/ssh/types'
+import { DshSshManager } from '@threadharbor/dsh-host-federation/ssh/manager'
+
+export { RELAY_HOSTS_PATH } from './hosts.ts'
 
 export const name = 'threadharbor-mobile-relay'
 
@@ -26,6 +33,12 @@ export interface RelayMachineConfig {
   readonly user?: string
   readonly identityFile?: string
   readonly remotePort: number
+  /**
+   * 该机 DSH 的启动日志路径（要**追加**写的那份，含 `LAUNCH_URL=` 标记）。
+   * 每台不一样（用户、服务名、部署通道都可能不同），所以必填而不给默认值——
+   * 猜一个默认值等于让凭据自愈对着错文件 grep，然后报「连不上」。
+   */
+  readonly logPath: string
 }
 
 /** apply 收到的组合配置形状（Config 的解析结果）；mobileOrigin 缺省时后续任务再定处置。 */
@@ -36,8 +49,6 @@ export interface MobileRelayConfig {
   readonly machines: readonly RelayMachineConfig[]
 }
 
-/** hosts 清单 exact 路由的路径；手机端中转页按这个常量取可达机器清单。 */
-export const RELAY_HOSTS_PATH = '/threadharbor/relay/hosts'
 
 /** 宿主侧路由登记 API（webServer 服务）与本插件用到的 effect 面。 */
 export interface RelayRoute {
@@ -85,9 +96,32 @@ export const Config: Schema = Schema.object({
       user: Schema.string().description('SSH 用户'),
       identityFile: Schema.string().description('私钥绝对路径'),
       remotePort: Schema.number().min(1).max(65535).step(1).required().description('该机 DSH 的回环端口（如 3081）'),
+      logPath: Schema.string().pattern(/^\S+$/).required().description('该机 DSH 的启动日志路径（追加写、含 LAUNCH_URL= 标记）'),
     }),
   ).description('各台机器的隧道目标清单'),
 })
+
+/**
+ * 会被拼进远端 shell 的字段，装载期再挡一道。
+ *
+ * schema 的「非空无空白」挡不住 `;`、反引号、`$()`、换行——这些值之后要进
+ * `ssh <target> grep ... <logPath>` 这类命令行，漏进去就是一次任意命令执行。
+ * 这里用**正字白名单**而不是禁字符表：禁字符表要靠人记得列全（`~` 一度就被误
+ * 拦，而它是日志路径的常态）；正字表多写一个字符就放行一次，也得人记得列全——
+ * 但列全的是「合法字符集」，比列全「所有危险字符」可靠得多，多半也不会误伤。
+ * `~` 放行是有意的：manager 会把开头的 `~/` 改写成远端双引号形式，交给远端展开。
+ */
+const SHELL_SAFE_TARGET = /^[A-Za-z0-9._:[\]-]+$/
+const SHELL_SAFE_USER = /^[A-Za-z0-9._-]+$/
+const SHELL_SAFE_PATH = /^[A-Za-z0-9._~/:+-]+$/
+
+function assertShellSafe(value: string | undefined, label: string, pattern: RegExp): void {
+  if (value === undefined) return
+  if (!pattern.test(value)) {
+    throw new Error(`${label} 含 shell 元字符，拒绝装载：${value}`)
+  }
+}
+
 
 /**
  * hostId 的装载期语义校验。形状门（schema）只保证非空无空白；这里再加
@@ -102,7 +136,7 @@ function assertHostId(hostId: string): void {
 }
 
 /** machines 逐项校验 + hostId 全表唯一：重名会让路由指向错乱，装载期拒掉。 */
-function assertMachines(machines: readonly RelayMachineConfig[]): void {
+function assertMachines(machines: readonly RelayMachineConfig[], sshKnownHostsPath: string | undefined): void {
   const seen = new Set<string>()
   for (const machine of machines) {
     assertHostId(machine.hostId)
@@ -110,34 +144,160 @@ function assertMachines(machines: readonly RelayMachineConfig[]): void {
       throw new Error(`machines 里 hostId 重复：${machine.hostId}`)
     }
     seen.add(machine.hostId)
+    // target/user/identityFile/logPath 都要进远端命令行，逐个过白名单。
+    assertShellSafe(machine.target, `${machine.hostId} 的 target`, SHELL_SAFE_TARGET)
+    assertShellSafe(machine.user, `${machine.hostId} 的 user`, SHELL_SAFE_USER)
+    assertShellSafe(machine.identityFile, `${machine.hostId} 的 identityFile`, SHELL_SAFE_PATH)
+    assertShellSafe(machine.logPath, `${machine.hostId} 的 logPath`, SHELL_SAFE_PATH)
+  }
+  assertShellSafe(sshKnownHostsPath, 'sshKnownHostsPath', SHELL_SAFE_PATH)
+}
+
+/**
+ * 装配时用到的 SSH 面（生产是联邦包的 DshSshManager，测试换假件）。
+ * 声明成最小面而不是直接依赖具体类：装配只碰这两个方法，
+ * 也免得为了两个方法把整个 manager 的构造参数搬进中转的配置面。
+ */
+export interface RelaySshFacade {
+  ensureTunnel(config: SshConnectionConfig, remotePort: number, opts?: { readonly localPort?: number }): Promise<string>
+  readLaunchUrl(config: SshConnectionConfig, remoteLogPath: string, timeoutMs?: number): Promise<string | undefined>
+}
+
+/**
+ * apply 的第三参：只在单测里注入的窄缝，生产不传。
+ *
+ * 之所以开缝：真实装配要真连 SSH、真读 known_hosts、真探测网络，单测里一件
+ * 都不该发生；但「隧道池落盘的端口有没有原样传到 SSH 层」这种接线正确性，
+ * 又必须用真代码路径验出来——它正是上一版差点让整条链路静默失效的地方。
+ * 缝开在**装配的输入面**（SSH 面、tailnet 对端、探测结果），不在被验的逻辑里。
+ */
+export interface RelayAssemblyDeps {
+  /** SSH 面；缺省由装配处构造联邦包的 manager。 */
+  ssh?: RelaySshFacade
+  /** tailnet 对端假件；缺省走真 tailscale 命令。 */
+  tailscalePeers?: readonly { readonly name: string; readonly online: boolean }[]
+  /** 探测假件；缺省走全局 fetch。 */
+  probeStatus?: number
+  /** 整份清单的端到端时限；缺省 10 秒。 */
+  listTimeoutMs?: number
+  /** 清单算子替身；缺省按上面三件真装配。 */
+  registry?: { list(): Promise<{ hosts: readonly RelayHost[]; error?: string }>; invalidate(): void }
+}
+
+/** 整份清单的端到端时限；到点按空清单 + error 应答，绝不把手机吊着。 */
+const LIST_TIMEOUT_MS = 10_000
+
+/**
+ * 挂载入口：装配隧道池、凭据层、清单算子，注册 hosts 清单 exact 路由。
+ * @param ctx - 宿主上下文（effect / webServer / connection 服务从这里取）。
+ * @param config - 校验后的组合配置。
+ * @param deps - 仅单测注入的窄缝，生产不传。
+ */
+export function apply(ctx: RelayRouteContext, config?: MobileRelayConfig, deps: RelayAssemblyDeps = {}): void {
+  // 语义校验先于任何注册：坏配置装载即失败，不留下半挂的路由。
+  if (config === undefined || config.mobileOrigin === undefined || config.mobileOrigin === '') {
+    // 没有 origin 就没法做 origin 绑定（请求 Host 对不上也放行等于门户大开），
+    // 而一个说不清自己对外源的���中转站本来也不该上线——拒装载，不给默认值兜。
+    throw new Error('threadharbor-mobile-relay 缺 mobileOrigin：中转站必须声明对外服务的源（如 https://relay.example.com），没有它无法做 origin 绑定')
+  }
+  assertMobileOrigin(config.mobileOrigin)
+  assertMachines(config.machines, config.sshKnownHostsPath)
+  const registry = deps.registry ?? new HostRegistry(buildRegistryDeps(config, deps))
+  registerHostsRoute(ctx, registry, new URL(config.mobileOrigin).host, deps.listTimeoutMs ?? LIST_TIMEOUT_MS)
+}
+
+/**
+ * 装配清单算子要吃的面：隧道池与凭据层是真件，SSH 面按需注入。
+ *
+ * 端口这件事在这里合拢：池子按 hostId 固定分配并落盘，再把**同一个号**交给
+ * SSH 层去开转发。凭据绑定的 authority（`127.0.0.1:<落盘号>`）必须与真实监听
+ * 口是同一个号——分家之后每次请求都 401，自愈也救不回来，而且现场看着像
+ * 「网络问题」，极难定位。
+ */
+function buildRegistryDeps(config: MobileRelayConfig, deps: RelayAssemblyDeps): HostRegistryDeps {
+  const ssh = deps.ssh ?? createSshFacade(config.sshKnownHostsPath)
+  const tunnels = new TunnelPool(
+    config.statePath,
+    {
+      // 箭头函数保住 this：manager 的方法取出来裸传会丢接收者。
+      ensureTunnel: (connection, remotePort, opts) => ssh.ensureTunnel(connection, remotePort, opts),
+    },
+    config.sshKnownHostsPath,
+  )
+  const credentials = new MachineCredentials(new CredentialStore(config.statePath))
+  const byHost = new Map(config.machines.map(machine => [machine.hostId, machine]))
+  const readLaunchUrl = async (hostId: string): Promise<string | undefined> => {
+    const machine = byHost.get(hostId)
+    if (machine === undefined) return undefined
+    // 指纹未登记时池子不给连接配置，这里也就读不到启动日志——如实交白卷，
+    // 由上层把「需先确认指纹」和「凭据需更新」两件事分开说。
+    const connection = tunnels.connectionFor(machine)
+    if (connection === undefined) return undefined
+    return await ssh.readLaunchUrl(connection, machine.logPath)
+  }
+  const registryDeps: HostRegistryDeps = { machines: config.machines, tunnels, credentials, readLaunchUrl }
+  if (deps.tailscalePeers !== undefined) {
+    // 缝给的是「对端列表」，但清单层要的是命令执行面——中间仍走联邦包那份真
+    // 解析器（MagicDNS 全名去尾点、Online 布尔、100.x 首地址这些规则都在那边）。
+    // 绕开解析器造假输出，等于让用例验证的是另一条代码路径。
+    const peers = deps.tailscalePeers
+    return {
+      ...registryDeps,
+      run: async () => ({
+        stdout: JSON.stringify({
+          BackendState: 'Running',
+          Peer: Object.fromEntries(peers.map((peer, index) => [
+            `peer${index}`,
+            { DNSName: `${peer.name}.ts.net.`, HostName: peer.name, TailscaleIPs: ['100.64.0.1'], Online: peer.online, Active: peer.online },
+          ])),
+        }),
+      }),
+    }
+  }
+  if (deps.probeStatus !== undefined) {
+    const status = deps.probeStatus
+    return { ...registryDeps, probeFetch: async () => ({ status }) }
+  }
+  return registryDeps
+}
+
+/** 生产用的 SSH 面：联邦包那个 manager（隧道与读启动日志都归它）。 */
+function createSshFacade(knownHostsPath: string): RelaySshFacade {
+  const manager = new DshSshManager({
+    knownHostsPath,
+    connectTimeoutMs: 10_000,
+    installTimeoutMs: 120_000,
+    deploymentChannel: 'mobile-relay',
+    defaultRemoteWebPort: 3081,
+  })
+  return {
+    ensureTunnel: (config, remotePort, opts) => manager.ensureTunnel(config, remotePort, opts),
+    readLaunchUrl: (config, remoteLogPath, timeoutMs) => manager.readLaunchUrl(config, remoteLogPath, timeoutMs),
   }
 }
 
 /**
- * 挂载入口：注册 hosts 清单占位 exact 路由（空清单，真现在后续任务）。
- * @param ctx - 宿主上下文（effect / webServer / connection 服务从这里取）。
- * @param config - 校验后的组合配置。
- */
-export function apply(ctx: RelayRouteContext, config?: MobileRelayConfig): void {
-  // 语法与语义校验先于任何注册：坏配置装载即失败，不留下半挂的路由。
-  if (config?.mobileOrigin !== undefined) assertMobileOrigin(config.mobileOrigin)
-  assertMachines(config?.machines ?? [])
-  registerHostsRoute(ctx)
-}
-
-/**
  * 注册 hosts 清单 exact 路由，走 DSH 插件的登记样式：
- * `ctx.effect(() => ctx.webServer.register(...))`。先过官方 admit（与
- * 官方 /api 同一面），拒绝分支短体固定——401 'unauthorized'，其余
- * 'forbidden'。占位应答空清单，Task 7 换成真实的 tailnet 发现结果。
+ * `ctx.effect(() => ctx.webServer.register(...))`。
+ *
+ * 四道门按固定次序：admit（与官方 /api 同一面，拒绝分支短体固定）→ 方法 →
+ * **origin 绑定** → 端到端时限。第三道是中转自己的：请求的 Host 与配置声明的
+ * origin 不符就拒，否则同一个中转换个 Host 头也能被取走清单，origin 与凭据的
+ * 绑定就名存实亡了（Host 大小写不敏感，比较时统一小写）。
  */
-function registerHostsRoute(ctx: RelayRouteContext): void {
+function registerHostsRoute(
+  ctx: RelayRouteContext,
+  registry: { list(): Promise<{ hosts: readonly RelayHost[]; error?: string }>; invalidate(): void },
+  originHost: string,
+  timeoutMs: number,
+): void {
+  const expected = originHost.toLowerCase()
   ctx.effect(
     () =>
       ctx.webServer.register({
         kind: 'exact',
         path: RELAY_HOSTS_PATH,
-        handler(req, res) {
+        async handler(req, res) {
           // 拒绝分支照抄官方 /api 的写法：状态码原样，短体固定。
           const admission = ctx.connection.admit(req)
           if ('rejection' in admission) {
@@ -150,15 +310,55 @@ function registerHostsRoute(ctx: RelayRouteContext): void {
             res.end('method not allowed')
             return
           }
-          const body = '{"hosts":[]}'
-          res.writeHead(200, {
-            'content-type': 'application/json',
-            'cache-control': 'no-store',
-            'content-length': Buffer.byteLength(body),
-          })
-          res.end(body)
+          const host = req.headers.host
+          if (typeof host !== 'string' || host.toLowerCase() !== expected) {
+            res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+            res.end('forbidden')
+            return
+          }
+          const result = await listWithDeadline(registry, timeoutMs)
+          respondJson(res, 200, JSON.stringify(result))
         },
       }),
-    'threadharbor-mobile-relay: hosts placeholder route',
+    'threadharbor-mobile-relay: hosts route',
   )
+}
+
+/**
+ * 端到端时限：清单算子内部只给 tailnet 查询与 hello 探测各兜了预算，拿隧道
+ * （真 SSH）与换凭据（读日志 + 换令牌）各有自己的超时，不在同一个 3s 内。应答
+ * 的时限只能在这里兜——到点按空清单 + error 应答（200），让手机看到「暂时拿不到」
+ * 而不是一直转圈。
+ */
+async function listWithDeadline(
+  registry: { list(): Promise<{ hosts: readonly RelayHost[]; error?: string }> },
+  timeoutMs: number,
+): Promise<{ hosts: readonly RelayHost[]; error?: string }> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      registry.list(),
+      new Promise<{ hosts: readonly RelayHost[]; error: string }>(resolve => {
+        timer = setTimeout(
+          () => resolve({ hosts: [], error: `清单计算超时（${Math.round(timeoutMs / 1000)}s）：有机器没在预算内应答，按空清单处置` }),
+          timeoutMs,
+        )
+      }),
+    ])
+  } catch (error) {
+    // 算子约定不抛，真抛了也不甩 500：手机看到的是「拿不到 + 原因」。
+    return { hosts: [], error: `清单计算失败：${error instanceof Error ? error.message : String(error)}` }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** JSON 应答：no-store（清单跟着机器状态变，不许被任何一环缓存）+ 固定长度。 */
+function respondJson(res: ServerResponse, status: number, body: string): void {
+  res.writeHead(status, {
+    'content-type': 'application/json',
+    'cache-control': 'no-store',
+    'content-length': Buffer.byteLength(body),
+  })
+  res.end(body)
 }

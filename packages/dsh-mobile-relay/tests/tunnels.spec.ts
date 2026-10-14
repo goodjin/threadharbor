@@ -21,7 +21,7 @@ import { TunnelPool } from '../src/tunnels.ts'
 
 const HOST = 'gooddemacbook-pro'
 const TARGET = '100.64.0.2'
-const MACHINE: RelayMachineConfig = { hostId: HOST, target: TARGET, remotePort: 3081 }
+const MACHINE: RelayMachineConfig = { hostId: HOST, target: TARGET, remotePort: 3081, logPath: '/l.log' }
 
 /**
  * known_hosts 条目的主机别名是 manager.ts `alias()` 的现值快照：
@@ -55,7 +55,7 @@ function knownHostsPathOf(...lines: readonly string[]): string {
 }
 
 /** 两台机器共用同一 target（hostId 与 target 解耦），known_hosts 夹具即可复用。 */
-const MACHINE_B: RelayMachineConfig = { hostId: 'host-b', target: TARGET, remotePort: 3082 }
+const MACHINE_B: RelayMachineConfig = { hostId: 'host-b', target: TARGET, remotePort: 3082, logPath: '/l.log' }
 
 interface TunnelCall {
   config: SshConnectionConfig
@@ -261,6 +261,7 @@ describe('TunnelPool（本地端口固定分配并持久化）', () => {
       target: TARGET,
       port: 2222,
       user: 'hello',
+      logPath: '/l.log',
       identityFile: '/home/relay/.ssh/id_ed25519',
       remotePort: 3081,
     }
