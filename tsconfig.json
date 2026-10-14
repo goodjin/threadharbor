@@ -6,6 +6,7 @@
     { "path": "packages/dsh-preset-dispatch" },
     { "path": "packages/dsh-host-federation" },
     { "path": "packages/dsh-mobile-entry" },
+    { "path": "packages/dsh-mobile-relay" },
     { "path": "packages/zcode-acp" },
     { "path": "tsconfig.plugin.json" }
   ]

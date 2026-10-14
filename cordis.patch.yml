@@ -34,6 +34,11 @@
     # 手机端独立入口（宿主侧）：手机页静态资源 + peers / pair-url 接口。
     - id: threadharbor-mobile-entry
       name: '@threadharbor/dsh-mobile-entry'
+    # 手机中转（云主机侧）：公网 HTTPS 入口，由它经 SSH 隧道代理到各机的
+    # DSH。骨架任务只挂 /threadharbor/relay/hosts 占位路由；隧道数据面、
+    # tailnet 发现与静态壳由后续任务接上。
+    - id: threadharbor-mobile-relay
+      name: '@threadharbor/dsh-mobile-relay'
     # 名册过滤器不点名。每个要藏起的 preset 在自己的 binding 上打
     # hideFromRoster: true；过滤器只认这个标记（以及行上的同名字段）。
     # 新增 agent 只要打标记，不必改过滤器配置。内部 list() 仍不过滤。
