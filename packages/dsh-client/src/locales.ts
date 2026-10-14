@@ -16,9 +16,10 @@
  * 字典不留无主键。带行内元素的句子（ssh 说明、访问方式标签）沿用帮助块的
  * `{…}` 记号约定：记号内容随语言走，`richSegments` 拆开包回行内元素。
  *
- * 其中还有一小批「运行时层」的键（panel.gateway.* / panel.tailscale.* 的
- * 报错、panel.ssh 的 HTTP 错误模板）：它们产自入口接线（client/index.ts）
- * 与 ssh-deploy.ts 的端口结果，不经过 JSX，`verify-client-ui-i18n` 的
+ * 其中还有一批「运行时层」的键（panel.gateway.* / panel.tailscale.* 的
+ * 报错、panel.ssh 的 HTTP 错误模板，以及 reach / host-store /
+ * rollup-section / session-source 的提示）：它们产自入口接线
+ * （client/index.ts）与各端口模块，不经过 JSX，`verify-client-ui-i18n` 的
  * 属性赋值规则只扫 .tsx、看不见它们——双语化靠调用侧把 `t` 递进端口，
  * locale 服务缺席时由 `fallbackT` 读本文件回落（tests/runtime-locale.spec.ts
  * 钉住这批键与回落行为）。
@@ -93,6 +94,12 @@ export const zh = {
   /** 打不开会话网关时接线层给的错误原文（agent 列表与探测结论共用）。 */
   'panel.gateway.missing': '主机服务缺失：{missing}',
   'panel.gateway.notReady': '主机服务未就绪：{error}',
+  /** 网关对返回形状的核查结果；`{what}` 是英文的调用名（如 session.modelCatalog），保持原样。 */
+  'panel.gateway.shapeNotObject': '{what}: 主机没有按约定返回对象',
+  'panel.gateway.shapeUnexpected': '{what}: 返回值不符合预期',
+  'panel.gateway.shapeNoOk': '{what}: 返回值缺少 ok 字段',
+  /** 目录缺席时网关自己给出的失败（必需调用都在、唯独没有 modelCatalog）。 */
+  'panel.gateway.noModelCatalog': '主机上没有 remote.session.modelCatalog，列不出 agent',
   /** 结论旁折叠起来的建议小节。 */
   'panel.verdict.advice': '建议',
   /** 四种结论的措辞与建议（describeVerdict）；`{ms}` 是耗时毫秒数。 */
@@ -120,6 +127,10 @@ export const zh = {
   'panel.posture.memoryRemotePage': '这个页面由远程机器提供：登记与本机名称只保存在本页内存里，关闭页面就没有了。',
   'panel.posture.memoryNoChannel': '这台机器没有提供设置存储通道（remote.settings）：登记与本机名称只保存在本页内存里，关闭页面就没有了。',
   'panel.posture.degraded': '这台机器上的存储出了问题：{detail}。名单还在本页里；真正存进去之前，换浏览器或清缓存会丢。',
+  /** degraded 的 {detail} 值由存储层（host-store.ts）产出的这三种原因填入。 */
+  'panel.posture.degradedNoNamespace': '这台机器的设置通道里没有 threadharbor-host-store 命名空间（组合里缺 threadharbor-host-store 行）；名单这次存不进这台机器',
+  'panel.posture.degradedReadFailed': '读不到这台机器上已存的名单：{message}',
+  'panel.posture.degradedWriteFailed': '没存进这台机器：{message}',
   /** 心跳的久暂措辞（heartbeatWord）；`{n}` 是间隔数值。 */
   'panel.time.justNow': '刚刚',
   'panel.time.secondsAgo': '{n} 秒前',
@@ -144,6 +155,9 @@ export const zh = {
   'panel.registry.launchLink': '连接（打开含 token 的页面）',
   /** 详情页的可达性复查；`{ms}` 是超时毫秒数。 */
   'panel.reach.probeTimeout': '检测超时（{ms} ms）',
+  /** 不可探测的两种原因（reach.ts 的探针产出，面板原样显示在状态行）。 */
+  'panel.reach.networkFailure': '网络层失败：地址不可达、端口没有监听，或浏览器拦下了这个请求',
+  'panel.reach.requestFailed': '请求失败：{name}',
   /** 本机 agent 区。 */
   'panel.agents.loading': '正在读取本机 agent……',
   'panel.agents.failed': '读取失败：{message}',
@@ -163,6 +177,13 @@ export const zh = {
   'panel.notes.onlineMeaning': '「在线」= 这台机器的页面在同一个浏览器的同源标签页里开着并按心跳报数；关闭或崩溃的页面过了静默窗口会自动转为未列出。',
   'panel.notes.otherSource': '另一台机器（另一个源）的页面不在这个频道里；它的行以「未连接」出现，靠的是登记。',
   'panel.notes.sessionTree': '左侧树按主机列出项目与会话：本机来自 DSH 投影；其他主机用登记里的 launchUrl 拉取（失败时请点「连接」打开那台机器的页面）。各主机对等，没有单独的管理机。',
+  /** 汇总区块的空态与说明（rollup-section.ts 产出，画进树和「说明」一节）。 */
+  'panel.rollup.emptySessions': '这台主机还没有会话数据——请点「连接」打开远端 DSH，或等待后台拉取。',
+  'panel.rollup.crossSourceNote': '跨主机说明：页签间的通道只在同源之间通信。同一台 DSH 的多个标签页会互相看见；另一台机器（另一个源）的页面不在这个频道里，要让它出现，请在那里打开它自己的页面。',
+  /** 本机会话来源读不出来时的三条提示（session-source.ts 产出）。 */
+  'panel.session.noWorkspacesService': '读不到项目列表：主机上没有 workspaces 服务（可能还没加载完）。',
+  'panel.session.readFailed': '项目列表读取失败：主机报了错误，稍后会随订阅自动重试。',
+  'panel.session.stillLoading': '项目列表还在加载。',
   /** 列表页的空态。 */
   'panel.list.empty': '还没有主机。点「添加新主机」登记第一台。',
   /**
@@ -304,6 +325,12 @@ export const en = {
   'panel.probe.error': 'Probe failed: {message}',
   'panel.gateway.missing': 'Missing host services: {missing}',
   'panel.gateway.notReady': 'Host services not ready: {error}',
+  // Gateway shape-check failures; `{what}` is the English call name (e.g.
+  // session.modelCatalog) and stays verbatim.
+  'panel.gateway.shapeNotObject': "{what}: the host did not return an object as agreed",
+  'panel.gateway.shapeUnexpected': '{what}: the returned value is not the expected shape',
+  'panel.gateway.shapeNoOk': '{what}: the returned value lacks the ok field',
+  'panel.gateway.noModelCatalog': 'The host has no remote.session.modelCatalog, so no agents can be listed',
   'panel.verdict.advice': 'Advice',
   'panel.verdict.ok': 'OK',
   'panel.verdict.slow': 'Slow',
@@ -327,6 +354,11 @@ export const en = {
   'panel.posture.memoryRemotePage': 'This page is served by a remote machine: registrations and this machine\'s name live only in this page\'s memory and are gone when the page closes.',
   'panel.posture.memoryNoChannel': 'This machine provides no settings-storage channel (remote.settings): registrations and this machine\'s name live only in this page\'s memory and are gone when the page closes.',
   'panel.posture.degraded': 'Storage on this machine is in trouble: {detail}. The list still lives in this page; until it is truly saved, a different browser or a cleared cache loses it.',
+  // The degraded `{detail}` is one of these three reasons, produced by the
+  // storage layer (host-store.ts).
+  'panel.posture.degradedNoNamespace': "This machine's settings channel has no threadharbor-host-store namespace (the threadharbor-host-store row is missing from the bundle); the list could not be saved to this machine this time",
+  'panel.posture.degradedReadFailed': 'Could not read the list already saved on this machine: {message}',
+  'panel.posture.degradedWriteFailed': 'Not saved to this machine: {message}',
   'panel.time.justNow': 'just now',
   'panel.time.secondsAgo': '{n} seconds ago',
   'panel.time.minutesAgo': '{n} minutes ago',
@@ -344,6 +376,10 @@ export const en = {
   'panel.registry.removeNote': "Removes it from this machine's registration list only; the remote machine is untouched. Delete?",
   'panel.registry.launchLink': 'Connect (opens the page that carries the token)',
   'panel.reach.probeTimeout': 'The check timed out ({ms} ms)',
+  // The two unreachable reasons the reach probe produces; the panel shows
+  // them verbatim in the status line.
+  'panel.reach.networkFailure': 'Network-level failure: the address is unreachable, nothing is listening on the port, or the browser blocked the request',
+  'panel.reach.requestFailed': 'Request failed: {name}',
   'panel.agents.loading': "Reading this machine's agents…",
   'panel.agents.failed': 'Reading failed: {message}',
   'panel.agents.empty': 'This host lists no acp agents — maybe no preset is configured, or the model catalog read failed; press "Refresh" and try again.',
@@ -359,6 +395,13 @@ export const en = {
   'panel.notes.onlineMeaning': '"Online" = this machine\'s page is open in a same-origin tab of the same browser and announcing on its heartbeat; a closed or crashed page drops out of the list on its own after the quiet window.',
   'panel.notes.otherSource': "Another machine's page (another origin) is not on this channel; its row shows up as \"Not connected\", carried by the registration.",
   'panel.notes.sessionTree': 'The tree on the left lists projects and sessions per host: this machine\'s come from DSH\'s projection; other hosts are fetched via launchUrl in the registry (if that fails, press "Connect" to open that machine\'s page). Every host is a peer — there is no separate management machine.',
+  // The roll-up section's empty state and cross-host note (rollup-section.ts).
+  'panel.rollup.emptySessions': 'This host has no session data yet — press "Connect" to open the remote DSH, or wait for the background pull.',
+  'panel.rollup.crossSourceNote': 'Cross-host note: the channel between tabs only reaches same-origin tabs. Several tabs of the same DSH see one another; another machine\'s page (another origin) is not on this channel — to make it appear, open its own page on that machine.',
+  // This host's session source, when it cannot read yet (session-source.ts).
+  'panel.session.noWorkspacesService': 'Could not read the project list: the host has no workspaces service (it may still be loading).',
+  'panel.session.readFailed': 'Reading the project list failed: the host reported an error; the subscription retries it automatically.',
+  'panel.session.stillLoading': 'The project list is still loading.',
   'panel.list.empty': 'No hosts yet. Press "Add a new host" to register the first one.',
   // The ssh-deploy section. The intro is two keys because one sentence mixes
   // a <strong> and a <code> segment and richSegments wraps one kind per call;

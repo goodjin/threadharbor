@@ -334,12 +334,12 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // sessionStorage: that per-tab override is what lets two tabs of one DSH
   // claim two hosts, and it is not a bug to fix.
   const hostStoreDepsResult = hostStoreDeps(ctx, message => { log.warn(message) })
-  const hostStore = startHostStore(hostStoreDepsResult.deps)
+  const hostStore = startHostStore(hostStoreDepsResult.deps, t)
   const tailscale = tailscalePort(ctx, hostStoreDepsResult.channel, message => { log.warn(message) }, t)
   const settings = layeredIdentitySettings(window.sessionStorage, hostStore.storage)
   const registry = hostRegistry(hostStore.storage)
   const remoteSessions = createRemoteSessionStore()
-  const sessionSource = hostSessionSource(ctx)
+  const sessionSource = hostSessionSource(ctx, t)
   let section = startRollUpSection({
     settings,
     sessions: sessionSource.sessions,
@@ -356,6 +356,7 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
     setInterval: (handler, ms) => window.setInterval(handler, ms),
     clearInterval: handle => { window.clearInterval(handle) },
     report: message => { log.warn(message) },
+    t,
     heartbeatMs: HEARTBEAT_MS,
     staleMs: STALE_MS,
   })
@@ -389,7 +390,7 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
     log.info(`host store posture: ${JSON.stringify(hostStore.posture())}`)
   })
 
-  const openGateway = (): GatewayOpening => openSessionGateway(ctx)
+  const openGateway = (): GatewayOpening => openSessionGateway(ctx, t)
   // A mount-time read, purely for the self-report: what the host provides may
   // settle later, so absence here is a log line, never a functional gate.
   const mountOpening = openGateway()
@@ -459,7 +460,13 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   log.info(`roll-up identity: ${identity.hostId}${identity.derived ? ' (derived from page origin; configure it in the panel)' : ''}; session tree: DSH projections + remote pull via launchUrl`)
 }
 
-export function hostSessionSource(ctx: ClientPanelContext): {
+/**
+ * This host's session source over DSH's projections.
+ * @param ctx - the browser plugin context.
+ * @param t - reads the not-ready notes in the active language; absent
+ * (tests, no locale service) it falls back to the dictionary's source text.
+ */
+export function hostSessionSource(ctx: ClientPanelContext, t?: RuntimeT): {
   sessions(): readonly SectionSession[]
   sourceNotes(): readonly string[]
 } {
@@ -469,7 +476,7 @@ export function hostSessionSource(ctx: ClientPanelContext): {
       workspaces: safeContextService(ctx, 'workspaces'),
       sessions: safeContextService(ctx, 'sessions'),
     })
-    return buildHostSessions(workspaces, sessions)
+    return buildHostSessions(workspaces, sessions, t)
   }
   return {
     sessions: () => {

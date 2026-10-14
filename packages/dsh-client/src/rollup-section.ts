@@ -28,6 +28,8 @@ import { mountRollUpSurface } from './surface.ts'
 import type { RollUpSurface } from './surface.ts'
 import type { ConfiguredIdentity, IdentitySettings } from './settings-source.ts'
 import { rollUpViewWithRegistry } from './host-roll-up.ts'
+import { fallbackT } from './locales.ts'
+import type { RuntimeT } from './locales.ts'
 
 /** What one host reports about its sessions, as the federation reads it. */
 export type SectionSession = { readonly projectId: string; readonly sessionId: string; readonly title: string; readonly projectTitle?: string }
@@ -54,6 +56,12 @@ export type RollUpSectionDeps = {
   clearInterval(handle: number): void
   /** Where failures are said out loud instead of swallowed. */
   report(message: string): void
+  /**
+   * Reads the section's user-facing notes in the active language. Absent
+   * (tests, no locale service) it falls back to the dictionary's source
+   * text — the notes reach the screen through the roll-up's mount.
+   */
+  t?: RuntimeT
   heartbeatMs: number
   staleMs: number
 }
@@ -89,6 +97,7 @@ const CHANNEL_NAME = 'dsh-host-federation'
  * @returns the section; dispose stops the heartbeat and says goodbye.
  */
 export function startRollUpSection(deps: RollUpSectionDeps): RollUpSection {
+  const say = deps.t ?? fallbackT
   let identity = resolveIdentity()
   // The federation can report changes before the surface exists; the holder
   // lets the first drawings and every later one go through the same path.
@@ -182,7 +191,7 @@ export function startRollUpSection(deps: RollUpSectionDeps): RollUpSection {
           const notes = deps.sourceNotes()
           return notes.length > 0 ? notes.join(' ') : undefined
         }
-        return host.empty ? '这台主机还没有会话数据——请点「连接」打开远端 DSH，或等待后台拉取。' : undefined
+        return host.empty ? say('panel.rollup.emptySessions') : undefined
       },
     }),
   })
@@ -208,7 +217,7 @@ export function startRollUpSection(deps: RollUpSectionDeps): RollUpSection {
     identity: () => identity,
     notices: () => [
       ...deps.sourceNotes(),
-      '跨主机说明：页签间的通道只在同源之间通信。同一台 DSH 的多个标签页会互相看见；另一台机器（另一个源）的页面不在这个频道里，要让它出现，请在那里打开它自己的页面。',
+      say('panel.rollup.crossSourceNote'),
     ],
     setIdentity: value => {
       deps.settings.write(value)

@@ -11,6 +11,7 @@ import { startRollUpSection } from '../src/rollup-section.ts'
 import type { RollUpSectionDeps } from '../src/rollup-section.ts'
 import type { FederationBus } from '@threadharbor/dsh-host-federation'
 import type { ConfiguredIdentity, IdentitySettings } from '../src/settings-source.ts'
+import type { RuntimeT } from '../src/locales.ts'
 
 /** A bus the test can look into and drive, standing in for BroadcastChannel. */
 function fakeBus(): FederationBus & {
@@ -186,6 +187,31 @@ describe('身份变更', () => {
     // hello（派生身份启动）、bye（派生身份退场）、hello（配置身份报到）。
     expect(kinds).toEqual(['hello', 'sessions', 'bye', 'hello'])
     expect(derivedId).not.toBe('workstation')
+    section.dispose()
+  })
+})
+
+/** 一个跟任何词典文案都不同的 `t`：译文即调用痕迹，断言不用猜。 */
+const fakeT: RuntimeT = (key, params) =>
+  params === undefined ? `[T] ${key}` : `[T] ${key} ${JSON.stringify(params)}`
+
+describe('空会话提示与跨主机说明的文案（盲区串收编）', () => {
+  it('给 t 时别的空主机提示与本节说明都被翻译', () => {
+    const { bus, section } = setup({ t: fakeT })
+    // 一台空会话的外来主机：它的行挂的就是「还没有会话数据」那句。
+    bus.deliver({ kind: 'hello', hostId: 'beta', hostTitle: 'B', at: 100 })
+    const note = section.element().querySelector('[data-host-note]')
+    expect(note?.textContent).toBe(fakeT('panel.rollup.emptySessions'))
+    expect(section.notices()).toContain(fakeT('panel.rollup.crossSourceNote'))
+    section.dispose()
+  })
+
+  it('不给 t 时回落到迁移前的中文原文（逐字节）', () => {
+    const { bus, section } = setup()
+    bus.deliver({ kind: 'hello', hostId: 'beta', hostTitle: 'B', at: 100 })
+    const note = section.element().querySelector('[data-host-note]')
+    expect(note?.textContent).toBe('这台主机还没有会话数据——请点「连接」打开远端 DSH，或等待后台拉取。')
+    expect(section.notices()).toContain('跨主机说明：页签间的通道只在同源之间通信。同一台 DSH 的多个标签页会互相看见；另一台机器（另一个源）的页面不在这个频道里，要让它出现，请在那里打开它自己的页面。')
     section.dispose()
   })
 })

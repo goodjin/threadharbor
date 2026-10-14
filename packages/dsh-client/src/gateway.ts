@@ -11,6 +11,9 @@
  * `ctx.get` is `unknown` until a predicate below has checked it.
  */
 
+import { fallbackT } from './locales.ts'
+import type { RuntimeT } from './locales.ts'
+
 /** How a forwarded call ended, including the "the answer made no sense" case. */
 export type GatewayResult<T> =
   | { readonly ok: true; readonly value: T }
@@ -146,14 +149,15 @@ function resultOf<T>(
   raw: unknown,
   check: (value: unknown) => T | undefined,
   what: string,
+  t: RuntimeT,
 ): GatewayResult<T> {
   if (!isRecord(raw)) {
-    return { ok: false, error: { code: 'gateway/shape', message: `${what}: 主机没有按约定返回对象` } }
+    return { ok: false, error: { code: 'gateway/shape', message: t('panel.gateway.shapeNotObject', { what }) } }
   }
   if (raw['ok'] === true) {
     const value = check(raw['value'])
     if (value === undefined) {
-      return { ok: false, error: { code: 'gateway/shape', message: `${what}: 返回值不符合预期` } }
+      return { ok: false, error: { code: 'gateway/shape', message: t('panel.gateway.shapeUnexpected', { what }) } }
     }
     return { ok: true, value }
   }
@@ -164,7 +168,7 @@ function resultOf<T>(
     }
     return { ok: false, error: { code: 'remote/failed', message: `${what}: ${JSON.stringify(error)}` } }
   }
-  return { ok: false, error: { code: 'gateway/shape', message: `${what}: 返回值缺少 ok 字段` } }
+  return { ok: false, error: { code: 'gateway/shape', message: t('panel.gateway.shapeNoOk', { what }) } }
 }
 
 const objectValue = (value: unknown): Record<string, unknown> | undefined =>
@@ -219,8 +223,11 @@ const agentsValue = (value: unknown): readonly AgentDescriptor[] | undefined => 
  *
  * Never throws: whatever is missing is named in `missing`, and the caller
  * shows that instead of pretending the probe ran.
+ * @param ctx - the browser plugin context, narrowed to its service reads.
+ * @param t - reads the shape-check copy in the active language; absent
+ * (tests, no locale service) it falls back to the dictionary's source text.
  */
-export function openSessionGateway(ctx: ServiceLookup): GatewayOpening {
+export function openSessionGateway(ctx: ServiceLookup, t: RuntimeT = fallbackT): GatewayOpening {
   const missing: string[] = []
   const note = (name: string): undefined => {
     missing.push(name)
@@ -246,7 +253,7 @@ export function openSessionGateway(ctx: ServiceLookup): GatewayOpening {
     : async () => {
         try {
           const raw: unknown = await modelCatalog()
-          return resultOf(raw, agentsValue, 'session.modelCatalog')
+          return resultOf(raw, agentsValue, 'session.modelCatalog', t)
         } catch (error) {
           return { ok: false as const, error: { code: 'gateway/call', message: `session.modelCatalog: ${String(error)}` } }
         }
@@ -257,11 +264,11 @@ export function openSessionGateway(ctx: ServiceLookup): GatewayOpening {
     ? {
         listAgents: async () => {
           if (modelCatalog === undefined) {
-            return { ok: false as const, error: { code: 'gateway/missing', message: '主机上没有 remote.session.modelCatalog，列不出 agent' } }
+            return { ok: false as const, error: { code: 'gateway/missing', message: t('panel.gateway.noModelCatalog') } }
           }
           try {
             const raw: unknown = await modelCatalog()
-            return resultOf(raw, agentsValue, 'session.modelCatalog')
+            return resultOf(raw, agentsValue, 'session.modelCatalog', t)
           } catch (error) {
             return { ok: false as const, error: { code: 'gateway/call', message: `session.modelCatalog: ${String(error)}` } }
           }
@@ -279,7 +286,7 @@ export function openSessionGateway(ctx: ServiceLookup): GatewayOpening {
         createSession: async request => {
           try {
             const raw: unknown = await awaited(sessionCreate!(request))
-            return resultOf(raw, sessionValue, 'session.create')
+            return resultOf(raw, sessionValue, 'session.create', t)
           } catch (error) {
             return { ok: false as const, error: { code: 'gateway/call', message: `session.create: ${String(error)}` } }
           }
@@ -293,7 +300,7 @@ export function openSessionGateway(ctx: ServiceLookup): GatewayOpening {
           }
           try {
             const raw: unknown = await awaited(sessionPrompt!(payload))
-            return resultOf(raw, objectValue, 'session.prompt')
+            return resultOf(raw, objectValue, 'session.prompt', t)
           } catch (error) {
             return { ok: false as const, error: { code: 'gateway/call', message: `session.prompt: ${String(error)}` } }
           }
@@ -301,7 +308,7 @@ export function openSessionGateway(ctx: ServiceLookup): GatewayOpening {
         archiveSession: async request => {
           try {
             const raw: unknown = await awaited(archiveSession!({ sessionId: request.sessionId, stopActivity: true }))
-            return resultOf(raw, objectValue, 'workspace.archiveSession')
+            return resultOf(raw, objectValue, 'workspace.archiveSession', t)
           } catch (error) {
             return { ok: false as const, error: { code: 'gateway/call', message: `workspace.archiveSession: ${String(error)}` } }
           }
