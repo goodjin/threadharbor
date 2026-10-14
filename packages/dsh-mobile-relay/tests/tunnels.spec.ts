@@ -140,12 +140,28 @@ describe('TunnelPool（本地端口固定分配并持久化）', () => {
     expect(fake.calls[1]?.localPort).toBe(first.localPort)
   })
 
-  it('③ 同实例重复 ensure：返回同一 handle，不再调用假隧道', async () => {
+  it('③ 同实例重复 ensure：隧道口仍在监听时返回同一 handle，不再调用假隧道', async () => {
+    // 前提是「口上确实有东西在听」：池子缓存命中时会验活（见 tunnel-liveness.spec.ts），
+    // 假隧道不真的监听端口的话，这条用例验的就不是复用而是重建了。
     const path = statePathInTemp()
     const fake = ensureTunnelFake()
-    const pool = new TunnelPool(path, { ensureTunnel: fake.ensureTunnel }, knownHostsPathOf(knownHostsLine(ALIAS_PORT_22)))
+    const listeners: { close(): void }[] = []
+    const pool = new TunnelPool(
+      path,
+      {
+        ensureTunnel: async (config, remotePort, opts) => {
+          const endpoint = await fake.ensureTunnel(config, remotePort, opts)
+          const server = createServer()
+          await new Promise<void>(resolve => server.listen(opts?.localPort ?? 0, '127.0.0.1', resolve))
+          listeners.push(server)
+          return endpoint
+        },
+      },
+      knownHostsPathOf(knownHostsLine(ALIAS_PORT_22)),
+    )
     const first = expectOk(await pool.ensure(MACHINE))
     const again = expectOk(await pool.ensure(MACHINE))
+    for (const server of listeners) server.close()
     expect(again).toBe(first)
     expect(fake.calls).toHaveLength(1)
   })

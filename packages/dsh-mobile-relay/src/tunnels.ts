@@ -100,7 +100,14 @@ export class TunnelPool {
       }
 
       const cached = this.handles.get(machine.hostId)
-      if (cached !== undefined) return { ok: true, handle: cached }
+      if (cached !== undefined) {
+        // 缓存命中也要验活：ssh 起隧道只等 350ms 就判成功（manager 侧的口径），
+        // 一台「黑洞型失联」的机器（休眠、被防火墙丢包）要十几秒才退，那时句柄
+        // 早就进缓存了。不验活的话，从下一拍起每拍都直接返回缓存——隧道死了也
+        // 不重建，reachable 恒 true 而 running 恒 false，除非重启中转进程。
+        if (!(await isPortFree(cached.localPort))) return { ok: true, handle: cached }
+        this.handles.delete(machine.hostId)
+      }
 
       const doc = this.state.read()
       const assigned = assignedPort(doc, machine.hostId)

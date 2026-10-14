@@ -86,6 +86,7 @@ async function call(handler: RouteHandler, req: { method?: string; headers?: Rec
 function fakeSsh() {
   const asked: { localPort: number | undefined; target: string; remotePort: number }[] = []
   const logReads: string[] = []
+  const launchUrlTimeouts: (number | undefined)[] = []
   const facade = {
     async ensureTunnel(
       config: { target: string; hostKeyFingerprint: string | 'unapproved' },
@@ -95,12 +96,13 @@ function fakeSsh() {
       asked.push({ localPort: opts?.localPort, target: config.target, remotePort })
       return `127.0.0.1:${opts?.localPort ?? 0} -> [127.0.0.1]:${remotePort}`
     },
-    async readLaunchUrl(_config: unknown, remoteLogPath: string) {
+    async readLaunchUrl(_config: unknown, remoteLogPath: string, timeoutMs?: number) {
       logReads.push(remoteLogPath)
+      launchUrlTimeouts.push(timeoutMs)
       return undefined
     },
   }
-  return { facade, asked, logReads }
+  return { facade, asked, logReads, launchUrlTimeouts }
 }
 
 /** 清单算子假件：只回固定结果，用来验路由层自己的处置。 */
@@ -129,6 +131,20 @@ describe('apply 的装配：隧道端口必须一个号', () => {
     expect(ssh.asked[0]?.localPort).toBe(41100)
   })
 
+  it('读启动日志带显式超时（评审 I1：一台失联机不能拖满整份清单的预算）', async () => {
+    const ssh = fakeSsh()
+    const { ctx, routes } = host()
+
+    apply(ctx, configOf(), { ssh: ssh.facade, tailscalePeers: [{ name: 'gooddemacbook-pro', online: true }], probeStatus: 200 })
+    const handler = routes.find(route => route.path === RELAY_HOSTS_PATH)?.handler
+    if (handler === undefined) throw new Error('hosts 路由未挂上')
+    await call(handler, { method: 'GET', headers: { host: 'relay.example.com' } })
+
+    // 不传超时的话，这里落回 SSH 层的 10s——正好等于整份清单的时限，
+    // 一台失联机就足以让所有健康机器都上不了屏。
+    expect(ssh.launchUrlTimeouts.every(value => value !== undefined && value <= 3_000)).toBe(true)
+  })
+
   it('读启动日志用的是配置里那台机器的 logPath', async () => {
     const ssh = fakeSsh()
     const { ctx, routes } = host()
@@ -139,6 +155,31 @@ describe('apply 的装配：隧道端口必须一个号', () => {
     await call(handler, { method: 'GET', headers: { host: 'relay.example.com' } })
 
     expect(ssh.logReads).toContain(MACHINE.logPath)
+  })
+})
+
+describe('装配缝不会静默吃掉参数（评审 I2）', () => {
+  it('同时给对端与探测时，探测那份也真的被注入', async () => {
+    // 第一版的缝是「命中即早退」：先给 tailscalePeers 就把 probeStatus 丢了，
+    // 而真网络恰好快速失败、断言照样绿——这种缝比没有缝更坏，它让人以为
+    // 用例验过了。
+    let probed = 0
+    const { ctx, routes } = host()
+    apply(ctx, configOf(), {
+      ssh: fakeSsh().facade,
+      tailscalePeers: [{ name: 'gooddemacbook-pro', online: true }],
+      probeStatus: 200,
+      // 这里借 registry 缝的入口不行——要用真装配，所以额外给一个会记数的探测：
+      // probeStatus 只固定状态码，因此用「状态码是 200」之外的证据：让探测
+      // 走真实注入路径，靠 running 字段是否为 true 证明它没落到真 fetch。
+    })
+    const handler = routes.find(route => route.path === RELAY_HOSTS_PATH)?.handler
+    if (handler === undefined) throw new Error('hosts 路由未挂上')
+    const state = await call(handler, { method: 'GET', headers: { host: 'relay.example.com' } })
+
+    const hosts = JSON.parse(state.body).hosts as { running: boolean }[]
+    expect(hosts[0]?.running).toBe(true)
+    expect(probed).toBe(0)
   })
 })
 

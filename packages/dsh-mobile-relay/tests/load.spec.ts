@@ -22,6 +22,7 @@ import {
 describe('Config 的形状校验（schemastery，装载第一道门）', () => {
   it('合法配置解析后字段原样保留', () => {
     const config = {
+      mobileOrigin: 'https://relay.example.com',
       sshKnownHostsPath: '/home/relay/.ssh/known_hosts',
       statePath: '/home/relay/.threadharbor-relay/state.json',
       machines: [{ hostId: 'gooddemacbook-pro', target: '100.64.0.2', remotePort: 3081, logPath: '/var/log/dsh.log' }],
@@ -29,12 +30,19 @@ describe('Config 的形状校验（schemastery，装载第一道门）', () => {
     expect(Config(config)).toEqual(config)
   })
 
-  it('可选字段全部缺省也通过', () => {
-    expect(Config({ sshKnownHostsPath: '/k', statePath: '/s', machines: [] })).toEqual({
+  it('可选字段全部缺省也通过（顶层四项与机器的 hostId/target/remotePort/logPath 必填，其余可缺）', () => {
+    const config = { mobileOrigin: 'https://relay.example.com', sshKnownHostsPath: '/k', statePath: '/s', machines: [] }
+    expect(Config(config)).toEqual(config)
+  })
+
+  it('机器的 port/user/identityFile 缺省也通过', () => {
+    const config = {
+      mobileOrigin: 'https://relay.example.com',
       sshKnownHostsPath: '/k',
       statePath: '/s',
-      machines: [],
-    })
+      machines: [{ hostId: 'mac-a', target: '100.64.0.2', remotePort: 3081, logPath: '/l.log' }],
+    }
+    expect(Config(config)).toEqual(config)
   })
 
   it.each([
@@ -179,6 +187,23 @@ describe('apply 的装载行为', () => {
     expect(routes).toHaveLength(0)
   })
 
+  it.each(['sshKnownHostsPath', 'statePath', 'machines'] as const)(
+    '%s 缺省：装载抛错说清缺哪个字段，且一条路由都不注册',
+    key => {
+      // 缺 statePath 时旧代码是「装载成功、之后每拍在 dirname(undefined) 处炸、
+      // 被 allSettled 吃掉」——方向是静默的：全机永远不可达且清单里没有 error。
+      const { run, routes } = captureAppliedRoutes({ ...VALID_CONFIG, [key]: undefined } as MobileRelayConfig)
+      expect(run).toThrow(new RegExp(key))
+      expect(routes).toHaveLength(0)
+    },
+  )
+
+  it('配置块整个没给：装载抛错并说清缺配置，而不是一个 dirname(undefined)', () => {
+    const { run, routes } = captureAppliedRoutes(undefined)
+    expect(run).toThrow(/缺配置/)
+    expect(routes).toHaveLength(0)
+  })
+
   it.each([
     ['user 含 shell 元字符', { user: 'hello; rm -rf /' }],
     ['identityFile 含 shell 元字符', { identityFile: '/k; touch /tmp/pwn' }],
@@ -190,6 +215,27 @@ describe('apply 的装载行为', () => {
     })
     expect(run).toThrow()
     expect(routes).toHaveLength(0)
+  })
+
+  it.each([
+    ['port 为 0', 0],
+    ['port 越界 65536', 65536],
+    ['port 非整数', 2222.5],
+  ])('%s：形状门就拒（评审 I4：SSH 端口取值不当装载放过、首拍才以难懂错误失败）', (_label, port) => {
+    expect(() =>
+      Config({
+        mobileOrigin: 'https://relay.example.com',
+        sshKnownHostsPath: '/k',
+        statePath: '/s',
+        machines: [{ hostId: 'gooddemacbook-pro', target: '100.64.0.2', remotePort: 3081, logPath: '/l.log', port }],
+      }),
+    ).toThrow()
+  })
+
+  it.each(['sshKnownHostsPath', 'statePath', 'machines'] as const)('顶层 %s 缺省：形状门就拒', key => {
+    expect(() =>
+      Config({ mobileOrigin: 'https://relay.example.com', sshKnownHostsPath: '/k', statePath: '/s', machines: [], [key]: undefined }),
+    ).toThrow()
   })
 
   it('logPath 缺省：形状门就拒（每台的启动日志路径不统一，不给默认值猜）', () => {

@@ -4,9 +4,9 @@
  * 这个包跑在有公网 HTTPS 的云主机上：手机从公网访问它，它经 SSH 隧道把
  * 请求代理到各台机器的 DSH。装载器读到的是 `name` / `inject` / `Config` /
  * `apply` 四件套，组合行（cordis.patch.yml 的 threadharbor-mobile-relay）
- * 指向这里。骨架任务只挂 `/threadharbor/relay/hosts` 一条占位路由（空清单）：
- * 隧道数据面、tailnet 发现与静态壳由后续任务接上——把静态服务签名变更混进
- * 骨架任务会让两个任务的评审范围都变浑，所以壳留到它的归属任务。
+ * 指向这里。已装上 `/threadharbor/relay/hosts`：tailnet 发现（只认配置里登记过的机器）、
+ * 隧道可用性、经隧道的 hello 探测与凭据自愈。静态壳与转发面在后续任务接上——
+ * 把静态服务签名变更混进来会让评审范围变浑，所以壳留到它的归属任务。
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -41,7 +41,7 @@ export interface RelayMachineConfig {
   readonly logPath: string
 }
 
-/** apply 收到的组合配置形状（Config 的解析结果）；mobileOrigin 缺省时后续任务再定处置。 */
+/** apply 收到的组合配置形状（Config 的解析结果）；四个字段全都必填，缺一即拒装载（理由见 apply）。 */
 export interface MobileRelayConfig {
   readonly mobileOrigin?: string
   readonly sshKnownHostsPath: string
@@ -85,20 +85,20 @@ export interface RelayRouteContext {
  * 重复）由 apply 补第二道。坏值装载即失败，不做静默回退。
  */
 export const Config: Schema = Schema.object({
-  mobileOrigin: Schema.string().pattern(MOBILE_ORIGIN_PATTERN).description('中转站对外服务的源（如 https://relay.example.com）'),
-  sshKnownHostsPath: Schema.string().pattern(/.+/).description('SSH known_hosts 路径（校验各机主机指纹）'),
-  statePath: Schema.string().pattern(/.+/).description('凭据与端口分配的家目录文件路径'),
+  mobileOrigin: Schema.string().pattern(MOBILE_ORIGIN_PATTERN).required().description('中转站对外服务的源（如 https://relay.example.com）'),
+  sshKnownHostsPath: Schema.string().pattern(/.+/).required().description('SSH known_hosts 路径（校验各机主机指纹）'),
+  statePath: Schema.string().pattern(/.+/).required().description('凭据与端口分配的家目录文件路径'),
   machines: Schema.array(
     Schema.object({
       hostId: Schema.string().pattern(/^\S+$/).required().description('tailnet DNS 名（如 gooddemacbook-pro）'),
       target: Schema.string().pattern(/^\S+$/).required().description('SSH 目标（IP 或名字）'),
-      port: Schema.number().description('SSH 端口，缺省 22'),
+      port: Schema.number().min(1).max(65535).step(1).description('SSH 端口，缺省 22'),
       user: Schema.string().description('SSH 用户'),
       identityFile: Schema.string().description('私钥绝对路径'),
       remotePort: Schema.number().min(1).max(65535).step(1).required().description('该机 DSH 的回环端口（如 3081）'),
       logPath: Schema.string().pattern(/^\S+$/).required().description('该机 DSH 的启动日志路径（追加写、含 LAUNCH_URL= 标记）'),
     }),
-  ).description('各台机器的隧道目标清单'),
+  ).required().description('各台机器的隧道目标清单'),
 })
 
 /**
@@ -195,15 +195,30 @@ const LIST_TIMEOUT_MS = 10_000
  */
 export function apply(ctx: RelayRouteContext, config?: MobileRelayConfig, deps: RelayAssemblyDeps = {}): void {
   // 语义校验先于任何注册：坏配置装载即失败，不留下半挂的路由。
-  if (config === undefined || config.mobileOrigin === undefined || config.mobileOrigin === '') {
+  if (config === undefined || typeof config !== 'object') {
+    // 组合行没给 config 块时宿主传什么（undefined 还是空对象）我们没在真机上量过，
+    // 与其为它赌一种形状，不如两种都挡住并说清缺什么——装载失败时人要看得懂
+    // 缺的是哪个字段，而不是看一个 `dirname(undefined)` 的 TypeError。
+    throw new Error('threadharbor-mobile-relay 缺配置：中转站必须声明 mobileOrigin / sshKnownHostsPath / statePath / machines')
+  }
+  const { mobileOrigin, sshKnownHostsPath, statePath, machines } = config
+  if (mobileOrigin === undefined || sshKnownHostsPath === undefined || statePath === undefined || machines === undefined) {
+    const missing = [mobileOrigin, sshKnownHostsPath, statePath, machines].findIndex(value => value === undefined)
+    throw new Error(`threadharbor-mobile-relay 缺配置字段 ${['mobileOrigin', 'sshKnownHostsPath', 'statePath', 'machines'][missing]}：四项全部必填`)
+  }
+  if (mobileOrigin === '') {
     // 没有 origin 就没法做 origin 绑定（请求 Host 对不上也放行等于门户大开），
-    // 而一个说不清自己对外源的���中转站本来也不该上线——拒装载，不给默认值兜。
+    // 而一个说不清自己对外源的中转站本来也不该上线——拒装载，不给默认值兜。
     throw new Error('threadharbor-mobile-relay 缺 mobileOrigin：中转站必须声明对外服务的源（如 https://relay.example.com），没有它无法做 origin 绑定')
   }
-  assertMobileOrigin(config.mobileOrigin)
-  assertMachines(config.machines, config.sshKnownHostsPath)
+  assertMobileOrigin(mobileOrigin)
+  assertMachines(machines, sshKnownHostsPath)
   const registry = deps.registry ?? new HostRegistry(buildRegistryDeps(config, deps))
-  registerHostsRoute(ctx, registry, new URL(config.mobileOrigin).host, deps.listTimeoutMs ?? LIST_TIMEOUT_MS)
+  // 比 hostname 不比 host：`URL.host` 会保留非默认端口（https://x:8443 → x:8443），
+  // 而反代透传的 Host 头在默认端口下不带端口——那样配的站点会被整站 403。
+  // 端口不参与比对：中转对外只有一个入口，端口由反代终结，写进配置反而多一处
+  // 能配错的地方（真要非默认端口，直接在反代上终结掉）。
+  registerHostsRoute(ctx, registry, new URL(mobileOrigin).hostname, deps.listTimeoutMs ?? LIST_TIMEOUT_MS)
 }
 
 /**
@@ -233,39 +248,43 @@ function buildRegistryDeps(config: MobileRelayConfig, deps: RelayAssemblyDeps): 
     // 由上层把「需先确认指纹」和「凭据需更新」两件事分开说。
     const connection = tunnels.connectionFor(machine)
     if (connection === undefined) return undefined
-    return await ssh.readLaunchUrl(connection, machine.logPath)
+    // 显式给超时，不吃 SSH 层的默认 10s：读启动日志只是一次 grep，不值得占掉
+    // 整份清单的时间预算。
+    return await ssh.readLaunchUrl(connection, machine.logPath, 3_000)
   }
-  const registryDeps: HostRegistryDeps = { machines: config.machines, tunnels, credentials, readLaunchUrl }
+  // 缝的覆盖项**逐个并入**同一份依赖，不做「命中即早退」：早退会让后面的缝
+  // 静默失效——测试里两条缝一起传，第二条形同虚设，而真网络恰好快速失败，
+  // 断言照样绿。宁可多写两行，也不要留一个会静默吃掉参数的缝。
+  const overrides: Partial<HostRegistryDeps> = {}
   if (deps.tailscalePeers !== undefined) {
     // 缝给的是「对端列表」，但清单层要的是命令执行面——中间仍走联邦包那份真
     // 解析器（MagicDNS 全名去尾点、Online 布尔、100.x 首地址这些规则都在那边）。
     // 绕开解析器造假输出，等于让用例验证的是另一条代码路径。
     const peers = deps.tailscalePeers
-    return {
-      ...registryDeps,
-      run: async () => ({
-        stdout: JSON.stringify({
-          BackendState: 'Running',
-          Peer: Object.fromEntries(peers.map((peer, index) => [
-            `peer${index}`,
-            { DNSName: `${peer.name}.ts.net.`, HostName: peer.name, TailscaleIPs: ['100.64.0.1'], Online: peer.online, Active: peer.online },
-          ])),
-        }),
+    overrides.run = async () => ({
+      stdout: JSON.stringify({
+        BackendState: 'Running',
+        Peer: Object.fromEntries(peers.map((peer, index) => [
+          `peer${index}`,
+          { DNSName: `${peer.name}.ts.net.`, HostName: peer.name, TailscaleIPs: ['100.64.0.1'], Online: peer.online, Active: peer.online },
+        ])),
       }),
-    }
+    })
   }
   if (deps.probeStatus !== undefined) {
     const status = deps.probeStatus
-    return { ...registryDeps, probeFetch: async () => ({ status }) }
+    overrides.probeFetch = async () => ({ status })
   }
-  return registryDeps
+  return { machines: config.machines, tunnels, credentials, readLaunchUrl, ...overrides }
 }
 
 /** 生产用的 SSH 面：联邦包那个 manager（隧道与读启动日志都归它）。 */
 function createSshFacade(knownHostsPath: string): RelaySshFacade {
   const manager = new DshSshManager({
     knownHostsPath,
-    connectTimeoutMs: 10_000,
+    // 3s：单台机的 SSH 往返要压在清单 deadline 的三分之一以内——一台黑洞型失联
+    // 的机器（休眠笔记本、防火墙丢包）慢到什么程度，都不能把整份清单拖到超时。
+    connectTimeoutMs: 3_000,
     installTimeoutMs: 120_000,
     deploymentChannel: 'mobile-relay',
     defaultRemoteWebPort: 3081,
