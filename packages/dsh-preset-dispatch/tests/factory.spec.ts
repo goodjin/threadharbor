@@ -8,6 +8,9 @@
  */
 
 import { describe, expect, it } from 'vitest'
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { claudeDialect, codexDialect, grokDialect } from '@threadharbor/dsh-acp-agent'
 import { makeSessionFactory } from '../src/factory.ts'
 import type { AcpTransport } from '@threadharbor/dsh-acp-agent'
@@ -168,6 +171,75 @@ const CURSOR_ASK = JSON.stringify({
   params: {
     questions: [{ id: 'q1', prompt: 'Which mode?', options: [{ id: 'plan', label: 'Plan' }] }],
   },
+})
+
+/**
+ * A real executable that writes down the argv it was spawned with, then exits.
+ *
+ * The stdio transport spawns in its constructor and takes no injection seam, so
+ * the only honest way to see what a preset actually launches is to launch
+ * something. A stand-in binary answers that without needing a live agent — and
+ * without it, "the agent never answered" is indistinguishable from "we passed
+ * the wrong arguments", which is exactly the failure this guards.
+ */
+function recordingBinary(): { command: string; argv: () => readonly string[] } {
+  const dir = mkdtempSync(join(tmpdir(), 'threadharbor-argv-'))
+  const argvFile = join(dir, 'argv.json')
+  const script = join(dir, 'agent')
+  writeFileSync(script, [
+    '#!/usr/bin/env node',
+    'const { writeFileSync } = require("node:fs")',
+    `writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(process.argv.slice(2)))`,
+    'process.exit(0)',
+    '',
+  ].join('\n'))
+  chmodSync(script, 0o755)
+  return { command: script, argv: () => JSON.parse(readFileSync(argvFile, 'utf8')) as readonly string[] }
+}
+
+/** Open one preset, let the stand-in binary exit, and report how it was launched. */
+async function spawnArgvOf(config: PresetConfig, presetId: string): Promise<readonly string[]> {
+  const binary = recordingBinary()
+  const factory = makeSessionFactory(
+    { presets: { [presetId]: { command: binary.command, ...config.presets[presetId]! } } },
+    deps,
+  )
+  const session = await factory.open(presetId, { cwd: '/tmp' })
+  const dead = new Promise<void>(resolve => { session.onDead(() => { resolve() }) })
+  await session
+    .run(
+      { kind: 'enter', messages: [] },
+      { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 },
+    )
+    .catch(() => {})
+  // The binary wrote its argv before exiting, so its death is the write's
+  // completion — no polling, no sleep.
+  await dead
+  return binary.argv()
+}
+
+describe('拉起外部 agent 时补齐 ACP 所需的参数', () => {
+  it('cursor 带上 acp 子命令：裸 agent 是交互式 CLI，不会应答 JSON-RPC', async () => {
+    // Cursor 的官方文档：`agent acp` 才是 stdio 上的 ACP 服务。少了这个子
+    // 命令，进程活着却一个字节不回，握手只能等超时——而超时说的是「没应答」，
+    // 没人看得出是参数漏了。
+    expect(await spawnArgvOf({ presets: { 'acp-cursor': { agent: 'cursor' } } }, 'acp-cursor'))
+      .toEqual(['acp', '--trust'])
+  })
+
+  it('claude 与 codex 的二进制本身就是 ACP 服务，不加参数', async () => {
+    // claude-agent-acp / codex-acp 启动即服务；给它们加参数反而会启动错的东西。
+    expect(await spawnArgvOf({ presets: { 'acp-claude': { agent: 'claude' } } }, 'acp-claude')).toEqual([])
+    expect(await spawnArgvOf({ presets: { 'acp-codex': { agent: 'codex' } } }, 'acp-codex')).toEqual([])
+  })
+
+  it('配置显式写了参数时以配置为准，不再补默认值', async () => {
+    // 换版本、换端点或换认证方式时，运维要能完全接管命令行。
+    expect(await spawnArgvOf(
+      { presets: { 'acp-cursor': { agent: 'cursor', args: ['--api-key', 'k', 'acp'] } } },
+      'acp-cursor',
+    )).toEqual(['--api-key', 'k', 'acp'])
+  })
 })
 
 describe('把 agent 的提问接到 host 的提问服务', () => {

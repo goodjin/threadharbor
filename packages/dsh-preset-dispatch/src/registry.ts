@@ -18,6 +18,17 @@ export type AcpPresetConfig = {
   readonly url?: string
   /** Command to spawn, for agents that run as a child process. */
   readonly command?: string
+  /**
+   * Arguments that command is spawned with, when the defaults are not what this
+   * deployment needs.
+   *
+   * Absent means the factory's per-agent default (see `stdioArgsFor`) — which is
+   * what makes an agent that needs a subcommand speak ACP without every preset
+   * repeating it. Set it to take the whole command line over: an endpoint, a key
+   * or a different auth path changes the arguments the agent expects, and an
+   * operator who names them knows better than a table.
+   */
+  readonly args?: readonly string[]
   readonly model?: string
   readonly mode?: string
   readonly cwd?: string

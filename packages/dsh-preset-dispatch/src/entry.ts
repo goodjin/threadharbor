@@ -72,6 +72,11 @@ export const Config: Schema<Config> = Schema.object({
   agent: Schema.string().required(),
   url: Schema.string(),
   command: Schema.string(),
+  /**
+   * Replaces the spawn arguments the factory would default to. Omitted keeps
+   * the default that makes this agent speak ACP at all.
+   */
+  args: Schema.array(Schema.string()),
   model: Schema.string(),
   mode: Schema.string(),
   cwd: Schema.string(),
@@ -107,6 +112,11 @@ export type Config = {
   agent: string
   url?: string
   command?: string
+  /**
+   * Replaces the factory's per-agent spawn arguments for this row. Absent keeps
+   * the default that makes the agent speak ACP in the first place.
+   */
+  args?: string[]
   model?: string
   mode?: string
   cwd?: string
@@ -166,6 +176,7 @@ export function apply(ctx: unknown, config: Config): void {
     agent: config.agent,
     ...(config.url === undefined ? {} : { url: config.url }),
     ...(config.command === undefined ? {} : { command: config.command }),
+    ...(config.args === undefined ? {} : { args: config.args }),
     ...(config.model === undefined ? {} : { model: config.model }),
     ...(config.mode === undefined ? {} : { mode: config.mode }),
     ...(config.cwd === undefined ? {} : { cwd: config.cwd }),

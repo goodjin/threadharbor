@@ -29,6 +29,7 @@ import { claudeDialect } from '../src/dialects/claude.ts'
 import { codexDialect } from '../src/dialects/codex.ts'
 import { cursorDialect } from '../src/dialects/cursor.ts'
 import { grokDialect } from '../src/dialects/grok.ts'
+import { stdioArgsForDialect } from '../src/spawn-args.ts'
 import type { AcpDialect } from '../src/dialects/types.ts'
 import type { AcpTransport } from '../src/transport.ts'
 import type { AcpFrame, AcpSession } from '../src/acp-client.ts'
@@ -117,7 +118,9 @@ async function openLiveAgent(
 ): Promise<LiveSession> {
   const transport = new StdioAcpTransport({
     command,
-    ...(dialect.id === 'cursor' ? { args: ['acp', '--trust'] as readonly string[] } : {}),
+    // The same table production spawns from, so a probe can never pass over a
+    // deployment that launches the agent wrongly.
+    args: stdioArgsForDialect(dialect),
     cwd: CWD,
     onDiagnostic: () => {}, // agents are chatty on stderr; it is not protocol
   })

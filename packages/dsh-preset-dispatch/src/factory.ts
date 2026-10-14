@@ -16,6 +16,7 @@ import {
   codexDialect,
   cursorDialect,
   grokDialect,
+  stdioArgsFor as acpStdioArgsFor,
 } from '@threadharbor/dsh-acp-agent'
 import type {
   AcpDialect,
@@ -25,7 +26,7 @@ import type {
   PermissionDecision,
   PermissionRequest,
 } from '@threadharbor/dsh-acp-agent'
-import type { AcpSession, AcpSessionFactory, PresetConfig } from './registry.ts'
+import type { AcpPresetConfig, AcpSession, AcpSessionFactory, PresetConfig } from './registry.ts'
 import { AcpTurnRunner } from './runner.ts'
 import type { AcpClientPort } from './runner.ts'
 
@@ -64,6 +65,20 @@ const DIALECTS: Readonly<Record<string, AcpDialect>> = {
   claude: claudeDialect,
   codex: codexDialect,
   cursor: cursorDialect,
+}
+
+/**
+ * The argv one stdio preset is spawned with.
+ *
+ * The preset's own `args` wins outright: it names a command line the deployment
+ * chose, and half-appending a default to it would produce an invocation nobody
+ * asked for. Everything else falls back to what the agent needs to speak ACP at
+ * all — see `stdioArgsFor` for why cursor is not simply spawned bare.
+ * @param preset - the configured preset about to be spawned.
+ * @returns the arguments, empty when the binary is the service itself.
+ */
+export function stdioArgsFor(preset: AcpPresetConfig): readonly string[] {
+  return preset.args ?? acpStdioArgsFor(preset.agent)
 }
 
 /**
@@ -125,7 +140,7 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
               command: preset.command ?? 'grok',
               ...(preset.cwd === undefined ? {} : { cwd: preset.cwd }),
             })
-          : new StdioAcpTransport({ command: preset.command ?? '' }))
+          : new StdioAcpTransport({ command: preset.command ?? '', args: stdioArgsFor(preset) }))
       // The client and the registry's death watcher both listen; the fanout is
       // what lets them without one stealing the other's slot.
       const transport = new DeathFanoutTransport(raw)
