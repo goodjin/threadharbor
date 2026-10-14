@@ -679,7 +679,7 @@ function SshDeploySection(props: {
     setBusy('inspect')
     setKeys([])
     setApprovedFingerprint('')
-    void inspectSshHost(sshPayload()).then(result => {
+    void inspectSshHost(sshPayload(), props.t).then(result => {
       setBusy(undefined)
       if (!result.ok) {
         props.onError(result.error)
@@ -697,7 +697,7 @@ function SshDeploySection(props: {
       return
     }
     setBusy('peer')
-    void readRemotePeer({ ...sshPayload(), hostKeyFingerprint: approvedFingerprint }).then(result => {
+    void readRemotePeer({ ...sshPayload(), hostKeyFingerprint: approvedFingerprint }, props.t).then(result => {
       setBusy(undefined)
       if (!result.ok) {
         props.onError(result.error)
@@ -725,13 +725,13 @@ function SshDeploySection(props: {
       ...(remoteWebPort.trim() === '' ? {} : { remoteWebPort: Number(remoteWebPort) }),
       accessMode: 'tunnel',
       remoteAgents,
-    }).then(started => {
+    }, props.t).then(started => {
       if (!started.ok) {
         setBusy(undefined)
         props.onError(started.error)
         return
       }
-      void waitSshDeployOperation(started.value.operationId, view => { setProgress(view) }).then(done => {
+      void waitSshDeployOperation(started.value.operationId, view => { setProgress(view) }, undefined, props.t).then(done => {
         setBusy(undefined)
         if (!done.ok) {
           props.onError(done.error)

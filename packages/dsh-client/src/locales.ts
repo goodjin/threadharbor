@@ -15,6 +15,13 @@
  * 没有跟过来——那一块界面已被 main 的改版整块移除（测试也钉住它不在），
  * 字典不留无主键。带行内元素的句子（ssh 说明、访问方式标签）沿用帮助块的
  * `{…}` 记号约定：记号内容随语言走，`richSegments` 拆开包回行内元素。
+ *
+ * 其中还有一小批「运行时层」的键（panel.gateway.* / panel.tailscale.* 的
+ * 报错、panel.ssh 的 HTTP 错误模板）：它们产自入口接线（client/index.ts）
+ * 与 ssh-deploy.ts 的端口结果，不经过 JSX，`verify-client-ui-i18n` 的
+ * 属性赋值规则只扫 .tsx、看不见它们——双语化靠调用侧把 `t` 递进端口，
+ * locale 服务缺席时由 `fallbackT` 读本文件回落（tests/runtime-locale.spec.ts
+ * 钉住这批键与回落行为）。
  */
 
 /** 这个插件在 locale 注册表里的命名空间。 */
@@ -83,6 +90,9 @@ export const zh = {
   'panel.probe.idle': '未探测',
   'panel.probe.running': '探测中……（最多等一分钟）',
   'panel.probe.error': '探测出错：{message}',
+  /** 打不开会话网关时接线层给的错误原文（agent 列表与探测结论共用）。 */
+  'panel.gateway.missing': '主机服务缺失：{missing}',
+  'panel.gateway.notReady': '主机服务未就绪：{error}',
   /** 结论旁折叠起来的建议小节。 */
   'panel.verdict.advice': '建议',
   /** 四种结论的措辞与建议（describeVerdict）；`{ms}` 是耗时毫秒数。 */
@@ -123,7 +133,7 @@ export const zh = {
   /** 离线注脚按 DOM 拆成三段：前句、在线名称冒头、句号。 */
   'panel.facts.offlineIdsPrefix': '；现在在线的名称：',
   'panel.facts.offlineEnd': '。',
-  /** 在线名称列表的枚举分隔符（join 的胶水，不是句子）。 */
+  /** 在线名称列表的枚举分隔符（join 的胶水，不是句子）；网关缺失清单同用。 */
   'panel.facts.onlineIdsSeparator': '、',
   'panel.facts.match': '（与填写一致）',
   'panel.facts.idMismatch': '（与填写的不一样；两边都保留，把名称改成它，两边就对上了）',
@@ -144,6 +154,10 @@ export const zh = {
   'panel.tailscale.empty': '清单是空的——只有本机，或还没登录 Tailscale。',
   'panel.tailscale.collapse': '收起',
   'panel.tailscale.peerMeta': '{ip} · {status}',
+  /** Tailscale 选择器读不到清单时端口给的错误行；`{error}` 是通道的拒绝原文。 */
+  'panel.tailscale.noChannel': '这台机器没有提供设置通道（remote.settings）',
+  'panel.tailscale.badList': '清单读出来是坏的，没法解析',
+  'panel.tailscale.refreshDenied': '刷新请求被拒：{error}',
   /** 面板上直接渲染的说明。 */
   'panel.notes.selfHeal': '连接由主机自己照看：发现断了会自动丢弃并在下一次对话时自动重连，无需在这里操作。',
   'panel.notes.onlineMeaning': '「在线」= 这台机器的页面在同一个浏览器的同源标签页里开着并按心跳报数；关闭或崩溃的页面过了静默窗口会自动转为未列出。',
@@ -203,10 +217,35 @@ export const zh = {
   'panel.ssh.registered': '已登记 {endpoint}。点「打开」在新标签页完成 token 交换后，跨标签页频道会显示在线。',
   'panel.ssh.addFooterPrefix': '也可以在远端自动安装 DSH 与 ThreadHarbor：',
   'panel.ssh.redeploy': '重新部署 DSH',
+  /** ssh-deploy HTTP 层的错误模板；`{status}` 是 HTTP 状态码。 */
+  'panel.ssh.httpInvalid': '无效响应（HTTP {status}）',
+  'panel.ssh.httpFailed': '请求失败（HTTP {status}）',
 } satisfies Record<string, string>
 
 /** 这份文案的全部键，也是命名空间声明进 `LocaleNamespaceMap` 的键域。 */
 export type ClientLocaleKey = keyof typeof zh
+
+/**
+ * 运行时层读词典的面：入口接线与 ssh-deploy 的函数把它当参数收（面板的
+ * `t` 席位、入口 `locale.bind` 的活函数，结构上都满足它）。占位符约定与
+ * 宿主 locale 服务一致：`{name}` 记号、`t(key, { name })` 传值。
+ */
+export type RuntimeT = (key: ClientLocaleKey, params?: Record<string, unknown>) => string
+
+/**
+ * locale 服务缺席时的回落：直接读中文词典并替换 `{占位符}`。
+ *
+ * 产出必须与迁移前散在端口里的硬编码串逐字节一致（无 locale 行为不变，
+ * tests/runtime-locale.spec.ts 钉住这一点）；替换用单趟正则、函数形式，
+ * 参数里的 `$` 序列按字面落进文案，不当替换模式展开；单趟也保证已替换进去的
+ * 值里若含 `{name}` 不会被再替换（与宿主 translate 的单趟语义一致）。
+ */
+export const fallbackT: RuntimeT = (key, params) => {
+  const template: string = zh[key]
+  if (params === undefined) return template
+  return template.replace(/\{(\w+)\}/g, (match, name: string) =>
+    name in params ? String(params[name]) : match)
+}
 
 /** 切换进度条的键。 */
 export type ProgressKey = Extract<ClientLocaleKey, `progress.${string}`>
@@ -263,6 +302,8 @@ export const en = {
   'panel.probe.idle': 'Not probed yet',
   'panel.probe.running': 'Probing… (up to a minute)',
   'panel.probe.error': 'Probe failed: {message}',
+  'panel.gateway.missing': 'Missing host services: {missing}',
+  'panel.gateway.notReady': 'Host services not ready: {error}',
   'panel.verdict.advice': 'Advice',
   'panel.verdict.ok': 'OK',
   'panel.verdict.slow': 'Slow',
@@ -311,6 +352,9 @@ export const en = {
   'panel.tailscale.empty': 'The list is empty — only this machine, or not logged in to Tailscale.',
   'panel.tailscale.collapse': 'Collapse',
   'panel.tailscale.peerMeta': '{ip} · {status}',
+  'panel.tailscale.noChannel': 'This machine provides no settings channel (remote.settings)',
+  'panel.tailscale.badList': 'The list came back malformed and cannot be parsed',
+  'panel.tailscale.refreshDenied': 'The refresh request was refused: {error}',
   'panel.notes.selfHeal': 'The host minds its own connections: a broken one is dropped on its own and reconnected at the next turn — nothing to do here.',
   'panel.notes.onlineMeaning': '"Online" = this machine\'s page is open in a same-origin tab of the same browser and announcing on its heartbeat; a closed or crashed page drops out of the list on its own after the quiet window.',
   'panel.notes.otherSource': "Another machine's page (another origin) is not on this channel; its row shows up as \"Not connected\", carried by the registration.",
@@ -368,6 +412,8 @@ export const en = {
   'panel.ssh.registered': 'Registered {endpoint}. After you press "Open" and finish the token exchange in the new tab, the cross-tab channel shows it online.',
   'panel.ssh.addFooterPrefix': 'DSH and ThreadHarbor can also be installed on the remote machine automatically:',
   'panel.ssh.redeploy': 'Redeploy DSH',
+  'panel.ssh.httpInvalid': 'Invalid response (HTTP {status})',
+  'panel.ssh.httpFailed': 'Request failed (HTTP {status})',
 } satisfies Record<ClientLocaleKey, string>
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {

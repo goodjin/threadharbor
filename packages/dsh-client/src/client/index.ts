@@ -66,8 +66,8 @@ import { AgentPanel } from '../panel.tsx'
 import type { AgentListPort, AgentPanelBusinessProps, ProbeStarter, TailscalePeersResult, TailscalePort } from '../panel.tsx'
 import { registerAgentSwitchHandoverSurface } from '../handover-card.ts'
 import { createSwitchProgressStore, startSwitchProgressSurface } from '../switch-progress.ts'
-import { NAMESPACE, en, zh } from '../locales.ts'
-import type { ClientLocaleKey } from '../locales.ts'
+import { NAMESPACE, en, fallbackT, zh } from '../locales.ts'
+import type { ClientLocaleKey, RuntimeT } from '../locales.ts'
 import { createElement } from 'react'
 
 /** Required browser services. The remote namespace is the gateway's whole door
@@ -216,12 +216,16 @@ export function registerPanelSlots(slots: PanelSlotHost, face: AgentPanelBusines
  * across a short window before it gives up and names what is missing.
  * @param openGateway - opens the gateway now, against the current graph.
  * @param delay - waits between retries; injected so tests stay instant.
+ * @param t - reads the failure copy in the active language; absent (tests,
+ * no locale service) it falls back to the dictionary's source text.
  * @returns the port the panel renders from.
  */
 export function agentListPort(
   openGateway: () => GatewayOpening,
   delay: (ms: number) => Promise<void> = ms => new Promise(resolve => { setTimeout(resolve, ms) }),
+  t?: RuntimeT,
 ): AgentListPort {
+  const say = t ?? fallbackT
   let agents: readonly AgentDescriptor[] = []
   const read = async (): Promise<GatewayResult<readonly AgentDescriptor[]>> => {
     for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -241,12 +245,12 @@ export function agentListPort(
       if (list !== undefined) return await list()
       return {
         ok: false as const,
-        error: { code: 'gateway/missing', message: `主机服务缺失：${opening.missing.join('、')}` },
+        error: { code: 'gateway/missing', message: say('panel.gateway.missing', { missing: opening.missing.join(say('panel.facts.onlineIdsSeparator')) }) },
       }
     } catch (error) {
       return {
         ok: false as const,
-        error: { code: 'gateway/missing', message: `主机服务未就绪：${String(error)}` },
+        error: { code: 'gateway/missing', message: say('panel.gateway.notReady', { error: String(error) }) },
       }
     }
   }
@@ -265,18 +269,21 @@ export function agentListPort(
  * The gateway is opened at click time for the same reason the list is: what
  * the host provides may settle after mount.
  * @param openGateway - opens the gateway now, against the current graph.
+ * @param t - reads the failure copy in the active language; absent (tests,
+ * no locale service) it falls back to the dictionary's source text.
  * @returns the starter the panel rows call.
  */
-export function panelProbe(openGateway: () => GatewayOpening): ProbeStarter {
+export function panelProbe(openGateway: () => GatewayOpening, t?: RuntimeT): ProbeStarter {
+  const say = t ?? fallbackT
   return presetId => {
     let opening: GatewayOpening
     try {
       opening = openGateway()
     } catch (error) {
-      return Promise.resolve({ verdict: { kind: 'unreachable', reason: `主机服务未就绪：${String(error)}` } })
+      return Promise.resolve({ verdict: { kind: 'unreachable', reason: say('panel.gateway.notReady', { error: String(error) }) } })
     }
     return opening.gateway === undefined
-      ? Promise.resolve({ verdict: { kind: 'unreachable', reason: `主机服务缺失：${opening.missing.join('、')}` } })
+      ? Promise.resolve({ verdict: { kind: 'unreachable', reason: say('panel.gateway.missing', { missing: opening.missing.join(say('panel.facts.onlineIdsSeparator')) }) } })
       : runSessionProbe(opening.gateway, presetId)
   }
 }
@@ -302,6 +309,24 @@ export function apply(ctx: ClientContext): void {
 /** The same wiring, typed by the narrow face the panel actually uses. */
 function applyToClientPanel(ctx: ClientPanelContext): void {
   const log = ctx.logger('threadharbor-client')
+  // The dictionaries this plugin owns register with the host's locale service;
+  // the slot registrations (progress layer, handover card) declare the
+  // namespace, and the framework synthesizes their typed `t` seat from it.
+  // The sidebar row's label re-reads through a bound `t` so it follows the
+  // active language without re-registering. A missing service degrades to one
+  // log line and the dictionaries' source text — the surfaces keep working.
+  const locale = localeFaceOf(ctx)
+  if (locale === undefined) {
+    log.warn('locale service unavailable — copy renders in the dictionary source language; progress bar, handover card and panel label keep working')
+  } else {
+    ctx.effect(() => locale.register(NAMESPACE, { zh, en }), 'threadharbor: locale dictionary')
+  }
+  // The runtime layer's copy (port failures, ssh-deploy HTTP errors) reads
+  // through this same seat: it threads into the ports below and the
+  // ssh-deploy calls, so a live bind follows the active language, and the
+  // fallback reads the dictionary's source text so the ports work unchanged
+  // without a locale service.
+  const t: RuntimeT = locale?.bind(NAMESPACE) ?? fallbackT
   // The registry and the default identity follow the machine (2026-10-12
   // 用户要求：名单当然应该跟着本机的设置走): both go through ONE host-backed
   // storage — `isLoopback ? 'host' : 'memory'`, per the design doc — so the
@@ -310,7 +335,7 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // claim two hosts, and it is not a bug to fix.
   const hostStoreDepsResult = hostStoreDeps(ctx, message => { log.warn(message) })
   const hostStore = startHostStore(hostStoreDepsResult.deps)
-  const tailscale = tailscalePort(ctx, hostStoreDepsResult.channel, message => { log.warn(message) })
+  const tailscale = tailscalePort(ctx, hostStoreDepsResult.channel, message => { log.warn(message) }, t)
   const settings = layeredIdentitySettings(window.sessionStorage, hostStore.storage)
   const registry = hostRegistry(hostStore.storage)
   const remoteSessions = createRemoteSessionStore()
@@ -364,20 +389,6 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
     log.info(`host store posture: ${JSON.stringify(hostStore.posture())}`)
   })
 
-  // The dictionaries this plugin owns register with the host's locale service;
-  // the slot registrations (progress layer, handover card) declare the
-  // namespace, and the framework synthesizes their typed `t` seat from it.
-  // The sidebar row's label re-reads through a bound `t` so it follows the
-  // active language without re-registering. A missing service degrades to one
-  // log line and the dictionaries' source text — the surfaces keep working.
-  const locale = localeFaceOf(ctx)
-  if (locale === undefined) {
-    log.warn('locale service unavailable — copy renders in the dictionary source language; progress bar, handover card and panel label keep working')
-  } else {
-    ctx.effect(() => locale.register(NAMESPACE, { zh, en }), 'threadharbor: locale dictionary')
-  }
-  const t = locale?.bind(NAMESPACE) ?? ((key: ClientLocaleKey) => zh[key])
-
   const openGateway = (): GatewayOpening => openSessionGateway(ctx)
   // A mount-time read, purely for the self-report: what the host provides may
   // settle later, so absence here is a log line, never a functional gate.
@@ -386,8 +397,8 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
     log.warn(`probe unavailable at mount: missing host services [${mountOpening.missing.join(', ')}] — the panel mounts, opens the gateway per use, and says so on screen`)
   }
   const face: AgentPanelBusinessProps = {
-    agents: agentListPort(openGateway),
-    probe: panelProbe(openGateway),
+    agents: agentListPort(openGateway, undefined, t),
+    probe: panelProbe(openGateway, t),
     rollUp: section,
     registry,
     remoteSessions: {
@@ -395,7 +406,7 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
         for (const entry of registrations) {
           const launchUrl = entry.launchUrl
           if (launchUrl === undefined || launchUrl === '') continue
-          void import('../ssh-deploy.ts').then(({ fetchRemoteHostSessions }) => fetchRemoteHostSessions(launchUrl)).then(result => {
+          void import('../ssh-deploy.ts').then(({ fetchRemoteHostSessions }) => fetchRemoteHostSessions(launchUrl, t)).then(result => {
             if (result.ok) remoteSessions.set(entry.hostId, result.value.sessions, result.value.note)
           })
         }
@@ -660,9 +671,13 @@ function hostStoreDeps(ctx: ClientPanelContext, log: (message: string) => void):
  * @param ctx - the browser plugin context.
  * @param channel - the host-store settings channel, or undefined when this host offers none.
  * @param log - where a refused read/write is reported, never thrown at the page.
+ * @param t - reads the picker's failure copy in the active language; absent
+ * (tests, no locale service) it falls back to the dictionary's source text.
  * @returns the port the panel's 「从 Tailscale 选」 button drives.
  */
-function tailscalePort(ctx: ClientPanelContext, channel: HostStoreChannel | undefined, log: (message: string) => void): TailscalePort {
+function tailscalePort(ctx: ClientPanelContext, channel: HostStoreChannel | undefined, log: (message: string) => void, t?: RuntimeT): TailscalePort {
+  const say = t ?? fallbackT
+  const noChannel = (): TailscalePeersResult => ({ ok: false, message: say('panel.tailscale.noChannel') })
   const readKey = async (key: string): Promise<string | undefined> => {
     if (channel === undefined) return undefined
     try {
@@ -674,7 +689,7 @@ function tailscalePort(ctx: ClientPanelContext, channel: HostStoreChannel | unde
     }
   }
   const readPeers = async (): Promise<TailscalePeersResult> => {
-    if (channel === undefined) return { ok: false, message: '这台机器没有提供设置通道（remote.settings）' }
+    if (channel === undefined) return noChannel()
     const raw = await readKey(TAILSCALE_PEERS_KEY)
     if (raw === undefined) return { ok: true, peers: [] }
     try {
@@ -682,18 +697,18 @@ function tailscalePort(ctx: ClientPanelContext, channel: HostStoreChannel | unde
       const note = await readKey(TAILSCALE_ERROR_KEY)
       return { ok: true, peers, ...(note === undefined ? {} : { note }) }
     } catch {
-      return { ok: false, message: '清单读出来是坏的，没法解析' }
+      return { ok: false, message: say('panel.tailscale.badList') }
     }
   }
   return {
     loadPeers: readPeers,
     refresh: async () => {
-      if (channel === undefined) return { ok: false, message: '这台机器没有提供设置通道（remote.settings）' }
+      if (channel === undefined) return noChannel()
       const demand = String(Date.now())
       try {
         await channel.mutateDocument([{ kind: 'set', key: TAILSCALE_REFRESH_KEY, value: demand }])
       } catch (error) {
-        return { ok: false, message: `刷新请求被拒：${error instanceof Error ? error.message : String(error)}` }
+        return { ok: false, message: say('panel.tailscale.refreshDenied', { error: error instanceof Error ? error.message : String(error) }) }
       }
       // 轮询：等主机侧把 refreshed 写成我们的 demand；超时也读一次当前清单（可能是旧的），不当作失败。
       for (let attempt = 0; attempt < 10; attempt += 1) {
