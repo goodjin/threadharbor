@@ -216,10 +216,7 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
       const head = q(container, '[data-host-list-head]')
       const labels = [...head.querySelectorAll('span')].map(span => span.textContent)
       expect(labels[0]).toBe('名称')
-<<<<<<< HEAD
       // 状态列由主机状态工作加入：表头四列——名称/状态/IP/设置。
-=======
->>>>>>> b306d22 (rebase onto main: 合并 panel 冲突并补齐 main 新增 SSH/状态列的 i18n)
       expect(labels[1]).toBe('状态')
       expect(labels[2]).toBe('IP')
       // 第四列是设置按钮，表头留空。
