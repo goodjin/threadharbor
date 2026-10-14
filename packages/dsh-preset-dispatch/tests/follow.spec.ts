@@ -181,7 +181,7 @@ describe('followModelSelection — the move that lands on the session', () => {
     expect(fixture.selected).toEqual([])
     expect(fixture.forks).toEqual([])
     expect(fixture.reports.join('\n')).toContain('has started')
-    expect(fixture.reports.join('\n')).toContain('new-session handover')
+    expect(fixture.reports.join('\n')).toContain('answered in place')
   })
 
   it('says so, and moves nothing, when the target preset is not on this host', async () => {

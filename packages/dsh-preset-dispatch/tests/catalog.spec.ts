@@ -47,10 +47,38 @@ describe('providerRoute', () => {
   })
 })
 
-/** Drive the adapter's stream to its (mandatory) failure; rejections propagate. */
-async function failToStream(iterable: AsyncIterable<never>): Promise<never> {
-  for await (const chunk of iterable) void chunk
-  throw new Error('the adapter never yields and never came back quietly')
+/** Read a stream to its end; rejections propagate. */
+async function readStream(iterable: AsyncIterable<{ type: string }>): Promise<{ type: string }[]> {
+  const chunks: { type: string }[] = []
+  for await (const chunk of iterable) chunks.push(chunk)
+  return chunks
+}
+
+/** A stand-in answerer that records the request and streams one text block. */
+function fakeGateway() {
+  const seen: {
+    sessionId: string
+    presetId: string
+    modelId?: string
+    reasoningEffort?: string
+    messages: readonly unknown[]
+  }[] = []
+  return {
+    seen,
+    gateway: {
+      answer: async (sessionId: string, presetId: string, request: {
+        messages: readonly unknown[]
+        modelId?: string
+        reasoningEffort?: string
+      }, sink: { chunk(c: unknown): void }) => {
+        seen.push({ sessionId, presetId, ...request })
+        sink.chunk({ type: 'block-start', index: 0, blockType: 'text' })
+        sink.chunk({ type: 'text-delta', index: 0, text: '答' })
+        sink.chunk({ type: 'block-end', index: 0, block: { type: 'text', text: '答' } })
+        sink.chunk({ type: 'finish', reason: { kind: 'stop' } })
+      },
+    },
+  }
 }
 
 describe('catalogAdapter', () => {
@@ -105,46 +133,47 @@ describe('catalogAdapter', () => {
     })
   })
 
-  it('refuses to stream, loudly, naming the route that asked', async () => {
-    // External turns are driven by the replaced step, never by a model request.
-    // Reaching this method means the takeover did not happen; staying quiet
-    // would let a session look healthy while doing nothing.
-    await expect(failToStream(adapter.stream({
+  it('refuses without a session, loudly, naming the route that asked', async () => {
+    // Nowhere to hang an in-place answer on: the refusal names the route so
+    // the failure cannot read as a healthy empty answer.
+    await expect(readStream(adapter.stream({
       provider: providerRoute('acp-grok'), model: 'grok-4.7',
-    }))).rejects.toThrow(/acp:acp-grok\/grok-4\.7.*takeover did not happen/s)
+    }))).rejects.toThrow(/acp:acp-grok\/grok-4\.7/s)
   })
 
-  it('hands a request naming a session to the switch hook before refusing', async () => {
-    // The switch hook is the one way a foreign model request gets answered;
-    // its outcome (thrown or not) is said before the stream's own refusal.
-    const seen: unknown[] = []
+  it('answers a foreign conversation request in place through the gateway', async () => {
+    // The pick never moves the conversation: the gateway borrows the agent as
+    // a model and its answer arrives as this route's own chunk stream.
+    const { gateway, seen } = fakeGateway()
     const hooked = catalogAdapter(CONFIG, {
       modelsOf,
       dialectOf: () => grokDialect,
-      onForeignModelRequest: async request => {
-        seen.push(request)
-        throw new Error('switched by forking: continue in session s2')
-      },
+      gateway,
     })
-    await expect(failToStream(hooked.stream({
-      provider: providerRoute('acp-grok'), model: 'grok-4.7', sessionId: 's1',
-    }))).rejects.toThrow(/continue in session s2/)
+    const messages = [{ role: 'user', content: [{ type: 'text', text: '问' }] }]
+    const chunks = await readStream(hooked.stream({
+      provider: providerRoute('acp-grok'), model: 'grok-4.7', sessionId: 's1', messages,
+    }))
+    expect(chunks.map(c => c.type)).toEqual(['block-start', 'text-delta', 'block-end', 'finish'])
     expect(seen).toEqual([{
-      provider: providerRoute('acp-grok'),
-      model: 'grok-4.7',
       sessionId: 's1',
+      presetId: 'acp-grok',
+      modelId: 'grok-4.7',
+      messages,
     }])
   })
 
-  it('keeps its refusal when a request carries no session to switch', async () => {
+  it('keeps its refusal when a request carries no session to answer in', async () => {
+    const { gateway, seen } = fakeGateway()
     const hooked = catalogAdapter(CONFIG, {
       modelsOf,
       dialectOf: () => grokDialect,
-      onForeignModelRequest: async () => { throw new Error('should not be reached') },
+      gateway,
     })
-    await expect(failToStream(hooked.stream({
+    await expect(readStream(hooked.stream({
       provider: providerRoute('acp-grok'), model: 'grok-4.7',
-    }))).rejects.toThrow(/takeover did not happen/)
+    }))).rejects.toThrow(/never streams on its own/)
+    expect(seen).toEqual([])
   })
 
   it('refuses background housekeeping requests without touching the switch hook', async () => {
@@ -153,19 +182,16 @@ describe('catalogAdapter', () => {
     // turn's own switch — or fork a session whose first prompt is the title
     // question. They refuse by name instead; the title falls back to the
     // first-prompt text exactly as it already does for driven sessions.
-    const seen: unknown[] = []
+    const { gateway, seen } = fakeGateway()
     const hooked = catalogAdapter(CONFIG, {
       modelsOf,
       dialectOf: () => grokDialect,
-      onForeignModelRequest: async request => {
-        seen.push(request)
-        throw new Error('should not be reached')
-      },
+      gateway,
     })
-    await expect(failToStream(hooked.stream({
+    await expect(readStream(hooked.stream({
       provider: providerRoute('acp-grok'), model: 'grok-4.7', sessionId: 's1', purpose: 'session-title',
     }))).rejects.toThrow(/background session-title request/)
-    await expect(failToStream(hooked.stream({
+    await expect(readStream(hooked.stream({
       provider: providerRoute('acp-grok'), model: 'grok-4.7', sessionId: 's1', purpose: 'compaction',
     }))).rejects.toThrow(/background compaction request/)
     expect(seen).toEqual([])
@@ -184,36 +210,30 @@ describe('catalogAdapter', () => {
     expect(typeof prepared.stream).toBe('function')
   })
 
-  it('dispatches a prepared call with a session into the switch hook', async () => {
-    // Picking one of our models in a started session is carried out at that
-    // session's next turn: the native step prepares, then dispatches through
-    // the prepared stream. The switch hook must sit at the end of that path,
-    // not only on the bare `stream` method.
-    const seen: unknown[] = []
+  it('dispatches a prepared call with a session into the gateway', async () => {
+    // Picking one of our models in a started session is answered in place at
+    // that session's next turn: the native step prepares, then dispatches
+    // through the prepared stream. The gateway must sit at the end of that
+    // path, not only on the bare `stream` method.
+    const { gateway, seen } = fakeGateway()
     const hooked = catalogAdapter(CONFIG, {
       modelsOf,
       dialectOf: () => grokDialect,
-      onForeignModelRequest: async request => {
-        seen.push(request)
-        throw new Error('switched by forking: continue in session s2')
-      },
+      gateway,
     })
     const prepared = await hooked.prepareCall(providerRoute('acp-grok'), 'grok-4.7')
-    await expect(failToStream(prepared.stream({
+    const chunks = await readStream(prepared.stream({
       provider: providerRoute('acp-grok'), model: 'grok-4.7', sessionId: 's1',
-    }))).rejects.toThrow(/continue in session s2/)
-    expect(seen).toEqual([{
-      provider: providerRoute('acp-grok'),
-      model: 'grok-4.7',
-      sessionId: 's1',
-    }])
+    }))
+    expect(chunks.map(c => c.type)).toEqual(['block-start', 'text-delta', 'block-end', 'finish'])
+    expect(seen.map(entry => entry.sessionId)).toEqual(['s1'])
   })
 
-  it('keeps the takeover diagnostic when a prepared call has no session to switch', async () => {
+  it('keeps the refusal when a prepared call has no session to answer in', async () => {
     const prepared = await adapter.prepareCall(providerRoute('acp-grok'), 'grok-4.7')
-    await expect(failToStream(prepared.stream({
+    await expect(readStream(prepared.stream({
       provider: providerRoute('acp-grok'), model: 'grok-4.7',
-    }))).rejects.toThrow(/takeover did not happen/)
+    }))).rejects.toThrow(/never streams on its own/)
   })
 })
 

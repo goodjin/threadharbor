@@ -15,6 +15,8 @@
 import type { AcpDialect } from '@threadharbor/dsh-acp-agent'
 import type { PresetConfig } from './registry.ts'
 import { baseIdOf } from './selection.ts'
+import { GatewayChunkQueue } from './gateway.ts'
+import type { GatewayChunk, GatewaySink } from './gateway.ts'
 
 /** One model as the catalog publishes it. */
 export type CatalogModel = {
@@ -180,22 +182,17 @@ export type CatalogDeps = {
   /** The frame dialect of one preset's agent. */
   dialectOf(presetId: string): AcpDialect | undefined
   /**
-   * A model request landed on one of our routes for a session this row does
-   * not drive — the user picked one of our models somewhere the takeover never
-   * reached. This is where a mid-conversation switch runs, and it must end
-   * loudly either way: the caller refuses to pretend to stream.
+   * The in-place answerer for sessions this row does not drive. When the
+   * adapter is absent, a foreign conversation request can only be refused.
    */
-  onForeignModelRequest?(request: ForeignModelRequest): Promise<void> | void
-}
-
-/** A model request that reached one of this adapter's routes from outside. */
-export type ForeignModelRequest = {
-  readonly provider: string
-  readonly model: string
-  /** The session the request belongs to, when the loop stamped one. */
-  readonly sessionId: string
-  /** The conversation the request would have carried, when present. */
-  readonly messages?: readonly unknown[]
+  gateway?: {
+    answer(sessionId: string, presetId: string, request: {
+      readonly messages: readonly unknown[]
+      readonly modelId?: string
+      readonly reasoningEffort?: string
+      readonly signal?: AbortSignal
+    }, sink: GatewaySink): Promise<void>
+  }
 }
 
 const ROUTE_PREFIX = 'acp:'
@@ -324,40 +321,47 @@ export function catalogAdapter(config: PresetConfig, deps: CatalogDeps): Catalog
     // async, and the generator's rejection surfaces to the loop as the turn's
     // error — loud, and never a silently empty answer.
     providerRetryPolicy: (): undefined => undefined,
-    stream: function stream(options: { provider: string; model: string; sessionId?: unknown; messages?: readonly unknown[]; purpose?: unknown }): AsyncIterable<never> {
-      return (async function* foreignModelRequest(): AsyncIterable<never> {
+    stream: function stream(options: { provider: string; model: string; reasoningEffort?: unknown; sessionId?: unknown; messages?: readonly unknown[]; purpose?: unknown; signal?: unknown }): AsyncIterable<GatewayChunk> {
+      return (async function* foreignModelRequest(): AsyncIterable<GatewayChunk> {
         // Background housekeeping (session titles, compaction) borrows the
-        // session's route but is not a conversation turn. Only a turn may
-        // switch agents: a housekeeping request that reached the switch chain
-        // would race the turn's own switch, or fork a session whose first
-        // prompt is the title question. It refuses by name instead — the
-        // title then falls back to the first-prompt text, exactly as it
-        // already does for sessions our rows drive (verified against the
-        // reference: only these two purposes exist, and the turn's own
-        // request never sets one).
+        // session's route but is not a conversation turn: prompting the
+        // external agent for a title would double-bill and drift the
+        // conversation. It refuses by name instead — the title then falls back
+        // to the first-prompt text, exactly as it already does for sessions
+        // our rows drive (verified against the reference: only these two
+        // purposes exist, and the turn's own request never sets one).
         if (typeof options.purpose === 'string' && options.purpose !== '') {
           throw new Error(
-            `acp catalog: ${options.provider}/${options.model} does not serve background ${options.purpose} requests — only a conversation turn can switch agents`,
+            `acp catalog: ${options.provider}/${options.model} does not serve background ${options.purpose} requests — only a conversation turn may reach the external agent`,
           )
         }
-        if (deps.onForeignModelRequest === undefined || typeof options.sessionId !== 'string') {
+        const presetId = presetOfRoute(options.provider)
+        if (typeof options.sessionId !== 'string' || presetId === undefined || deps.gateway === undefined) {
+          // Sessions our rows drive never reach a native model request — the
+          // takeover replaces the step — so a request arriving here without a
+          // session (or an answerer) has nowhere honest to go.
           throw new Error(
-            `acp catalog: ${options.provider}/${options.model} never streams — an external turn is driven by the replaced step, so reaching the model request means the takeover did not happen`,
+            `acp catalog: ${options.provider}/${options.model} never streams on its own — an external turn is either driven by the replaced step or answered in place through the gateway`,
           )
         }
-        const messages = Array.isArray(options.messages) ? options.messages : undefined
-        await deps.onForeignModelRequest({
-          provider: options.provider,
-          model: options.model,
-          sessionId: options.sessionId,
-          ...(messages === undefined ? {} : { messages }),
-        })
-        // The hook reports what it did by throwing; reaching this line means it
-        // performed nothing it wanted to name, so the plain takeover-diagnostic
-        // is the honest remaining answer.
-        throw new Error(
-          `acp catalog: ${options.provider}/${options.model} never streams — an external turn is driven by the replaced step, so reaching the model request means the takeover did not happen`,
+        // The pick is answered in place: the conversation stays in this
+        // session, and the external agent's words arrive as this model's own
+        // chunk stream. Nothing moves.
+        const queue = new GatewayChunkQueue()
+        const messages = Array.isArray(options.messages) ? options.messages : []
+        const answering = deps.gateway.answer(options.sessionId, presetId, {
+          messages,
+          ...(typeof options.model === 'string' ? { modelId: options.model } : {}),
+          ...(typeof options.reasoningEffort === 'string' && options.reasoningEffort !== ''
+            ? { reasoningEffort: options.reasoningEffort }
+            : {}),
+          ...(options.signal instanceof AbortSignal ? { signal: options.signal } : {}),
+        }, { chunk: chunk => { queue.push(chunk) } })
+        void answering.then(
+          () => { queue.close() },
+          error => { queue.close(error) },
         )
+        yield* queue.iterate()
       })()
     },
 
@@ -398,9 +402,9 @@ export type CatalogAdapterLike = {
    */
   prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<{
     model: CatalogModel
-    stream(options: { provider: string; model: string; sessionId?: unknown; messages?: readonly unknown[]; purpose?: unknown }): AsyncIterable<never>
+    stream(options: { provider: string; model: string; reasoningEffort?: unknown; sessionId?: unknown; messages?: readonly unknown[]; purpose?: unknown; signal?: unknown }): AsyncIterable<GatewayChunk>
   }>
-  stream(options: { provider: string; model: string; sessionId?: unknown; messages?: readonly unknown[]; purpose?: unknown }): AsyncIterable<never>
+  stream(options: { provider: string; model: string; reasoningEffort?: unknown; sessionId?: unknown; messages?: readonly unknown[]; purpose?: unknown; signal?: unknown }): AsyncIterable<GatewayChunk>
   /**
    * The runtime asks every registered adapter for this, without checking that
    * it exists — an adapter that omits it takes down every route, not just its

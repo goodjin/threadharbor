@@ -48,13 +48,13 @@ export { applySwitchPlan } from './apply-plan.ts'
 export type { ApplyResult, ForkRequest, SwitchCarry, SwitchPorts } from './apply-plan.ts'
 export {
   estimateTokens,
-  mountSwitchOnForeignModelRequest,
   servicesOf,
   splitQuestion,
   startedOf,
   switchDrivenSession,
-  switchPortsOf,
 } from './switch-mount.ts'
+export { GatewayConversations, GatewayChunkQueue, GatewayChunkStream } from './gateway.ts'
+export type { GatewayChunk, GatewaySink, GatewayStepEnd } from './gateway.ts'
 export type { HostServices } from './switch-mount.ts'
 export { makeSwitchShared, switchShared } from './switch-shared.ts'
 export type { MountedModel, SwitchRecord, SwitchShared } from './switch-shared.ts'

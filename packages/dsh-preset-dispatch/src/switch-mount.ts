@@ -42,7 +42,6 @@ import { hasLog, planReplay, replayInto } from './replay.ts'
 import type { LoggedEvent } from './replay.ts'
 import type { SwitchShared } from './switch-shared.ts'
 import type { CatalogDeps } from './catalog.ts'
-import type { ForeignModelRequest } from './catalog.ts'
 import type { PresetConfig } from './registry.ts'
 import { promptText } from './runner.ts'
 
@@ -501,108 +500,6 @@ function sessionIdOfAgent(agent: AgentLike): string | undefined {
   return typeof id === 'string' && id !== '' ? id : undefined
 }
 
-/**
- * Build the switch handler for one row's catalog routes.
- *
- * The handler always ends in a throw: the calling stream can never produce a
- * stream, and the throw is where the switch's outcome is said out loud —
- * including success, which names the session to continue in.
- */
-export function mountSwitchOnForeignModelRequest(
-  ctx: object,
-  config: PresetConfig,
-  deps: CatalogDeps,
-  shared: SwitchShared,
-  report: (message: string) => void,
-): (request: ForeignModelRequest) => Promise<void> {
-  return async request => {
-    const services = servicesOf(ctx)
-    const missing = [
-      ...(services.sessions === undefined ? ['sessions'] : []),
-      ...(services.projections === undefined ? ['sessionProjections'] : []),
-      ...(services.createSession === undefined ? ['sessionController.create'] : []),
-      ...(services.promptSession === undefined ? ['sessionController.prompt'] : []),
-      ...(services.agents === undefined ? ['agents'] : []),
-      ...(services.presets === undefined ? ['agentPresets'] : []),
-    ]
-    if (missing.length > 0) {
-      throw new Error(
-        `acp switch: cannot switch session ${request.sessionId} to ${request.provider}/${request.model} — `
-        + `this host does not expose: ${missing.join(', ')}`,
-      )
-    }
-    const sessions = present(services.sessions, 'sessions')
-    const projections = present(services.projections, 'sessionProjections')
-
-    const session = sessions(request.sessionId)
-    if (session === undefined) {
-      throw new Error(`acp switch: session ${request.sessionId} is not on this host anymore; nothing to switch`)
-    }
-
-    // The conversation this request would have carried, as the loop assembled
-    // it. Unreadable is refuseable, never failable-quietly: a switch that
-    // cannot say what it would carry must not carry nothing.
-    if (request.messages === undefined) {
-      throw new Error(
-        `无法把会话 ${request.sessionId} 切到 ${request.provider}/${request.model}：读不到这轮请求携带的对话，`
-        + '而创建一个不带历史的新会话等于静默丢掉这段对话——已拒绝，未创建任何会话。',
-      )
-    }
-    const whole = messagesOf(request.messages)
-    const { carried, question } = splitQuestion(whole)
-
-    // A switch already made from this session to this target points at its new
-    // session instead of making a second one.
-    const prior = shared.switchFor(request.sessionId)
-    const targetPreset = request.provider.startsWith('acp:') ? request.provider.slice('acp:'.length) : request.provider
-    if (prior !== undefined && prior.target === targetPreset) {
-      throw new Error(
-        `这个会话此前已切到 ${targetPreset}：对话在新会话 ${prior.sessionId} 里，请到那个会话继续`,
-      )
-    }
-
-    const plan = planSwitch(config, deps, { provider: request.provider, model: request.model }, {
-      currentPreset: presetOfState(projections(session, 'agentPreset')),
-      started: startedOf(projections(session, 'turnBoundary')),
-      historyTokens: estimateTokens(carried),
-      targetContextWindow: declaredContextWindow(config, request.provider, request.model),
-      reservedForOutput: RESERVED_FOR_OUTPUT_TOKENS,
-    }, {})
-
-    if (plan.kind === 'noop') {
-      // The session is supposedly already on this route, or the model is not
-      // one this row advertises. Either way the takeover should have prevented
-      // this request, and saying so is the whole point of the diagnostic.
-      throw new Error(
-        `acp catalog: ${request.provider}/${request.model} reached a native model request on session `
-        + `${request.sessionId} even though the takeover should own its step — the takeover did not happen`,
-      )
-    }
-
-    const ports: SwitchPorts = switchPortsOf(services, shared, report)
-
-    const result = await applySwitchPlan(plan, request.sessionId, ports, {
-      history: carried,
-      prompt: question,
-      selection: { provider: request.provider, model: request.model },
-    })
-    if (result.kind === 'nothing') {
-      throw new Error(
-        `acp switch: session ${request.sessionId} is already on ${request.provider}/${request.model}; `
-        + 'reaching a model request for it means the takeover did not happen',
-      )
-    }
-    const carriedNote = result.droppedTokens === undefined
-      ? '整段对话已带过去'
-      : `只带过去了最新的部分（丢弃约 ${String(result.droppedTokens)} tokens）`
-    report(`acp switch: session ${request.sessionId} switched for ${request.provider}/${request.model}; ${carriedNote}; continue in session ${result.sessionId}.`)
-    throw plan.kind === 'fork'
-      ? `已按新会话切换到 ${request.provider}/${request.model}：新会话 ${result.sessionId} 已带上${result.droppedTokens === undefined ? '整段' : '部分'}对话历史`
-        + `，界面上此前的对话原样保留`
-        + `${question === '' ? '' : '，并已把这条消息提交给它'}。请到新会话继续。`
-      : `已就地切换到 ${request.provider}/${request.model}：这个会话还没有开始对话，预设已换，直接在这里继续即可。`
-  }
-}
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)

@@ -28,7 +28,8 @@ import { buildPresetTable, openSessionsOf, sessionsRegistry } from './registry.t
 import type { AcpPresetConfig, PresetConfig } from './registry.ts'
 import { makeSessionFactory } from './factory.ts'
 import { modelsOfPreset, registerCatalog, runtimeModels } from './catalog-registration.ts'
-import { mountSwitchOnForeignModelRequest, servicesOf } from './switch-mount.ts'
+import { servicesOf } from './switch-mount.ts'
+import { GatewayConversations } from './gateway.ts'
 import { followModelSelection, followPresetSelection } from './follow.ts'
 import { switchShared } from './switch-shared.ts'
 import { selectionOf } from './selection.ts'
@@ -209,15 +210,20 @@ export function applyAcpPlugin(
     dialectOf: presetId => table.get(presetId)?.dialect,
   }
   // A model request landing on one of these routes for a session this row does
-  // not drive is a switch request; the chain (judge → plan → hand over →
-  // apply) runs there and always says how it ended.
-  catalogDeps.onForeignModelRequest = mountSwitchOnForeignModelRequest(
-    ctx,
-    presets,
-    catalogDeps,
-    switchShared,
+  // not drive is answered in place: the gateway borrows the agent as a model,
+  // keeps one external conversation per session, and its answer arrives as
+  // this model's own chunk stream. The conversation never moves.
+  const gateway = new GatewayConversations(
+    async (presetId, options) => await factory.open(presetId, {
+      cwd: presets.presets[presetId]?.cwd ?? process.cwd(),
+      dshSessionId: options.dshSessionId,
+      primer: options.primer,
+      ...(presets.presets[presetId]?.model === undefined ? {} : { modelId: presets.presets[presetId]?.model }),
+      ...(presets.presets[presetId]?.mode === undefined ? {} : { modeId: presets.presets[presetId]?.mode }),
+    }),
     message => { deps.report?.(message) },
   )
+  catalogDeps.gateway = gateway
   registerCatalog(ctx, presets, catalogDeps)
   // A session whose work was stopped — archived with its turn running, most
   // visibly — must not leave its external connection open behind it. The stop
@@ -229,6 +235,7 @@ export function applyAcpPlugin(
   ctx.on('workspace/session-stop', payload => {
     const sessionId = payload.sessionId
     if (typeof sessionId !== 'string') return
+    gateway.close(sessionId)
     const opened = sessions.get(presetId)
     const entry = openSessionsOf(sessions, presetId).get(sessionId)
     if (opened === undefined || entry === undefined) return

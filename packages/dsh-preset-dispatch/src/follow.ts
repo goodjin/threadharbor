@@ -21,10 +21,9 @@
  *   its preset is locked, and — verified in the reference source, correcting
  *   an earlier guess — a fork replays the lock too, because the copy's event
  *   prefix includes the source's turn boundaries and the lock check folds
- *   `turn/start` events. So nothing moves here; the pick is carried out at
- *   the session's next turn by the mounted switch (`switch-mount.ts`), which
- *   creates the new session, carries the whole conversation, and asks the
- *   question there.
+ *   `turn/start` events. So nothing moves here; the pick is answered in place
+ *   at the session's next turn by the gateway (`gateway.ts`), which borrows
+ *   the agent as a model and streams its answer into the session's own turn.
  *
  * Both writes are events this row itself hears back; each rule treats its own
  * writes as no-ops, so the loop closes instead of feeding itself.
@@ -76,8 +75,8 @@ export type ModelFollowDecision =
   /**
    * Started session — the host locks its preset, and a fork replays the lock
    * (the copy's prefix carries the source's turn boundaries), so nothing can
-   * move here; the pick switches at the session's next turn, where the mounted
-   * switch creates the new session and carries the conversation.
+   * move here; the pick is answered in place at the session's next turn by
+   * the gateway, and nothing about the session changes.
    */
   | { readonly kind: 'locked'; readonly target: string }
 
@@ -173,7 +172,7 @@ export async function followModelSelection(
   const decision = decideModelFollow({ presetId }, selection, currentPreset, started)
   if (decision.kind === 'none') return
   if (decision.kind === 'locked') {
-    report(`acp ${presetId}: session ${sessionId} picked ${selection.provider}/${selection.model} (preset ${decision.target}) but the session has started and neither its preset nor a fork's can change — the pick switches as a new-session handover at that session's next turn`)
+    report(`acp ${presetId}: session ${sessionId} picked ${selection.provider}/${selection.model} (preset ${decision.target}) but the session has started and its preset stays — the pick will be answered in place by that agent at the session's next turn`)
     return
   }
   const target = decision.target
