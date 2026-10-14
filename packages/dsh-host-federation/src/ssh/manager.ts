@@ -102,6 +102,46 @@ export class DshSshManager {
     }
   }
 
+  /**
+   * Read the latest `LAUNCH_URL=` marker (launch URL incl. its token) from
+   * the DSH web log on a remote host.
+   *
+   * Production shape (verified in the relay spike): the deploy script appends
+   * DSH Web output to `~/.local/state/threadharbor/<channel>/dsh-web.log` and
+   * writes a `LAUNCH_URL=<url>` line into that same file afterwards. The line
+   * can appear only after the service started, and a non-append redirect can
+   * overwrite it — so take the last marker and return undefined whenever it
+   * is missing (no marker, no file, failing command, SSH error). Failing to
+   * read the log is not fatal; the caller decides how to degrade.
+   */
+  async readLaunchUrl(config: SshConnectionConfig, remoteLogPath: string, timeoutMs?: number): Promise<string | undefined> {
+    // A tilde path must not be wrapped in single quotes: the remote shell does
+    // not expand `~` inside them (observed on real machines). Rewrite a leading
+    // `~/` to double-quoted `"$HOME/..."`, which still expands and tolerates
+    // spaces; absolute paths stay safe through shellQuote.
+    const target = remoteLogPath.startsWith('~/')
+      ? `"$HOME/${remoteLogPath.slice(2)}"`
+      : shellQuote(remoteLogPath)
+    try {
+      const materialized = await this.materializeAuth(config)
+      try {
+        const probe = await this.remoteExec(
+          materialized,
+          `grep -h '^LAUNCH_URL=' ${target} | tail -1`,
+          timeoutMs ?? 15_000,
+        )
+        if (probe.code !== 0) return undefined
+        // parseDeployMarkers keeps the last occurrence, so "latest marker
+        // wins" holds even if the grep pipeline above ever grows noisier.
+        return parseDeployMarkers(probe.stdout).launchUrl
+      } finally {
+        this.cleanupTempKeys()
+      }
+    } catch {
+      return undefined
+    }
+  }
+
   async deploy(
     request: SshDeployRequest,
     onProgress: (progress: SshDeployProgress) => void = () => undefined,
