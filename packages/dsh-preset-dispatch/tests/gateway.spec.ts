@@ -110,6 +110,42 @@ describe('GatewayChunkStream — the native loop’s chunk vocabulary', () => {
       expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason })
     }
   })
+
+  // The native loop rebuilds a terminal failure as `new LlmError(message, code)`
+  // (reference agent-loop), and that constructor refuses an empty code. A finish
+  // chunk whose failure omits the code therefore fails the turn with
+  // "LlmError code must be a non-empty string" instead of the agent's own words.
+  it('carries a non-empty code on every failing finish reason', () => {
+    for (const end of [
+      { kind: 'error', error: { message: 'agent died', code: 'ACP_CONNECTION' } },
+      { kind: 'error', error: { message: 'agent died' } },
+      { kind: 'error' },
+      { kind: 'blocked', reason: 'waiting on the user' },
+      { kind: 'agent-switch/handover', target: 'acp-cursor', sessionId: 's2', note: 'moved' },
+      { kind: 'aborted', reason: 'stopped' },
+      { kind: 'aborted' },
+    ] as GatewayStepEnd[]) {
+      const chunks: GatewayChunk[] = []
+      const stream = new GatewayChunkStream({ chunk: c => { chunks.push(c) } })
+      stream.finish(end)
+      const finish = chunks.at(-1)
+      expect(finish).toMatchObject({ type: 'finish' })
+      const reason = (finish as { reason: { kind: string; failure?: { message: string; code?: string } } }).reason
+      expect(reason.kind === 'error' || reason.kind === 'aborted').toBe(true)
+      expect(typeof reason.failure?.message === 'string' && reason.failure.message.length > 0).toBe(true)
+      expect(typeof reason.failure?.code === 'string' && reason.failure.code.length > 0).toBe(true)
+    }
+  })
+
+  it('passes the runner\'s own code through, so the row keeps its diagnosis', () => {
+    const chunks: GatewayChunk[] = []
+    const stream = new GatewayChunkStream({ chunk: c => { chunks.push(c) } })
+    stream.finish({ kind: 'error', error: { message: '外部 agent 连接已断开：acp agent could not run', code: 'ACP_CONNECTION' } })
+    expect(chunks.at(-1)).toMatchObject({
+      type: 'finish',
+      reason: { kind: 'error', failure: { message: '外部 agent 连接已断开：acp agent could not run', code: 'ACP_CONNECTION' } },
+    })
+  })
 })
 
 describe('GatewayConversations — one external conversation per session', () => {

@@ -44,9 +44,27 @@ export type GatewayChunk =
     readonly reason:
       | { readonly kind: 'stop' }
       | { readonly kind: 'max-tokens' }
-      | { readonly kind: 'aborted'; readonly failure: { readonly message: string } }
-      | { readonly kind: 'error'; readonly failure: { readonly message: string } }
+      | { readonly kind: 'aborted'; readonly failure: GatewayFailure }
+      | { readonly kind: 'error'; readonly failure: GatewayFailure }
   }
+
+/**
+ * A terminal failure as the native loop reads it.
+ *
+ * `code` is required, not optional: the loop rebuilds this into its own typed
+ * failure, whose constructor refuses an empty code and would replace the agent's
+ * diagnosis with a validation message about its own argument. The runner's code
+ * (`ACP_ERROR`, `ACP_CONNECTION`, `ACP_PERMISSION`, `ACP_INTERNAL`,
+ * `REPLAY_REJECTED`) rides through verbatim, so the row keeps saying what went
+ * wrong and whether resending will help.
+ */
+type GatewayFailure = {
+  readonly message: string
+  readonly code: string
+}
+
+/** The code a failure the runner did not classify reports itself under. */
+const UNCLASSIFIED_CODE = 'ACP_ERROR'
 
 export type GatewaySink = { readonly chunk: (chunk: GatewayChunk) => void }
 
@@ -159,13 +177,23 @@ export class GatewayChunkStream {
     if (end.kind === 'aborted') {
       return {
         kind: 'aborted',
-        failure: { message: typeof end.reason === 'string' ? end.reason : 'the external answer was stopped' },
+        failure: {
+          message: typeof end.reason === 'string' ? end.reason : 'the external answer was stopped',
+          // The loop recognizes this one code as an abort rather than a fault
+          // (reference `adapterFailureChunk`), so a stopped answer stops instead
+          // of being reported as an error worth retrying.
+          code: 'ABORTED',
+        },
       } as never
     }
-    const failure = (end as { error?: { message?: string } }).error
+    const error = (end as { error?: { message?: string; code?: unknown } }).error
+    const code = typeof error?.code === 'string' && error.code !== '' ? error.code : UNCLASSIFIED_CODE
     return {
       kind: 'error',
-      failure: { message: end.kind === 'error' ? failure?.message ?? 'the external agent failed' : `the external turn ended as ${end.kind}` },
+      failure: {
+        message: end.kind === 'error' ? error?.message ?? 'the external agent failed' : `the external turn ended as ${end.kind}`,
+        code,
+      },
     } as never
   }
 }
