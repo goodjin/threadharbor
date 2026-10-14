@@ -192,6 +192,8 @@ export type CatalogDeps = {
       readonly modelId?: string
       readonly reasoningEffort?: string
       readonly signal?: AbortSignal
+      /** Placeholder step placement — GenerateOptions carries none. */
+      readonly position: { readonly turn: number; readonly step: number }
     }, sink: GatewaySink): Promise<void>
   }
   /**
@@ -400,6 +402,9 @@ export function catalogAdapter(config: PresetConfig, deps: CatalogDeps): Catalog
             ? { reasoningEffort: options.reasoningEffort }
             : {}),
           ...(options.signal instanceof AbortSignal ? { signal: options.signal } : {}),
+          // GenerateOptions carries no step numbers; the placeholder keeps the
+          // runner's card bookkeeping from reading undefined (turn-1 crash).
+          position: { turn: 0, step: 0 },
         }, { chunk: chunk => { queue.push(chunk) } })
         void answering.then(
           () => { queue.close() },

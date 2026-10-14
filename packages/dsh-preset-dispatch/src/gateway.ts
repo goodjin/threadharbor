@@ -256,13 +256,18 @@ export class GatewayConversations {
       })
     }
     const stream = new GatewayChunkStream(sink)
+    // The catalog adapter has no step numbers of its own (GenerateOptions
+    // carries none), so position degrades to a zero placeholder rather than
+    // crashing the runner's card bookkeeping — the gateway writes nothing
+    // durable anyway, the native loop owns placement.
+    const position = request.position ?? { turn: 0, step: 0 }
     const decision: StepDecisionLike = {
       kind: 'enter',
       messages: [{ role: 'user', content: [{ type: 'text', text: plan.prompt }] }],
     }
     const turn = {
       sessionId,
-      position: request.position,
+      position,
       // The native loop owns the durable write; the gateway writes nothing.
       produce: () => [],
       write: () => 1,

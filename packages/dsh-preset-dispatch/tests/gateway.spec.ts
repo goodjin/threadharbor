@@ -35,6 +35,7 @@ function fakeSession() {
     modelId: string | undefined
     reasoningEffort: string | undefined
     signal: AbortSignal | undefined
+    positionTurn: number | undefined
     open: () => (GatewayChunkStream | undefined)
   }[] = []
   type Turnish = {
@@ -50,6 +51,7 @@ function fakeSession() {
       const t = turn as unknown as Turnish
       seen.push({
         prompt: JSON.stringify(decision.messages),
+        positionTurn: (turn as unknown as { position?: { turn?: number } }).position?.turn,
         modelId: t.modelId,
         reasoningEffort: t.reasoningEffort,
         signal: t.abort?.(),
@@ -161,6 +163,22 @@ describe('GatewayConversations — one external conversation per session', () =>
     }, { chunk: () => {} })
     expect(fake.seen[0]?.modelId).toBe('gpt-6-astra')
     expect(fake.seen[0]?.reasoningEffort).toBe('high')
+    expect(fake.seen[0]?.positionTurn).toBe(position.turn)
+  })
+
+  it('answers without a position instead of crashing the runner on undefined', async () => {
+    // Regression: the runner reads position.turn for its card bookkeeping, and
+    // the first shipped wire omitted position entirely — the turn died as
+    // "Cannot read properties of undefined (reading 'turn')". A missing
+    // position must degrade to the zero placeholder.
+    const fake = fakeSession()
+    const gate = new GatewayConversations(async () => fake.session)
+    const chunks: GatewayChunk[] = []
+    await gate.answer('s1', 'acp-codex', {
+      messages: [user('问')],
+    } as unknown as Parameters<GatewayConversations['answer']>[2], { chunk: c => { chunks.push(c) } })
+    expect(fake.seen[0]?.positionTurn).toBe(0)
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
   })
 
   it('does not advance on failure, so a retry asks the same question', async () => {

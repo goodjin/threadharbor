@@ -62,6 +62,7 @@ function fakeGateway() {
     modelId?: string
     reasoningEffort?: string
     messages: readonly unknown[]
+    position: { turn: number; step: number }
   }[] = []
   return {
     seen,
@@ -70,6 +71,7 @@ function fakeGateway() {
         messages: readonly unknown[]
         modelId?: string
         reasoningEffort?: string
+        position: { turn: number; step: number }
       }, sink: { chunk(c: unknown): void }) => {
         seen.push({ sessionId, presetId, ...request })
         sink.chunk({ type: 'block-start', index: 0, blockType: 'text' })
@@ -160,6 +162,10 @@ describe('catalogAdapter', () => {
       presetId: 'acp-grok',
       modelId: 'grok-4.7',
       messages,
+      // GenerateOptions has no step numbers; a placeholder must still arrive —
+      // the runner's card bookkeeping reads position.turn and crashed on
+      // undefined the first time this wire shipped without it.
+      position: { turn: 0, step: 0 },
     }])
   })
 
