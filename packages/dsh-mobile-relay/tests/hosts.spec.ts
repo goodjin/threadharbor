@@ -7,7 +7,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import type { TailscaleStatusRun } from '@threadharbor/dsh-host-federation/tailscale'
-import { HostRegistry, RELAY_HOSTS_PATH, type HostRegistryDeps } from '../src/hosts.ts'
+import { HostRegistry, RELAY_HOSTS_PATH, type HostProbeFetch, type HostRegistryDeps } from '../src/hosts.ts'
 
 const MACHINE_A = { hostId: 'mac-a', target: 'mac-a', remotePort: 3081 }
 const MACHINE_B = { hostId: 'linux-b', target: 'linux-b', remotePort: 3081 }
@@ -174,6 +174,49 @@ describe('relay hosts 清单', () => {
     await registry.list()
 
     expect(probe.urls).toHaveLength(1)
+  })
+
+  it('探测连不上时该机算「可达但没在跑」，不算不可达', async () => {
+    // 隧道通、机器 DSH 没跑 → 连拒绝（真环境最常见：ECONNREFUSED）。
+    // 这时诚实的形状是 reachable:true / running:false；若这个 catch 丢了，
+    // 机器会从「可达但没在跑」错成「不可达 + 凭据缺失」，页面看着像断线。
+    const refusing: HostProbeFetch = async () => {
+      throw new Error('connect ECONNREFUSED 127.0.0.1:41100')
+    }
+    const registry = makeRegistry({ machines: [MACHINE_A], probeFetch: refusing })
+
+    const { hosts } = await registry.list()
+
+    expect(hosts).toEqual([
+      { hostId: 'mac-a', online: true, running: false, reachable: true, credential: 'ok' },
+    ])
+  })
+
+  it('探测悬挂到点按「没在跑」判，不拖着清单', async () => {
+    vi.useFakeTimers()
+    try {
+      const hanging: HostProbeFetch = () => new Promise(() => {})
+      const registry = makeRegistry({ machines: [MACHINE_A], probeFetch: hanging })
+
+      const pending = registry.list()
+      await vi.advanceTimersByTimeAsync(2000)
+      const { hosts } = await pending
+
+      expect(hosts[0]?.running).toBe(false)
+      expect(hosts[0]?.reachable).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('首标签相近的两台机器不会互相串状态', async () => {
+    // tailnet 上只有 box-2，配置里是 box：首标签全等匹配必须判「不在 tailnet 上」，
+    // 而不是把 box-2 的在线状态安到 box 头上。
+    const registry = makeRegistry({ machines: [{ ...MACHINE_A, hostId: 'box' }], run: runWith([], ['box-2']) })
+
+    const { hosts } = await registry.list()
+
+    expect(hosts[0]).toMatchObject({ hostId: 'box', online: false })
   })
 
   it('清掉缓存后重新探测', async () => {

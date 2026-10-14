@@ -338,7 +338,7 @@ git commit -m "feat(relay): 单机客户端——带 cookie 的 RPC 与事件流
 - 测试：`packages/dsh-mobile-relay/tests/hosts.spec.ts`
 
 **接口：**
-- 产出：`export const RELAY_HOSTS_PATH = '/threadharbor/relay/hosts'`；`export type RelayHost = { hostId: string; online: boolean; running: boolean; reachable: boolean; credential: 'ok' | 'stale' | 'missing' }`；`export class HostRegistry { constructor(deps: { tunnels: TunnelPool; credentials: MachineCredentials; run?: TailscaleStatusRun; probeFetch?: ProbeFetch }); async list(): Promise<{ hosts: readonly RelayHost[]; error?: string }>; invalidate(): void }`
+- 产出：`export const RELAY_HOSTS_PATH = '/threadharbor/relay/hosts'`；`export type RelayHost = { hostId: string; online: boolean; running: boolean; reachable: boolean; credential: 'ok' | 'missing' }`（据实订正：凭据层只有进程内判脏、无持久化失效标记，`stale` 无从判定，硬造一个永远为假的枚举值会被误读成有信息）；`export class HostRegistry { constructor(deps: { tunnels: TunnelPool; credentials: MachineCredentials; run?: TailscaleStatusRun; probeFetch?: ProbeFetch }); async list(): Promise<{ hosts: readonly RelayHost[]; error?: string }>; invalidate(): void }`
 
 **行为：** 查 `queryTailscalePeers(run)` 拿对端（3s 到点按失败处置，折成 `error` 字段）；只保留配置里登记过的 `hostId`（未登记的对端不进清单）；对每台并发 `ensure` 隧道并探 `/threadharbor/mobile/hello`（2s 预算、5s 缓存，形状照 `packages/dsh-mobile-entry/src/peers.ts` 的 `probeDsh`），据探测结果定 `running`；`reachable` 取隧道结果；`credential` 由凭据层当前状态给出。坏名字在 Task 3 装载期已拒，这里不再兜。
 
