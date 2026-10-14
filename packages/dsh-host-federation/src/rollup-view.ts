@@ -48,6 +48,10 @@ export type HostViewRow = {
   readonly sessionCount: number
   /** Nothing published yet, or nothing open. */
   readonly empty: boolean
+  /** Registered but never deployed: no launch URL to fetch from. */
+  readonly undeployed?: boolean
+  /** Why a fetch produced nothing, verbatim, when the host has a launch URL. */
+  readonly note?: string
 }
 
 export type RollUpView = {
@@ -102,6 +106,8 @@ function toHostView(host: RollUp['hosts'][number]): HostViewRow {
     projects,
     sessionCount: projects.reduce((sum, project) => sum + project.sessions.length, 0),
     empty: projects.every(project => project.sessions.length === 0),
+    ...(host.undeployed === undefined ? {} : { undeployed: host.undeployed }),
+    ...(host.note === undefined ? {} : { note: host.note }),
   }
 }
 

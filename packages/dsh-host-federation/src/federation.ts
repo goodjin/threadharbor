@@ -63,6 +63,10 @@ export type ProjectGroup = {
 export type HostRoll = HostSnapshot & {
   readonly projects: readonly ProjectGroup[]
   readonly sessions: readonly HostSession[]
+  /** Registered but never deployed (registry-side fact, not a channel fact). */
+  readonly undeployed?: boolean
+  /** Why the last remote fetch produced nothing, verbatim. */
+  readonly note?: string
 }
 
 export type RollUp = {

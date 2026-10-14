@@ -2,7 +2,7 @@
  * Browser client for ThreadHarbor SSH auto-deploy routes on the serving host.
  */
 
-import type { PeerStatus, SshConnectResult, SshConnectionInput, SshDeployOperationView, SshDeployRequest, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
+import type { HostSession, PeerStatus, SshConnectResult, SshConnectionInput, SshDeployOperationView, SshDeployRequest, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
 import type { RuntimeT } from './locales.ts'
 import { fallbackT } from './locales.ts'
 
@@ -11,6 +11,7 @@ export const ROUTE_DEPLOY = '/api/threadharbor.host-ssh.deploy'
 export const ROUTE_OPERATION = '/api/threadharbor.host-ssh.operation'
 export const ROUTE_PEER = '/api/threadharbor.host-ssh.peer'
 export const ROUTE_CONNECT = '/api/threadharbor.host-ssh.connect'
+export const ROUTE_REMOTE_SESSIONS = '/api/threadharbor.host-remote.sessions'
 
 type ApiResult<T> =
   | { readonly ok: true; readonly value: T }
@@ -92,3 +93,8 @@ export async function probeSshDeployApi(): Promise<boolean> {
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null
+
+/** Pull a remote host's project/session list through the host-side route. */
+export async function fetchRemoteHostSessions(launchUrl: string, t: RuntimeT = fallbackT): Promise<ApiResult<{ readonly sessions: readonly HostSession[]; readonly note?: string }>> {
+  return await postJson(ROUTE_REMOTE_SESSIONS, { launchUrl }, t)
+}
