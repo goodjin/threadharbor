@@ -47,6 +47,18 @@ import type { AgentDescriptor, GatewayResult } from '../src/gateway.ts'
 import { hostRegistry } from '@threadharbor/dsh-host-federation'
 import type { HostIdentity, HostRegistration, HostSnapshot } from '@threadharbor/dsh-host-federation'
 import type { HostStorePosture } from '../src/host-store.ts'
+import { zh } from '../src/locales.ts'
+
+/**
+ * The `t` the framework would synthesize, bound to the dictionary's source
+ * language with the documented `{name}` placeholder substitution — the same
+ * copy path the real seat runs, minus the locale registry (the panel's copy
+ * lives in the dictionary since the `t` seat landed; the wiring under test
+ * here is structure, not translation).
+ */
+function zhT(key: string, params?: Record<string, unknown>): string {
+  return zh[key as keyof typeof zh]!.replace(/\{(\w+)\}/g, (_, name: string) => String(params?.[name] ?? `{${name}}`))
+}
 
 /** A string-map stand-in for the slice of localStorage these settings touch. */
 function fakeStorage(initial: Record<string, string> = {}): {
@@ -99,19 +111,19 @@ describe('四种结论的措辞', () => {
       { kind: 'hung', ms: 60_000 },
       { kind: 'unreachable', reason: 'route not found' },
     ]
-    const headlines = verdicts.map(verdict => describeVerdict(verdict).headline)
+    const headlines = verdicts.map(verdict => describeVerdict(verdict, zhT).headline)
     expect(new Set(headlines).size).toBe(4)
     expect(headlines).toEqual(['正常', '偏慢', '卡住', '连不上'])
   })
 
   it('卡住的建议不再指向重启：主机自己会重连，这里让人去看 agent', () => {
-    const display = describeVerdict({ kind: 'hung', ms: 60_000 })
+    const display = describeVerdict({ kind: 'hung', ms: 60_000 }, zhT)
     expect(display.advice).not.toContain('重启')
     expect(display.advice).toContain('agent')
   })
 
   it('连不上说的是地址和凭证，不是速度', () => {
-    const display = describeVerdict({ kind: 'unreachable', reason: 'connect ECONNREFUSED' })
+    const display = describeVerdict({ kind: 'unreachable', reason: 'connect ECONNREFUSED' }, zhT)
     expect(display.detail).toBe('connect ECONNREFUSED')
     expect(display.advice).toContain('地址')
   })
@@ -184,6 +196,7 @@ const renderPanel = (rollUp: RollUpSection, registry: HostRegistryPort, posture?
     probe: fakeProbe().probe,
     rollUp,
     registry,
+    t: zhT,
     ...(posture === undefined ? {} : { hostStore: fakeHostStore(posture) }),
   }))
 
@@ -229,6 +242,7 @@ describe('面板渲染（agent 探测，位于本机详情页）', () => {
       presetId: 'acp-grok',
       label: 'Grok',
       onProbe: () => {},
+      t: zhT,
     }))
     expect(html).toContain('data-agent="acp-grok"')
     expect(html).toContain('data-action="probe"')
@@ -241,6 +255,7 @@ describe('面板渲染（agent 探测，位于本机详情页）', () => {
       label: 'Grok',
       verdict: { phase: 'done', verdict: { kind: 'ok', ms: 900 }, archiveNote: '归档失败：workspace is stopping' } satisfies ProbeRunState,
       onProbe: () => {},
+      t: zhT,
     }))
     expect(html).toContain('正常')
     expect(html).toContain('归档失败：workspace is stopping')
@@ -252,6 +267,7 @@ describe('面板渲染（agent 探测，位于本机详情页）', () => {
       label: 'Grok',
       verdict: { phase: 'done', verdict: { kind: 'slow', ms: 20_000 } } satisfies ProbeRunState,
       onProbe: () => {},
+      t: zhT,
     }))
     expect(html).toContain('data-verdict-word=""')
     expect(html).toContain('data-verdict-tone="slow"')
@@ -320,6 +336,7 @@ describe('主机表单页：新增和详情是同一套东西的两种模式', (
     values: { hostId: 'bench', address: 'http://192.168.1.20:3081' },
     onConfirm: () => true,
     onCancel: () => {},
+    t: zhT,
   } as const
 
   it('新增模式：两个字段（名称、IP）和确定/取消；主机报的字段一概不出现；按钮下面没有内容', () => {
@@ -329,6 +346,7 @@ describe('主机表单页：新增和详情是同一套东西的两种模式', (
       values: { hostId: '', address: '' },
       onConfirm: () => false,
       onCancel: () => {},
+      t: zhT,
     }))
     expect(html).toContain('data-panel-page="add"')
     expect(html).toContain('data-form-field-id=""')
@@ -357,6 +375,7 @@ describe('主机表单页：新增和详情是同一套东西的两种模式', (
       values: { hostId: '', address: '' },
       onConfirm: () => false,
       onCancel: () => {},
+      t: zhT,
     }))
     const navAt = html.indexOf('data-form-cancel=""')
     const cardAt = html.indexOf('data-form-card=""')
@@ -434,6 +453,7 @@ describe('主机表单页：新增和详情是同一套东西的两种模式', (
       reported: { self: true, online: true, lastSeen: 9_000, reportedId: 'self-host', onlineIds: ['self-host'] },
       onConfirm: () => true,
       onCancel: () => {},
+      t: zhT,
     }))
     expect(html).toContain('这就是本机')
     expect(html).toContain('最近心跳')
@@ -474,6 +494,7 @@ describe('面板三个界面', () => {
     const html = renderToString(createElement(HostRow, {
       row: { hostId: 'bench', name: '测试机', self: false, online: false, connection: 'disconnected', address: 'http://192.168.1.20:3081' },
       onOpen: () => {},
+      t: zhT,
     }))
     expect(html).toContain('data-host-open="bench"')
     expect(html).toContain('data-host-name=""')
@@ -492,6 +513,7 @@ describe('面板三个界面', () => {
     const html = renderToString(createElement(HostRow, {
       row: { hostId: 'self', name: '本机', self: true, online: true },
       onOpen: () => {},
+      t: zhT,
     }))
     expect(html).toContain('data-host-status="self"')
     expect(html).toContain('—')
@@ -504,7 +526,7 @@ describe('面板三个界面', () => {
       [{ hostId: 'bench', name: 'b', self: false, online: false, connection: 'disconnected' }, 'data-host-status="offline"'],
     ]
     for (const [row, marker] of cases) {
-      const html = renderToString(createElement(HostRow, { row, onOpen: () => {} }))
+      const html = renderToString(createElement(HostRow, { row, onOpen: () => {}, t: zhT }))
       expect(html).toContain(marker)
     }
   })
@@ -520,6 +542,7 @@ describe('面板三个界面', () => {
       notes: createElement('ul', { 'data-panel-notices': '' }, createElement('li', null, '「在线」= 同源标签页按心跳报数')),
       onConfirm: () => true,
       onCancel: () => {},
+      t: zhT,
     }))
     expect(html).toContain('data-panel-notices=""')
     expect(html).toContain('「在线」')
@@ -624,9 +647,9 @@ describe('主机行合并', () => {
 describe('心跳措辞', () => {
   it('按久暂选词：刚刚、秒、分、时', () => {
     const now = 1_000_000
-    expect(heartbeatWord(now, now)).toBe('刚刚')
-    expect(heartbeatWord(now - 5_000, now)).toBe('5 秒前')
-    expect(heartbeatWord(now - 120_000, now)).toBe('2 分钟前')
-    expect(heartbeatWord(now - 7_200_000, now)).toBe('2 小时前')
+    expect(heartbeatWord(now, now, zhT)).toBe('刚刚')
+    expect(heartbeatWord(now - 5_000, now, zhT)).toBe('5 秒前')
+    expect(heartbeatWord(now - 120_000, now, zhT)).toBe('2 分钟前')
+    expect(heartbeatWord(now - 7_200_000, now, zhT)).toBe('2 小时前')
   })
 })

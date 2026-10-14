@@ -11,7 +11,14 @@
  * channel precisely when an agent is hung. Dead connections are dropped by the
  * host itself and rebuilt on the session's next turn, so a button here could
  * only ever order the host around at the moment the page is least able to.
+ *
+ * The wording lives in the locale dictionary (`locales.ts`) like every other
+ * piece of product copy; this module is a plain function and cannot call `t`
+ * itself, so the caller's seat rides in as a parameter.
  */
+
+import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { ClientLocaleKey } from './locales.ts'
 
 /**
  * What one probe found, in terms a person can act on.
@@ -89,43 +96,51 @@ export type VerdictDisplay = {
 }
 
 /**
+ * The `t` seat `describeVerdict` reads its copy through. Typed to the
+ * dictionary's whole key domain, so the panel's seat (`PanelT`) plugs in
+ * directly and a test fake with string keys fits too.
+ */
+export type VerdictT = Translate<ClientLocaleKey>
+
+/**
  * Turn a probe verdict into the row a person reads.
  * @param verdict - what the probe found.
+ * @param t - the caller's locale seat; the wording lives in the dictionary.
  * @returns headline, evidence, and the matching instruction.
  */
-export function describeVerdict(verdict: ProbeVerdict): VerdictDisplay {
+export function describeVerdict(verdict: ProbeVerdict, t: VerdictT): VerdictDisplay {
   switch (verdict.kind) {
     case 'ok':
       return {
         tone: 'ok',
-        headline: '正常',
+        headline: t('panel.verdict.ok'),
         detail: `${verdict.ms} ms`,
-        advice: '有回应，速度正常，不用处理。',
+        advice: t('panel.verdict.okAdvice'),
       }
     case 'slow':
       return {
         tone: 'slow',
-        headline: '偏慢',
+        headline: t('panel.verdict.slow'),
         detail: `${verdict.ms} ms`,
-        advice: '回来了但超过正常阈值——建议再探测一次，慢不代表卡。',
+        advice: t('panel.verdict.slowAdvice'),
       }
     case 'hung':
       return {
         tone: 'hung',
-        headline: '卡住',
+        headline: t('panel.verdict.hung'),
         detail: verdict.started
-          ? `${verdict.ms} ms 内开了工但没有完成`
-          : `${verdict.ms} ms 内无回应`,
+          ? t('panel.verdict.hungStartedDetail', { ms: verdict.ms })
+          : t('panel.verdict.hungSilentDetail', { ms: verdict.ms }),
         advice: verdict.started
-          ? 'agent 领了这轮对话但一直没交回——多半卡在它那一侧。去主机上看这个 agent 的进程和日志；连接如果断了，主机会在下一次对话时自动重连。'
-          : '到点没有动静——agent 多半没在工作。去主机上查看这个 agent 的进程和日志；连接如果断了，主机会在下一次对话时自动重连。',
+          ? t('panel.verdict.hungStartedAdvice')
+          : t('panel.verdict.hungSilentAdvice'),
       }
     case 'unreachable':
       return {
         tone: 'unreachable',
-        headline: '连不上',
+        headline: t('panel.verdict.unreachable'),
         detail: verdict.reason,
-        advice: '先检查主机的 agent 地址和凭证是否正确；这不是等待或重连能解决的问题。',
+        advice: t('panel.verdict.unreachableAdvice'),
       }
   }
 }

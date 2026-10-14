@@ -117,6 +117,7 @@ async function openLiveAgent(
 ): Promise<LiveSession> {
   const transport = new StdioAcpTransport({
     command,
+    ...(dialect.id === 'cursor' ? { args: ['acp', '--trust'] as readonly string[] } : {}),
     cwd: CWD,
     onDiagnostic: () => {}, // agents are chatty on stderr; it is not protocol
   })

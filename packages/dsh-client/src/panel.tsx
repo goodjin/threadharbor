@@ -25,7 +25,7 @@
  * dead connections and rebuilds on the next turn.
  */
 
-import { useEffect, useState } from 'react'
+import { createElement, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { describeVerdict } from './verdict.ts'
 import type { ProbeVerdict } from './verdict.ts'
@@ -47,6 +47,8 @@ import {
   waitSshDeployOperation,
 } from './ssh-deploy.ts'
 import type { SshDeployOperationView } from '@threadharbor/dsh-host-federation'
+import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
+import { NAMESPACE } from './locales.ts'
 import styles from './panel.module.css'
 
 /**
@@ -102,8 +104,11 @@ export type HostRegistryPort = {
   remove(hostId: string): boolean
 }
 
-/** What the panel reads from the page wiring. */
-export type AgentPanelProps = {
+/** The `t` seat, as the framework synthesizes it for this plugin's namespace. */
+export type PanelT = PropsLocale<typeof NAMESPACE>['t']
+
+/** What the panel reads from the page wiring, without the framework shares. */
+export type AgentPanelBusinessProps = {
   readonly agents: AgentListPort
   readonly probe: ProbeStarter
   /** The host-list section, owned by the wiring so the panel has no setup to do. */
@@ -138,6 +143,14 @@ export type AgentPanelProps = {
   readonly agentsNote?: string | undefined
 }
 
+/**
+ * What AgentPanel receives: the wiring's face plus the framework's `t` seat.
+ * The seat exists because the `main` slot registration declares
+ * `locale: NAMESPACE` (client/index.ts) — a component that renders copy but
+ * has no `t` would silently ship hardcoded text instead.
+ */
+export type AgentPanelProps = PropsLocale<typeof NAMESPACE> & AgentPanelBusinessProps
+
 /** How a storage posture reads on screen. */
 export type StoragePostureDisplay = {
   readonly tone: 'ok' | 'info' | 'bad'
@@ -147,29 +160,31 @@ export type StoragePostureDisplay = {
 /**
  * The posture, in one honest sentence. Every state names where the data
  * stands — including the good one, so "saved on this machine" is visible and
- * its absence is a question a user knows to ask.
+ * its absence is a question a user knows to ask. The wording lives in the
+ * locale dictionary; this is a plain function, so the caller's seat rides in.
  * @param posture - the storage's own account of itself.
+ * @param t - the caller's locale seat.
  * @returns tone and text for the line.
  */
-export function storagePostureLine(posture: HostStorePosture): StoragePostureDisplay {
+export function storagePostureLine(posture: HostStorePosture, t: PanelT): StoragePostureDisplay {
   switch (posture.kind) {
     case 'host':
-      return { tone: 'ok', text: '登记与本机名称保存在这台机器上：换浏览器、换标签页、清缓存都不会丢。' }
+      return { tone: 'ok', text: t('panel.posture.host') }
     case 'loading':
-      return { tone: 'info', text: '正在从这台机器读取已保存的登记……' }
+      return { tone: 'info', text: t('panel.posture.loading') }
     case 'memory':
       return posture.reason === 'remote-page'
-        ? { tone: 'bad', text: '这个页面由远程机器提供：登记与本机名称只保存在本页内存里，关闭页面就没有了。' }
-        : { tone: 'bad', text: '这台机器没有提供设置存储通道（remote.settings）：登记与本机名称只保存在本页内存里，关闭页面就没有了。' }
+        ? { tone: 'bad', text: t('panel.posture.memoryRemotePage') }
+        : { tone: 'bad', text: t('panel.posture.memoryNoChannel') }
     case 'degraded':
-      return { tone: 'bad', text: `这台机器上的存储出了问题：${posture.detail}。名单还在本页里；真正存进去之前，换浏览器或清缓存会丢。` }
+      return { tone: 'bad', text: t('panel.posture.degraded', { detail: posture.detail }) }
   }
 }
 
 /** The one posture line, shared by every page that edits stored data. */
-function StoragePostureLine(props: { readonly posture: HostStorePosture | undefined }): ReactNode {
+function StoragePostureLine(props: { readonly posture: HostStorePosture | undefined; readonly t: PanelT }): ReactNode {
   if (props.posture === undefined) return undefined
-  const display = storagePostureLine(props.posture)
+  const display = storagePostureLine(props.posture, props.t)
   return (
     <p
       data-storage-posture={props.posture.kind}
@@ -223,12 +238,12 @@ export function deriveHostConnection(
   return 'disconnected'
 }
 
-export function connectionStatusLabel(status: HostConnectionStatus): string {
+export function connectionStatusLabel(status: HostConnectionStatus, t: PanelT): string {
   switch (status) {
-    case 'connected': return '已连接'
-    case 'reachable': return '可达未同步'
-    case 'checking': return '检测中'
-    case 'disconnected': return '未连接'
+    case 'connected': return t('panel.status.connected')
+    case 'reachable': return t('panel.status.reachableUnsynced')
+    case 'checking': return t('panel.status.checking')
+    case 'disconnected': return t('panel.status.offline')
   }
 }
 
@@ -344,18 +359,20 @@ export function addressFromHostPart(value: string): string {
 }
 
 /**
- * How long since the host was last heard, in words.
+ * How long since the host was last heard, in words. The wording lives in the
+ * locale dictionary; this is a plain function, so the caller's seat rides in.
  * @param lastSeen - the page-clock time of the last announcement.
  * @param now - the page clock; defaults to Date.now, injected for tests.
- * @returns 刚刚 / N 秒前 / N 分钟前 / N 小时前.
+ * @param t - the caller's locale seat.
+ * @returns panel.time.justNow / secondsAgo / minutesAgo / hoursAgo.
  */
-export function heartbeatWord(lastSeen: number, now: number = Date.now()): string {
+export function heartbeatWord(lastSeen: number, now: number = Date.now(), t: PanelT): string {
   const seconds = Math.max(0, Math.floor((now - lastSeen) / 1000))
-  if (seconds < 5) return '刚刚'
-  if (seconds < 60) return `${seconds} 秒前`
+  if (seconds < 5) return t('panel.time.justNow')
+  if (seconds < 60) return t('panel.time.secondsAgo', { n: seconds })
   const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes} 分钟前`
-  return `${Math.floor(minutes / 60)} 小时前`
+  if (minutes < 60) return t('panel.time.minutesAgo', { n: minutes })
+  return t('panel.time.hoursAgo', { n: Math.floor(minutes / 60) })
 }
 
 /**
@@ -493,6 +510,8 @@ export function AgentRow(props: {
   readonly label: string
   readonly verdict?: ProbeRunState | undefined
   readonly onProbe: (presetId: string) => void
+  /** The locale seat, threaded from the panel. */
+  readonly t: PanelT
 }): ReactNode {
   const { presetId, label, verdict } = props
   return (
@@ -506,9 +525,9 @@ export function AgentRow(props: {
           data-action="probe"
           className={styles.action}
           onClick={() => { props.onProbe(presetId) }}
-        >探测</button>
+        >{props.t('panel.button.probe')}</button>
       </div>
-      <VerdictLine state={verdict} />
+      <VerdictLine state={verdict} t={props.t} />
     </div>
   )
 }
@@ -516,29 +535,30 @@ export function AgentRow(props: {
 /** The verdict line under one row: state word first, evidence second, advice folded away. */
 function VerdictLine(props: {
   readonly state?: ProbeRunState | undefined
+  readonly t: PanelT
 }): ReactNode {
   const { state } = props
   if (state?.phase === 'running') {
-    return <p data-probe-state="running" className={styles.stateLine}>探测中……（最多等一分钟）</p>
+    return <p data-probe-state="running" className={styles.stateLine}>{props.t('panel.probe.running')}</p>
   }
   if (state?.phase === 'error') {
-    return <p data-probe-state="error" className={styles.stateBad}>探测出错：{state.message}</p>
+    return <p data-probe-state="error" className={styles.stateBad}>{props.t('panel.probe.error', { message: state.message })}</p>
   }
   if (state?.phase === 'done') {
-    const display = describeVerdict(state.verdict)
+    const display = describeVerdict(state.verdict, props.t)
     return (
       <div data-probe-state={display.tone} className={styles.verdictLine} data-verdict-tone={display.tone}>
         <span data-verdict-word="" className={styles.verdictWord} data-verdict-tone={display.tone}>{display.headline}</span>
         <span data-verdict-detail="" className={styles.verdictDetail}>{display.detail}</span>
         <details className={styles.verdictMore}>
-          <summary className={styles.summary}>建议</summary>
+          <summary className={styles.summary}>{props.t('panel.verdict.advice')}</summary>
           <p className={styles.verdictAdvice}>{display.advice}</p>
           {state.archiveNote === undefined ? undefined : <p data-archive-note="" className={styles.verdictAdvice}>{state.archiveNote}</p>}
         </details>
       </div>
     )
   }
-  return <p data-probe-state="idle" className={styles.stateLine}>未探测</p>
+  return <p data-probe-state="idle" className={styles.stateLine}>{props.t('panel.probe.idle')}</p>
 }
 
 /**
@@ -551,21 +571,23 @@ function VerdictLine(props: {
 export function HostRow(props: {
   readonly row: HostListRow
   readonly onOpen: () => void
+  /** The locale seat, threaded from the panel. */
+  readonly t: PanelT
 }): ReactNode {
   const { row } = props
   // 本机没有登记地址（它的地址就是这个标签页自己的 URL），IP 列以 — 占位，
   // 不硬塞内部标识充数。
   const ip = hostOf(row.address)
   const status = row.self
-    ? { word: '本机', tone: 'self' as const }
+    ? { word: props.t('panel.status.self'), tone: 'self' as const }
     : row.connection === 'connected'
-      ? { word: '已连接', tone: 'online' as const }
+      ? { word: props.t('panel.status.connected'), tone: 'online' as const }
       : row.connection === 'reachable'
-        ? { word: connectionStatusLabel('reachable'), tone: 'online' as const }
+        ? { word: connectionStatusLabel('reachable', props.t), tone: 'online' as const }
         : row.connection === 'checking'
-          ? { word: connectionStatusLabel('checking'), tone: 'offline' as const }
-          : { word: connectionStatusLabel('disconnected'), tone: 'offline' as const }
-  const connection = row.self ? '本机' : connectionStatusLabel(row.connection)
+          ? { word: connectionStatusLabel('checking', props.t), tone: 'offline' as const }
+          : { word: connectionStatusLabel('disconnected', props.t), tone: 'offline' as const }
+  const connection = row.self ? props.t('panel.status.self') : connectionStatusLabel(row.connection, props.t)
   return (
     <div data-host-row={row.hostId} className={styles.hostRow}>
       <button
@@ -588,13 +610,30 @@ export function HostRow(props: {
         <span data-host-ip="" className={styles.hostIp} title={ip ?? undefined}>{ip ?? '—'}</span>
         {/* 设置按钮是这一行的动作（打开主机的设置页）。整行都是这个按钮，
             这里的 span 是它的第三列外观，不是又一个独立控件。 */}
-        <span data-host-settings="" className={styles.rowSettings} aria-hidden="true">设置</span>
+        <span data-host-settings="" className={styles.rowSettings} aria-hidden="true">{props.t('panel.button.settings')}</span>
       </button>
     </div>
   )
 }
 
 type SshAuthMode = 'identityFile' | 'identityPem' | 'password'
+
+/**
+ * 把一句翻译文案里的 `{…}` 段渲染回行内元素（`t` 返回的是字符串，行内样式
+ * 只能在这一头补回）。带行内元素的句子（ssh 部署说明、访问方式标签）是一个
+ * 键一句：命令样式（`?token=`、`http://<主机IP>:<端口>` 这类词）留在句子的
+ * 字符串里，用 `{…}` 标记哪段是行内元素。这里调 `t` 一律不带参数：宿主无参
+ * 时模板原样返回，记号不会被占位符替换碰坏，只在这一个出口拆开成
+ * `<code>`/`<strong>`。记号优先用带非 `\w` 字符的（如 `{?token=}`、
+ * `{http://…}`）最稳，纯 `\w` 记号会撞占位符替换的形状。
+ * @param template - `t` 读出的整句，`{…}` 段原样保留。
+ * @param tag - 段落包成的行内元素（命令用 code，强调用 strong）。
+ * @returns 文本与行内元素交错的子节点列表。
+ */
+export function richSegments(template: string, tag: 'code' | 'strong'): ReactNode[] {
+  return template.split(/\{([^{}]+)\}/g).map((part, index) =>
+    index % 2 === 0 ? part : createElement(tag, { key: index }, part))
+}
 
 function SshDeploySection(props: {
   readonly hostId: string
@@ -603,6 +642,8 @@ function SshDeploySection(props: {
   readonly onHostTitleChange: (value: string) => void
   readonly onDeployed: (result: SshDeployResult) => void
   readonly onError: (message: string) => void
+  /** The locale seat, threaded from the panel. */
+  readonly t: PanelT
 }): ReactNode {
   const [target, setTarget] = useState('')
   const [port, setPort] = useState('22')
@@ -638,7 +679,7 @@ function SshDeploySection(props: {
     setBusy('inspect')
     setKeys([])
     setApprovedFingerprint('')
-    void inspectSshHost(sshPayload()).then(result => {
+    void inspectSshHost(sshPayload(), props.t).then(result => {
       setBusy(undefined)
       if (!result.ok) {
         props.onError(result.error)
@@ -652,11 +693,11 @@ function SshDeploySection(props: {
 
   const runReadPeer = (): void => {
     if (approvedFingerprint === '') {
-      props.onError('请先检查并批准 SSH 主机密钥指纹')
+      props.onError(props.t('panel.ssh.approveFingerprintFirst'))
       return
     }
     setBusy('peer')
-    void readRemotePeer({ ...sshPayload(), hostKeyFingerprint: approvedFingerprint }).then(result => {
+    void readRemotePeer({ ...sshPayload(), hostKeyFingerprint: approvedFingerprint }, props.t).then(result => {
       setBusy(undefined)
       if (!result.ok) {
         props.onError(result.error)
@@ -668,11 +709,11 @@ function SshDeploySection(props: {
 
   const runDeploy = (): void => {
     if (approvedFingerprint === '') {
-      props.onError('请先检查并批准 SSH 主机密钥指纹')
+      props.onError(props.t('panel.ssh.approveFingerprintFirst'))
       return
     }
     if (!props.hostId.trim()) {
-      props.onError('请填写主机标识')
+      props.onError(props.t('panel.ssh.hostIdRequired'))
       return
     }
     setBusy('deploy')
@@ -684,20 +725,20 @@ function SshDeploySection(props: {
       ...(remoteWebPort.trim() === '' ? {} : { remoteWebPort: Number(remoteWebPort) }),
       accessMode: 'tunnel',
       remoteAgents,
-    }).then(started => {
+    }, props.t).then(started => {
       if (!started.ok) {
         setBusy(undefined)
         props.onError(started.error)
         return
       }
-      void waitSshDeployOperation(started.value.operationId, view => { setProgress(view) }).then(done => {
+      void waitSshDeployOperation(started.value.operationId, view => { setProgress(view) }, undefined, props.t).then(done => {
         setBusy(undefined)
         if (!done.ok) {
           props.onError(done.error)
           return
         }
         if (done.value.status !== 'succeeded' || done.value.result === undefined) {
-          props.onError(done.value.error ?? '部署失败')
+          props.onError(done.value.error ?? props.t('panel.ssh.deployFailed'))
           return
         }
         setDeployed(done.value.result)
@@ -714,62 +755,62 @@ function SshDeploySection(props: {
   return (
     <div data-ssh-deploy="" className={styles.sshSection}>
       <p className={styles.note}>
-        对方的 DSH 只听 127.0.0.1。任意一台已安装 ThreadHarbor 的主机都可以 SSH 到另一台，读取对方是否已装插件和带 token 的地址，再在本机打开 SSH 隧道访问。私钥路径指<strong>当前这台机器</strong>上的绝对路径；粘贴的私钥或密码只发给本机 DSH 进程，不会写入日志。
+        {richSegments(props.t('panel.ssh.intro'), 'strong')}
       </p>
       <div className={styles.formGrid}>
         <label className={styles.field}>
-          SSH 主机
-          <input className={styles.input} value={target} onChange={event => { setTarget(event.target.value) }} placeholder="192.168.1.10" />
+          {props.t('panel.ssh.targetLabel')}
+          <input className={styles.input} value={target} onChange={event => { setTarget(event.target.value) }} placeholder={props.t('panel.ssh.targetPlaceholder')} />
         </label>
         <label className={styles.field}>
-          端口
+          {props.t('panel.ssh.portLabel')}
           <input className={styles.input} value={port} onChange={event => { setPort(event.target.value) }} />
         </label>
         <label className={styles.field}>
-          用户
-          <input className={styles.input} value={user} onChange={event => { setUser(event.target.value) }} placeholder="deploy" />
+          {props.t('panel.ssh.userLabel')}
+          <input className={styles.input} value={user} onChange={event => { setUser(event.target.value) }} placeholder={props.t('panel.ssh.userPlaceholder')} />
         </label>
         <label className={styles.field}>
-          ProxyJump（可选）
+          {props.t('panel.ssh.proxyJumpLabel')}
           <input className={styles.input} value={proxyJump} onChange={event => { setProxyJump(event.target.value) }} />
         </label>
         <label className={styles.field}>
-          认证方式
+          {props.t('panel.ssh.authModeLabel')}
           <select className={styles.input} value={authMode} onChange={event => { setAuthMode(event.target.value as SshAuthMode) }}>
-            <option value="identityFile">本机私钥路径</option>
-            <option value="identityPem">粘贴私钥 PEM</option>
-            <option value="password">密码（需本机安装 sshpass）</option>
+            <option value="identityFile">{props.t('panel.ssh.authIdentityFile')}</option>
+            <option value="identityPem">{props.t('panel.ssh.authIdentityPem')}</option>
+            <option value="password">{props.t('panel.ssh.authPassword')}</option>
           </select>
         </label>
         {authMode === 'identityFile'
           ? (
               <label className={styles.field}>
-                私钥路径（Web 服务主机上）
-                <input className={styles.input} value={identityFile} onChange={event => { setIdentityFile(event.target.value) }} placeholder="/home/me/.ssh/id_ed25519" />
+                {props.t('panel.ssh.identityFileLabel')}
+                <input className={styles.input} value={identityFile} onChange={event => { setIdentityFile(event.target.value) }} placeholder={props.t('panel.ssh.identityFilePlaceholder')} />
               </label>
             )
           : authMode === 'identityPem'
             ? (
                 <label className={styles.field}>
-                  私钥 PEM
+                  {props.t('panel.ssh.identityPemLabel')}
                   <textarea className={styles.textarea} value={identityPem} onChange={event => { setIdentityPem(event.target.value) }} rows={4} />
                 </label>
               )
             : (
                 <label className={styles.field}>
-                  SSH 密码
+                  {props.t('panel.ssh.passwordLabel')}
                   <input type="password" className={styles.input} value={password} onChange={event => { setPassword(event.target.value) }} autoComplete="off" />
                 </label>
               )}
         <label className={styles.field}>
-          远端 DSH Web 端口
+          {props.t('panel.ssh.remotePortLabel')}
           <input className={styles.input} value={remoteWebPort} onChange={event => { setRemoteWebPort(event.target.value) }} />
         </label>
       </div>
       <fieldset className={styles.accessModes} data-ssh-remote-agents="">
-        <legend className={styles.summary}>远端 Agent（ACP preset）</legend>
+        <legend className={styles.summary}>{props.t('panel.ssh.remoteAgentsLegend')}</legend>
         <p className={styles.note}>
-          勾选的 agent 会在远端 DSH 组合中启用（命令走 PATH，需目标机已安装对应二进制）；未勾选的将在部署后禁用。
+          {props.t('panel.ssh.remoteAgentsNote')}
         </p>
         {REMOTE_DEPLOY_AGENT_SPECS.map(spec => (
           <label key={spec.key} className={styles.sshKeyRow}>
@@ -784,19 +825,19 @@ function SshDeploySection(props: {
       </fieldset>
       <div className={styles.formActions}>
         <button type="button" className={styles.action} disabled={busy !== undefined} onClick={runInspect}>
-          {busy === 'inspect' ? '正在检查……' : '检查 SSH 主机密钥'}
+          {busy === 'inspect' ? props.t('panel.ssh.inspecting') : props.t('panel.ssh.inspect')}
         </button>
         <button type="button" className={styles.action} disabled={busy !== undefined} onClick={runReadPeer}>
-          {busy === 'peer' ? '正在读取……' : '通过 SSH 读取对方状态'}
+          {busy === 'peer' ? props.t('panel.ssh.readingPeer') : props.t('panel.ssh.readPeer')}
         </button>
         <button type="button" className={styles.actionPrimary} disabled={busy !== undefined} onClick={runDeploy}>
-          {busy === 'deploy' ? '正在部署……' : '部署 DSH 并登记'}
+          {busy === 'deploy' ? props.t('panel.ssh.deploying') : props.t('panel.ssh.deploy')}
         </button>
       </div>
       {keys.length > 0
         ? (
             <div data-ssh-keys="" className={styles.sshKeys}>
-              <p className={styles.stateLine}>请核对指纹后选择要信任的那把钥匙：</p>
+              <p className={styles.stateLine}>{props.t('panel.ssh.pickKeyPrompt')}</p>
               {keys.map(key => (
                 <label key={key.hostKeyFingerprint} className={styles.sshKeyRow}>
                   <input
@@ -816,9 +857,9 @@ function SshDeploySection(props: {
             <p data-ssh-peer="" className={styles.stateLine}>
               {peer.pluginsInstalled
                 ? peer.listen === 'loopback'
-                  ? `对方已安装插件，DSH 听在 127.0.0.1。打开页面会走本机 SSH 隧道。${peer.launchUrl ?? ''}`
-                  : '对方这份记录不是回环监听。重新部署会改成只听 127.0.0.1，并由本机隧道访问。'
-                : '对方还没有 ThreadHarbor 的 peer 记录（尚未安装，或安装后还没成功启动）。可以在这里部署。'}
+                  ? `${props.t('panel.ssh.peerLoopback')}${peer.launchUrl ?? ''}`
+                  : props.t('panel.ssh.peerNotLoopback')
+                : props.t('panel.ssh.peerMissing')}
             </p>
           )
         : undefined}
@@ -826,28 +867,28 @@ function SshDeploySection(props: {
         ? (
             <p data-ssh-progress="" className={styles.stateLine}>
               {progress.progress.detail}
-              {progress.status === 'failed' && progress.error !== undefined ? `（${progress.error}）` : ''}
+              {progress.status === 'failed' && progress.error !== undefined ? props.t('panel.ssh.progressFailed', { error: progress.error }) : ''}
             </p>
           )
         : undefined}
       {deployed !== undefined
         ? (
             <div data-ssh-launch-url="" className={styles.launchUrlBox}>
-              <p className={styles.stateLine}>打开链接即可换 cookie 上线（已写入登记）：</p>
+              <p className={styles.stateLine}>{props.t('panel.ssh.launchUrlPrompt')}</p>
               <code className={styles.launchUrlText}>{deployed.launchUrl}</code>
               <div className={styles.formActions}>
-                <button type="button" className={styles.action} data-action="copy-launch-url" onClick={copyLaunchUrl}>复制链接</button>
-                <a className={styles.actionPrimary} data-action="open-launch-url" href={deployed.launchUrl} target="_blank" rel="noreferrer">打开</a>
+                <button type="button" className={styles.action} data-action="copy-launch-url" onClick={copyLaunchUrl}>{props.t('panel.button.copyLink')}</button>
+                <a className={styles.actionPrimary} data-action="open-launch-url" href={deployed.launchUrl} target="_blank" rel="noreferrer">{props.t('panel.ssh.open')}</a>
               </div>
             </div>
           )
         : undefined}
       <label className={styles.field}>
-        主机标识（部署后登记用）
+        {props.t('panel.ssh.hostIdLabel')}
         <input className={styles.input} value={props.hostId} onChange={event => { props.onHostIdChange(event.target.value) }} />
       </label>
       <label className={styles.field}>
-        显示名
+        {props.t('panel.form.fieldTitle')}
         <input className={styles.input} value={props.hostTitle} onChange={event => { props.onHostTitleChange(event.target.value) }} />
       </label>
     </div>
@@ -885,6 +926,8 @@ export function HostFormPage(props: {
   readonly onCancel: () => void
   /** 从 Tailscale 选的口（表单前面的入口）；缺省就不显示那个按钮。 */
   readonly tailscale?: TailscalePort | undefined
+  /** The locale seat, threaded from the panel. */
+  readonly t: PanelT
 }): ReactNode {
   const [idDraft, setIdDraft] = useState(props.values.hostId)
   // IP 字段里放的是去协议的主机（可带端口）；入库前补协议，出库时剥掉。
@@ -934,14 +977,14 @@ export function HostFormPage(props: {
           data-form-cancel=""
           className={styles.action}
           onClick={props.onCancel}
-        >‹ 返回</button>
+        >{props.t('panel.button.back')}</button>
       </div>
       <section data-form-card="" className={styles.card}>
         <div className={styles.cardHead}>
           <h2 className={styles.title}>{props.heading}</h2>
           {/* 点开每一台主机都进这里：标题点明这是「主机管理」设置界面，
               下面的主机信息（自报标识、状态、登记字段）是其中一个栏目。 */}
-          <span data-host-management-heading="" className={styles.managementTag}>主机管理</span>
+          <span data-host-management-heading="" className={styles.managementTag}>{props.t('panel.title.management')}</span>
           <span className={styles.spacer} />
         </div>
         {reported === undefined
@@ -949,32 +992,32 @@ export function HostFormPage(props: {
           : (
               <div data-reported-facts="" className={styles.reportedFacts}>
                 {reported.self
-                  ? <p className={styles.stateLine}>这就是本机：这里显示和编辑的是这个标签页自己声明的身份。</p>
+                  ? <p className={styles.stateLine}>{props.t('panel.facts.selfLine')}</p>
                   : undefined}
                 <p data-fact-online="" className={styles.stateLine}>
-                  状态：{reported.online ? '在线' : '未连接'}
+                  {props.t('panel.facts.status', { status: reported.online ? props.t('panel.status.online') : props.t('panel.status.offline') })}
                   {reported.online && reported.lastSeen !== undefined
-                    ? <span data-fact-heartbeat=""> · 最近心跳 {heartbeatWord(reported.lastSeen)}</span>
+                    ? <span data-fact-heartbeat="">{props.t('panel.facts.heartbeat', { age: heartbeatWord(reported.lastSeen, undefined, props.t) })}</span>
                     : undefined}
                 </p>
                 {!reported.online && !reported.self
                   ? (
                       <p data-fact-offline-note="" className={styles.stateLine}>
-                        频道上没有这台主机的报数
+                        {props.t('panel.facts.offlineNote')}
                         {reported.onlineIds.length > 0
-                          ? <>；现在在线的名称：<span data-fact-online-ids="">{reported.onlineIds.join('、')}</span></>
+                          ? <>{props.t('panel.facts.offlineIdsPrefix')}<span data-fact-online-ids="">{reported.onlineIds.join(props.t('panel.facts.onlineIdsSeparator'))}</span></>
                           : null}
-                        。
+                        {props.t('panel.facts.offlineEnd')}
                       </p>
                     )
                   : undefined}
                 {reported.reportedId !== undefined
                   ? (
                       <p data-fact-reported-id="" className={styles.stateLine}>
-                        主机自报名称：{reported.reportedId}
+                        {props.t('panel.facts.reportedTitle', { name: reported.reportedId })}
                         {idMatch === true
-                          ? <span data-fact-id-match="">（与填写一致）</span>
-                          : <span data-fact-id-mismatch="" className={styles.mismatch}>（与填写的不一样；两边都保留，把名称改成它，两边就对上了）</span>}
+                          ? <span data-fact-id-match="">{props.t('panel.facts.match')}</span>
+                          : <span data-fact-id-mismatch="" className={styles.mismatch}>{props.t('panel.facts.idMismatch')}</span>}
                       </p>
                     )
                   : undefined}
@@ -991,19 +1034,19 @@ export function HostFormPage(props: {
                         className={styles.action}
                         onClick={() => { void openPicker() }}
                       >
-                        从 Tailscale 选
+                        {props.t('panel.button.pickFromTailscale')}
                       </button>
                     )
                   : (
                       <div data-tailscale-picker="" className={styles.tailscalePicker}>
                         <div className={styles.tailscalePickerBar}>
-                          <span className={styles.tailscalePickerTitle}>从 Tailscale 选一台</span>
+                          <span className={styles.tailscalePickerTitle}>{props.t('panel.tailscale.pickTitle')}</span>
                           <span className={styles.spacer} />
-                          <button type="button" data-action="tailscale-refresh" className={styles.action} onClick={() => { void refreshPicker() }}>刷新</button>
-                          <button type="button" data-action="tailscale-close" className={styles.action} onClick={() => { setPicker({ open: false }) }}>收起</button>
+                          <button type="button" data-action="tailscale-refresh" className={styles.action} onClick={() => { void refreshPicker() }}>{props.t('panel.button.refresh')}</button>
+                          <button type="button" data-action="tailscale-close" className={styles.action} onClick={() => { setPicker({ open: false }) }}>{props.t('panel.tailscale.collapse')}</button>
                         </div>
                         {picker.result === undefined
-                          ? <p data-tailscale-state="loading" className={styles.stateLine}>正在读取清单……</p>
+                          ? <p data-tailscale-state="loading" className={styles.stateLine}>{props.t('panel.tailscale.loading')}</p>
                           : picker.result.ok === false
                             ? <p data-tailscale-state="failed" className={styles.stateBad}>{picker.result.message}</p>
                             : (
@@ -1012,7 +1055,7 @@ export function HostFormPage(props: {
                                     ? <p data-tailscale-note="" className={styles.note}>{picker.result.note}</p>
                                     : undefined}
                                   {picker.result.peers.length === 0
-                                    ? <p data-tailscale-state="empty" className={styles.stateLine}>清单是空的——只有本机，或还没登录 Tailscale。</p>
+                                    ? <p data-tailscale-state="empty" className={styles.stateLine}>{props.t('panel.tailscale.empty')}</p>
                                     : (
                                         <ul className={styles.tailscalePeerList}>
                                           {picker.result.peers.map(peer => (
@@ -1025,7 +1068,7 @@ export function HostFormPage(props: {
                                                 onClick={() => { pickPeer(peer) }}
                                               >
                                                 <span className={styles.tailscalePeerName}>{peer.name}</span>
-                                                <span className={styles.tailscalePeerMeta}>{peer.ip} · {peer.online ? '在线' : '未连接'}</span>
+                                                <span className={styles.tailscalePeerMeta}>{props.t('panel.tailscale.peerMeta', { ip: peer.ip, status: peer.online ? props.t('panel.status.online') : props.t('panel.status.offline') })}</span>
                                               </button>
                                             </li>
                                           ))}
@@ -1047,7 +1090,7 @@ export function HostFormPage(props: {
           }}
         >
           <label className={styles.field}>
-            名称
+            {props.t('panel.form.fieldName')}
             {fields.id
               ? (
                   <input
@@ -1055,7 +1098,7 @@ export function HostFormPage(props: {
                     data-form-field-id=""
                     className={styles.input}
                     onChange={event => { setIdDraft(event.target.value) }}
-                    placeholder={props.mode === 'new' ? '如：mac-mini' : undefined}
+                    placeholder={props.mode === 'new' ? props.t('panel.form.fieldNamePlaceholder') : undefined}
                   />
                 )
               : <span data-form-field-id="" className={styles.readonlyValue}>{props.values.hostId}</span>}
@@ -1064,7 +1107,7 @@ export function HostFormPage(props: {
             ? undefined
             : (
                 <label className={styles.field}>
-                  IP
+                  {props.t('panel.form.fieldIp')}
                   {fields.address
                     ? (
                         <input
@@ -1072,7 +1115,7 @@ export function HostFormPage(props: {
                           data-form-field-address=""
                           className={styles.input}
                           onChange={event => { setIpDraft(event.target.value) }}
-                          placeholder="100.101.1.7，可带端口：100.101.1.7:3081"
+                          placeholder={props.t('panel.form.ipPlaceholder')}
                         />
                       )
                     : <span data-form-field-address="" className={styles.readonlyValue}>{hostPartOfAddress(props.values.address)}</span>}
@@ -1087,12 +1130,12 @@ export function HostFormPage(props: {
           {props.mode === 'new' || fields.id || fields.address
             ? (
                 <button type="button" data-form-confirm="" className={styles.actionPrimary} onClick={confirm}>
-                  {props.mode === 'new' ? '确定' : '保存'}
+                  {props.mode === 'new' ? props.t('panel.button.confirm') : props.t('panel.button.save')}
                 </button>
               )
             : undefined}
           <button type="button" data-form-cancel-bottom="" className={styles.action} onClick={props.onCancel}>
-            {props.mode === 'new' ? '取消' : '返回列表'}
+            {props.mode === 'new' ? props.t('panel.button.cancel') : props.t('panel.button.backToList')}
           </button>
         </div>
         {props.footer}
@@ -1262,12 +1305,12 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
         <div data-threadharbor-panel="" className={styles.root}>
           <section data-panel-page="add-ssh" className={styles.card}>
             <div className={styles.cardHead}>
-              <button type="button" className={styles.action} onClick={openList}>‹ 返回</button>
-              <h2 className={styles.title}>SSH 自动部署</h2>
+              <button type="button" className={styles.action} onClick={openList}>{props.t('panel.button.back')}</button>
+              <h2 className={styles.title}>{props.t('panel.ssh.title')}</h2>
               <span className={styles.spacer} />
-              <button type="button" className={styles.action} onClick={() => { setAddMode('manual'); setFormMessage(undefined) }}>手动登记</button>
+              <button type="button" className={styles.action} onClick={() => { setAddMode('manual'); setFormMessage(undefined) }}>{props.t('panel.ssh.manualEntry')}</button>
             </div>
-            <StoragePostureLine posture={props.hostStore?.posture()} />
+            <StoragePostureLine posture={props.hostStore?.posture()} t={props.t} />
             {formMessage !== undefined
               ? <p data-form-message={formMessage.tone} className={formMessage.tone === 'ok' ? styles.stateLine : styles.stateBad}>{formMessage.text}</p>
               : undefined}
@@ -1291,9 +1334,10 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                 setRegistryRevision(revision => revision + 1)
                 setFormMessage({
                   tone: 'ok',
-                  text: `已登记 ${deployResult.endpoint}。点「打开」在新标签页完成 token 交换后，跨标签页频道会显示在线。`,
+                  text: props.t('panel.ssh.registered', { endpoint: deployResult.endpoint }),
                 })
               }}
+              t={props.t}
             />
           </section>
         </div>
@@ -1304,15 +1348,15 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
         <HostFormPage
           key="add"
           mode="new"
-          heading="添加新主机"
+          heading={props.t('panel.title.addHost')}
           values={{ hostId: addIdDraft, address: addAddressDraft }}
           message={formMessage}
-          postureNote={<StoragePostureLine posture={props.hostStore?.posture()} />}
+          postureNote={<StoragePostureLine posture={props.hostStore?.posture()} t={props.t} />}
           footer={sshDeployAvailable
             ? (
                 <p className={styles.note}>
-                  也可以在远端自动安装 DSH 与 ThreadHarbor：
-                  <button type="button" data-action="add-host-ssh" className={styles.action} onClick={() => { setAddMode('ssh'); setFormMessage(undefined) }}>SSH 自动部署</button>
+                  {props.t('panel.ssh.addFooterPrefix')}
+                  <button type="button" data-action="add-host-ssh" className={styles.action} onClick={() => { setAddMode('ssh'); setFormMessage(undefined) }}>{props.t('panel.ssh.title')}</button>
                 </p>
               )
             : undefined}
@@ -1323,6 +1367,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
           }}
           onCancel={openList}
           tailscale={props.tailscale}
+          t={props.t}
         />
       </div>
     )
@@ -1366,36 +1411,37 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
             fields={fields}
             reported={reported}
             message={formMessage}
-            postureNote={<StoragePostureLine posture={props.hostStore?.posture()} />}
+            postureNote={<StoragePostureLine posture={props.hostStore?.posture()} t={props.t} />}
             onConfirm={values => row.self ? confirmSelf(values) : confirmEdit(view.hostId, values)}
             onCancel={openList}
             tailscale={props.tailscale}
+            t={props.t}
             footer={registration !== undefined
               ? (
                   <div data-registry-actions="" className={styles.registryActions}>
                     <p data-host-connection="" className={styles.stateLine}>
-                      状态：{connectionStatusLabel(row.connection)}
+                      {props.t('panel.facts.status', { status: connectionStatusLabel(row.connection, props.t) })}
                       {row.connection === 'disconnected' || row.connection === 'reachable'
                         ? (
                             <>
                               {' '}
-                              <button type="button" data-registry-reach-try="" className={styles.action} onClick={() => { startReach(registration) }}>检测可达</button>
+                              <button type="button" data-registry-reach-try="" className={styles.action} onClick={() => { startReach(registration) }}>{props.t('panel.button.reachTry')}</button>
                             </>
                           )
                         : undefined}
                     </p>
                     {reach !== undefined && reach !== 'probing' && reach.kind !== 'reachable'
-                      ? <p className={styles.stateBad}>{reach.kind === 'timeout' ? `检测超时（${reach.ms} ms）` : reach.reason}</p>
+                      ? <p className={styles.stateBad}>{reach.kind === 'timeout' ? props.t('panel.reach.probeTimeout', { ms: reach.ms }) : reach.reason}</p>
                       : undefined}
                     {registration.launchUrl !== undefined
                       ? (
                           <p data-registry-launch="" className={styles.stateLine}>
-                            <a className={styles.actionPrimary} href={registration.launchUrl} target="_blank" rel="noreferrer">连接（打开含 token 的页面）</a>
+                            <a className={styles.actionPrimary} href={registration.launchUrl} target="_blank" rel="noreferrer">{props.t('panel.registry.launchLink')}</a>
                             <button
                               type="button"
                               className={styles.action}
                               onClick={() => { void navigator.clipboard.writeText(registration.launchUrl ?? '') }}
-                            >复制链接</button>
+                            >{props.t('panel.button.copyLink')}</button>
                           </p>
                         )
                       : undefined}
@@ -1413,19 +1459,19 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                                 setFormMessage(undefined)
                                 setView({ page: 'add' })
                               }}
-                            >重新部署 DSH</button>
+                            >{props.t('panel.ssh.redeploy')}</button>
                           </p>
                         )
                       : undefined}
                     {!confirmingRemove
                       ? (
-                          <button type="button" data-registry-remove-ask="" className={styles.action} onClick={() => { setConfirmingRemove(true) }}>删除登记</button>
+                          <button type="button" data-registry-remove-ask="" className={styles.action} onClick={() => { setConfirmingRemove(true) }}>{props.t('panel.button.deleteRegistration')}</button>
                         )
                       : (
                           <span data-registry-confirm="" className={styles.confirmBox}>
-                            只从这台机器的登记列表里移除，不动远端那台机器。确定？
-                            <button type="button" data-registry-remove-confirm="" className={styles.action} onClick={() => { removeRegistration(row.hostId); openList() }}>确定删除</button>
-                            <button type="button" data-registry-remove-cancel="" className={styles.action} onClick={() => { setConfirmingRemove(false) }}>取消</button>
+                            {props.t('panel.registry.removeNote')}
+                            <button type="button" data-registry-remove-confirm="" className={styles.action} onClick={() => { removeRegistration(row.hostId); openList() }}>{props.t('panel.button.confirmRemove')}</button>
+                            <button type="button" data-registry-remove-cancel="" className={styles.action} onClick={() => { setConfirmingRemove(false) }}>{props.t('panel.button.cancel')}</button>
                           </span>
                         )}
                   </div>
@@ -1435,18 +1481,18 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
               ? (
                   <div data-agent-section="" className={styles.agentSection}>
                     <div className={styles.sectionHead}>
-                      <h3 className={styles.sectionTitle}>本机 agent</h3>
+                      <h3 className={styles.sectionTitle}>{props.t('panel.title.selfAgents')}</h3>
                       <span className={styles.spacer} />
-                      <button type="button" data-action="refresh-agents" className={styles.action} onClick={refreshAgents}>刷新</button>
+                      <button type="button" data-action="refresh-agents" className={styles.action} onClick={refreshAgents}>{props.t('panel.button.refresh')}</button>
                     </div>
                     {load.stage === 'loading'
-                      ? <p data-agents-loading="" className={styles.stateLine}>正在读取本机 agent……</p>
+                      ? <p data-agents-loading="" className={styles.stateLine}>{props.t('panel.agents.loading')}</p>
                       : load.stage === 'failed'
-                        ? <p data-agents-failed="" className={styles.stateBad}>读取失败：{load.message}</p>
+                        ? <p data-agents-failed="" className={styles.stateBad}>{props.t('panel.agents.failed', { message: load.message })}</p>
                         : agents.length === 0
                           ? (
                               <p data-agents-empty="" className={styles.stateLine}>
-                                {props.agentsNote ?? '这台主机没有列出任何 acp agent——可能没有配置预设，或模型目录读取失败；点"刷新"再试。'}
+                                {props.agentsNote ?? props.t('panel.agents.empty')}
                               </p>
                             )
                           : (
@@ -1458,14 +1504,15 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                                     label={agent.label}
                                     verdict={probes.get(agent.presetId)}
                                     onProbe={startProbe}
+                                    t={props.t}
                                   />
                                 ))}
                               </div>
                             )}
                     <details data-self-heal-note="" className={styles.noteDetails}>
-                      <summary className={styles.summary}>连接由谁照看</summary>
+                      <summary className={styles.summary}>{props.t('panel.title.connectionCare')}</summary>
                       <p className={styles.note}>
-                        连接由主机自己照看：发现断了会自动丢弃并在下一次对话时自动重连，无需在这里操作。
+                        {props.t('panel.notes.selfHeal')}
                       </p>
                     </details>
                   </div>
@@ -1473,11 +1520,11 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
               : undefined}
             notes={(
               <details className={styles.noteDetails}>
-                <summary className={styles.summary}>说明</summary>
+                <summary className={styles.summary}>{props.t('panel.title.notes')}</summary>
                 <ul data-panel-notices="" className={styles.notices}>
-                  <li>「在线」= 这台机器的页面在同一个浏览器的同源标签页里开着并按心跳报数；关闭或崩溃的页面过了静默窗口会自动转为未列出。</li>
-                  <li>另一台机器（另一个源）的页面不在这个频道里；它的行以「未连接」出现，靠的是登记。</li>
-                  <li>左侧树按主机列出项目与会话：本机来自 DSH 投影；其他主机用登记里的 launchUrl 拉取（失败时请点「连接」打开那台机器的页面）。各主机对等，没有单独的管理机。</li>
+                  <li>{props.t('panel.notes.onlineMeaning')}</li>
+                  <li>{props.t('panel.notes.otherSource')}</li>
+                  <li>{props.t('panel.notes.sessionTree')}</li>
                 </ul>
               </details>
             )}
@@ -1491,35 +1538,36 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
     <div data-threadharbor-panel="" className={styles.root}>
       <section data-panel-page="list" className={styles.listLayout}>
         <div data-session-tree="" className={styles.sessionTreePane}>
-          <h2 className={styles.title}>会话（按主机）</h2>
+          <h2 className={styles.title}>{props.t('panel.title.sessionTree')}</h2>
           <div ref={attachRollUpMount(props.rollUp)} data-rollup-host="" className={styles.rollupHost} />
         </div>
         <div data-host-pane="" className={styles.hostPane}>
           <div className={styles.pageHead}>
-            <h2 className={styles.title}>主机</h2>
+            <h2 className={styles.title}>{props.t('panel.title.hosts')}</h2>
             <span className={styles.spacer} />
             <button
               type="button"
               data-action="add-host"
               className={styles.actionPrimary}
               onClick={() => { setFormMessage(undefined); setView({ page: 'add' }) }}
-            >添加新主机</button>
+            >{props.t('panel.title.addHost')}</button>
           </div>
-          <StoragePostureLine posture={props.hostStore?.posture()} />
+          <StoragePostureLine posture={props.hostStore?.posture()} t={props.t} />
           <div data-host-list="" className={styles.hostList}>
             <div data-host-list-head="" className={styles.hostListHead} aria-hidden="true">
-              <span className={styles.hostListHeadLabel}>名称</span>
-              <span className={styles.hostListHeadLabel}>状态</span>
-              <span className={styles.hostListHeadLabel}>IP</span>
+              <span className={styles.hostListHeadLabel}>{props.t('panel.form.fieldName')}</span>
+              <span className={styles.hostListHeadLabel}>{props.t('panel.form.fieldStatus')}</span>
+              <span className={styles.hostListHeadLabel}>{props.t('panel.form.fieldIp')}</span>
               <span className={styles.hostListHeadLabel} />
             </div>
             {hostRows.length === 0
-              ? <p data-host-list-empty="" className={styles.hostListEmpty}>还没有主机。点「添加新主机」登记第一台。</p>
+              ? <p data-host-list-empty="" className={styles.hostListEmpty}>{props.t('panel.list.empty')}</p>
               : hostRows.map(row => (
                   <HostRow
                     key={row.hostId}
                     row={row}
                     onOpen={() => { setFormMessage(undefined); setConfirmingRemove(false); setView({ page: 'detail', hostId: row.hostId }) }}
+                    t={props.t}
                   />
                 ))}
           </div>
