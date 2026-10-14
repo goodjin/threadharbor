@@ -271,10 +271,26 @@ export class DshSshManager {
     }
   }
 
-  async ensureTunnel(config: SshConnectionConfig, remotePort: number): Promise<string> {
+  /**
+   * 确保一条到远端 `127.0.0.1:<remotePort>` 的本地转发，返回 endpoint 字符串。
+   *
+   * `opts.localPort`（中转隧道池用）：本地端口服从调用方分配而不是自选。各
+   * 机的认证凭据绑定 authority（`127.0.0.1:<本地端口>`），落盘的端口和实际
+   * 监听的端口分家会让凭据对着没人监听的地址静默失败——所以指定了就必须
+   * 逐字执行。不传时行为与既有消费方（远程会话等）完全一致：自选临时端口。
+   */
+  async ensureTunnel(config: SshConnectionConfig, remotePort: number, opts?: { readonly localPort?: number }): Promise<string> {
+    const requested = opts?.localPort
+    // 调用方指定端口时在这里挡住非法值，不透传给 ssh：0 会被 ssh 解释成
+    // 「随机分配本地端口」，endpoint 却仍写 0——恰好是本入口要消灭的静默
+    // 分家；负数/非整数拼出 `127.0.0.1:-5:` 这类畸形转发声明，越界端口
+    // bind 必败，都只会在隧道建立那一步才炸。挡在调用点，错误当场出现。
+    if (requested !== undefined && (!Number.isInteger(requested) || requested < 1 || requested > 65535)) {
+      throw new Error(`本地端口必须是 1-65535 的整数，收到：${requested}`)
+    }
     const materialized = await this.materializeAuth(config)
     try {
-      return await this.ensureTunnelWithAuth(materialized, remotePort)
+      return await this.ensureTunnelWithAuth(materialized, remotePort, requested)
     } finally {
       this.cleanupTempKeys()
     }
@@ -293,16 +309,20 @@ export class DshSshManager {
     this.cleanupTempKeys()
   }
 
-  private async ensureTunnelWithAuth(config: SshConnectionConfig, remotePort: number): Promise<string> {
+  private async ensureTunnelWithAuth(config: SshConnectionConfig, remotePort: number, requestedLocalPort?: number): Promise<string> {
     const key = alias(config)
     const prior = this.tunnelOps.get(key) ?? Promise.resolve()
     const runTunnel = prior.then(async () => {
       const existing = this.tunnels.get(key)
+      // 已有隧道只有在本地端口与本次要求一致时才可复用：调用方指定端口时
+      // 端口是承重约束（凭据绑定 authority），复用别的端口等于让 endpoint
+      // 对着没人监听的地址。未指定时保持旧行为：有任何活着的隧道就复用。
       if (existing !== undefined
+        && (requestedLocalPort === undefined || existing.localPort === requestedLocalPort)
         && (existing.child.exitCode === null || await portListening(existing.localPort))) {
         return `http://127.0.0.1:${existing.localPort}`
       }
-      const localPort = await freePort()
+      const localPort = requestedLocalPort ?? await freePort()
       await this.startTunnel(config, localPort, remotePort)
       return `http://127.0.0.1:${localPort}`
     })

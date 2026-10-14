@@ -60,6 +60,8 @@ const MACHINE_B: RelayMachineConfig = { hostId: 'host-b', target: TARGET, remote
 interface TunnelCall {
   config: SshConnectionConfig
   remotePort: number
+  /** opts.localPort 的记录；undefined = 调用方没把落盘端口交给 SSH 层。 */
+  localPort?: number
 }
 
 /**
@@ -69,11 +71,19 @@ interface TunnelCall {
  */
 function ensureTunnelFake(...outcomes: Array<string | Error>): {
   calls: TunnelCall[]
-  ensureTunnel: (config: SshConnectionConfig, remotePort: number) => Promise<string>
+  ensureTunnel: (
+    config: SshConnectionConfig,
+    remotePort: number,
+    opts?: { readonly localPort?: number },
+  ) => Promise<string>
 } {
   const calls: TunnelCall[] = []
-  const ensureTunnel = async (config: SshConnectionConfig, remotePort: number): Promise<string> => {
-    calls.push({ config, remotePort })
+  const ensureTunnel = async (
+    config: SshConnectionConfig,
+    remotePort: number,
+    opts?: { readonly localPort?: number },
+  ): Promise<string> => {
+    calls.push({ config, remotePort, ...(opts?.localPort === undefined ? {} : { localPort: opts.localPort }) })
     const next = outcomes.shift()
     if (next instanceof Error) throw next
     return next ?? 'http://127.0.0.1:54321'
@@ -111,6 +121,9 @@ describe('TunnelPool（本地端口固定分配并持久化）', () => {
     expect(calls).toHaveLength(1)
     expect(calls[0]?.config).toEqual({ target: TARGET, hostKeyFingerprint: PUB_FINGERPRINT })
     expect(calls[0]?.remotePort).toBe(MACHINE.remotePort)
+    // 落盘端口必须经 opts.localPort 交给 SSH 层：落盘账目和实际监听口是同
+    // 一个号，端口↔凭据绑定才成立（Task 5b）。
+    expect(calls[0]?.localPort).toBe(handle.localPort)
   })
 
   it('② 重启重建（同 statePath 新开 pool）：端口不变；假隧道累计被调 2 次——重建要真把隧道再开起来', async () => {
@@ -122,6 +135,9 @@ describe('TunnelPool（本地端口固定分配并持久化）', () => {
     expect(second.localPort).toBe(first.localPort)
     expect(second.origin).toBe(first.origin)
     expect(fake.calls).toHaveLength(2)
+    // 重建的两次调用都服从同一个落盘端口——重启后端口不换号正是隧道池存在的意义。
+    expect(fake.calls[0]?.localPort).toBe(first.localPort)
+    expect(fake.calls[1]?.localPort).toBe(first.localPort)
   })
 
   it('③ 同实例重复 ensure：返回同一 handle，不再调用假隧道', async () => {

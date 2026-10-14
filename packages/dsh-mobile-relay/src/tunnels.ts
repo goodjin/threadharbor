@@ -20,9 +20,9 @@
  *
  * deps.ensureTunnel 由装配处注入（Task 7 传 DshSshManager.ensureTunnel 的
  * 绑定），本文件不拼 ssh 命令行。它的返回值（endpoint 字符串）不作为句柄
- * 端口的来源——端口的权威是本层的落盘分配；这意味着**装配处注入的绑定必
- * 须按本层分配的端口开隧道**（现 manager 会自选临时端口，接线时需扩展或
- * 包一层服从分配的绑定，见任务报告的遗留项）。
+ * 端口的来源——端口的权威是本层的落盘分配；本层经 opts.localPort 把落盘
+ * 端口交给 SSH 层，联邦包的 manager 自 Task 5b 起服从该端口，落盘端口与
+ * 实际监听口两边一致。
  *
  * 先落盘、后开隧道：开隧道失败时分配已留存，重试或重启后仍拿同一端口——
  * 「一经分配就固定」不因一次失败而作废。
@@ -52,8 +52,8 @@ export type TunnelEnsureResult =
     }
 
 export interface TunnelPoolDeps {
-  /** 与 DshSshManager.ensureTunnel 同形；绑定必须服从本层分配的 localPort（见模块头注释）。 */
-  ensureTunnel(config: SshConnectionConfig, remotePort: number): Promise<string>
+  /** 与 DshSshManager.ensureTunnel 同形；绑定必须服从 opts.localPort（见模块头注释）。 */
+  ensureTunnel(config: SshConnectionConfig, remotePort: number, opts?: { readonly localPort?: number }): Promise<string>
   /** 收尾钩子（如 manager.close 的绑定）；缺省时 closeAll 只清内存句柄。 */
   closeTunnel?(): Promise<void>
 }
@@ -139,7 +139,9 @@ export class TunnelPool {
 
       try {
         // 返回值（endpoint）不作句柄端口来源：权威是上面的落盘分配。
-        await this.deps.ensureTunnel(this.connectionConfig(machine, fingerprint), machine.remotePort)
+        // opts.localPort 把落盘端口交给 SSH 层，落盘账目和实际监听口是同一
+        // 个号，凭据绑定的 authority 不落空。
+        await this.deps.ensureTunnel(this.connectionConfig(machine, fingerprint), machine.remotePort, { localPort })
       } catch (error) {
         // SSH 层的错误文本只含目标与 stderr（不含凭据）；原样截取给上层分
         // 「连不上」类提示。状态文档里的凭据值从不进入本层任何消息。
