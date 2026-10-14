@@ -22,6 +22,8 @@ export default defineConfig({
       ['packages/dsh-client/tests/rollup-section.spec.ts', 'jsdom'],
       ['packages/dsh-client/tests/surface.spec.ts', 'jsdom'],
       ['packages/dsh-host-federation/tests/rollup-mount.spec.ts', 'jsdom'],
+      // 手机页挂接层 bootApp 跑真 DOM（jsdom）：入口探测、页签、横幅、表单。
+      ['packages/dsh-mobile-entry/tests/app.spec.ts', 'jsdom'],
     ],
   },
 })

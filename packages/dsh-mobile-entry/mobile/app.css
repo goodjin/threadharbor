@@ -1,0 +1,328 @@
+/*
+ * 手机页样式：无图片资源（静态资产全文本），三层适配全部用 CSS 媒体查询——
+ * 深色模式跟系统（prefers-color-scheme）、窄屏收紧留白（max-width）、触屏
+ * 加大命中区（pointer: coarse）。按钮的基础命中高度按拇指尺寸给到 44px。
+ */
+
+:root {
+  color-scheme: light dark;
+  --bg: #f5f6f8;
+  --fg: #1c1e21;
+  --muted: #69707a;
+  --card: #ffffff;
+  --line: #d9dce1;
+  --accent: #2563eb;
+  --accent-contrast: #ffffff;
+  --danger: #b91c1c;
+  --ok: #15803d;
+  --warn-bg: #fff4e5;
+  --warn-line: #f0b264;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #101214;
+    --fg: #e7e9ec;
+    --muted: #9aa1ab;
+    --card: #1a1d21;
+    --line: #2d3138;
+    --accent: #7cabf8;
+    --accent-contrast: #0d1117;
+    --danger: #f28b82;
+    --ok: #6cc98a;
+    --warn-bg: #332412;
+    --warn-line: #7a5a2e;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.55 system-ui, -apple-system, 'PingFang SC', 'Noto Sans CJK SC', sans-serif;
+}
+
+#app {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 0 12px calc(72px + env(safe-area-inset-bottom));
+}
+
+/* 顶栏 */
+.appbar {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  position: sticky;
+  top: 0;
+  padding: 12px 0 8px;
+  background: var(--bg);
+  z-index: 2;
+}
+
+.app-title { font-size: 18px; font-weight: 700; }
+
+.mux-state { font-size: 12px; color: var(--muted); }
+.mux-online { color: var(--ok); }
+.mux-offline { color: var(--danger); }
+
+/* 按钮：拇指尺寸的统一基底 */
+button {
+  font: inherit;
+  color: inherit;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  min-height: 44px;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+
+button:active { opacity: 0.7; }
+
+button.ghost { background: transparent; }
+
+button.danger,
+button[data-action='reject'] {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+button[data-action='approve'] {
+  color: var(--accent-contrast);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* 引导 / 错误 / 加载整屏 */
+.guide, .boot-loading { padding-top: 12vh; }
+
+.guide h1 { font-size: 20px; margin: 0 0 12px; }
+.guide p, .guide li { color: var(--fg); }
+.guide .guide-detail { color: var(--muted); word-break: break-all; }
+.guide code {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 1px 6px;
+  word-break: break-all;
+}
+.guide ol, .guide ul { padding-left: 20px; }
+.guide li { margin: 6px 0; }
+.guide button, .guide + * button { margin-top: 12px; }
+
+.boot-loading { color: var(--muted); text-align: center; }
+
+/* 列表（主机 / 会话） */
+.list-error, .list-loading, .list-empty, .conv-error, .conv-loading {
+  color: var(--muted);
+  margin: 12px 0;
+  word-break: break-all;
+}
+.list-error, .conv-error { color: var(--danger); }
+
+.host-list, .session-list {
+  list-style: none;
+  margin: 12px 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.host {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+
+.host-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+}
+
+.mark { font-size: 12px; }
+.mark-online { color: var(--ok); }
+.mark-offline { color: var(--muted); }
+
+.badge {
+  font-size: 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.badge-running {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.session-item {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  text-align: left;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.session-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.session-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* 底部页签 */
+.tabbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  background: var(--card);
+  border-top: 1px solid var(--line);
+  padding-bottom: env(safe-area-inset-bottom);
+  z-index: 2;
+}
+
+.tabbar:empty { display: none; }
+
+.tab {
+  flex: 1;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+.tab-active { color: var(--accent); font-weight: 700; }
+
+/* 待批权限横幅 */
+.banners { display: grid; gap: 8px; margin: 8px 0; }
+.banners:empty { display: none; }
+
+.approval {
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-line);
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+
+.approval p { margin: 0 0 6px; overflow-wrap: anywhere; }
+.approval-title { font-weight: 700; }
+.approval-reason { color: var(--muted); font-size: 14px; }
+.approval-actions { display: flex; gap: 8px; }
+.approval-actions button { flex: 1; }
+
+/* 对话屏 */
+.conv-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  position: sticky;
+  top: 44px;
+  padding: 6px 0;
+  background: var(--bg);
+  z-index: 1;
+}
+
+.conv-title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.conv-header .danger { flex: none; }
+
+.msg-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 0;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.msg {
+  max-width: 85%;
+  padding: 8px 12px;
+  border-radius: 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.msg-user {
+  align-self: flex-end;
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.msg-assistant {
+  align-self: flex-start;
+  background: var(--card);
+  border: 1px solid var(--line);
+}
+
+.msg-streaming { color: var(--muted); font-style: italic; }
+
+.evt-marker {
+  align-self: flex-start;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 2px 4px;
+}
+
+.prompt-bar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  gap: 8px;
+  padding: 8px 0 calc(8px + env(safe-area-inset-bottom));
+  background: var(--bg);
+}
+
+#prompt-input {
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  font: inherit;
+  color: var(--fg);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0 12px;
+}
+
+/* 窄屏：收紧留白与字号 */
+@media (max-width: 380px) {
+  #app { padding-left: 8px; padding-right: 8px; }
+  .app-title { font-size: 16px; }
+  .mux-state { display: none; }
+  .msg { max-width: 92%; }
+}
+
+/* 触屏：加大可点区域的外扩 */
+@media (pointer: coarse) {
+  button { padding: 10px 16px; }
+  .session-item { padding: 14px 16px; }
+}

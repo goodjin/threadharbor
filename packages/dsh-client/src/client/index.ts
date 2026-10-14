@@ -14,7 +14,11 @@
  * workspace / session 投影也随之不再从这里读), this host's agent probes,
  * and the host registry whose settings source this panel is. One more
  * session-side surface rides here: a switched-away turn's neutral notice and
- * the automatic jump to the session that took over (handover-card.ts).
+ * the automatic jump to the session that took over (handover-card.ts). Beside
+ * the hosts panel sits a second sidebar section of the same registration face:
+ * 手机配对 (pairing-panel.ts), which fetches the mobile pair-url over the
+ * same origin and draws its QR — or the configuration guidance when the host
+ * has no mobileOrigin.
  *
  * There is no restart control here, and that is not an omission: a restart
  * ordered from this page must travel through the channel that is hung. The
@@ -56,6 +60,7 @@ import { buildHostSessions, readSessionSources } from '../session-source.ts'
 import type { SessionRead } from '../session-source.ts'
 import { startRollUpSection } from '../rollup-section.ts'
 import type { SectionSession } from '../rollup-section.ts'
+import { startPairingSurface } from '../pairing-panel.ts'
 import { createRemoteSessionStore } from '../remote-session-store.ts'
 import { AgentPanel } from '../panel.tsx'
 import type { AgentListPort, AgentPanelProps, ProbeStarter, TailscalePeersResult, TailscalePort } from '../panel.tsx'
@@ -103,6 +108,8 @@ export { startRollUpSection } from '../rollup-section.ts'
 export { buildHostSessions, readSessionSources } from '../session-source.ts'
 export type { SessionRead, SessionListSource, SourceSession, WorkspaceListSource } from '../session-source.ts'
 export type { RollUpSection, RollUpSectionDeps, SectionSession } from '../rollup-section.ts'
+export { PAIRING_PANEL_ID, PAIRING_PANEL_ORDER, PAIR_URL_PATH, PairingIcon, PairingPanel, createPairingStore, requestPairUrl, startPairingSurface } from '../pairing-panel.ts'
+export type { PairingPanelProps, PairingSlotHost, PairingState, PairingStore, PairingStoreWriter, PairingSurface, PairingSurfaceParams, PairQrRenderer, PairUrlOutcome, SameOriginFetch } from '../pairing-panel.ts'
 export { mergeHostRows, heartbeatWord } from '../panel.tsx'
 export type { HostListRow } from '../panel.tsx'
 export { AgentPanel, AgentRow, runProbe } from '../panel.tsx'
@@ -403,6 +410,16 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
     },
   }
   registerPanelSlots(ctx.slots, face, () => t('panel.label'))
+
+  // 手机配对 section：和主机面板同一套侧栏注册面（sidebar.panellist + main），
+  // 数据只有一条同源 GET（pair-url）。带令牌的网址只进面板状态、只画在这台
+  // 已准入会话的屏幕上——log 只收失败原因，一个字都不提网址。
+  const pairing = startPairingSurface({
+    slots: ctx.slots,
+    label: () => t('pairing.label'),
+    log: message => { log.warn(message) },
+  })
+  ctx.effect(() => () => { pairing.dispose() }, 'threadharbor: pairing surface')
 
   // A switched-away turn ends by naming the session that took over. This is
   // what turns that ending into the on-page behavior the user asked for: a

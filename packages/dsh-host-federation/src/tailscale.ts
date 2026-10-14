@@ -22,9 +22,14 @@
  * nonsense all land in the document as an empty list plus the reason, because
  * a picker that silently shows nothing is indistinguishable from a bridge
  * that never loaded.
+ *
+ * The exec + parse core is {@link queryTailscalePeers}: mobile-entry 的
+ * peers 接口 shares this same query; the bridge only adds the document
+ * writes around it.
  */
 
 import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { HOST_STORE_ENTRY_ID } from './host-store-id.ts'
 import {
   TAILSCALE_ERROR_KEY,
@@ -131,49 +136,55 @@ function backendStateNote(status: unknown): string | undefined {
   return undefined
 }
 
-/** What one status run produced, whatever went wrong. */
-export type TailscaleStatusOutcome =
-  | { readonly ok: true; readonly status: unknown }
-  | { readonly ok: false; readonly reason: string }
+/** The slice of the tailscale CLI runner this query needs; injectable for tests. */
+export type TailscaleStatusRun = (file: string, args: string[]) => Promise<{ readonly stdout: string }>
 
-/** The slice of node:child_process execFile this bridge needs; injectable for tests. */
-export type ExecFileFace = (
-  file: string,
-  args: readonly string[],
-  options: { readonly timeout: number; readonly maxBuffer: number },
-  callback: (error: { readonly message: string; readonly code?: string | number | null | undefined } | null, stdout: string | Buffer, stderr: string | Buffer) => void,
-) => void
-
-/** The real command runner: node's execFile, adapted to the face. */
-const nodeExecFile: ExecFileFace = (file, args, options, callback) => {
-  execFile(file, args, options, (error, stdout, stderr) => { callback(error, stdout, stderr) })
+/**
+ * The real command runner: node's execFile, promisified, carrying the same
+ * timeout and buffer ceiling the bridge has always used.
+ */
+const execTailscale: TailscaleStatusRun = async (file, args) => {
+  const { stdout } = await promisify(execFile)(file, args, { timeout: 15_000, maxBuffer: 16 * 1024 * 1024 })
+  return { stdout }
 }
 
 /**
- * Run `tailscale status --json` once and parse its stdout.
- * @param exec - the command runner; the default is node's execFile.
- * @returns the parsed document, or the reason the run said nothing useful.
+ * Run `tailscale status --json` once and fold its stdout into the peer list.
+ * 失败不抛是这份查询的合同：命令没装、没登录、输出不是 JSON，全都折成
+ * 空清单加原因（error 字段），跟写进 host-store 的 error 键同一段话。
+ * mobile-entry 的 peers 接口走同一份——两个消费方，一份解析。
+ * @param run - the command runner; the default is node's promisified execFile.
+ * @returns the folded peer list, plus the reason the list is empty when the command said nothing useful.
  */
-export async function runTailscaleStatus(exec: ExecFileFace = nodeExecFile): Promise<TailscaleStatusOutcome> {
-  return await new Promise<TailscaleStatusOutcome>(resolve => {
-    exec('tailscale', ['status', '--json'], { timeout: 15_000, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
-      if (error !== null) {
-        // ENOENT（没装）和非零退出（最常见是没登录）是两种最常见的坏。
-        // stderr 带着人话原因，原样跟出去，面板上那句「为什么是空的」才有内容。
-        const detail = stderr.toString().trim()
-        resolve({ ok: false, reason: `tailscale status --json 失败：${error.message}${detail === '' ? '' : `：${detail}`}` })
-        return
-      }
-      let parsed: unknown
-      try {
-        parsed = JSON.parse(stdout.toString())
-      } catch {
-        resolve({ ok: false, reason: `tailscale status --json 的输出不是 JSON：${stdout.toString().slice(0, 120)}` })
-        return
-      }
-      resolve({ ok: true, status: parsed })
-    })
-  })
+export async function queryTailscalePeers(
+  run: TailscaleStatusRun = execTailscale,
+): Promise<{ peers: readonly TailscalePeer[]; error?: string }> {
+  let stdout: string
+  try {
+    stdout = (await run('tailscale', ['status', '--json'])).stdout
+  } catch (error) {
+    // ENOENT（没装）和非零退出（最常见是没登录）是两种最常见的坏。
+    // stderr 带着人话原因，原样跟出去，「为什么是空的」才有内容。
+    const detail = stderrTextOf(error)
+    return { peers: [], error: `tailscale status --json 失败：${messageOf(error)}${detail === '' ? '' : `：${detail}`}` }
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(stdout)
+  } catch {
+    return { peers: [], error: `tailscale status --json 的输出不是 JSON：${stdout.slice(0, 120)}` }
+  }
+  const peers = parseTailscaleStatus(parsed)
+  // BackendState 不是 Running 时（最常见是未登录），说清为什么清单是空的。
+  const note = backendStateNote(parsed)
+  return note === undefined ? { peers } : { peers, error: note }
+}
+
+/** The stderr a failed command run carried, as text; most rejections carry none. */
+function stderrTextOf(error: unknown): string {
+  const stderr: unknown = (error as { stderr?: unknown } | null)?.['stderr']
+  if (typeof stderr === 'string') return stderr.trim()
+  return Buffer.isBuffer(stderr) ? stderr.toString().trim() : ''
 }
 
 /** The settings face this bridge writes through — describe and mutate, bound. */
@@ -184,8 +195,8 @@ export type TailscaleSettingsFace = {
 
 /** What the bridge needs from its host; everything is a port so tests stay hermetic. */
 export type TailscaleBridgeDeps = {
-  /** One status run. */
-  status(): Promise<TailscaleStatusOutcome>
+  /** One tailscale query; undefined = the real promisified execFile. */
+  run?: TailscaleStatusRun
   /** The settings service of this machine (already resolved). */
   settings: TailscaleSettingsFace
   /** Fires on every settings document change; the argument is the namespace id. */
@@ -271,12 +282,11 @@ async function demandOf(deps: TailscaleBridgeDeps): Promise<string | undefined> 
 
 /** Write one full picture: peers, the error note, and which demand this was. */
 async function runOnce(deps: TailscaleBridgeDeps, demand: string): Promise<void> {
-  const outcome = await deps.status()
-  // 命令成功但 BackendState 不是 Running（最常见是未登录）也属于「这一拍没清单」，
-  // 把原因写进 error 键，面板那句「为什么是空的」才有内容；命令本身失败时用它给的原因。
-  const note = outcome.ok ? backendStateNote(outcome.status) : outcome.reason
+  // 清单与原因（命令失败、未登录、已停止）都由 queryTailscalePeers 折好；
+  // 这里只管把这一拍写进文档：peers 键、应答键、error 键。
+  const { peers, error: note } = await queryTailscalePeers(deps.run)
   const ops: unknown[] = [
-    { op: 'set', path: ['data', TAILSCALE_PEERS_KEY], value: JSON.stringify(outcome.ok ? parseTailscaleStatus(outcome.status) : []) },
+    { op: 'set', path: ['data', TAILSCALE_PEERS_KEY], value: JSON.stringify(peers) },
     // 应答键写「消费到的那一拍」，不是本地时钟：面板比对的是它自己写下去的值。
     { op: 'set', path: ['data', TAILSCALE_REFRESHED_KEY], value: demand },
     note === undefined
@@ -342,7 +352,6 @@ export function apply(ctx: unknown, _config: unknown): void {
       : (handler: (ns: string) => void): (() => void) =>
           onFacet('settings/document-updated', (ns: unknown) => { handler(typeof ns === 'string' ? ns : '') }) as () => void
     startTailscaleBridge({
-      status: () => runTailscaleStatus(),
       settings: {
         describe: async () => await describe(),
         mutate: async (ns, ops) => await mutate(ns, ops),

@@ -18,6 +18,16 @@ const KEYS_USED_BY_COMPONENTS: readonly ClientLocaleKey[] = [
   'progress.ready',
   'handover.title',
   'handover.open',
+  'pairing.label',
+  'pairing.loading',
+  'pairing.ready.title',
+  'pairing.qr.alt',
+  'pairing.url.hint',
+  'pairing.guidance.originTitle',
+  'pairing.guidance.origin',
+  'pairing.guidance.unreachableTitle',
+  'pairing.guidance.unreachable',
+  'pairing.guidance.detail',
 ]
 
 /** Every `{name}` placeholder a value carries, in order. */

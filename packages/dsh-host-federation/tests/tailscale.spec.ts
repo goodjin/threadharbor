@@ -6,7 +6,9 @@
  * threadharbor-host-store 命名空间的 data 字典（浏览器经 remote.settings
  * 读同一个键），并盯着 refresh 键——面板点「刷新」改它，这里重跑一次。
  *
- * 命令边界（execFile）与设置通道（describe/mutate）都是端口，全部的
+ * exec + 解析的核心在 queryTailscalePeers：mobile-entry 的 peers 接口与
+ * 这座桥共用同一份查询；桥只在它外面包文档写入。命令边界（run：文件 +
+ * 参数进、stdout 出）与设置通道（describe/mutate）都是端口，全部的
  * 行为测试都用假件立起来：这里不跑真的 tailscale，也不碰真的设置服务。
  */
 
@@ -18,10 +20,10 @@ import {
   TAILSCALE_REFRESHED_KEY,
   TAILSCALE_REFRESH_KEY,
   parseTailscaleStatus,
-  runTailscaleStatus,
+  queryTailscalePeers,
   startTailscaleBridge,
 } from '../src/tailscale.ts'
-import type { TailscaleBridgeDeps, TailscaleSettingsFace, TailscaleStatusOutcome } from '../src/tailscale.ts'
+import type { TailscaleBridgeDeps, TailscaleSettingsFace, TailscaleStatusRun } from '../src/tailscale.ts'
 
 /** 一份真实形状的 tailscale status --json 片段（字段名照抄真机输出）。 */
 function statusFixture(): unknown {
@@ -103,39 +105,47 @@ describe('parseTailscaleStatus：把 status JSON 折成 {name, ip, online} 清�
   })
 })
 
-describe('runTailscaleStatus：命令边界', () => {
-  it('把 stdout 解析成 JSON 交给调用方', async () => {
-    const outcome = await runTailscaleStatus((file, args, options, callback) => {
-      expect(file).toBe('tailscale')
-      expect(args).toEqual(['status', '--json'])
-      expect(options.timeout).toBeGreaterThan(0)
-      callback(null, JSON.stringify(statusFixture()), '')
+describe('queryTailscalePeers：命令边界与解析（peers 接口同用这份查询）', () => {
+  it('把 stdout 解析成 peers 清单；跑的就是 tailscale status --json', async () => {
+    const commands: string[] = []
+    const outcome = await queryTailscalePeers(async (file, args) => {
+      commands.push(`${file} ${args.join(' ')}`)
+      return { stdout: JSON.stringify(statusFixture()) }
     })
-    expect(outcome.ok).toBe(true)
+    expect(commands).toEqual(['tailscale status --json'])
+    expect(outcome.peers.map(peer => peer.name)).toContain('bench.tail-scale.ts.net')
+    expect(outcome.error).toBeUndefined()
   })
 
-  it('命令不存在 / 非零退出：给出带原因的失败，不抛', async () => {
-    const missing = await runTailscaleStatus((_file, _args, _options, callback) => {
-      callback(Object.assign(new Error('spawn tailscale ENOENT'), { code: 'ENOENT' }), '', '')
+  it('命令不存在 / 非零退出：空清单 + 带原因（含 stderr）的 error，不抛', async () => {
+    const missing = await queryTailscalePeers(async () => {
+      throw Object.assign(new Error('spawn tailscale ENOENT'), { code: 'ENOENT' })
     })
-    expect(missing.ok).toBe(false)
-    if (missing.ok) throw new Error('should have failed')
-    expect(missing.reason).toContain('tailscale')
-    expect(missing.reason).toContain('ENOENT')
+    expect(missing.peers).toEqual([])
+    expect(missing.error).toContain('tailscale')
+    expect(missing.error).toContain('ENOENT')
 
-    const failed = await runTailscaleStatus((_file, _args, _options, callback) => {
-      callback(Object.assign(new Error('exit code 1'), { code: 1 }), '', 'logged out')
+    const failed = await queryTailscalePeers(async () => {
+      throw Object.assign(new Error('Command failed: tailscale status --json'), { stderr: 'logged out' })
     })
-    expect(failed.ok).toBe(false)
-    if (failed.ok) throw new Error('should have failed')
-    expect(failed.reason).toContain('logged out')
+    expect(failed.peers).toEqual([])
+    expect(failed.error).toContain('logged out')
   })
 
-  it('stdout 不是 JSON：失败并带上原始输出的前一段', async () => {
-    const outcome = await runTailscaleStatus((_file, _args, _options, callback) => {
-      callback(null, '这不是 JSON', '')
-    })
-    expect(outcome.ok).toBe(false)
+  it('stdout 不是 JSON：空清单 + 带原始输出前一段的 error', async () => {
+    const outcome = await queryTailscalePeers(async () => ({ stdout: '这不是 JSON' }))
+    expect(outcome.peers).toEqual([])
+    expect(outcome.error).toContain('这不是 JSON')
+  })
+
+  it('命令成功但 BackendState 是 NeedsLogin：清单照折，error 说「未登录」', async () => {
+    // 未登录时 tailscale status --json 照样吐 JSON、照样 exit 0，命令层看不出坏，
+    // 只有 BackendState 能告诉消费方「空是因为没登录」，而不是「空是因为没 peer」。
+    const outcome = await queryTailscalePeers(async () => ({
+      stdout: JSON.stringify({ BackendState: 'NeedsLogin', Self: { ID: '' } }),
+    }))
+    expect(outcome.peers).toEqual([])
+    expect(outcome.error).toContain('未登录')
   })
 })
 
@@ -188,13 +198,13 @@ class FakeSettings implements TailscaleSettingsFace {
   }
 }
 
-/** 桥 + 假件的整套台架：命令桩可编程，事件手动派发。 */
-function bench(options: { status: () => Promise<TailscaleStatusOutcome> | TailscaleStatusOutcome }) {
+/** 桥 + 假件的整套台架：命令桩（run）可编程，事件手动派发。 */
+function bench(options: { run: () => Promise<{ stdout: string }> | { stdout: string } }) {
   const settings = new FakeSettings()
   let documentHandler: ((ns: string) => void) | undefined
   const lines: string[] = []
   const deps: TailscaleBridgeDeps = {
-    status: async () => await options.status(),
+    run: async () => await options.run(),
     settings,
     onDocumentUpdated: handler => {
       documentHandler = handler
@@ -218,7 +228,7 @@ function bench(options: { status: () => Promise<TailscaleStatusOutcome> | Tailsc
 
 describe('startTailscaleBridge：启动与按需刷新', () => {
   it('启动即跑一次：把 Self+Peer 写进 data 字典的 peers 键（JSON 串），并清掉 error', async () => {
-    const rig = bench({ status: () => ({ ok: true, status: statusFixture() }) })
+    const rig = bench({ run: () => ({ stdout: JSON.stringify(statusFixture()) }) })
     await rig.bridge.settled()
     const raw = rig.peers()
     expect(raw).toBeDefined()
@@ -229,38 +239,45 @@ describe('startTailscaleBridge：启动与按需刷新', () => {
     expect(rig.error()).toBeUndefined()
   })
 
-  it('命令失败：写空清单 + error 键写明原因；刷新应答键照写（面板轮询它）', async () => {
-    const rig = bench({ status: () => ({ ok: false, reason: 'tailscale: 未登录' }) })
+  it('命令失败：写空清单 + error 键写明原因（stderr 也带上）；刷新应答键照写（面板轮询它）', async () => {
+    const rig = bench({
+      run: async () => {
+        throw Object.assign(new Error('spawn tailscale ENOENT'), { code: 'ENOENT', stderr: 'logged out' })
+      },
+    })
     await rig.bridge.settled()
     expect(rig.peers()).toBe('[]')
-    expect(rig.error()).toContain('未登录')
+    expect(rig.error()).toContain('ENOENT')
+    expect(rig.error()).toContain('logged out')
     expect(rig.refreshed()).toBe('')
   })
 
   it('命令成功（exit 0）但 BackendState 是 NeedsLogin：写空清单 + error 键说「未登录」', async () => {
     // 未登录时 tailscale status --json 照样吐 JSON、照样 exit 0，命令层看不出坏，
     // 只有 BackendState 能告诉面板「空是因为没登录」，而不是「空是因为没 peer」。
-    const rig = bench({ status: () => ({ ok: true, status: { BackendState: 'NeedsLogin', Self: { ID: '' } } }) })
+    const rig = bench({ run: () => ({ stdout: JSON.stringify({ BackendState: 'NeedsLogin', Self: { ID: '' } }) }) })
     await rig.bridge.settled()
     expect(rig.peers()).toBe('[]')
     expect(rig.error()).toContain('未登录')
   })
 
   it('BackendState 是 Stopped：error 键说「已停止」', async () => {
-    const rig = bench({ status: () => ({ ok: true, status: { BackendState: 'Stopped' } }) })
+    const rig = bench({ run: () => ({ stdout: JSON.stringify({ BackendState: 'Stopped' }) }) })
     await rig.bridge.settled()
     expect(rig.error()).toContain('已停止')
   })
 
   it('BackendState 是 Running：不写 error 键（清单就是清单，没有「为什么空」要解释）', async () => {
-    const rig = bench({ status: () => ({ ok: true, status: statusFixture() }) })
+    const rig = bench({ run: () => ({ stdout: JSON.stringify(statusFixture()) }) })
     await rig.bridge.settled()
     expect(rig.error()).toBeUndefined()
   })
 
   it('面板改 refresh 键 → 收到 document-updated → 重跑并把新清单写回去', async () => {
     let call = 0
-    const rig = bench({ status: () => (call += 1) === 1 ? ({ ok: true, status: statusFixture() }) : ({ ok: true, status: { Peer: {} } }) })
+    const rig = bench({
+      run: () => (call += 1) === 1 ? { stdout: JSON.stringify(statusFixture()) } : { stdout: JSON.stringify({ Peer: {} }) },
+    })
     await rig.bridge.settled()
     expect(JSON.parse(rig.peers() ?? '')).toHaveLength(4)
 
@@ -275,7 +292,7 @@ describe('startTailscaleBridge：启动与按需刷新', () => {
   })
 
   it('自己写的 peers / refreshedAt 又触发 document-updated：refresh 没变就不重跑', async () => {
-    const rig = bench({ status: () => ({ ok: true, status: statusFixture() }) })
+    const rig = bench({ run: () => ({ stdout: JSON.stringify(statusFixture()) }) })
     await rig.bridge.settled()
     rig.updated()
     await rig.bridge.settled()
@@ -286,7 +303,7 @@ describe('startTailscaleBridge：启动与按需刷新', () => {
   })
 
   it('别的命名空间的 document-updated 不理会', async () => {
-    const rig = bench({ status: () => ({ ok: true, status: statusFixture() }) })
+    const rig = bench({ run: () => ({ stdout: JSON.stringify(statusFixture()) }) })
     await rig.bridge.settled()
     rig.settings.doc('threadharbor-host-store').set(TAILSCALE_REFRESH_KEY, '1')
     rig.updated('some-other-ns')
@@ -295,7 +312,7 @@ describe('startTailscaleBridge：启动与按需刷新', () => {
   })
 
   it('describe 一开始就坏：说一声，不抛，也不写账', async () => {
-    const rig = bench({ status: () => ({ ok: true, status: statusFixture() }) })
+    const rig = bench({ run: () => ({ stdout: JSON.stringify(statusFixture()) }) })
     rig.settings.failNextDescribe = 'settings service not started'
     await rig.bridge.settled()
     expect(rig.peers()).toBeUndefined()
@@ -303,7 +320,7 @@ describe('startTailscaleBridge：启动与按需刷新', () => {
   })
 
   it('启动时 refresh 键已有值（主机重启期间面板点过刷新）：一并消费掉', async () => {
-    const rig = bench({ status: () => ({ ok: true, status: statusFixture() }) })
+    const rig = bench({ run: () => ({ stdout: JSON.stringify(statusFixture()) }) })
     rig.settings.doc(HOST_STORE_ENTRY_ID).set(TAILSCALE_REFRESH_KEY, 'old-demand')
     await rig.bridge.settled()
     expect(rig.refreshed()).toBe('old-demand')

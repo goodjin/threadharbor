@@ -20,6 +20,7 @@ describe('remote Web bundle', () => {
     expect(manifest.dependencies).toEqual({
       '@threadharbor/dsh-client': 'workspace:^',
       '@threadharbor/dsh-host-federation': 'workspace:^',
+      '@threadharbor/dsh-mobile-entry': 'workspace:^',
       '@threadharbor/dsh-preset-dispatch': 'workspace:^',
     })
 

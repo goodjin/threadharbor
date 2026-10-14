@@ -31,6 +31,9 @@
       name: '@threadharbor/dsh-host-federation/tailscale'
     - id: threadharbor-ssh-deploy
       name: '@threadharbor/dsh-host-federation/ssh-deploy'
+    # 手机端独立入口（宿主侧）：手机页静态资源 + peers / pair-url 接口。
+    - id: threadharbor-mobile-entry
+      name: '@threadharbor/dsh-mobile-entry'
     # 名册过滤器不点名。每个要藏起的 preset 在自己的 binding 上打
     # hideFromRoster: true；过滤器只认这个标记（以及行上的同名字段）。
     # 新增 agent 只要打标记，不必改过滤器配置。内部 list() 仍不过滤。

@@ -23,6 +23,17 @@ export const zh = {
   /** 交接卡：被切走的回合显示的中性行。 */
   'handover.title': '已切换到 {target}，对话已移到新会话',
   'handover.open': '打开新会话',
+  /** 手机配对 section：侧栏行名与面板三种状态。 */
+  'pairing.label': '手机配对',
+  'pairing.loading': '正在获取配对网址…',
+  'pairing.ready.title': '用手机扫码打开',
+  'pairing.qr.alt': '手机配对二维码',
+  'pairing.url.hint': '扫码不便时，把这个网址发到手机上打开：',
+  'pairing.guidance.originTitle': '还差一步配置：手机端访问地址',
+  'pairing.guidance.origin': '这台 DSH 还没有配置 mobileOrigin。请按文档在 DSH 配置里给 threadharbor-mobile-entry 设置 mobileOrigin 字段（手机端根网址，如 https://mac1.example.ts.net），保存并重启 DSH 后刷新这个页面。',
+  'pairing.guidance.unreachableTitle': '拿不到配对网址',
+  'pairing.guidance.unreachable': '没能从这台主机取回配对网址。请确认这个页面是从 DSH 服务所在的机器打开的，然后刷新页面重试。',
+  'pairing.guidance.detail': '原因：{detail}',
 } satisfies Record<string, string>
 
 /** 这份文案的全部键，也是命名空间声明进 `LocaleNamespaceMap` 的键域。 */
@@ -42,6 +53,16 @@ export const en = {
   'progress.ready': 'New session ready, switching · {target}',
   'handover.title': 'Switched to {target}; the conversation moved to the new session',
   'handover.open': 'Open the new session',
+  'pairing.label': 'Mobile pairing',
+  'pairing.loading': 'Fetching the pairing URL…',
+  'pairing.ready.title': 'Scan with your phone',
+  'pairing.qr.alt': 'Mobile pairing QR code',
+  'pairing.url.hint': 'If scanning is inconvenient, open this URL on the phone:',
+  'pairing.guidance.originTitle': 'One step missing: the mobile origin',
+  'pairing.guidance.origin': 'This DSH has no mobileOrigin configured yet. Following the docs, set the mobileOrigin field of the threadharbor-mobile-entry plugin in the DSH configuration (the mobile root URL, e.g. https://mac1.example.ts.net), restart DSH, and reload this page.',
+  'pairing.guidance.unreachableTitle': 'Pairing URL unavailable',
+  'pairing.guidance.unreachable': 'The pairing URL could not be fetched from this host. Make sure this page is opened from the machine serving DSH, then reload and try again.',
+  'pairing.guidance.detail': 'Reason: {detail}',
 } satisfies Record<ClientLocaleKey, string>
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {

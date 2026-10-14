@@ -19,6 +19,7 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 ACP agent（g
 - 中途切换 agent（判定 / 历史交接 / 执行三段）：已经在说话的会话锁死了预设，只能在目标预设上新建会话继续。切换时整段对话既作为上下文交给新 agent，也原样回填到新会话自己的记录上——打开新会话看到的还是刚才那段对话，只是底下接上了新的内容；旧会话留下一条交接提示并自动跳过去。
 - 切换过程看得见：面板整个换掉，所以切换一开始就在窗口顶部挂一条进度（准备 → 读新会话的历史 → 就绪），同时先把新会话的首屏读出来，读完才跳过去，跳过去时内容已经在屏幕上。首屏读不出来或迟迟不来都不卡住跳转，最多等 4 秒。历史长不长都只取首屏（DSH 自带的分页，约 50 条消息起），更早的用「加载更早」按页取。
 - 主机侧的 agent 探测（发一条真实小任务看是否回应）与重启已实现，但目前没有界面入口。
+- 手机通道（核对时间 2026-10-15）：`@threadharbor/dsh-mobile-entry` 在 DSH Web 上挂 `/threadharbor/mobile/` 手机页——主机清单（tailnet 名单 + 各机 DSH 探测）、看会话、发消息、批权限、停止回合——以及先过官方准入的 `peers` / `pair-url` 两个接口。桌面侧栏「手机配对」面板出二维码（需配置 `mobileOrigin`，只收 https 源），手机扫码经官方授权入口把令牌换成 cookie 完成配对。可达性由 `tailscale serve --bg` 提供，dsh 启动须带 `--trusted-host`；`scripts/mobile-setup.sh <dsh端口>` 一键完成发布并打印两步配置，详见 [docs/mobile-client.zh.md](docs/mobile-client.zh.md)。
 - 原生 dsh preset 的行为不受影响：组合行只认得自己 presetId 下的会话，其余一律不接管。
 - 各 agent 的端到端活测（建会话 → 提问 → 收到回答 → 工具调用正确投影、权限批准后回合继续）默认跳过，带 `THREADHARBOR_LIVE_ACP=1` 运行；见下文「真机活测」。
 
@@ -70,14 +71,15 @@ THREADHARBOR_LIVE_ACP=1 npx vitest run packages/dsh-acp-agent/tests/live.spec.ts
 ```text
 packages/dsh-acp-agent/        通用 ACP 接入层：客户端、传输、三家方言、投影、终端/文件子协议
 packages/dsh-preset-dispatch/  preset 组合行（宿主加载入口 entry.ts）：分流、回合驱动、写回、流式
-packages/dsh-client/           浏览器插件：目前只承担跨主机汇总的挂载点（面板未挂）
+packages/dsh-client/           浏览器插件：「各主机」汇总面板（未挂进侧栏）与「手机配对」二维码面板
 packages/dsh-host-federation/  跨主机汇总的库：主机身份、跨标签页通道、分组视图、按主机设置
+packages/dsh-mobile-entry/     手机端入口（宿主侧）：/threadharbor/mobile/ 手机页、peers / pair-url 接口
 tests/wiring.spec.ts           「代码对」与「代码跑得到」分开检查；到不了的模块登记在 KNOWN_UNWIRED
 cordis.patch.yml               安装到 DSH Web profile 的标准 bundle patch（只插浏览器插件）
 reference/                     被 Git 忽略的 DeepSeek Harness 参考源码
 ```
 
-设计说明见 [docs/design/dsh-multi-host-migration.md](docs/design/dsh-multi-host-migration.md)，各 agent 的对接实测见 [docs/agent-acp/](docs/agent-acp/README.md)，AgentHarbor/SessionPort 对比见 [docs/landscape.zh.md](docs/landscape.zh.md)。通过 SSH 在远端安装 DSH 见 [docs/ssh-deploy.zh.md](docs/ssh-deploy.zh.md)。手机端（Android）接入方案尚未实现，见 [docs/mobile-client.zh.md](docs/mobile-client.zh.md)。
+设计说明见 [docs/design/dsh-multi-host-migration.md](docs/design/dsh-multi-host-migration.md)，各 agent 的对接实测见 [docs/agent-acp/](docs/agent-acp/README.md)，AgentHarbor/SessionPort 对比见 [docs/landscape.zh.md](docs/landscape.zh.md)。通过 SSH 在远端安装 DSH 见 [docs/ssh-deploy.zh.md](docs/ssh-deploy.zh.md)。手机端（Android）的通道、配对与手机页见 [docs/mobile-client.zh.md](docs/mobile-client.zh.md)。
 
 ## 开发检查
 

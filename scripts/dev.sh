@@ -23,6 +23,10 @@
 #   THREADHARBOR_DSH_HOME       DSH home per channel (default: ~/.dsh-threadharbor-<channel>)
 #   THREADHARBOR_WEB_LOG        web log path         (default: $DSH_HOME/threadharbor-runtime/web.log)
 #   THREADHARBOR_WEB_PID        web pid path         (default: .../web.pid)
+#   THREADHARBOR_TRUSTED_HOST   extra --trusted-host authorities for the /api
+#                               trust fence, whitespace-separated; each value
+#                               becomes one repeatable flag (e.g. this
+#                               machine's ts.net name for `tailscale serve`)
 #
 # Notes:
 #   - There is no separate hostd process any more (migration phase 6). The ACP
@@ -115,6 +119,17 @@ web_start() {
   local patch="$root/deploy/channels/$channel.patch.yml"
   local patch_arg=()
   if [[ -f "$patch" ]]; then patch_arg=(--patch "$patch"); fi
+  # One repeatable --trusted-host flag per whitespace-separated authority, so a
+  # single value and a list go through the same code (the CLI accepts both).
+  # read -ra splits on IFS without glob expansion; an unquoted for-in would let
+  # a '*' in the value expand against the cwd into filenames.
+  local trusted_arg=()
+  local -a trusted_hosts=()
+  read -r -a trusted_hosts <<<"${THREADHARBOR_TRUSTED_HOST:-}" || true
+  local trusted_host
+  for trusted_host in ${trusted_hosts[@]+"${trusted_hosts[@]}"}; do
+    trusted_arg+=(--trusted-host "$trusted_host")
+  done
   mkdir -p "$(dirname "$web_log")" "$(dirname "$web_pid")"
   guard_orphan "$web_pid" "$web_port"
   if pid_alive "$web_pid"; then
@@ -124,7 +139,7 @@ web_start() {
   info "starting web (channel=$channel port=$web_port home=$dsh_home)"
   (
     cd "$root"
-    env DSH_HOME="$dsh_home" nohup "$dsh_bin" --profile web "${patch_arg[@]+"${patch_arg[@]}"}" --port "$web_port" \
+    env DSH_HOME="$dsh_home" nohup "$dsh_bin" --profile web "${patch_arg[@]+"${patch_arg[@]}"}" "${trusted_arg[@]+"${trusted_arg[@]}"}" --port "$web_port" \
       >>"$web_log" 2>&1 < /dev/null &
     echo $! >"$web_pid"
   )
@@ -162,7 +177,7 @@ declare -a positional=()
 while (($# > 0)); do
   case "$1" in
     --frame-log) frame_log=1 ;;
-    -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,37p' "$0"; exit 0 ;;
     start|stop|restart|status) positional+=("$1") ;;
     web|all) positional+=("$1") ;;
     *) die "unknown argument: $1 (try --help)" ;;
@@ -174,5 +189,5 @@ action="${positional[0]:-}"
 if [[ -n "${positional[1]:-}" ]]; then target="${positional[1]}"; fi
 case "$action" in
   start|stop|restart|status) run "$action" "$target" ;;
-  *) sed -n '2,34p' "$0"; exit 1 ;;
+  *) sed -n '2,37p' "$0"; exit 1 ;;
 esac
