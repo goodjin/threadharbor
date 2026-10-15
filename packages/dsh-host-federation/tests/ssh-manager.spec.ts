@@ -144,4 +144,71 @@ describe('DshSshManager', () => {
       }
     })
   })
+
+  describe('readPeer — degraded reads stay distinguishable', () => {
+    // Pins the load-bearing split between "the machine was too slow to read"
+    // and "the machine has no record": the timeout path carries a 读取超时
+    // note, a genuinely absent record carries none. Downstream (the panel and
+    // planConnection, which refuses to connect on pluginsInstalled: false)
+    // must be able to tell a slow deployed host from an undeployed one.
+    const makeManager = (): DshSshManager => new DshSshManager({
+      knownHostsPath: '/dev/null',
+      connectTimeoutMs: 10,
+      installTimeoutMs: 10,
+      deploymentChannel: 'test',
+      defaultRemoteWebPort: 3081,
+      releaseDirectory: '/dev/null',
+    })
+    const approved = { target: 'mini.ts.net', hostKeyFingerprint: 'SHA256:abc' }
+    type Internals = {
+      scan: () => Promise<readonly { hostKeyFingerprint: string; knownHostLine: string }[]>
+      remoteExec: () => Promise<{ code: number; stdout: string; stderr: string }>
+    }
+    const scanResult = [{ hostKeyFingerprint: 'SHA256:abc', knownHostLine: 'mini.ts.net ssh-ed25519 AAAA' }]
+
+    it('answers a record read that outlives the budget with unknown plus a timeout note, never stopped', async () => {
+      const manager = makeManager()
+      const internals = manager as unknown as Internals
+      vi.spyOn(internals, 'scan').mockResolvedValue(scanResult)
+      vi.spyOn(internals, 'remoteExec').mockRejectedValue(new Error('ssh timed out after 8000ms'))
+      try {
+        const report = await manager.readPeer(approved)
+        expect(report.liveness).toBe('unknown')
+        expect(report.livenessNote).toBe('读取超时')
+      } finally {
+        manager.close()
+      }
+    })
+
+    it('keeps an installed record intact when only the liveness probe times out, noting the timeout', async () => {
+      const manager = makeManager()
+      const internals = manager as unknown as Internals
+      vi.spyOn(internals, 'scan').mockResolvedValue(scanResult)
+      vi.spyOn(internals, 'remoteExec')
+        .mockResolvedValueOnce({ code: 0, stdout: JSON.stringify({ pluginsInstalled: true, listen: 'loopback', port: 3081 }), stderr: '' })
+        .mockRejectedValueOnce(new Error('ssh timed out after 8000ms'))
+      try {
+        const report = await manager.readPeer(approved)
+        expect(report).toEqual({
+          pluginsInstalled: true, listen: 'loopback', port: 3081,
+          liveness: 'unknown', livenessNote: '读取超时',
+        })
+      } finally {
+        manager.close()
+      }
+    })
+
+    it('leaves a genuinely absent record without a note so absence stays distinguishable from a timeout', async () => {
+      const manager = makeManager()
+      const internals = manager as unknown as Internals
+      vi.spyOn(internals, 'scan').mockResolvedValue(scanResult)
+      vi.spyOn(internals, 'remoteExec').mockResolvedValue({ code: 0, stdout: '', stderr: '' })
+      try {
+        const report = await manager.readPeer(approved)
+        expect(report).toEqual({ pluginsInstalled: false, liveness: 'unknown' })
+      } finally {
+        manager.close()
+      }
+    })
+  })
 })

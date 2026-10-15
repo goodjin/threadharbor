@@ -17,6 +17,12 @@ describe('buildLivenessProbe', () => {
     expect(script.indexOf('command -v node')).toBeLessThan(script.lastIndexOf('UNKNOWN'))
     expect(script).toContain('RUNNING')
     expect(script).toContain('STOPPED')
+    // Tool failures must exit with the tool's own code so the exit status that
+    // reaches classifyLiveness carries the real cause; the only UNKNOWN on
+    // stdout is the neither-tool fallback.
+    expect(script).toContain('exit "$curl_code"')
+    expect(script).toContain('exit "$node_code"')
+    expect(script).not.toContain('UNKNOWN: ')
   })
 
   it('never mentions tailscale', () => {
@@ -25,24 +31,30 @@ describe('buildLivenessProbe', () => {
 })
 
 describe('classifyLiveness', () => {
+  // Every input below is one the emitted script actually produces: curl's HTTP
+  // body is discarded (-o /dev/null … >/dev/null), so success stdout is the
+  // RUNNING echo, refusal echoes STOPPED and exits 7, a timeout exits 28 with
+  // nothing on stdout, and only the neither-tool fallback prints UNKNOWN.
   it('reads exit 0 as running for any HTTP answer, including 401/403', () => {
-    expect(classifyLiveness({ code: 0, stdout: '200' })).toEqual({ liveness: 'running' })
-    expect(classifyLiveness({ code: 0, stdout: '401' })).toEqual({ liveness: 'running' })
-    expect(classifyLiveness({ code: 0, stdout: '403' })).toEqual({ liveness: 'running' })
+    expect(classifyLiveness({ code: 0, stdout: 'RUNNING' })).toEqual({ liveness: 'running' })
   })
 
   it('reads exit 7 (connection refused) as stopped', () => {
-    expect(classifyLiveness({ code: 7, stdout: '000' })).toEqual({ liveness: 'stopped' })
+    expect(classifyLiveness({ code: 7, stdout: 'STOPPED' })).toEqual({ liveness: 'stopped' })
   })
 
   it('never calls a timeout (exit 28) stopped and notes the exit code', () => {
-    const verdict = classifyLiveness({ code: 28, stdout: '000' })
+    const verdict = classifyLiveness({ code: 28, stdout: '' })
     expect(verdict.liveness).toBe('unknown')
     expect(verdict.note).toContain('28')
   })
 
   it('reads a remote UNKNOWN print (no curl, no node) as unknown', () => {
     expect(classifyLiveness({ code: 1, stdout: 'UNKNOWN' })).toEqual({ liveness: 'unknown' })
+  })
+
+  it('trusts the exit status over stdout: exit 0 is running even when stdout says UNKNOWN', () => {
+    expect(classifyLiveness({ code: 0, stdout: 'UNKNOWN' })).toEqual({ liveness: 'running' })
   })
 })
 
@@ -65,7 +77,7 @@ describe('decidePeerReport', () => {
       .toEqual({ pluginsInstalled: true, port: 3081, liveness: 'running' })
     expect(decidePeerReport({ pluginsInstalled: true, port: 3081 }, { code: 7, stdout: 'STOPPED' }))
       .toEqual({ pluginsInstalled: true, port: 3081, liveness: 'stopped' })
-    expect(decidePeerReport({ pluginsInstalled: true, port: 3081 }, { code: 28, stdout: '000' }).liveness)
+    expect(decidePeerReport({ pluginsInstalled: true, port: 3081 }, { code: 28, stdout: '' }).liveness)
       .toBe('unknown')
   })
 })

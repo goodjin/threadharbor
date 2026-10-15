@@ -36,8 +36,10 @@ const NODE_PROBE = 'const http=require("http");const req=http.get(process.argv[1
  * Output contract (classification keys on these exit statuses, not on HTTP
  * codes — the remote DSH requires a token, so 401/403 still mean the process
  * is up): curl is tried first, then node; an HTTP answer prints RUNNING and
- * exits 0, connection refused prints STOPPED and exits 7, and anything else —
- * including the 2 s per-tool timeout — prints UNKNOWN and exits nonzero.
+ * exits 0, connection refused prints STOPPED and exits 7, and any other tool
+ * failure — including the 2 s per-tool timeout — exits with the tool's own
+ * code, so the exit status that reaches classification carries the real
+ * cause. Only when neither tool exists does it print UNKNOWN and exit 1.
  */
 export function buildLivenessProbe(port: number): string {
   const url = shellQuote(`http://127.0.0.1:${port}/`)
@@ -50,7 +52,7 @@ export function buildLivenessProbe(port: number): string {
     '  case "$curl_code" in',
     '    0) echo RUNNING; exit 0 ;;',
     '    7) echo STOPPED; exit 7 ;;',
-    '    *) echo "UNKNOWN: curl exit $curl_code"; exit 1 ;;',
+    '    *) exit "$curl_code" ;;',
     '  esac',
     'fi',
     'if command -v node >/dev/null 2>&1; then',
@@ -59,7 +61,7 @@ export function buildLivenessProbe(port: number): string {
     '  case "$node_code" in',
     '    0) echo RUNNING; exit 0 ;;',
     '    7) echo STOPPED; exit 7 ;;',
-    '    *) echo "UNKNOWN: node exit $node_code"; exit 1 ;;',
+    '    *) exit "$node_code" ;;',
     '  esac',
     'fi',
     'echo UNKNOWN',
@@ -70,17 +72,20 @@ export function buildLivenessProbe(port: number): string {
 /**
  * Classify a probe run by its exit status, never by the HTTP status code.
  *
- * Exit 0 is `running` — any HTTP answer at all counts, including 401/403.
- * Exit 7 (connection refused) is `stopped`. Everything else is `unknown` with
- * the exit code in the note; curl's exit 28 timeout lands here too, because
- * calling a slow machine stopped would invite a needless redeploy.
+ * The exit status is authoritative: exit 0 is `running` — any HTTP answer at
+ * all counts, including 401/403 — even if stdout disagrees. Exit 7 (connection
+ * refused) is `stopped`. A stdout of UNKNOWN is the script's neither-tool
+ * fallback and reads as bare `unknown`. Everything else is `unknown` with the
+ * exit code in the note; the probe script passes a timeout through as its own
+ * exit code (curl's 28), so it lands here with the cause in the note — calling
+ * a slow machine stopped would invite a needless redeploy.
  */
 export function classifyLiveness(probe: { readonly code: number; readonly stdout: string }): {
   readonly liveness: Liveness
   readonly note?: string
 } {
-  if (probe.stdout.includes('UNKNOWN')) return { liveness: 'unknown' }
   if (probe.code === 0) return { liveness: 'running' }
+  if (probe.stdout.includes('UNKNOWN')) return { liveness: 'unknown' }
   if (probe.code === 7) return { liveness: 'stopped' }
   return { liveness: 'unknown', note: `探测退出码 ${probe.code}` }
 }
