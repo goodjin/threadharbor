@@ -17,7 +17,7 @@ import { hostRegistry } from '@threadharbor/dsh-host-federation'
 import { HostSessionTree } from './host-session-tree.tsx'
 import { rollUpViewWithRegistry, groupByProject } from './host-roll-up.ts'
 import { createRemoteSessionStore } from './remote-session-store.ts'
-import { buildHostSessions, readSessionSources } from './session-source.ts'
+import { buildHostSessions, currentSessionId, readSessionSources } from './session-source.ts'
 import type { SessionRead } from './session-source.ts'
 import { fetchHostSessions } from './remote-session-poll.ts'
 import type { HostSessionsResult } from './remote-session-poll.ts'
@@ -26,42 +26,6 @@ import { NAMESPACE, fallbackT } from './locales.ts'
 
 /** The kill switch: `off` restores DSH's native workspace list. */
 export const TREE_STORAGE_KEY = 'threadharbor.sidebarTree'
-
-/** The panel a host row deep-links into (stage L's bridge to its detail page). */
-const PANEL_ID = 'threadharbor-rollup'
-export const FOCUS_HOST_EVENT = 'threadharbor:focus-host'
-
-/**
- * A click's intent, parked for the panel to read when it mounts.
- *
- * `main` renders only the ACTIVE panel, so the panel — and its focus-host
- * listener — does not exist yet at click time: selectPanel activates it, and
- * the freshly mounted panel consumes this instead of having missed the event.
- */
-type PendingFocus = { readonly hostId: string }
-let pendingFocus: PendingFocus | undefined
-export function recordPendingFocus(hostId: string): void { pendingFocus = { hostId } }
-export function consumePendingFocus(): PendingFocus | undefined {
-  const taken = pendingFocus
-  pendingFocus = undefined
-  return taken
-}
-
-const tryGet = (ctx: ServicesCtx, name: string): unknown => {
-  try {
-    return ctx.get(name)
-  } catch {
-    return undefined
-  }
-}
-
-/** Switch panels through whichever channel this registrant actually has. */
-const selectPanelThrough = (ctx: ServicesCtx, fallback?: (id: string) => void): ((id: string) => void) | undefined => {
-  if (typeof fallback === 'function') return fallback
-  const layout = tryGet(ctx, 'layout')
-  const selectPanel = (layout as { selectPanel?: unknown } | null | undefined)?.['selectPanel']
-  return typeof selectPanel === 'function' ? (layout as { selectPanel: (id: string) => void }).selectPanel.bind(layout) : undefined
-}
 
 /** The slot face the client entry hands in; tests build a recording fake. */
 export type TreeSlotHost = {
@@ -104,15 +68,12 @@ export function maybeRegisterSidebarTree(slots: TreeSlotHost, ctx: ServicesCtx, 
   const bound: RegistryLike = registry ?? hostRegistry(safeStorage())
   slots.inject('sidebar.workspaces', () => slots.register(
     { name: 'sidebar.workspaces', priority: -10, locale: NAMESPACE },
-    (props: { readonly t?: RuntimeT; readonly selectPanel?: (id: string) => void }) => {
-      const via = selectPanelThrough(ctx, props.selectPanel)
-      return createElement(ShadowTreeHost, {
+    (props: { readonly t?: RuntimeT }) =>
+      createElement(ShadowTreeHost, {
         ctx,
         registry: bound,
         ...(props.t === undefined ? {} : { t: props.t }),
-        ...(typeof via === 'function' ? { selectPanel: via } : {}),
-      })
-    },
+      }),
   ))
 }
 
@@ -120,17 +81,21 @@ const LOCAL_POLL_MS = 30_000
 const REMOTE_POLL_MS = 60_000
 
 type ShadowProps = {
+  /** The open session, when the conversation owns the main area; null while a panel is active. */
+  readonly currentSessionId?: string
   readonly ctx: ServicesCtx
   readonly registry: RegistryLike
   readonly t?: RuntimeT
   /** From the sidebar parent's inject; absent in tests and in-panel mounts. */
-  readonly selectPanel?: (id: string) => void
   /** Test seam: one remote fetch. Production default hits the host-side route. */
   readonly fetchNow?: (launchUrl: string) => Promise<HostSessionsResult>
   readonly pollMs?: number
 }
 
-export function ShadowTreeHost({ ctx, registry, t = fallbackT, selectPanel, fetchNow, pollMs }: ShadowProps) {
+export function ShadowTreeHost({ ctx, registry, t = fallbackT, fetchNow, pollMs }: ShadowProps) {
+  // Selected-state source of truth: re-derived on every read, so the tree's
+  // highlight follows both service publishes and panel switches.
+  const [currentId, setCurrentId] = useState<string | undefined>(undefined)
   const [selfRead, setSelfRead] = useState<SessionRead>({ ok: false, note: t('panel.tree.noSessions') })
   const store = useMemo(() => createRemoteSessionStore(), [])
   // registry.list() returns a fresh array every call; keying an effect on it
@@ -151,6 +116,16 @@ export function ShadowTreeHost({ ctx, registry, t = fallbackT, selectPanel, fetc
       sessions: ctx.get('sessions'),
     })
     setSelfRead(buildHostSessions(sources.workspaces, sources.sessions))
+    // Native rule: no highlight while a panel owns the main area.
+    const panelActive = (() => {
+      try {
+        const layout = ctx.get('layout') as { panelInfo?: { getSnapshot(): { activePanelId?: string | null } } } | undefined
+        return layout?.panelInfo?.getSnapshot().activePanelId != null
+      } catch {
+        return false
+      }
+    })()
+    setCurrentId(panelActive ? undefined : currentSessionId(sources.sessions))
     refreshRegistrations()
   }, [ctx, refreshRegistrations])
 
@@ -171,7 +146,15 @@ export function ShadowTreeHost({ ctx, registry, t = fallbackT, selectPanel, fetc
       workspaces: ctx.get('workspaces'),
       sessions: ctx.get('sessions'),
     })
-    const unsubscribes = [sources.workspaces?.subscribe, sources.sessions?.subscribe]
+    const layoutSubscribe = (() => {
+      try {
+        const layout = ctx.get('layout') as { panelInfo?: { subscribe(listener: () => void): () => void } } | undefined
+        return layout?.panelInfo?.subscribe
+      } catch {
+        return undefined
+      }
+    })()
+    const unsubscribes = [sources.workspaces?.subscribe, sources.sessions?.subscribe, layoutSubscribe]
       .filter((subscribe): subscribe is (listener: () => void) => () => void => typeof subscribe === 'function')
       .map(subscribe => subscribe(readLocal))
     const localTimer = window.setInterval(readLocal, pollMs ?? LOCAL_POLL_MS)
@@ -209,11 +192,5 @@ export function ShadowTreeHost({ ctx, registry, t = fallbackT, selectPanel, fetc
     return rollUpViewWithRegistry(rollUp, registrations, store.snapshotWithNotes())
   }, [selfRead, registrations, store, t])
 
-  const onOpenHostPage = useCallback((hostId: string) => {
-    selectPanel?.(PANEL_ID)
-    recordPendingFocus(hostId)
-    window.dispatchEvent(new CustomEvent(FOCUS_HOST_EVENT, { detail: { hostId } }))
-  }, [selectPanel])
-
-  return createElement(HostSessionTree, { view, ctx, onOpenHostPage, t })
+  return createElement(HostSessionTree, { view, ctx, currentSessionId: currentId, t })
 }

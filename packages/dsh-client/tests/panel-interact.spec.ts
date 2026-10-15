@@ -26,7 +26,6 @@ import { hostRegistry } from '@threadharbor/dsh-host-federation'
 import type { HostIdentity, HostSnapshot } from '@threadharbor/dsh-host-federation'
 import type { HostStorePosture } from '../src/host-store.ts'
 import { zh } from '../src/locales.ts'
-import { consumePendingFocus, recordPendingFocus } from '../src/sidebar-tree.ts'
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
 
@@ -717,34 +716,6 @@ describe('从 Tailscale 选：表单前面的选择器', () => {
       expect(withoutPort.container.querySelector('[data-action="tailscale-pick"]')).toBeNull()
     } finally {
       await unmount(withoutPort.root)
-    }
-  })
-})
-
-describe('侧栏树跳转：挂载前存下的定位意图在面板挂载时被消费', () => {
-  it('recordPendingFocus → 面板挂载即进该主机详情页（不依赖事件时机）', async () => {
-    recordPendingFocus('mini')
-    const registry = makeRegistry([{ hostId: 'mini', hostTitle: '迷你主机', address: 'http://192.168.1.20:3081' }])
-    const { container, root } = await mountPanel(registry)
-    try {
-      expect(container.querySelector('[data-use-section]')?.textContent ?? '').toContain('使用这台主机')
-      expect(consumePendingFocus()).toBeUndefined()
-    } finally {
-      await unmount(root)
-    }
-  })
-})
-
-describe('侧栏树跳转：threadharbor:focus-host 事件打开对应主机详情页', () => {
-  it('广播定位事件 → 面板切到该主机的详情页', async () => {
-    const registry = makeRegistry([{ hostId: 'mini', hostTitle: '迷你主机', address: 'http://192.168.1.20:3081' }])
-    const { container, root } = await mountPanel(registry)
-    try {
-      expect(container.querySelector('[data-host-detail]')).toBeNull()
-      act(() => { window.dispatchEvent(new CustomEvent('threadharbor:focus-host', { detail: { hostId: 'mini' } })) })
-      expect(container.querySelector('[data-use-section]')?.textContent ?? '').toContain('使用这台主机')
-    } finally {
-      await unmount(root)
     }
   })
 })

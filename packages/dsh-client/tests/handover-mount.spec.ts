@@ -26,6 +26,8 @@ function shellWith(core: SlotCore): void {
         main: { kind: 'keyed', scope: 'root' },
         sidebar: { kind: 'single', scope: 'root' },
         'conversation.chat.node': { kind: 'keyed', scope: 'session' },
+        'conversation.session.header': { kind: 'single', scope: 'session' },
+        'conversation.session.header.utilities': { kind: 'list', scope: 'session' },
         // The frame's floating layer, where the switch's progress lives: a bar
         // that dies with the session it belongs to shows nothing at all.
         'shell.overlay': { kind: 'list', scope: 'root' },
@@ -37,7 +39,7 @@ function shellWith(core: SlotCore): void {
   core.register(
     {
       name: 'sidebar',
-      children: { 'sidebar.panellist': { kind: 'list', scope: 'root' }, 'sidebar.workspaces': { kind: 'single', scope: 'root' } },
+      children: { 'sidebar.panellist': { kind: 'list', scope: 'root' }, 'sidebar.workspaces': { kind: 'single', scope: 'root' }, 'settings.section': { kind: 'list', scope: 'root' } },
     },
     () => createElement('div'),
   )

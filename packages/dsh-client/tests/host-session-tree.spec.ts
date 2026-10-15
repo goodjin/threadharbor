@@ -101,24 +101,13 @@ describe('HostSessionTree', () => {
     } finally { await unmount(root) }
   })
 
-  it('点远端会话行 → 走 onOpenHostPage（阶段 L 过渡：跳那台主机的详情页）', async () => {
-    const { container, root, onOpenHostPage } = await mountTree()
+  it('未部署主机：灰显行 + 指引文案（设置 → 各主机），点击不展开不跳转', async () => {
+    const { container, root } = await mountTree()
     try {
-      click(container, '[data-host-node="mini"] [data-host-toggle]')
-      click(container, '[data-session-row="r1"]')
-      expect(onOpenHostPage).toHaveBeenCalledWith('mini')
-    } finally { await unmount(root) }
-  })
-
-  it('未部署主机：灰显行 + 说明 + 点击进详情页，不渲染会话区', async () => {
-    const { container, root, onOpenHostPage } = await mountTree()
-    try {
-      const node = container.querySelector('[data-host-node="ghost"]')
-      expect(node?.getAttribute('data-undeployed')).toBe('true')
-      expect(node?.textContent).toContain(zh['panel.tree.undeployedNote'])
-      click(container, '[data-host-node="ghost"] [data-host-toggle]')
-      expect(onOpenHostPage).toHaveBeenCalledWith('ghost')
-      expect(container.querySelector('[data-host-node="ghost"] [data-project-group]')).toBeNull()
+      expect(container.querySelector('[data-undeployed="true"]')).not.toBeNull()
+      expect(container.querySelector('[data-undeployed-note]')?.textContent).toContain('设置')
+      click(container, '[data-undeployed="true"] [data-host-toggle]')
+      expect(container.querySelector('[data-undeployed="true"] [data-project-group]')).toBeNull()
     } finally { await unmount(root) }
   })
 

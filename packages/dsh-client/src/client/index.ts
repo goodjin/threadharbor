@@ -53,6 +53,7 @@ import { runSessionProbe } from '../probe.ts'
 import type { ProbeOutcome } from '../probe.ts'
 import { layeredIdentitySettings, IDENTITY_STORAGE_KEY } from '../settings-source.ts'
 import { maybeRegisterSidebarTree } from '../sidebar-tree.ts'
+import { registerSessionIdBar } from '../session-id-bar.ts'
 import { HOST_REGISTRY_KEY, HOST_STORE_ENTRY_ID, TAILSCALE_ERROR_KEY, TAILSCALE_PEERS_KEY, TAILSCALE_REFRESHED_KEY, TAILSCALE_REFRESH_KEY, hostRegistry } from '@threadharbor/dsh-host-federation'
 import type { TailscalePeer } from '@threadharbor/dsh-host-federation'
 import { startHostStore } from '../host-store.ts'
@@ -160,6 +161,19 @@ export type PanelSlotHost = {
   register: SlotCore['register']
 }
 
+/** The settings dialog declares its slots in packages this one does not reference. */
+type SettingsSlotHost = {
+  inject(key: string, callback: () => SlotEffect): () => void
+  register(options: {
+    name: string
+    id?: string
+    order?: number
+    label?: () => string
+    locale?: string
+    inject?: () => unknown
+  }, component: unknown): () => void
+}
+
 /** What apply() needs from the page's context, no more. */
 export type ClientPanelContext = {
   logger(name: string): { info(message: string): void; warn(message: string): void }
@@ -184,19 +198,14 @@ export type ClientPanelContext = {
  * active locale without re-registering (SlotLabel's thunk form).
  */
 export function registerPanelSlots(slots: PanelSlotHost, face: AgentPanelBusinessProps, label: () => string): void {
-  // Both registrations share PANEL_ID: the sidebar row resolves its active
-  // state and the main slot addresses its occupant by the same id.
-  slots.inject('main', () => slots.register(
-    // `locale` puts the framework-synthesized `t` seat on the panel's props —
-    // the same mechanism the progress bar's shell.overlay registration gives
-    // the switch layer; the dictionaries themselves register in the entry
-    // (locales.ts owns them).
-    { name: 'main', key: PANEL_ID, locale: NAMESPACE, inject: () => face },
+  // The hosts surface lives in the settings dialog as one section (its sidebar
+  // row and main-panel seat are gone): `settings.section` is the list the
+  // dialog's rail renders from, and `inject` hands the section its business
+  // face. `locale` keeps the framework-synthesized `t` seat flowing.
+  const settingsSlots = slots as unknown as SettingsSlotHost
+  settingsSlots.inject('settings.section', () => settingsSlots.register(
+    { name: 'settings.section', id: PANEL_ID, order: PANEL_ORDER, label, locale: NAMESPACE, inject: () => face },
     AgentPanel,
-  ))
-  slots.inject('sidebar.panellist', () => slots.register(
-    { name: 'sidebar.panellist', id: PANEL_ID, order: PANEL_ORDER, label },
-    PanelIcon,
   ))
 }
 
@@ -385,6 +394,9 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // 会话」树（§8.5）。开关 threadharbor.sidebarTree=off 时跳过注册，原生
   // 列表照常——升级漂移时的一键退路。
   maybeRegisterSidebarTree(ctx.slots, ctx, registry)
+
+  // 会话头工具行：会话编号 + 复制按钮（会话作用域槽位，inject 首参即编号）。
+  registerSessionIdBar(ctx.slots)
 
   // 手机配对 section：和主机面板同一套侧栏注册面（sidebar.panellist + main），
   // 数据只有一条同源 GET（pair-url）。带令牌的网址只进面板状态、只画在这台

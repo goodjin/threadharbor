@@ -20,9 +20,9 @@ const EXPANDED_KEY = 'threadharbor.tree.expanded'
 type Props = {
   readonly view: RollUpView
   readonly ctx: SessionActionsCtx
-  /** Stage-L bridge: a remote or undeployed host row goes to its detail page. */
-  readonly onOpenHostPage: (hostId: string) => void
   readonly initialExpanded?: readonly string[]
+  /** The open session's id; its row renders selected while the conversation owns main. */
+  readonly currentSessionId?: string | undefined
   readonly t: RuntimeT
 }
 
@@ -36,7 +36,7 @@ function readExpanded(): string[] {
   }
 }
 
-export function HostSessionTree({ view, ctx, onOpenHostPage, initialExpanded, t }: Props) {
+export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, t }: Props) {
   const [openFailed, setOpenFailed] = useState(false)
 
   const [expanded, setExpanded] = useState<readonly string[]>(() => {
@@ -73,10 +73,9 @@ export function HostSessionTree({ view, ctx, onOpenHostPage, initialExpanded, t 
               className={styles.hostRow}
               data-host-toggle
               onClick={() => {
-                // An undeployed host has nothing to expand; its click belongs to
-                // the detail page, where the deploy flow lives.
-                if (host.undeployed === true) onOpenHostPage(host.hostId)
-                else toggle(host.hostId)
+                // An undeployed host has nothing to expand; the note under it
+                // says where the deploy flow lives (设置 → 各主机).
+                if (host.undeployed !== true) toggle(host.hostId)
               }}
             >
               <span className={styles.hostDot} data-host-online={host.self || host.empty === false ? 'true' : 'false'} />
@@ -116,9 +115,9 @@ export function HostSessionTree({ view, ctx, onOpenHostPage, initialExpanded, t 
                     type="button"
                     className={styles.sessionRow}
                     data-session-row={session.sessionId}
+                    data-active={currentSessionId === session.sessionId ? 'true' : undefined}
                     onClick={() => {
                       if (host.self) setOpenFailed(openLocalSession(ctx, session.sessionId) === false)
-                      else onOpenHostPage(host.hostId)
                     }}
                   >
                     <span className={styles.sessionTitle}>{session.title}</span>

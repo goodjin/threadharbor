@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { buildHostSessions, readSessionSources } from '../src/session-source.ts'
+import { buildHostSessions, currentSessionId, readSessionSources } from '../src/session-source.ts'
 
 /** A service face narrow enough to stand in for DSH's own projections. */
 function service(snapshot: unknown, options: { subscribe?: boolean } = {}): unknown {
@@ -49,6 +49,48 @@ describe('buildHostSessions', () => {
         { projectId: 'w1', sessionId: 's1', title: '修登录', projectTitle: 'Web' },
         { projectId: 'w2', sessionId: 's3', title: '会话 s3', projectTitle: 'Bench' },
       ])
+    }
+  })
+
+  it('当前会话判定：主视图占用的行胜出（原生同款规则）', () => {
+    const service = {
+      list: {
+        getSnapshot: () => ({
+          ids: ['s1', 's2'],
+          byId: {
+            s1: { displayTitle: '甲', retainedBy: { mainView: 3 } },
+            s2: { displayTitle: '乙', retainedBy: {} },
+          },
+        }),
+        subscribe: () => () => {},
+      },
+    }
+    const sources = readSessionSources({ sessions: service })
+    expect(currentSessionId(sources.sessions)).toBe('s1')
+    expect(currentSessionId(undefined)).toBeUndefined()
+  })
+
+  it('旧格式空白会话：无 blank 标记但无原始标题、展示名等于项目名或路径基名 → 丢弃', () => {
+    // 旧格式会话运行时行可能缺 blank；展示名是收窄层给的目录名回退。
+    const read = buildHostSessions(
+      {
+        items: [{ workspaceId: 'w1', title: 'signalscout', path: '/Users/good/dsh/signalscout', sessionIds: ['s1', 's9', 's10'] }],
+        archivedSessionIds: [],
+        state: 'idle',
+      },
+      {
+        ids: ['s1', 's9', 's10'],
+        byId: {
+          s1: { displayTitle: '真实会话' },
+          s9: { displayTitle: 'signalscout' },
+          s10: { displayTitle: 'signalscout', title: 'signalscout' },
+        },
+      },
+    )
+    expect(read.ok).toBe(true)
+    if (read.ok) {
+      // s9 无 title → 空白回退形状，丢弃；s10 有 title（改名/起过名）→ 保留。
+      expect(read.sessions.map(row => row.sessionId)).toEqual(['s1', 's10'])
     }
   })
 

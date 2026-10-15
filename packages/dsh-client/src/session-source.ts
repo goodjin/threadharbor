@@ -55,6 +55,8 @@ export type SessionListSource = {
     readonly blank?: boolean
     /** Native list rule: subagent child sessions never list as rows. */
     readonly origin?: string
+    /** Retention ledger; a positive mainView marks the open session. */
+    readonly retainedBy?: { readonly mainView?: number }
   }>>
   /** Present when the service exposes one; change notifications for republish. */
   readonly subscribe?: (listener: () => void) => () => void
@@ -143,11 +145,13 @@ function sessionSource(value: unknown): SessionListSource | undefined {
     const title = row['title']
     const blank = row['blank']
     const origin = row['origin']
+    const retainedBy = row['retainedBy']
     rows[id] = {
       ...(typeof displayTitle === 'string' ? { displayTitle } : {}),
       ...(typeof title === 'string' ? { title } : {}),
       ...(blank === true ? { blank: true } : {}),
       ...(typeof origin === 'string' ? { origin } : {}),
+      ...(isRecord(retainedBy) ? { retainedBy: { ...(typeof retainedBy['mainView'] === 'number' ? { mainView: retainedBy['mainView'] } : {}) } } : {}),
     }
   }
   const subscribe = subscriberOf(value)
@@ -197,6 +201,16 @@ function subscriberOf(service: Record<string, unknown>): ((listener: () => void)
   }
 }
 
+/** The open session's id: the row the main view retains (native's own rule). */
+export function currentSessionId(sessions: SessionListSource | undefined): string | undefined {
+  if (sessions === undefined) return undefined
+  for (const id of sessions.ids) {
+    const row = sessions.byId[id]
+    if ((row?.retainedBy?.mainView ?? 0) > 0) return id
+  }
+  return undefined
+}
+
 /**
  * Build this host's session rows from the two projections.
  *
@@ -239,6 +253,21 @@ export function buildHostSessions(
         // session (created but never messaged — its fallback title echoes the
         // directory name) and subagent children never become rows.
         .filter(id => sessions.byId[id]?.blank !== true && sessions.byId[id]?.origin !== 'subagent')
+        // Legacy-format sessions can reach the client without the blank flag;
+        // their display title is then exactly the fallback shape — the bare
+        // directory name with no durable title behind it. A real session a
+        // user renamed, or an LLM titled, always carries title.
+        .filter(id => {
+          const row = sessions.byId[id]
+          if (row === undefined || row.title !== undefined) return true
+          const fallbackShapes = new Set(
+            workspacesLike.flatMap(w =>
+              [w.title, w.path.split('/').filter(Boolean).pop()]
+                .filter((v): v is string => typeof v === 'string' && v !== ''),
+            ),
+          )
+          return !fallbackShapes.has(row.displayTitle ?? '')
+        })
         .map(id => ({
           sessionId: id,
           title: sessions.byId[id]?.displayTitle ?? sessions.byId[id]?.title ?? '',

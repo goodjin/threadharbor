@@ -129,6 +129,11 @@
   background: rgba(127, 127, 127, 0.12);
 }
 
+.sessionRow[data-active='true'] {
+  background: rgba(127, 127, 127, 0.18);
+  box-shadow: inset 2px 0 0 rgba(127, 127, 127, 0.55);
+}
+
 .sessionTitle {
   display: block;
   overflow: hidden;

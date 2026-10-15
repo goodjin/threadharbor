@@ -12,7 +12,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
-import { maybeRegisterSidebarTree, ShadowTreeHost, TREE_STORAGE_KEY, consumePendingFocus, type TreeSlotHost } from '../src/sidebar-tree.ts'
+import { maybeRegisterSidebarTree, ShadowTreeHost, TREE_STORAGE_KEY, type TreeSlotHost } from '../src/sidebar-tree.ts'
 import { HostSessionTree } from '../src/host-session-tree.tsx'
 import { hostRegistry } from '@threadharbor/dsh-host-federation'
 import { zh } from '../src/locales.ts'
@@ -108,7 +108,7 @@ describe('槽位组件在无注入 props 时的生产真相', () => {
     return component
   }
 
-  it('无 selectPanel 注入：经 layout 服务切面板，并把定位意图存给面板挂载后消费', async () => {
+  it('无注入 props 的生产真相：未部署行点击不再切面板，指引在提示文案里', async () => {
     const layoutCalls: string[] = []
     const services = {
       workspaces: new FakeWorkspaces(),
@@ -123,12 +123,58 @@ describe('槽位组件在无注入 props 时的生产真相', () => {
       root.render(createElement(component as never, {}))
     })
     try {
-      // 组件树内部经 ctx 读 layout —— 通过捕获组件的子树点击验证
+      const note = container.querySelector('[data-undeployed-note]')?.textContent ?? ''
+      expect(note).toContain('设置')
       const el = container.querySelector<HTMLElement>('[data-host-node="mini"] [data-host-toggle]')
       if (el === null) throw new Error('mini row missing')
       act(() => { el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })) })
-      expect(layoutCalls).toEqual(['threadharbor-rollup'])
-      expect(consumePendingFocus()).toEqual({ hostId: 'mini' })
+      expect(layoutCalls).toEqual([])
+    } finally {
+      await act(async () => { root.unmount() })
+    }
+  })
+})
+
+describe('ShadowTreeHost（选中态：当前会话高亮随面板激活让位）', () => {
+  it('主视图占用的会话行带 data-active；面板激活时不亮', async () => {
+    const listeners: Array<() => void> = []
+    const sessions = {
+      list: {
+        getSnapshot: () => ({
+          ids: ['s1'],
+          byId: { s1: { displayTitle: '修登录', retainedBy: { mainView: 2 } } },
+        }),
+        subscribe: (listener: () => void) => { listeners.push(listener); return () => {} },
+      },
+    }
+    const workspaces = {
+      list: {
+        getSnapshot: () => ({
+          state: 'idle',
+          items: [{ workspaceId: 'w1', title: 'Web', path: '/w', sessionIds: ['s1'] }],
+          archivedSessionIds: [],
+        }),
+      },
+    }
+    let panelActive = false
+    const layout = {
+      panelInfo: {
+        getSnapshot: () => ({ activePanelId: panelActive ? 'some-panel' : null }),
+        subscribe: (listener: () => void) => { listeners.push(listener); return () => {} },
+      },
+    }
+    const services: Record<string, unknown> = { workspaces, sessions, layout }
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(ShadowTreeHost, { ctx: { get: (name: string) => services[name] }, registry: makeRegistry([]) }))
+    })
+    try {
+      expect(container.querySelector('[data-session-row="s1"]')?.getAttribute('data-active')).toBe('true')
+      panelActive = true
+      await act(async () => { for (const notify of listeners) notify() })
+      expect(container.querySelector('[data-session-row="s1"]')?.getAttribute('data-active')).toBeNull()
     } finally {
       await act(async () => { root.unmount() })
     }
@@ -242,28 +288,22 @@ describe('ShadowTreeHost（容器接线）', () => {
     }
   })
 
-  it('点未部署主机行：切到面板并广播定位事件', async () => {
-    const registry = makeRegistry([{ hostId: 'mini', hostTitle: '迷你主机', address: 'http://127.0.0.1:1' }])
-    const services = { workspaces: new FakeWorkspaces(), sessions: new FakeSessions() }
-    const ctx = { get: (name: string) => (name === 'workspaces' || name === 'sessions' ? services[name] : undefined) }
-    const selectPanel = vi.fn()
-    const events: Event[] = []
-    const listener = (event: Event): void => { events.push(event) }
+  it('点未部署主机行：不再有面板可切，事件也不发（桥已随主区注册一并拆除）', async () => {
+    const events: string[] = []
+    const listener = (e: Event): void => { events.push((e as CustomEvent).type) }
     window.addEventListener('threadharbor:focus-host', listener)
-
+    const services = { workspaces: new FakeWorkspaces(), sessions: new FakeSessions() }
     const container = document.createElement('div')
     document.body.appendChild(container)
     const root = createRoot(container)
     await act(async () => {
-      root.render(createElement(ShadowTreeHost, {
-        ctx, registry, t: zhT, selectPanel, fetchNow: async () => ({ sessions: [] }),
-      }))
+      root.render(createElement(ShadowTreeHost, { ctx: { get: (name: string) => services[name] }, registry: makeRegistry([{ hostId: 'mini', hostTitle: '迷你主机', address: 'http://127.0.0.1:1' }]) }))
     })
     try {
-      const toggle = container.querySelector<HTMLElement>('[data-host-node="mini"] [data-host-toggle]')
-      toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-      expect(selectPanel).toHaveBeenCalledWith('threadharbor-rollup')
-      expect(events).toHaveLength(1)
+      const el = container.querySelector<HTMLElement>('[data-host-node="mini"] [data-host-toggle]')
+      if (el === null) throw new Error('mini row missing')
+      act(() => { el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })) })
+      expect(events).toEqual([])
     } finally {
       window.removeEventListener('threadharbor:focus-host', listener)
       await act(async () => { root.unmount() })

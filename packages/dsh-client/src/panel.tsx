@@ -47,7 +47,6 @@ import {
   startSshDeploy,
   waitSshDeployOperation,
 } from './ssh-deploy.ts'
-import { consumePendingFocus } from './sidebar-tree.ts'
 import type { SshDeployOperationView, SshDeployProgress } from '@threadharbor/dsh-host-federation'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { NAMESPACE } from './locales.ts'
@@ -1360,24 +1359,6 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   // The sidebar tree's stage-L bridge lands here: a host row clicked in the
   // shadowed workspace list switches to this panel (selectPanel) and this
   // event says which host's detail page to open.
-  useEffect(() => {
-    const openHostDetail = (hostId: string): void => {
-      setFormMessage(undefined)
-      setConfirmingRemove(false)
-      setView({ page: 'detail', hostId })
-    }
-    const focusHost = (event: Event): void => {
-      const hostId = (event as CustomEvent<{ readonly hostId?: unknown }>).detail?.hostId
-      if (typeof hostId !== 'string' || hostId === '') return
-      openHostDetail(hostId)
-    }
-    // The sidebar tree's click arrives BEFORE this panel mounts (main renders
-    // only the active panel): the intent was parked, consume it now.
-    const pending = consumePendingFocus()
-    if (pending !== undefined) openHostDetail(pending.hostId)
-    window.addEventListener('threadharbor:focus-host', focusHost)
-    return () => { window.removeEventListener('threadharbor:focus-host', focusHost) }
-  }, [])
   const [confirmingRemove, setConfirmingRemove] = useState(false)
   const [reaches, setReaches] = useState<ReadonlyMap<string, ReachOutcome | 'probing'>>(new Map())
   // The host list lives in the section, not in React state; this tick is what

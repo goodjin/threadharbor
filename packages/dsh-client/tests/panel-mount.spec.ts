@@ -37,6 +37,8 @@ function shellWith(core: SlotCore): void {
         // The frame's floating layer, where the switch's progress lives: a
         // bar that dies with the session it belongs to shows nothing at all.
         'shell.overlay': { kind: 'list', scope: 'root' },
+        'conversation.session.header': { kind: 'single', scope: 'session' },
+        'conversation.session.header.utilities': { kind: 'list', scope: 'session' },
       },
       inject: () => null,
     },
@@ -45,7 +47,7 @@ function shellWith(core: SlotCore): void {
   core.register(
     {
       name: 'sidebar',
-      children: { 'sidebar.panellist': { kind: 'list', scope: 'root' }, 'sidebar.workspaces': { kind: 'single', scope: 'root' } },
+      children: { 'sidebar.panellist': { kind: 'list', scope: 'root' }, 'sidebar.workspaces': { kind: 'single', scope: 'root' }, 'settings.section': { kind: 'list', scope: 'root' } },
     },
     () => createElement('div'),
   )
@@ -113,15 +115,15 @@ function remoteNamespaces(): Namespaces {
 }
 
 describe('面板挂载', () => {
-  it('主机服务齐全时，面板进 main，侧栏行进 sidebar.panellist，全程不炸', () => {
+  it('主机服务齐全时，面板进 settings.section（各主机成为设置栏目），全程不炸', () => {
     const ctx = fakeCtx({ services: remoteNamespaces() })
 
     expect(() => { apply(ctx) }).not.toThrow()
 
-    const main = ctx.core.entriesOfSlot('main')
-    expect(main.some(entry => entry.options.key === 'threadharbor-rollup')).toBe(true)
-    const panellist = ctx.core.entriesOfSlot('sidebar.panellist')
-    expect(panellist.some(entry => entry.options.id === 'threadharbor-rollup')).toBe(true)
+    const sections = ctx.core.entriesOfSlot('settings.section')
+    expect(sections.some(entry => entry.options.id === 'threadharbor-rollup')).toBe(true)
+    expect(ctx.core.entriesOfSlot('main').some(entry => entry.options.key === 'threadharbor-rollup')).toBe(false)
+    expect(ctx.core.entriesOfSlot('sidebar.panellist').some(entry => entry.options.id === 'threadharbor-rollup')).toBe(false)
   })
 
   it('主机服务缺席时照样挂载：面板说明缺什么，而不是空白', () => {
@@ -132,10 +134,8 @@ describe('面板挂载', () => {
 
     expect(() => { apply(ctx) }).not.toThrow()
 
-    const main = ctx.core.entriesOfSlot('main')
-    expect(main.some(entry => entry.options.key === 'threadharbor-rollup')).toBe(true)
-    const panellist = ctx.core.entriesOfSlot('sidebar.panellist')
-    expect(panellist.some(entry => entry.options.id === 'threadharbor-rollup')).toBe(true)
+    const sections = ctx.core.entriesOfSlot('settings.section')
+    expect(sections.some(entry => entry.options.id === 'threadharbor-rollup')).toBe(true)
     expect(ctx.warnings.some(message => message.includes('remote.session'))).toBe(true)
   })
 
