@@ -267,7 +267,7 @@ describe('hostRegistry', () => {
   })
 })
 
-describe('hostRegistry 的 recordRemote', () => {
+describe('hostRegistry recordRemote', () => {
   const report: RemoteReport = {
     deployment: 'deployed',
     liveness: 'running',
@@ -275,7 +275,7 @@ describe('hostRegistry 的 recordRemote', () => {
     readAt: 500,
   }
 
-  it('写入后 list() 能读回同一个 remote（换个实例经存储也读得到）', () => {
+  it('stores the report on the entry and reads the same remote back from a fresh registry over storage', () => {
     const { storage } = fakeStorage()
     const registry = hostRegistry(storage, () => 100)
     registry.add({ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' })
@@ -284,14 +284,14 @@ describe('hostRegistry 的 recordRemote', () => {
     expect(hostRegistry(storage).list()[0]?.remote).toEqual(report)
   })
 
-  it('对不存在的 hostId 返回 false 且什么都不写', () => {
+  it('returns false for an unknown hostId and writes nothing', () => {
     const { storage, dump } = fakeStorage()
     const registry = hostRegistry(storage)
     expect(registry.recordRemote('ghost', report)).toBe(false)
     expect(dump()).toEqual({})
   })
 
-  it('写入后 address、launchUrl、ssh、createdAt 一个都不变', () => {
+  it('leaves address, launchUrl, ssh, and createdAt untouched when it writes', () => {
     const { storage } = fakeStorage()
     const registry = hostRegistry(storage, () => 100)
     registry.add({
@@ -319,7 +319,7 @@ describe('hostRegistry 的 recordRemote', () => {
     expect(after?.remote).toEqual(newer)
   })
 
-  it('解析不出读数的值不写入，原条目原样保留', () => {
+  it('a value that parses to no report is not written, keeping the entry as it was', () => {
     const { storage } = fakeStorage()
     const registry = hostRegistry(storage, () => 100)
     registry.add({ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' })
@@ -328,7 +328,7 @@ describe('hostRegistry 的 recordRemote', () => {
     expect(registry.list()).toEqual(before)
   })
 
-  it('旧条目（JSON 里没有 remote 键）读出时 remote 为 undefined，不报错', () => {
+  it('entries without a remote key keep parsing, reading remote as undefined (legacy records)', () => {
     const { storage } = fakeStorage({ [HOST_REGISTRY_KEY]: JSON.stringify([
       { hostId: 'old', hostTitle: '旧', address: 'http://192.168.1.20:3081', createdAt: 5 },
     ]) })
