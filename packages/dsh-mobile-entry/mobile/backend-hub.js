@@ -20,6 +20,19 @@ export function createHubBackend(opts = {}) {
   const WebSocketCtor = opts.WebSocketCtor ?? globalThis.WebSocket
   const root = opts.relayRoot ?? RELAY_ROOT
 
+  /**
+   * 把 relay/postJson 的应答收成 prompt/cancel 用的 {ok,message}。
+   *
+   * 收口在这里，而不是散在每个方法里各判一遍：`ok:false` 被漏判时表现是**假报
+   * 成功**——界面清掉草稿、以为发出去了，其实那台机器一个字也没收到，而手机上
+   * 没有任何迹象能让人起疑。
+   */
+  const outcomeOf = body => {
+    if (body?.ok === false) return { ok: false, message: body.message ?? '那台机器的凭据需要重新配对' }
+    if (typeof body?.error === 'string') return { ok: false, message: body.error }
+    return { ok: true }
+  }
+
   const hostOf = hostId => encodeURIComponent(hostId)
   const sessionsPath = hostId => `${root}/hosts/${hostOf(hostId)}/sessions`
 
@@ -36,6 +49,11 @@ export function createHubBackend(opts = {}) {
     if (body && body.error === 'credential-stale') {
       // 中转说那台机器的凭据该换了：按「需要重新配对」处置，与直连的 401 同路。
       return { ok: false, kind: 'unauthorized', message: '那台机器的凭据已过期，需要重新配对' }
+    }
+    // 游标这一条要把那个**整数**带出来（其它错误只留文案）。少了这一步，
+    // pageMessages 拿到的就只剩 'session-cursor' 三个字，探测无从还原。
+    if (body && body.error === 'session-cursor' && Number.isSafeInteger(body.cursor)) {
+      return { error: 'session-cursor', cursor: body.cursor }
     }
     if (body && typeof body.error === 'string') return { error: body.error }
     return body
@@ -62,6 +80,9 @@ export function createHubBackend(opts = {}) {
 
     async listSessions(hostId) {
       const body = await relay(sessionsPath(hostId))
+      // 凭据过期**不能**折成空清单：空清单在界面上长得就是「这台机器还没有
+      // 会话」，操作者不会想到是凭据出了问题。
+      if (body?.ok === false) return { error: body.message ?? '那台机器的凭据需要重新配对' }
       if (body.error !== undefined) return body
       return { items: Array.isArray(body?.value?.items) ? body.value.items : [] }
     },
@@ -72,6 +93,12 @@ export function createHubBackend(opts = {}) {
       if (typeof throughSeq === 'number') query.push(`throughSeq=${throughSeq}`)
       if (typeof maxMessages === 'number') query.push(`maxMessages=${maxMessages}`)
       const body = await relay(query.length > 0 ? `${path}?${query.join('&')}` : path)
+      // 中转只把「日志末端」那个**整数**放出来，不放上游原文。这里把整数还原成
+      // 直连模式同一句游标错误，让应用层那套探测逻辑在两种后端上完全一致——
+      // 直连是从上游原文里解析的，这里从中转的结构化字段还原。
+      if (body?.error === 'session-cursor' && Number.isSafeInteger(body.cursor)) {
+        return { error: `session page request past cursor ${body.cursor}` }
+      }
       if (body.error !== undefined) return body
       return { conv: body?.value }
     },
@@ -81,12 +108,12 @@ export function createHubBackend(opts = {}) {
         text,
         requestId: `hub-${Date.now().toString(36)}`,
       })
-      return body.error !== undefined ? { ok: false, message: body.error } : { ok: true }
+      return outcomeOf(body)
     },
 
     async cancel(hostId, sessionId) {
       const body = await postJson(`${sessionsPath(hostId)}/${encodeURIComponent(sessionId)}/cancel`, {})
-      return body.error !== undefined ? { ok: false, message: body.error } : { ok: true }
+      return outcomeOf(body)
     },
 
     async answer(hostId, eventId, outcome) {

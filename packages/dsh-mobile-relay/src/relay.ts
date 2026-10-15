@@ -394,6 +394,22 @@ export class Relay {
       respondJson(res, 200, JSON.stringify({ error: 'credential-stale' }))
       return
     }
+    // 翻历史的「日志末端」这一条要**例外**：手机是用一个超界游标去探末端的，
+    // 上游按约定回 `… past cursor N`，N 就是它要的数。压成 machine-error 等于
+    // 把这个数一起压掉——中转模式下任何会话都打不开（每一步都显示「无法确定
+    // 会话最新位置」）。
+    //
+    // 只放**那一个整数**出去，不放上游原文：正文可能是内部细节，而 N 是我们
+    // 自己发出去的超界游标的应答，属于本次请求的回声。解析不出 N 就照旧走
+    // 下面的固定文案。
+    if (endpoint === SESSION_HISTORY_ENDPOINT && result.kind === 'rpc-error') {
+      const cursor = pastCursorOf(messageOf(result.message))
+      if (cursor !== undefined) {
+        this.log(`转发 ${endpoint} 到 ${hostId}：探到日志末端 cursor=${cursor}`)
+        respondJson(res, 200, JSON.stringify({ error: 'session-cursor', cursor }))
+        return
+      }
+    }
     // rpc-error / transport 一律压成固定文案：上游原文可能含内部细节。
     this.log(`转发 ${endpoint} 到 ${hostId} 失败（${result.kind}）：${messageOf(result.message)}`)
     respondJson(res, 200, JSON.stringify({ error: 'machine-error' }))
@@ -526,4 +542,17 @@ function limitOf(url: URL): number | undefined {
   if (raw === null) return undefined
   const value = Number(raw)
   return Number.isInteger(value) && value > 0 ? value : undefined
+}
+
+/**
+ * 从上游错误里取「日志末端」那个游标。
+ *
+ * 宿主对超界 throughSeq 报 `session page request past cursor N`（N 是日志最后
+ * 一条的 seq；空日志 N=-1）。只认这一种形状、只取整数：放行的是数，不是原文。
+ */
+function pastCursorOf(message: string): number | undefined {
+  const match = /past cursor (-?\d+)/.exec(message)
+  if (match === null) return undefined
+  const cursor = Number(match[1])
+  return Number.isSafeInteger(cursor) ? cursor : undefined
 }

@@ -462,3 +462,68 @@ describe('中转模式的端到端：上游原样帧 → 界面', () => {
   })
 })
 
+describe('游标探测在两种后端上必须一致（真实形状：中转只给一个整数）', () => {
+  /** 中转真实应答 → 手机该看到的样子。 */
+  function hubWithFetch(payloads: unknown[]) {
+    let turn = 0
+    const seen: string[] = []
+    const backend = createHubBackend({
+      fetchLike: (async (url: string) => {
+        seen.push(url)
+        const body = payloads[turn++] ?? {}
+        return { status: 200, text: async () => JSON.stringify(body) } as unknown as Response
+      }) as never,
+      WebSocketCtor: (class { close() {} }) as never,
+    })
+    return { backend, seen }
+  }
+
+  it('中转回 {error:session-cursor,cursor:12} → 手机解析出的探针与直连同一句', async () => {
+    const { backend } = hubWithFetch([{ error: 'session-cursor', cursor: 12 }])
+    const body = await backend.pageMessages('mac-a', 's1', Number.MAX_SAFE_INTEGER, 1)
+    expect(body.error).toContain('past cursor 12')
+  })
+
+  it('探针拿不到游标时报错，不硬猜（与直连的处置一致）', async () => {
+    const { backend } = hubWithFetch([{ error: 'machine-error' }])
+    const body = await backend.pageMessages('mac-a', 's1', Number.MAX_SAFE_INTEGER, 1)
+    expect(body.error).toBe('machine-error')
+  })
+
+  it('凭据过期不许折成空清单——那在界面上长得就是「这台机器还没有会话」', async () => {
+    const { backend } = hubWithFetch([{ ok: false, kind: 'unauthorized', message: '那台机器的凭据已过期，需要重新配对' }])
+    const body = await backend.listSessions('mac-a')
+    expect(body.items).toBeUndefined()
+    expect(body.error).toContain('重新配对')
+  })
+})
+
+describe('prompt/cancel 不许假报成功（漏判 ok:false 的后果是草稿被清、消息没发出去）', () => {
+  function hubPosting(body: unknown) {
+    return createHubBackend({
+      fetchLike: (async () => ({ status: 200, text: async () => JSON.stringify(body) })) as never,
+      WebSocketCtor: (class { close() {} }) as never,
+    })
+  }
+
+  it('中转说凭据脏 → prompt 明确失败，界面因此保留草稿', async () => {
+    const backend = hubPosting({ ok: false, kind: 'unauthorized', message: '那台机器的凭据已过期，需要重新配对' })
+    expect(await backend.prompt('mac-a', 's1', '在吗')).toEqual({ ok: false, message: '那台机器的凭据已过期，需要重新配对' })
+  })
+
+  it('machine-error → prompt 明确失败（不是 ok:true）', async () => {
+    const backend = hubPosting({ error: 'machine-error' })
+    expect(await backend.prompt('mac-a', 's1', '在吗')).toEqual({ ok: false, message: 'machine-error' })
+  })
+
+  it('cancel 同理', async () => {
+    const backend = hubPosting({ ok: false, kind: 'unauthorized', message: '凭据过期' })
+    expect((await backend.cancel('mac-a', 's1')).ok).toBe(false)
+  })
+
+  it('真的成功才 ok:true', async () => {
+    const backend = hubPosting({ ok: true, value: {} })
+    expect(await backend.prompt('mac-a', 's1', '在吗')).toEqual({ ok: true })
+  })
+})
+

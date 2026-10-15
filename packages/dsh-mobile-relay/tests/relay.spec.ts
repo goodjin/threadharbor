@@ -605,3 +605,55 @@ describe('停机：订阅项与各机连接都要收掉', () => {
     expect(closed).toBe(1)
   })
 })
+
+describe('翻历史的游标探测要拿到那个整数（压掉它等于中转模式下打不开任何会话）', () => {
+  /** 上游回一句什么，就让那台机的下一次调用回什么。 */
+  function relayWithUpstream(message: string) {
+    const fake = fakeClient()
+    fake.state.result = { ok: false, kind: 'rpc-error', message }
+    const relay = new Relay({
+      knownHostIds: new Set(['mac-a']),
+      clients: { clientFor: async () => fake.client as never, invalidate: () => {}, closeAll: () => {} },
+      log: () => {},
+    })
+    return relay
+  }
+  const page = (relay: Relay, res: unknown) =>
+    relay.handleMessages(
+      { method: 'GET', url: '/threadharbor/relay/hosts/mac-a/sessions/s1/messages?throughSeq=9007199254740991', headers: {} } as never,
+      res as never,
+      new URL('http://x/threadharbor/relay/hosts/mac-a/sessions/s1/messages?throughSeq=9007199254740991'),
+    )
+
+  it('上游回 past cursor N → 回 {error:session-cursor,cursor:N}：只放整数，不放原文', async () => {
+    const relay = relayWithUpstream('session page request past cursor 42 (loaded through 17)')
+    const { state, res } = recorder()
+    await page(relay, res)
+    expect(JSON.parse(state.body)).toEqual({ error: 'session-cursor', cursor: 42 })
+  })
+
+  it('空日志的 past cursor -1 也认（那是「没有消息」，不能当成普通失败）', async () => {
+    const relay = relayWithUpstream('session page request past cursor -1')
+    const { state, res } = recorder()
+    await page(relay, res)
+    expect(JSON.parse(state.body)).toEqual({ error: 'session-cursor', cursor: -1 })
+  })
+
+  it('别的上游错误不例外：照旧压成 machine-error', async () => {
+    const relay = relayWithUpstream('session "s1" not found')
+    const { state, res } = recorder()
+    await page(relay, res)
+    expect(JSON.parse(state.body)).toEqual({ error: 'machine-error' })
+  })
+
+  it('翻历史之外的端点不放行游标（只有这个探测需要它）', async () => {
+    const relay = relayWithUpstream('session page request past cursor 42')
+    const { state, res } = recorder()
+    await relay.handleSessions(
+      { method: 'GET', url: '/threadharbor/relay/hosts/mac-a/sessions', headers: {} } as never,
+      res as never,
+      new URL('http://x/threadharbor/relay/hosts/mac-a/sessions'),
+    )
+    expect(JSON.parse(state.body)).toEqual({ error: 'machine-error' })
+  })
+})
