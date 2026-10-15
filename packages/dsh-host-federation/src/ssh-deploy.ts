@@ -30,6 +30,7 @@ export const ROUTE_OPERATION = '/api/threadharbor.host-ssh.operation'
 export const ROUTE_PEER = '/api/threadharbor.host-ssh.peer'
 export const ROUTE_REMOTE_SESSIONS = '/api/threadharbor.host-remote.sessions'
 export const ROUTE_CONNECT = '/api/threadharbor.host-ssh.connect'
+export const ROUTE_START = '/api/threadharbor.host-ssh.start'
 
 export type Config = {
   knownHostsPath?: string
@@ -160,6 +161,19 @@ export function apply(ctx: unknown, config: Config = {}): void {
     const result = await manager.connect(ssh, remoteWebPort)
     log.info('ssh connect', { target: ssh.target, mode: result.mode, endpoint: result.endpoint, installed: result.peer.pluginsInstalled })
     return result
+  })
+
+  register(ROUTE_START, async body => {
+    const record = body as Record<string, unknown>
+    const ssh = manager.parseApprovedConfig(record['ssh'])
+    const port = record['port']
+    if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65_535) {
+      throw new Error('port 必须是 1-65535 的整数')
+    }
+    const result = await manager.startPeer(ssh, port)
+    if (!result.ok) throw new Error(result.reason)
+    log.info('ssh start', { target: ssh.target, port: result.port })
+    return { port: result.port }
   })
 
   register(ROUTE_INSPECT, async body => {

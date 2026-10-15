@@ -11,6 +11,7 @@ export const ROUTE_DEPLOY = '/api/threadharbor.host-ssh.deploy'
 export const ROUTE_OPERATION = '/api/threadharbor.host-ssh.operation'
 export const ROUTE_PEER = '/api/threadharbor.host-ssh.peer'
 export const ROUTE_CONNECT = '/api/threadharbor.host-ssh.connect'
+export const ROUTE_START = '/api/threadharbor.host-ssh.start'
 export const ROUTE_REMOTE_SESSIONS = '/api/threadharbor.host-remote.sessions'
 
 type ApiResult<T> =
@@ -57,6 +58,15 @@ export async function connectRemoteHost(
   t: RuntimeT = fallbackT,
 ): Promise<ApiResult<SshConnectResult>> {
   return await postJson(ROUTE_CONNECT, { ssh, ...(remoteWebPort === undefined ? {} : { remoteWebPort }) }, t)
+}
+
+/** Start the DSH web process on an already-deployed peer; success means the port answers. */
+export async function startRemotePeer(
+  ssh: SshConnectionInput & { readonly hostKeyFingerprint: string },
+  port: number,
+  t?: RuntimeT,
+): Promise<ApiResult<{ readonly port: number }>> {
+  return await postJson(ROUTE_START, { ssh, port }, t)
 }
 
 export async function startSshDeploy(request: SshDeployRequest, t: RuntimeT = fallbackT): Promise<ApiResult<{ readonly operationId: string }>> {

@@ -15,8 +15,8 @@ import { readReleaseVersion, resolveReleaseDirectory } from './release.ts'
 import { DEFAULT_REMOTE_DSH_PLUGINS } from './deploy-plugins.ts'
 import { buildRemoteAgentsPatchYaml } from './remote-agents.ts'
 import { parsePeerStatus } from './peer-status.ts'
-import { buildLivenessProbe, decidePeerReport, type PeerReport } from './liveness.ts'
-import { buildRemoteEnv, buildStartBranch } from './start-script.ts'
+import { buildLivenessProbe, classifyLiveness, decidePeerReport, type PeerReport } from './liveness.ts'
+import { buildRemoteEnv, buildStartBranch, buildStartScript } from './start-script.ts'
 
 export type SshManagerOptions = {
   readonly knownHostsPath: string
@@ -269,6 +269,42 @@ export class DshSshManager {
   }
 
   /**
+   * Start the DSH web process on an already-deployed peer.
+   *
+   * The same scan + fingerprint gate as `readPeer` runs first and in full —
+   * starting something on that machine is a write action, so the host key is
+   * re-verified against the approved fingerprint before anything is sent. The
+   * script re-uses the deploy's remote environment and start branch; its
+   * built-in health loop is advisory only (a stale pid file or a slow daemon
+   * can fool it), so the verdict comes from probing the port on the same
+   * connection: only liveness `running` reports ok, anything else carries the
+   * remote stderr back as the reason.
+   */
+  async startPeer(config: SshConnectionConfig, port: number): Promise<{ readonly ok: true; readonly port: number } | { readonly ok: false; readonly reason: string }> {
+    const fingerprint: string | undefined = config.hostKeyFingerprint
+    if (fingerprint === undefined || fingerprint === '' || fingerprint === 'unapproved') {
+      throw new Error('hostKeyFingerprint is required')
+    }
+    const scans = await this.scan(config)
+    const scan = scans.find(candidate => candidate.hostKeyFingerprint === config.hostKeyFingerprint)
+    if (scan === undefined) throw new Error('SSH host key changed or does not match the approved fingerprint')
+    this.persistKnownHost(config, scan.knownHostLine)
+    const materialized = await this.materializeAuth(config)
+    try {
+      const nodePath = await this.discoverRemoteNode(materialized)
+      const start = await this.remoteExec(materialized, peerStartScript(this.options.deploymentChannel, nodePath, port), this.options.installTimeoutMs)
+      const probe = await this.remoteExec(materialized, buildLivenessProbe(port), this.peerReadBudgetMs())
+      if (classifyLiveness({ code: probe.code, stdout: probe.stdout }).liveness !== 'running') {
+        const reason = start.stderr.trim() || start.stdout.trim() || `status ${start.code}`
+        return { ok: false, reason }
+      }
+      return { ok: true, port }
+    } finally {
+      this.cleanupTempKeys()
+    }
+  }
+
+  /**
    * Reach an already-deployed peer: read its record, plan the honest route
    * (tunnel or direct), and hand back the tokenized URL to open. Refusals
    * throw with the reason and next action; SSH failures pass through raw.
@@ -325,6 +361,30 @@ export class DshSshManager {
       await new Promise(resolve => setTimeout(resolve, 400))
     }
     return false
+  }
+
+  /**
+   * Locate node on the remote with the same candidate list and version gate
+   * `deploy` uses, so the start script's PATH and `node_dir` anchor exactly
+   * where the original install found them.
+   */
+  private async discoverRemoteNode(config: SshConnectionConfig): Promise<string> {
+    const probe = await this.remoteExec(config, [
+      'set -eu',
+      'node_path="$(command -v node 2>/dev/null || true)"',
+      'if [ -z "$node_path" ] && [ -x /opt/homebrew/bin/node ]; then node_path=/opt/homebrew/bin/node; fi',
+      'if [ -z "$node_path" ] && [ -x /usr/local/bin/node ]; then node_path=/usr/local/bin/node; fi',
+      'if [ -z "$node_path" ] && [ -x "$HOME/.local/bin/node" ]; then node_path="$HOME/.local/bin/node"; fi',
+      'test -n "$node_path"',
+      '"$node_path" -e \'const major=Number(process.versions.node.split(".")[0]); process.exit(major >= 22 ? 0 : 1)\'',
+      'printf \'%s\\n\' "$node_path"',
+    ].join('; '), this.handshakeBudgetMs())
+    if (probe.code !== 0) throw new Error('远端需要 Node.js 22 或更高版本才能运行 DSH Web')
+    const nodePath = probe.stdout.trim().split(/\r?\n/).at(-1) ?? ''
+    if (nodePath === '' || !nodePath.startsWith('/') || /[\r\n\0]/.test(nodePath)) {
+      throw new Error('远端返回的 Node 路径无效')
+    }
+    return nodePath
   }
 
   private async uploadReleaseTar(config: SshConnectionConfig, localRelease: string, remoteReleaseDir: string): Promise<void> {
@@ -577,4 +637,27 @@ export function buildInstallScript(input: {
     upgrade ? '' : 'if [ "$already" = "1" ]; then emit_success; fi',
     buildStartBranch({ channel, remotePort }),
   ].filter(line => line !== '').join('; ')
+}
+
+/**
+ * The standalone start script: the deploy's remote environment and start
+ * branch, preceded by a no-op `emit_success` — the start branch calls it when
+ * its own health loop answers, but the verdict for a start comes from the
+ * liveness probe afterwards, and the peer record already exists from the
+ * original deploy, so there is no launch URL to emit and nothing to rewrite.
+ * The fragments never define `emit_success` themselves (the install script
+ * defines it inline), so the definition must travel with this script.
+ */
+function peerStartScript(channel: string, nodePath: string, port: number): string {
+  return [
+    'emit_success() { exit 0; }',
+    buildStartScript({
+      channel,
+      nodePath,
+      remotePort: String(port),
+      hostId: '',
+      hostTitle: '',
+      remoteAgentsPatch: buildRemoteAgentsPatchYaml(),
+    }),
+  ].join('; ')
 }

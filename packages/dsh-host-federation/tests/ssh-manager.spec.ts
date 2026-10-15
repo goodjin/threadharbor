@@ -1,10 +1,12 @@
 import { readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createServer } from 'node:net'
 import { portListening } from '../src/ssh/port.ts'
+import type { SshConnectionConfig } from '../src/ssh/types.ts'
 import { DshSshManager } from '../src/ssh/manager.ts'
 
 const roots: string[] = []
@@ -218,6 +220,105 @@ describe('DshSshManager', () => {
       try {
         const report = await manager.readPeer(approved)
         expect(report).toEqual({ pluginsInstalled: false, liveness: 'unknown' })
+      } finally {
+        manager.close()
+      }
+    })
+  })
+
+  describe('startPeer — restart the DSH web on an approved, deployed peer', () => {
+    const makeManager = (): DshSshManager => new DshSshManager({
+      knownHostsPath: '/dev/null',
+      connectTimeoutMs: 10,
+      installTimeoutMs: 10,
+      deploymentChannel: 'test',
+      defaultRemoteWebPort: 3081,
+      releaseDirectory: '/dev/null',
+    })
+    const approved = { target: 'mini.ts.net', hostKeyFingerprint: 'SHA256:abc' }
+    type Internals = {
+      scan: () => Promise<readonly { hostKeyFingerprint: string; knownHostLine: string }[]>
+      remoteExec: (config: unknown, script: string, timeoutMs: number) => Promise<{ code: number; stdout: string; stderr: string }>
+    }
+    const scanResult = [{ hostKeyFingerprint: 'SHA256:abc', knownHostLine: 'mini.ts.net ssh-ed25519 AAAA' }]
+    const nodeFound = { code: 0, stdout: '/usr/local/bin/node\n', stderr: '' }
+
+    it('refuses before any I/O when the config carries no approved fingerprint', async () => {
+      const manager = makeManager()
+      const internals = manager as unknown as Internals
+      const scan = vi.spyOn(internals, 'scan')
+      const remoteExec = vi.spyOn(internals, 'remoteExec')
+      try {
+        await expect(manager.startPeer({ target: 'mini.ts.net' } as SshConnectionConfig, 3081))
+          .rejects.toThrow('hostKeyFingerprint is required')
+        await expect(manager.startPeer({ target: 'mini.ts.net', hostKeyFingerprint: 'unapproved' }, 3081))
+          .rejects.toThrow('hostKeyFingerprint is required')
+        // Behavioural ordering proof: the refusal happened at the very top of
+        // startPeer, before the scan (the first I/O of the fingerprint gate)
+        // and before any remote exec.
+        expect(scan).not.toHaveBeenCalled()
+        expect(remoteExec).not.toHaveBeenCalled()
+      } finally {
+        manager.close()
+      }
+    })
+
+    it('reports ok only when the port answers after the start script runs', async () => {
+      const manager = makeManager()
+      const internals = manager as unknown as Internals
+      vi.spyOn(internals, 'scan').mockResolvedValue(scanResult)
+      const remoteExec = vi.spyOn(internals, 'remoteExec')
+        .mockResolvedValueOnce(nodeFound)
+        .mockResolvedValueOnce({ code: 0, stdout: '', stderr: '' })
+        .mockResolvedValueOnce({ code: 0, stdout: 'RUNNING\n', stderr: '' })
+      try {
+        const result = await manager.startPeer(approved, 3081)
+        expect(result).toEqual({ ok: true, port: 3081 })
+        expect(remoteExec).toHaveBeenCalledTimes(3)
+        // The verdict comes from the liveness probe on the requested port,
+        // not from the start script's own stdout.
+        expect(remoteExec.mock.calls[2]?.[1]).toContain('http://127.0.0.1:3081/')
+      } finally {
+        manager.close()
+      }
+    })
+
+    it('reports failure with the remote stderr when the port stays down', async () => {
+      const manager = makeManager()
+      const internals = manager as unknown as Internals
+      vi.spyOn(internals, 'scan').mockResolvedValue(scanResult)
+      vi.spyOn(internals, 'remoteExec')
+        .mockResolvedValueOnce(nodeFound)
+        .mockResolvedValueOnce({ code: 1, stdout: '', stderr: 'DSH Web did not become healthy\n' })
+        .mockResolvedValueOnce({ code: 7, stdout: 'STOPPED\n', stderr: '' })
+      try {
+        const result = await manager.startPeer(approved, 3081)
+        expect(result).toEqual({ ok: false, reason: 'DSH Web did not become healthy' })
+      } finally {
+        manager.close()
+      }
+    })
+
+    it('emits a start script that defines emit_success and parses as shell', async () => {
+      const manager = makeManager()
+      const internals = manager as unknown as Internals
+      vi.spyOn(internals, 'scan').mockResolvedValue(scanResult)
+      const remoteExec = vi.spyOn(internals, 'remoteExec')
+        .mockResolvedValueOnce(nodeFound)
+        .mockResolvedValue({ code: 0, stdout: 'RUNNING\n', stderr: '' })
+      try {
+        await manager.startPeer(approved, 3081)
+        const script = remoteExec.mock.calls[1]?.[1] ?? ''
+        // The start branch calls emit_success but the fragments never define
+        // it; the start script must supply the no-op definition itself.
+        expect(script).toContain('emit_success() { exit 0; }')
+        // Syntax check only — nothing executes. The fragment family (install
+        // and start alike) joins shell lines with "; ", which the POSIX sh on
+        // this machine rejects (`do;` / `{;` / `else;`) but the remote login
+        // shell that executes these scripts in the field — zsh, the macOS
+        // default — accepts. Parse under that shell family.
+        const shell = spawnSync('zsh', ['--version']).status === 0 ? 'zsh' : 'sh'
+        expect(spawnSync(shell, ['-n'], { input: script }).status).toBe(0)
       } finally {
         manager.close()
       }
