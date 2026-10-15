@@ -44,7 +44,13 @@ describe('DshSshManager', () => {
   })
 
   it('includes portable port reclaim and DSH web health wait in the remote install script', () => {
-    const source = readFileSync(new URL('../src/ssh/manager.ts', import.meta.url), 'utf8')
+    // The install script is composed from manager.ts plus the start-script.ts
+    // fragments, so its source now spans both files; every asserted string
+    // below must still exist verbatim in one of them.
+    const source = [
+      readFileSync(new URL('../src/ssh/manager.ts', import.meta.url), 'utf8'),
+      readFileSync(new URL('../src/ssh/start-script.ts', import.meta.url), 'utf8'),
+    ].join('\n')
     expect(source).toContain('port_pids()')
     expect(source).toContain('port_busy')
     expect(source).toContain('dsh plugin --profile web add')
@@ -56,6 +62,12 @@ describe('DshSshManager', () => {
     expect(source).toContain('threadharbor-remote-agents.patch.yml')
     expect(source).toContain('--patch $agents_patch')
     expect(source).not.toContain('hostd')
+  })
+
+  it('still assembles both the systemd and nohup branches into the install script', () => {
+    const source = readFileSync(new URL('../src/ssh/manager.ts', import.meta.url), 'utf8')
+    expect(source).toContain('buildRemoteEnv(')
+    expect(source).toContain('buildStartBranch(')
   })
 
   it('judges a tunnel by its local port', async () => {
