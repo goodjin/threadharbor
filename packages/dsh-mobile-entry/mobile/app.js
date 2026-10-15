@@ -288,6 +288,9 @@ export async function bootApp(root, deps = {}) {
           items: visibleSessions(),
           hasMore: state.sessions.length > state.sessionsShown,
           machineLabel: currentMachineLabel(),
+          // 取会话这一拍失败过：得说出来。以前这行读了却没人渲染，故障时手机上
+          // 显示的是「还没有会话」——像空列表，不像出事。
+          error: state.sessionsError,
         })
         tabbar.innerHTML = tabbarHtml('sessions')
         break

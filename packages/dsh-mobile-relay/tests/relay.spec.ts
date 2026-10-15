@@ -311,7 +311,9 @@ describe('评审补的接线用例（C1/C2/I1/I2 的判别力）', () => {
     relay.registerPhone({ on: () => {}, close: () => {}, send: (frame: string) => { seen.push(frame) } } as never)
     await relay.attachClients()
     current.emit('item', { t: 'one' })
-    relay.invalidateClient('host-a')
+    // 作废走的就是 deps 上那一条（转发面遇到 401 时也是这么调的）——曾经有个
+    // 公开方法包着它，生产无人调用，只有一条用例在调它。
+    current = fakeClient()
     await relay.reconcile()
     current.emit('item', { t: 'two' })
     expect(seen).toHaveLength(2)

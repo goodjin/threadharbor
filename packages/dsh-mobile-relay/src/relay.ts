@@ -187,15 +187,6 @@ export class Relay {
     return this.attachClients()
   }
 
-  /**
-   * 作废某机的客户端（401 之后、或运维要求重连）。调用方随后调 {@link reconcile}
-   * 才会把新客户端重挂到汇流上——分开是有意的：作废是同步的，重挂要开隧道，
-   * 不能塞在同一次调用里拖住应答。
-   */
-  invalidateClient(hostId: string): void {
-    this.deps.clients.invalidate(hostId)
-  }
-
   /** 手机接上事件流。 */
   registerPhone(socket: PhoneSocket): void {
     this.phones.add(socket)
@@ -514,14 +505,6 @@ function isOutcome(value: unknown): value is EventOutcome {
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
-
-/** 供装配层复用：把各机客户端按 hostId 挂上汇流。 */
-export function attachAllClients(relay: Relay): void {
-  relay.attachClients()
-}
-
-/** 事件结果端点（供接线自检用；这里再导出一次是给装配层拼路径校验时用）。 */
-export { EVENT_RESULT_ENDPOINT }
 
 /**
  * 查询串里的游标；不是有限整数就当没有（400 由上游去说，中转不替它编）。

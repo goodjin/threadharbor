@@ -527,3 +527,30 @@ describe('prompt/cancel 不许假报成功（漏判 ok:false 的后果是草稿�
   })
 })
 
+describe('会话这一拍失败要说出来（以前像「还没有会话」）', () => {
+  function hubFailingSessions() {
+    return {
+      mode: 'hub' as const,
+      async listHosts() { return { hosts: [{ hostId: HOST_A, name: 'MacBook', running: true, reachable: true, online: true }] } },
+      async listSessions() { return { error: '那台机器的凭据已过期，需要重新配对' } },
+      async pageMessages() { return { conv: { items: [] } } },
+      async prompt() { return { ok: true } },
+      async cancel() { return { ok: true } },
+      async answer() { return { ok: true } },
+      connectEvents() { return { close() {} } },
+    }
+  }
+
+  it('中转说凭据过期 → 界面显示那句话，不是一句「还没有会话」', async () => {
+    const root = host()
+    await bootApp(root, { backend: hubFailingSessions() as never })
+    await settle(8)
+    const enter = root.querySelector('[data-action="enter-machine"][data-machine-id="mac-a"]') as HTMLElement
+    expect(enter).not.toBeNull()
+    enter.click()
+    await settle(12)
+    expect(root.innerHTML).toContain('重新配对')
+    expect(root.innerHTML).not.toContain('还没有会话')
+  })
+})
+

@@ -178,10 +178,20 @@ function sessionTitle(item) {
  * 概念，显示一个空标签只会在每行后面多出一段空白）。
  */
 export function renderSessionList(state) {
-  const { items = [], hasMore = false, machineLabel = null } = state ?? {}
+  const { items = [], hasMore = false, machineLabel = null, error = undefined } = state ?? {}
   const parts = []
+  if (typeof error === 'string' && error.length > 0) {
+    // 故障**先说**：列表空了是「这台机器还没有会话」，说错话比空着更像一切正常。
+    // 排障提示放在这里，不在列表里堆技术细节（那句「找运维看日志」在别处）。
+    // class 与空列表那句共用一条样式（app.css 里已并在一起）：两者都是「列表
+    // 里没有条目」这一类，不为一句话单开一套配色。
+    parts.push(`<p class="conv-error" role="alert">${escapeHtml(error)}</p>`)
+  }
   if (items.length === 0) {
-    parts.push('<p class="list-empty">还没有会话。可以在桌面端新建一个。</p>')
+    // 已经说过故障了，就别再说「还没有会话」——两句互相矛盾。
+    if (!(typeof error === 'string' && error.length > 0)) {
+      parts.push('<p class="list-empty">还没有会话。可以在桌面端新建一个。</p>')
+    }
   } else {
     parts.push('<ul class="session-list">')
     for (const item of items) {
