@@ -42,6 +42,9 @@ export type {
   SshHostKeyCandidate,
 } from './ssh/types.ts'
 export type { PeerListen, PeerStatus } from './ssh/peer-status.ts'
+// PeerReport 是 readPeer 读数的线上形状（记录 + 存活探测），纯类型出根入口，
+// 浏览器侧只拿类型、不拖实现（先例同 peer-status）。
+export type { PeerReport } from './ssh/liveness.ts'
 export { REMOTE_DEPLOY_AGENT_SPECS } from './ssh/remote-agents.ts'
 export type { HostSession, HostRoll, ProjectGroup, RollUp } from './federation.ts'
 export { rollUpView } from './rollup-view.ts'

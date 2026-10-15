@@ -2,7 +2,7 @@
  * Browser client for ThreadHarbor SSH auto-deploy routes on the serving host.
  */
 
-import type { HostSession, PeerStatus, SshConnectResult, SshConnectionInput, SshDeployOperationView, SshDeployRequest, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
+import type { HostSession, PeerReport, SshConnectResult, SshConnectionInput, SshDeployOperationView, SshDeployRequest, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
 import type { RuntimeT } from './locales.ts'
 import { fallbackT } from './locales.ts'
 
@@ -46,7 +46,7 @@ export async function inspectSshHost(ssh: SshConnectionInput, t: RuntimeT = fall
 export async function readRemotePeer(
   ssh: SshConnectionInput & { readonly hostKeyFingerprint: string },
   t: RuntimeT = fallbackT,
-): Promise<ApiResult<PeerStatus>> {
+): Promise<ApiResult<PeerReport>> {
   return await postJson(ROUTE_PEER, { ssh }, t)
 }
 

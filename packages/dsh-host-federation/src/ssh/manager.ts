@@ -8,13 +8,14 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { dirname, join } from 'node:path'
 import type { SshConnectionConfig, SshConnectResult, SshDeployProgress, SshDeployRequest, SshDeployResult, SshHostKeyCandidate } from './types.ts'
 import { composeLaunchUrl, parseAccessMode, parseDeployMarkers, planConnection } from './access.ts'
-import { run, runWithEnv } from './run.ts'
+import { run, runWithEnv, type RunResult } from './run.ts'
 import { freePort, portListening } from './port.ts'
 import { deploymentChannel, destination, parseSshInput, shellQuote } from './parse.ts'
 import { readReleaseVersion, resolveReleaseDirectory } from './release.ts'
 import { DEFAULT_REMOTE_DSH_PLUGINS } from './deploy-plugins.ts'
 import { buildRemoteAgentsPatchYaml } from './remote-agents.ts'
-import { parsePeerStatus, type PeerStatus } from './peer-status.ts'
+import { parsePeerStatus } from './peer-status.ts'
+import { buildLivenessProbe, decidePeerReport, type PeerReport } from './liveness.ts'
 
 export type SshManagerOptions = {
   readonly knownHostsPath: string
@@ -73,12 +74,18 @@ export class DshSshManager {
   }
 
   /**
-   * Read the peer record another host wrote for itself.
+   * Read the peer record another host wrote for itself, then ask that machine
+   * whether its DSH web process is actually up.
    *
    * Any machine with SSH credentials can do this; the file says whether
-   * ThreadHarbor is installed and which URL / listen mode to use.
+   * ThreadHarbor is installed and which URL / listen mode to use. The record
+   * alone cannot vouch for liveness, so — still on the same SSH connection —
+   * the loopback port from the record is probed. No record means no port to
+   * probe: undeployed with liveness `unknown`, never a guess. The whole read
+   * runs on a capped budget; expiry reports `unknown` with a timeout note and
+   * never `stopped`.
    */
-  async readPeer(config: SshConnectionConfig): Promise<PeerStatus> {
+  async readPeer(config: SshConnectionConfig): Promise<PeerReport> {
     if (config.hostKeyFingerprint === 'unapproved') throw new Error('hostKeyFingerprint is required')
     const approved = config
     const scans = await this.scan(approved)
@@ -86,17 +93,37 @@ export class DshSshManager {
     if (scan === undefined) throw new Error('SSH host key changed or does not match the approved fingerprint')
     this.persistKnownHost(approved, scan.knownHostLine)
     const materialized = await this.materializeAuth(approved)
+    const deadline = Date.now() + this.peerReadBudgetMs()
     try {
-      const probe = await this.remoteExec(
-        materialized,
-        'cat "$HOME/.local/state/threadharbor/peer.json" 2>/dev/null || true',
-        this.handshakeBudgetMs(),
-      )
-      if (probe.code === 255) {
-        throw new Error(`无法使用当前 SSH 凭据连接目标主机：${probe.stderr.trim() || 'ssh 退出码 255'}`)
+      let record: RunResult
+      try {
+        record = await this.remoteExec(
+          materialized,
+          'cat "$HOME/.local/state/threadharbor/peer.json" 2>/dev/null || true',
+          this.peerReadBudgetMs(),
+        )
+      } catch (error) {
+        if (readTimedOut(error)) return { pluginsInstalled: false, liveness: 'unknown', livenessNote: '读取超时' }
+        throw error
       }
-      if (probe.code !== 0) return { pluginsInstalled: false }
-      return parsePeerStatus(probe.stdout)
+      if (record.code === 255) {
+        throw new Error(`无法使用当前 SSH 凭据连接目标主机：${record.stderr.trim() || 'ssh 退出码 255'}`)
+      }
+      if (record.code !== 0) return { pluginsInstalled: false, liveness: 'unknown' }
+      const peer = parsePeerStatus(record.stdout)
+      if (!peer.pluginsInstalled || peer.port === undefined) return decidePeerReport(peer, undefined)
+      let probe: RunResult
+      try {
+        probe = await this.remoteExec(
+          materialized,
+          buildLivenessProbe(peer.port),
+          Math.max(deadline - Date.now(), 1),
+        )
+      } catch (error) {
+        if (readTimedOut(error)) return { ...peer, liveness: 'unknown', livenessNote: '读取超时' }
+        throw error
+      }
+      return decidePeerReport(peer, { code: probe.code, stdout: probe.stdout })
     } finally {
       this.cleanupTempKeys()
     }
@@ -407,6 +434,11 @@ export class DshSshManager {
     return this.options.connectTimeoutMs * 4
   }
 
+  /** Total budget for one `readPeer` exchange (record + liveness probe). */
+  private peerReadBudgetMs(): number {
+    return Math.min(this.handshakeBudgetMs(), PEER_READ_BUDGET_MS)
+  }
+
   private muxArgs(config: SshConnectionConfig): string[] {
     const dir = dirname(this.options.knownHostsPath)
     const hash = createHash('sha256')
@@ -478,6 +510,18 @@ export class DshSshManager {
 
 function alias(config: SshConnectionConfig): string {
   return `threadharbor-${createHash('sha256').update(`${config.target}\0${config.port ?? 22}`).digest('hex').slice(0, 24)}`
+}
+
+/**
+ * Reading a peer must answer within this window no matter how slow the remote
+ * is; past it the read reports liveness `unknown` with a timeout note — never
+ * `stopped`.
+ */
+const PEER_READ_BUDGET_MS = 8_000
+
+/** `runWithEnv` signals budget expiry by rejecting with this message shape. */
+function readTimedOut(error: unknown): boolean {
+  return error instanceof Error && error.message.includes(' timed out after ')
 }
 
 function commandExists(name: string): boolean {

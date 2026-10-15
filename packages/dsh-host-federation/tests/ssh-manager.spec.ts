@@ -85,7 +85,7 @@ describe('DshSshManager', () => {
     it('tunnels a loopback peer and composes the tokenized launch URL', async () => {
       const manager = makeManager()
       const readPeer = vi.spyOn(manager, 'readPeer').mockResolvedValue({
-        pluginsInstalled: true, listen: 'loopback', port: 3081,
+        pluginsInstalled: true, listen: 'loopback', port: 3081, liveness: 'unknown',
         launchUrl: 'http://127.0.0.1:3081/?token=secret',
       })
       const ensureTunnel = vi.spyOn(manager, 'ensureTunnel').mockResolvedValue('http://127.0.0.1:45555')
@@ -96,7 +96,7 @@ describe('DshSshManager', () => {
           endpoint: 'http://127.0.0.1:45555',
           launchUrl: 'http://127.0.0.1:45555/?token=secret',
           mode: 'tunnel',
-          peer: { pluginsInstalled: true, listen: 'loopback', port: 3081, launchUrl: 'http://127.0.0.1:3081/?token=secret' },
+          peer: { pluginsInstalled: true, listen: 'loopback', port: 3081, liveness: 'unknown', launchUrl: 'http://127.0.0.1:3081/?token=secret' },
         })
         expect(readPeer).toHaveBeenCalled()
       } finally {
@@ -106,7 +106,7 @@ describe('DshSshManager', () => {
 
     it('refuses to connect when nothing is installed, without touching the tunnel', async () => {
       const manager = makeManager()
-      vi.spyOn(manager, 'readPeer').mockResolvedValue({ pluginsInstalled: false })
+      vi.spyOn(manager, 'readPeer').mockResolvedValue({ pluginsInstalled: false, liveness: 'unknown' })
       const ensureTunnel = vi.spyOn(manager, 'ensureTunnel').mockResolvedValue('http://127.0.0.1:1')
       try {
         await expect(manager.connect(approved)).rejects.toThrow('远端还没有 ThreadHarbor 部署记录')
@@ -119,8 +119,8 @@ describe('DshSshManager', () => {
     it('opens a legacy direct-listening peer as-is, no tunnel', async () => {
       const manager = makeManager()
       vi.spyOn(manager, 'readPeer').mockResolvedValue({
-        pluginsInstalled: true, listen: 'tailscale', port: 3081, bindHost: '100.64.0.2',
-        launchUrl: 'http://100.64.0.2:3081/?token=s',
+        pluginsInstalled: true, listen: 'tailscale', port: 3081, liveness: 'unknown',
+        bindHost: '100.64.0.2', launchUrl: 'http://100.64.0.2:3081/?token=s',
       })
       const ensureTunnel = vi.spyOn(manager, 'ensureTunnel').mockResolvedValue('http://127.0.0.1:1')
       try {
