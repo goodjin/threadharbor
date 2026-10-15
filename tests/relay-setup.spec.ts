@@ -77,3 +77,31 @@ describe('relay-setup.sh', () => {
     expect(() => execFileSync('bash', ['-n', SCRIPT], { encoding: 'utf8' })).not.toThrow()
   })
 })
+
+describe('known_hosts 别名（运维唯一能拿到它的途径）', () => {
+  it('输出别名与登记命令（别名是算出来的，运维没有别的途径知道它）', () => {
+    const result = run(['--host', 'tencent01', '--target', '100.84.120.35', '--remote-port', '3080'])
+    expect(result.code).toBe(0)
+    const alias = /threadharbor-[0-9a-f]{24}/.exec(result.stdout)
+    expect(alias).not.toBeNull()
+    // 与 packages/dsh-mobile-relay/src/tunnels.ts 的 hostKeyAlias 同式：sha256 前 24 位。
+    expect(alias?.[0]).toBe('threadharbor-563336ce4c9a9a72687422c7')
+    expect(result.stdout).toContain('known_hosts')
+    expect(result.stdout).toContain(alias?.[0] ?? '')
+  })
+
+  it('ssh 端口不同 → 别名不同（别名把端口算进去了）', () => {
+    const base = run(['--host', 'tencent01', '--target', '100.64.0.2', '--remote-port', '3081'])
+    const other = run(['--host', 'tencent01', '--target', '100.64.0.2', '--remote-port', '3081', '--ssh-port', '2222'])
+    const a = /threadharbor-[0-9a-f]{24}/.exec(base.stdout)?.[0]
+    const b = /threadharbor-[0-9a-f]{24}/.exec(other.stdout)?.[0]
+    expect(a).toBeTruthy()
+    expect(b).toBeTruthy()
+    expect(a).not.toBe(b)
+  })
+
+  it('ssh 端口非法形态被拒', () => {
+    const result = run(['--host', 'tencent01', '--target', '100.64.0.2', '--remote-port', '3081', '--ssh-port', '099'])
+    expect(result.code).not.toBe(0)
+  })
+})

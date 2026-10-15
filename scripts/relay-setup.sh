@@ -26,6 +26,7 @@ usage() {
   --remote-port  那台机器上 DSH 监听的端口（1–65535 的整数，不接受 099 这类前导零）。
   --user         SSH 用户名（缺省沿用本机登录名）。
   --identity     私钥绝对路径（缺省用 ssh 自己的默认私钥）。
+  --ssh-port     中转连它用的 SSH 端口（缺省 22）。它只影响 known_hosts 的别名。
 
 输出：可抄进云主机 cordis.patch.yml 的组合行片段。脚本不改任何文件。
 EOF
@@ -41,6 +42,7 @@ TARGET=''
 REMOTE_PORT=''
 USER_NAME=''
 IDENTITY=''
+SSH_PORT=22
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -71,6 +73,11 @@ while [ $# -gt 0 ]; do
     --identity)
       [ $# -ge 2 ] || die "--identity 后面要跟私钥路径"
       IDENTITY="$2"
+      shift 2
+      ;;
+    --ssh-port)
+      [ $# -ge 2 ] || die "--ssh-port 后面要跟端口"
+      SSH_PORT="$2"
       shift 2
       ;;
     *)
@@ -122,12 +129,30 @@ if [ -n "$USER_NAME" ]; then
     *[!A-Za-z0-9._-]*) die "用户名含非法字符：$USER_NAME" ;;
   esac
 fi
+case "$SSH_PORT" in
+  0[0-9]*)
+    die "SSH 端口不能写成前导零形态：$SSH_PORT"
+    ;;
+  ''|*[!0-9]*)
+    die "SSH 端口必须是十进制整数：$SSH_PORT"
+    ;;
+esac
+if [ "$SSH_PORT" -lt 1 ] || [ "$SSH_PORT" -gt 65535 ]; then
+  die "SSH 端口要在 1-65535 之间：$SSH_PORT"
+fi
+
 if [ -n "$IDENTITY" ]; then
   case "$IDENTITY" in
     /*) ;;
     *) die "私钥路径要用绝对路径：$IDENTITY" ;;
   esac
 fi
+
+# 中转查 known_hosts 用的别名：sha256("<target>\0<ssh端口>") 前 24 位十六进制。
+# 与 packages/dsh-mobile-relay/src/tunnels.ts 的 hostKeyAlias 同式——运维侧没有
+# 别的途径知道这个别名，所以脚本必须把它算出来。
+ALIAS="threadharbor-$(printf '%s\0%s' "$TARGET" "$SSH_PORT" | shasum -a 256 | cut -c1-24)"
+KNOWN_HOSTS="${KNOWN_HOSTS:-/root/.ssh/known_hosts}"
 
 cat <<EOF
 把下面这段加进云主机的 cordis.patch.yml（按需改 mobileOrigin 与 statePath）：
@@ -145,7 +170,20 @@ cat <<EOF
           remotePort: ${REMOTE_PORT}
 $(if [ -n "$USER_NAME" ]; then echo "          user: ${USER_NAME}"; fi)$(if [ -n "$IDENTITY" ]; then echo "          identityFile: ${IDENTITY}"; fi)
 
-机器侧还要做的两件事：
-  1. known_hosts 里要有这台机器的指纹（首次连接时人工确认一次，之后免密）。
-  2. 那台机器的 DSH 要监听 127.0.0.1:${REMOTE_PORT} 并启用受信任主机——公网不经它。
+机器侧还要做的三件事：
+
+  1. known_hosts 里要有这台机器的指纹，**而且要挂在下面这个别名下**（不是 IP）：
+
+       ${ALIAS}
+
+     中转按别名查指纹，查不到就不建隧道，那台机器在清单上永远显示「需先确认
+     指纹」——症状与「机器离线」很像，但它拒绝的是没核对过的主机。
+     人工登记一行（先 ssh-keyscan 核对再写进去）：
+
+       ssh-keyscan -t ed25519 ${TARGET} > /tmp/th-key
+       echo "${ALIAS} \$(cat /tmp/th-key)" >> ${KNOWN_HOSTS}
+
+  2. 那台机器的 DSH 要监听 127.0.0.1:${REMOTE_PORT}——公网不经它。
+  3. 中转自身：dsh 启动要带 --trusted-host <mobileOrigin 的主机名>，否则中转
+     自己的请求一律 403。
 EOF
