@@ -486,3 +486,54 @@ describe('转发参数形状照抄宿主描述符（线上字段名 = 形参名�
   })
 })
 
+describe('历史分页参数要透传（写死游标 = 手机翻不动历史）', () => {
+  async function pageArgsOf(query: string): Promise<unknown> {
+    const fake = fakeClient()
+    const relay = new Relay({
+      knownHostIds: new Set(['host-a']),
+      clients: { clientFor: async () => fake.client, invalidate: () => {}, closeAll: () => {} },
+    })
+    const path = `/threadharbor/relay/hosts/host-a/sessions/s1/messages${query}`
+    const { res } = recorder()
+    await relay.handleMessages(
+      { method: 'GET', url: path, headers: {} } as never,
+      res as never,
+      new URL(`http://x${path}`),
+    )
+    return fake.calls[0]?.args
+  }
+
+  it('游标与每页条数原样进上游', async () => {
+    expect(await pageArgsOf('?throughSeq=42&maxMessages=7')).toEqual({
+      request: { address: { kind: 'session', sessionId: 's1' }, throughSeq: 42, maxMessages: 7 },
+    })
+  })
+
+  it('只给游标：maxMessages 不出现（让上游用自己的默认值）', async () => {
+    expect(await pageArgsOf('?throughSeq=0')).toEqual({
+      request: { address: { kind: 'session', sessionId: 's1' }, throughSeq: 0 },
+    })
+  })
+
+  it('都没有：throughSeq 取 -1（不按游标截断，取整段）', async () => {
+    expect(await pageArgsOf('')).toEqual({
+      request: { address: { kind: 'session', sessionId: 's1' }, throughSeq: -1 },
+    })
+  })
+
+  it('坏值不透传（上游对游标有上限检查，手机看到的是读不懂的失败）', async () => {
+    expect(await pageArgsOf('?throughSeq=abc&maxMessages=0')).toEqual({
+      request: { address: { kind: 'session', sessionId: 's1' }, throughSeq: -1 },
+    })
+    expect(await pageArgsOf('?maxMessages=1.5')).toEqual({
+      request: { address: { kind: 'session', sessionId: 's1' }, throughSeq: -1 },
+    })
+  })
+
+  it('游标可以是负数（-1 是「不按游标截断」的意思，不是不合法）', async () => {
+    expect(await pageArgsOf('?throughSeq=-5')).toEqual({
+      request: { address: { kind: 'session', sessionId: 's1' }, throughSeq: -5 },
+    })
+  })
+})
+

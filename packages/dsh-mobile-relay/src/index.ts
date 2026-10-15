@@ -272,19 +272,24 @@ export function apply(ctx: RelayRouteContext, config?: MobileRelayConfig, deps: 
   // 而反代透传的 Host 头在默认端口下不带端口——那样配的站点会被整站 403。
   // 端口不参与比对：中转对外只有一个入口，端口由反代终结，写进配置反而多一处
   // 能配错的地方（真要非默认端口，直接在反代上终结掉）。
-  registerHostsRoute(ctx, registry, new URL(mobileOrigin).hostname, deps.listTimeoutMs ?? LIST_TIMEOUT_MS)
-  // 转发面（Task 8）：清单之外的请求都走这里。装配不出 TunnelPool 的场合
+  // 转发面（Task 8）：清单之外的手机请求都走这里。装配不出 TunnelPool 的场合
   // （测试替身）就只挂清单——半套转发面比没有更难排查。
-  if (runtime !== undefined) {
-    // 内部故障的落点。手机侧只拿到有界的 {error:'machine-error'}，细节在这里。
-    //
-    // 落点是自己那个只追加文件，不是 console 也不是 ctx.logger——两条都试过：
-    // 插件跑在 worker 里，console 的输出与 DSH logger 的输出**都不进**运维在读的
-    // 那份日志（真机实测：文件里搜不到一个字）。细节丢了等于没写。
-    // 写失败也不抛：这是在处理一个已经出错的请求，再抛一层只会盖掉真正的错误。
-    const log = makeRelayLogger(config)
-    registerHubRoutes(ctx, buildRelay(config, runtime, log), new URL(mobileOrigin).hostname)
-  }
+  //
+  // 先把 Relay 建出来，再登记清单路由：清单那一轮算完要触发**订阅对账**，而
+  // 对账是 Relay 的事。顺序反过来就接不上这条线——之前正是这样漏掉的：单测只
+  // 测了 `Relay.reconcile` 这个方法本身，没有一条用例问「谁调它」，于是启动时
+  // 离线、上线后本该补上订阅的那台机器，手机永远收不到它的动静。
+  let relay: Relay | undefined
+  if (runtime !== undefined) relay = buildRelay(config, runtime, makeRelayLogger(config))
+  registerHostsRoute(
+    ctx,
+    registry,
+    new URL(mobileOrigin).hostname,
+    deps.listTimeoutMs ?? LIST_TIMEOUT_MS,
+    // 转发面没装配时没有订阅可对账。
+    relay === undefined ? undefined : (hostIds: readonly string[]) => { void relay?.reconcile(hostIds) },
+  )
+  if (relay !== undefined) registerHubRoutes(ctx, relay, new URL(mobileOrigin).hostname)
 }
 
 /**
@@ -442,6 +447,14 @@ function registerHostsRoute(
   registry: { list(): Promise<{ hosts: readonly RelayHost[]; error?: string }>; invalidate(): void },
   originHost: string,
   timeoutMs: number,
+  /**
+   * 清单算完之后的一次对账钩子，拿到这一轮真正联系上的 hostId。
+   *
+   * 这是订阅唯一的自动补挂时机：手机每刷新一次清单就是一次「现在的在线集合是
+   * 什么」。不接这个钩子，启动时离线的那台机器上线后永远补不上事件订阅——清
+   * 单上它明明是通的，手机却收不到它的任何动静。
+   */
+  onListed?: (hostIds: readonly string[]) => void,
 ): void {
   const expected = originHost.toLowerCase()
   ctx.effect(
@@ -469,7 +482,10 @@ function registerHostsRoute(
             return
           }
           const result = await listWithDeadline(registry, timeoutMs)
+          // 先应答，再对账：对账要开隧道建连，不能压在手机的等待里。
           respondJson(res, 200, JSON.stringify(result))
+          // 清单是空的那一轮也要对账：那正是「全都掉了」的意思，要断开订阅。
+          onListed?.(result.hosts.map(host => host.hostId))
         },
       }),
     'threadharbor-mobile-relay: hosts route',
@@ -606,22 +622,29 @@ function methodAllowHeader(method: Methods): string {
   )
   // 事件流：宿主没给升级面就只留 HTTP 面——手机会看到「事件流不可用」，
   // 而不是整个中转起不来。
-  ctx.webServer.registerUpgrade?.({
-    path: RELAY_EVENTS_PATH,
-    // 与 HTTP 面同一套三道门，顺序也一致：admit → 方法 → origin 绑定。
-    // 升级面没有 res 可写状态码，过关的方式是**直接毁掉 socket**：握手还没
-    // 完成，此刻不回帧就是最干净的拒绝。
-    handler: (req, socket, head) => {
-      const typedReq = req as Req
-      // 三道门先过：升级面没有 res 可写状态码，握手还没完成，此刻不回帧就是
-      // 最干净的拒绝（直接毁掉 socket）。
-      if (!upgradeGate(typedReq)) {
-        ;(socket as { destroy?: () => void }).destroy?.()
-        return
-      }
-      upgradeFace(typedReq, socket, head, relay)
-    },
-  })
+  // 包在 ctx.effect 里，与三条 HTTP 路由同一套处置：升级路由**也有**重复登记
+  // 检查，而它的 disposer 不登记就等于永远收不掉——插件重载时宿主会撞上
+  // 「duplicate upgrade route」，整个中转从此起不来。
+  ctx.effect(
+    () =>
+      ctx.webServer.registerUpgrade?.({
+        path: RELAY_EVENTS_PATH,
+        // 与 HTTP 面同一套三道门，顺序也一致：admit → 方法 → origin 绑定。
+        // 升级面没有 res 可写状态码，过关的方式是**直接毁掉 socket**：握手还没
+        // 完成，此刻不回帧就是最干净的拒绝。
+        handler: (req, socket, head) => {
+          const typedReq = req as Req
+          // 三道门先过：升级面没有 res 可写状态码，握手还没完成，此刻不回帧就是
+          // 最干净的拒绝（直接毁掉 socket）。
+          if (!upgradeGate(typedReq)) {
+            ;(socket as { destroy?: () => void }).destroy?.()
+            return
+          }
+          upgradeFace(typedReq, socket, head, relay)
+        },
+      }),
+    'threadharbor-mobile-relay: events',
+  )
 }
 
 /**

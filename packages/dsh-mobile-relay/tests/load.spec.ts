@@ -11,9 +11,11 @@ import {
   name,
   RELAY_HOSTS_PATH,
   type MobileRelayConfig,
+  type RelayAssemblyDeps,
   type RelayMachineConfig,
   type RelayRouteContext,
 } from '../src/index.ts'
+import { Relay } from '../src/relay.ts'
 
 /**
  * 骨架装载用例：中转包要作为组合行装载，装载器读到的是 `name` / `inject` /
@@ -364,6 +366,85 @@ describe('内部故障的落点（细节不能跟着有界文案一起消失）'
   it('写不出去时静默（处理中的请求已经出错了，不能再抛一层）', () => {
     const log = makeRelayLogger({ statePath: '/dev/null/impossible/state.json' })
     expect(() => log('写不进去')).not.toThrow()
+  })
+})
+
+describe('装配层的两条线（有方法不等于有人调）', () => {
+  function assemblyCtx() {
+    const upgrades = new Map<string, unknown>()
+    const disposers: (() => void)[] = []
+    const ctx = {
+      effect(factory: () => unknown) {
+        const result = factory()
+        if (typeof result === 'function') disposers.push(result as () => void)
+        return result
+      },
+      webServer: {
+        register() { return () => {} },
+        registerUpgrade(route: { path: string }) {
+          if (upgrades.has(route.path)) throw new Error(`duplicate upgrade route "${route.path}"`)
+          upgrades.set(route.path, route)
+          return () => { upgrades.delete(route.path) }
+        },
+      },
+      connection: { admit: () => ({ peer: {} }) },
+    }
+    return { ctx: ctx as unknown as RelayRouteContext, upgrades, disposers }
+  }
+
+  const assemblyDeps: RelayAssemblyDeps = {
+    // 隧道开不出来：机器全程离线，正是「上线后要能补挂订阅」那个场景。
+    ssh: { ensureTunnel: async () => 'x', readLaunchUrl: async () => undefined },
+    tailscalePeers: [{ name: 'mac-a', online: true }],
+    probeStatus: 200,
+  }
+
+  it('升级路由的 disposer 要登记（否则插件重载撞重复登记，整个中转起不来）', () => {
+    const first = assemblyCtx()
+    apply(first.ctx, VALID_CONFIG, assemblyDeps)
+    expect(first.upgrades.size).toBe(1)
+    // 模拟宿主卸载：跑完所有 disposer 再重载。
+    for (const dispose of first.disposers.splice(0)) dispose()
+    expect(first.upgrades.size).toBe(0)
+    const second = assemblyCtx()
+    expect(() => apply(second.ctx, VALID_CONFIG, assemblyDeps)).not.toThrow()
+  })
+
+  it('清单每算完一轮都要触发订阅对账（启动时离线的机器上线后要能补挂）', async () => {
+    const { ctx, upgrades } = assemblyCtx()
+    const routes: { kind: string; path: string; handler: (req: unknown, res: unknown) => Promise<void> }[] = []
+    const spyCtx = {
+      ...ctx,
+      webServer: {
+        register(route: { kind: string; path: string; handler: (req: unknown, res: unknown) => Promise<void> }) {
+          routes.push(route as never)
+          return () => {}
+        },
+        registerUpgrade: ctx.webServer.registerUpgrade,
+      },
+    }
+    apply(spyCtx as unknown as RelayRouteContext, VALID_CONFIG, assemblyDeps)
+    expect(upgrades.size).toBe(1)
+
+    const hosts = routes.find(route => route.path === '/threadharbor/relay/hosts')
+    if (hosts === undefined) throw new Error('没有清单路由')
+    const seen: string[][] = []
+    // 盯住 reconcile 这一层：它才是「订阅对账」真正发生的地方。
+    const original = Relay.prototype.reconcile
+    Relay.prototype.reconcile = function patched(hostIds?: readonly string[]) {
+      seen.push([...(hostIds ?? [])])
+      return original.call(this, hostIds)
+    }
+    try {
+      // 清单那一轮是异步的：等它真的算完再断言（call 是同步的，这里另等一下）。
+      await (hosts.handler as (req: unknown, res: unknown) => Promise<void>)(
+        { method: 'GET', url: '/threadharbor/relay/hosts', headers: { host: 'relay.example.com' } },
+        { writeHead: () => {}, end: () => {} },
+      )
+    } finally {
+      Relay.prototype.reconcile = original
+    }
+    expect(seen[0]).toEqual(['gooddemacbook-pro'])
   })
 })
 

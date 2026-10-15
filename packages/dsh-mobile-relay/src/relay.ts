@@ -276,10 +276,17 @@ export class Relay {
     // 参数形状照抄宿主描述符，别照感觉写：
     //   page(request: SessionPageRequest) —— 线上的字段名就是**形参名**，是
     //   `request`（只有 list 的形参写作 `_request`，那里才用下划线那个名字）；
-    //   SessionPageRequest = { address: {kind:'session',sessionId}, throughSeq }
-    //   throughSeq: -1 表示「不按游标截断」，取整段。
+    //   SessionPageRequest = { address: {kind:'session',sessionId}, throughSeq, maxMessages? }
+    //
+    // 分页参数**要透传**：手机往前翻历史是拿 throughSeq 游标一页一页要的，
+    // 写死 throughSeq: -1 的话每次都问「整段」，界面表现为翻不动、或者翻回去
+    // 又是同一页。缺省才是 -1（不按游标截断）。
     await this.forward(req, res, parts.hostId, SESSION_HISTORY_ENDPOINT, {
-      request: { address: { kind: 'session', sessionId: parts.sid }, throughSeq: -1 },
+      request: {
+        address: { kind: 'session', sessionId: parts.sid },
+        throughSeq: cursorOf(url) ?? -1,
+        ...(limitOf(url) === undefined ? {} : { maxMessages: limitOf(url) }),
+      },
     })
   }
 
@@ -491,3 +498,24 @@ export function attachAllClients(relay: Relay): void {
 
 /** 事件结果端点（供接线自检用；这里再导出一次是给装配层拼路径校验时用）。 */
 export { EVENT_RESULT_ENDPOINT }
+
+/**
+ * 查询串里的游标；不是有限整数就当没有（400 由上游去说，中转不替它编）。
+ *
+ * 宁可不透传也不透传一个坏值：上游对 throughSeq 有「超过当前游标就报错」的
+ * 检查，手机那边看到的是一句读不懂的失败。
+ */
+function cursorOf(url: URL): number | undefined {
+  const raw = url.searchParams.get('throughSeq')
+  if (raw === null) return undefined
+  const value = Number(raw)
+  return Number.isInteger(value) ? value : undefined
+}
+
+/** 每页条数；同上，不合法就当没有（由上游用它的默认值）。 */
+function limitOf(url: URL): number | undefined {
+  const raw = url.searchParams.get('maxMessages')
+  if (raw === null) return undefined
+  const value = Number(raw)
+  return Number.isInteger(value) && value > 0 ? value : undefined
+}
