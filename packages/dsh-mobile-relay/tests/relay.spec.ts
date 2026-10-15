@@ -18,23 +18,28 @@ const HOST_B = 'linux-b'
 function fakeClient() {
   const calls: { endpoint: string; args: unknown }[] = []
   const answers: { eventId: string; outcome: EventOutcome }[] = []
+  // 假件与真客户端同形：`'*'` 通配订阅收全部事件（真实实现在 machine-client.dispatch）。
   const handlers = new Map<string, (value: unknown) => void>()
+  /** 假件要能换结果：上游 401 / 上游报错这两种形态分别靠它造。 */
+  const state: { result: unknown } = { result: { ok: true as const, value: { ok: true } } }
   const client = {
     calls,
     answers,
-    result: { ok: true as const, value: { ok: true } },
+    state,
     async call(endpoint: string, args: unknown) {
       calls.push({ endpoint, args })
-      return client.result
+      return state.result as { ok: true; value: unknown }
     },
     async answer(eventId: string, outcome: EventOutcome) {
       answers.push({ eventId, outcome })
       return { ok: true }
     },
     onEvent(type: string, listener: (value: unknown) => void) {
+      if (type === '*') client.lastEventType = '*'
       handlers.set(type, listener)
       return () => handlers.delete(type)
     },
+    lastEventType: '',
     connect() {},
     close() {},
   }
@@ -42,8 +47,10 @@ function fakeClient() {
     client: client as unknown as MachineClient,
     calls,
     answers,
+    state,
     emit(type: string, value: unknown) {
       handlers.get(type)?.(value)
+      handlers.get('*')?.(value)
     },
   }
 }
@@ -66,7 +73,7 @@ function recorder() {
 function relayWith(clients: Record<string, ReturnType<typeof fakeClient>>) {
   const closed: string[] = []
   const pool: ClientPool = {
-    clientFor(hostId: string) {
+    async clientFor(hostId: string) {
       return clients[hostId]?.client as MachineClient
     },
     invalidate(hostId: string) {
@@ -85,8 +92,24 @@ function relayWith(clients: Record<string, ReturnType<typeof fakeClient>>) {
   return { relay, closed }
 }
 
-const req = (path: string, method = 'GET', body?: unknown): IncomingMessage =>
-  ({ method, url: path, headers: { host: 'dsh.agentlab.fun' } }) as unknown as IncomingMessage
+/**
+ * 请求假件：带 url/method/headers，并给一个能收 body 的最小流。
+ * POST 用例要真的把体读出来，所以 `on('data'|'end')` 要在注册后立刻喂数据——
+ * 真实流也是这么走的（先注册监听，数据随后到达）。
+ */
+const req = (path: string, method = 'GET', body?: unknown): IncomingMessage => {
+  const payload = body === undefined ? '' : JSON.stringify(body)
+  return {
+    method,
+    url: path,
+    headers: { host: 'dsh.agentlab.fun' },
+    on(event: string, handler: (chunk?: unknown) => void) {
+      if (event === 'data' && payload !== '') handler(Buffer.from(payload))
+      if (event === 'end' || event === 'error') handler()
+      return this
+    },
+  } as unknown as IncomingMessage
+}
 
 function urlOf(path: string): URL {
   return new URL(path, 'http://relay.invalid')
@@ -97,24 +120,25 @@ describe('会话转发（按机器归属）', () => {
     const a = fakeClient()
     const b = fakeClient()
     const { relay } = relayWith({ [HOST_A]: a, [HOST_B]: b })
-    const frames: { hostId: string; type: string }[] = []
+    const frames: { type: string; hostId: string; value: { id: string } }[] = []
     const socket = {
       send(data: string) {
-        const frame = JSON.parse(data)
-        frames.push({ hostId: frame.hostId, type: frame.type })
+        frames.push(JSON.parse(data))
       },
       close() {},
       on() {},
     }
     relay.registerPhone(socket as never)
 
-    relay.attachClients()
+    await relay.attachClients()
     a.emit('approval/request', { id: 'e1' })
     b.emit('approval/request', { id: 'e2' })
 
+    // 信封与手机页同形：type 恒为 'item'，事件类型与载荷都在 value 里原样透传，
+    // 手机据此知道「这是哪台机器的什么事」。
     expect(frames).toEqual([
-      { hostId: HOST_A, type: 'approval/request' },
-      { hostId: HOST_B, type: 'approval/request' },
+      { type: 'item', hostId: HOST_A, value: { id: 'e1' } },
+      { type: 'item', hostId: HOST_B, value: { id: 'e2' } },
     ])
   })
 
@@ -122,7 +146,7 @@ describe('会话转发（按机器归属）', () => {
     const a = fakeClient()
     const b = fakeClient()
     const { relay } = relayWith({ [HOST_A]: a, [HOST_B]: b })
-    relay.attachClients()
+    await relay.attachClients()
     const { state, res } = recorder()
 
     await relay.handleAnswer(req(RELAY_ANSWER_PATH, 'POST', { hostId: HOST_A, eventId: 'e1', outcome: { kind: 'next' } }), res)
@@ -132,11 +156,11 @@ describe('会话转发（按机器归属）', () => {
     expect(b.answers).toEqual([])
   })
 
-  it('手机断开只摘它自己，上游不受影响', () => {
+  it('手机断开只摘它自己，上游不受影响', async () => {
     const a = fakeClient()
     const b = fakeClient()
     const { relay } = relayWith({ [HOST_A]: a, [HOST_B]: b })
-    relay.attachClients()
+    await relay.attachClients()
     const frames: unknown[] = []
     const first = { send: (data: string) => frames.push(JSON.parse(data)), close() {}, on() {} }
     const second = { send: (data: string) => frames.push(JSON.parse(data)), close() {}, on() {} }
@@ -191,7 +215,7 @@ describe('路径形状与白名单', () => {
 describe('上游失败的对手机表达', () => {
   it('上游 401 → credential-stale，并触发该机凭据重换', async () => {
     const a = fakeClient()
-    a.client.result = { ok: false, kind: 'unauthorized', message: '上游说没 cookie' } as never
+    a.state.result = { ok: false, kind: 'unauthorized', message: '上游说没 cookie' }
     const stale: string[] = []
     const { relay } = relayWith({ [HOST_A]: a })
     relay.onStale = (hostId: string) => stale.push(hostId)
@@ -207,7 +231,7 @@ describe('上游失败的对手机表达', () => {
   it('上游 rpc-error → 有界中文提示，不把上游原文转发给手机', async () => {
     const a = fakeClient()
     // 上游原文可能含内部细节（路径、栈、机器上的用户名），不该原样出公网。
-    a.client.result = { ok: false, kind: 'rpc-error', message: 'Error: EACCES /root/.ssh/id_rsa at /home/hello/…' } as never
+    a.state.result = { ok: false, kind: 'rpc-error', message: 'Error: EACCES /root/.ssh/id_rsa at /home/hello/…' }
     const { relay } = relayWith({ [HOST_A]: a })
     const { state, res } = recorder()
 

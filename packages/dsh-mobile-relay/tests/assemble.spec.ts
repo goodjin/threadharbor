@@ -125,7 +125,12 @@ describe('apply 的装配：隧道端口必须一个号', () => {
     const state = await call(handler, { method: 'GET', headers: { host: 'relay.example.com' } })
 
     expect(state.status).toBe(200)
-    expect(ssh.asked).toHaveLength(1)
+    // 断言的是「每次问 SSH 用的都是落盘那个号」，不是「只问一次」：清单层与
+    // 转发层共用一个池子，两边都会用到这台机器（假 SSH 不真监听，所以池子
+    // 每次都当隧道已死而重建——那正是验活该做的事）。若哪天两端分成两个池子，
+    // 这里的第二个号会变成 41101，这条断言即红。
+    expect(ssh.asked.length).toBeGreaterThan(0)
+    expect([...new Set(ssh.asked.map(call => call.localPort))]).toEqual([41100])
     // 落盘分配号 41100（池子的窄带起点）必须原样传给 SSH 层，两处分家就是
     // 凭据绑定的 authority 对不上真实监听口——整条链路会静默失效。
     expect(ssh.asked[0]?.localPort).toBe(41100)

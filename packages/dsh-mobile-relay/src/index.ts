@@ -13,12 +13,15 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import Schema from '@deepseek-ai/schemastery'
 import { assertMobileOrigin, MOBILE_ORIGIN_PATTERN } from '@threadharbor/dsh-mobile-entry/pair-url'
 import { HostRegistry, RELAY_HOSTS_PATH, type HostRegistryDeps, type RelayHost } from './hosts.ts'
+import { Relay, RELAY_ANSWER_PATH, RELAY_EVENTS_PATH, RELAY_SESSIONS_PATH } from './relay.ts'
+import { RelayClientPool } from './client-pool.ts'
 import { TunnelPool, type TunnelEnsureResult } from './tunnels.ts'
 import { CredentialStore, MachineCredentials } from './credentials.ts'
 import type { SshConnectionConfig } from '@threadharbor/dsh-host-federation/ssh/types'
 import { DshSshManager } from '@threadharbor/dsh-host-federation/ssh/manager'
 
 export { RELAY_HOSTS_PATH } from './hosts.ts'
+export { RELAY_ANSWER_PATH, RELAY_EVENTS_PATH, RELAY_SESSIONS_PATH, Relay } from './relay.ts'
 
 export const name = 'threadharbor-mobile-relay'
 
@@ -72,6 +75,8 @@ export interface RelayRouteContext {
   effect(factory: () => unknown, label?: string): unknown
   webServer: {
     register(route: RelayRoute): () => void
+    /** WebSocket 升级登记（可选面：没它就不挂事件流，其余 HTTP 面照常）。 */
+    registerUpgrade?(route: { path: string; handler: (socket: unknown, head: unknown) => void }): () => void
   }
   connection: RelayConnection
 }
@@ -215,30 +220,76 @@ export function apply(ctx: RelayRouteContext, config?: MobileRelayConfig, deps: 
   }
   assertMobileOrigin(mobileOrigin)
   assertMachines(machines, sshKnownHostsPath)
-  const registry = deps.registry ?? new HostRegistry(buildRegistryDeps(config, deps))
+  // 清单与转发共用**同一份** runtime（隧道池、凭据层、SSH 面各一份）：
+  // 两份池子会各自读盘、各自分配端口，第一台机器在两边拿到不同的号，凭据绑定
+  // 的 authority 与真实监听口就此分家——表现是「某台机器恒 401，自愈也救不
+  // 回来」，而现场看着像网络问题。
+  const runtime = deps.registry === undefined ? buildRuntime(config, deps) : undefined
+  const registry = deps.registry ?? new HostRegistry(buildRegistryDeps(config, deps, runtime!))
   // 比 hostname 不比 host：`URL.host` 会保留非默认端口（https://x:8443 → x:8443），
   // 而反代透传的 Host 头在默认端口下不带端口——那样配的站点会被整站 403。
   // 端口不参与比对：中转对外只有一个入口，端口由反代终结，写进配置反而多一处
   // 能配错的地方（真要非默认端口，直接在反代上终结掉）。
   registerHostsRoute(ctx, registry, new URL(mobileOrigin).hostname, deps.listTimeoutMs ?? LIST_TIMEOUT_MS)
+  // 转发面（Task 8）：清单之外的请求都走这里。装配不出 TunnelPool 的场合
+  // （测试替身）就只挂清单——半套转发面比没有更难排查。
+  if (runtime !== undefined) {
+    registerHubRoutes(ctx, buildRelay(config, runtime), new URL(mobileOrigin).hostname)
+  }
 }
 
 /**
- * 装配清单算子要吃的面：隧道池与凭据层是真件，SSH 面按需注入。
+ * 把清单层已经建好的隧道池与凭据层交给转发面：每台机器一个客户端，
+ * origin 就是该机隧道在云主机侧的落点（与凭据绑定的 authority 同一个号）。
  *
- * 端口这件事在这里合拢：池子按 hostId 固定分配并落盘，再把**同一个号**交给
- * SSH 层去开转发。凭据绑定的 authority（`127.0.0.1:<落盘号>`）必须与真实监听
- * 口是同一个号——分家之后每次请求都 401，自愈也救不回来，而且现场看着像
- * 「网络问题」，极难定位。
+ * 这里刻意复用同一份 `tunnelDeps`/`credentialStore`，而不是再各建一个——两份
+ * 池子会各自读盘、各自分配端口，配额会在两次分配之间分裂，表现是「某台机器
+ * 偶尔 401，自愈也救不回来」。
  */
-function buildRegistryDeps(config: MobileRelayConfig, deps: RelayAssemblyDeps): HostRegistryDeps {
+function buildRelay(config: MobileRelayConfig, runtime: RelayRuntime): Relay {
+  const { tunnels, credentials, readLaunchUrl } = runtime
+  const pool = new RelayClientPool(
+    config.machines.map(machine => ({
+      hostId: machine.hostId,
+      resolve: async () => {
+        // 端口向池子要，不自己算：落盘号是唯一真相（见本文件头部注释）。
+        const ensured = await tunnels.ensure(machine)
+        if (!ensured.ok) throw new Error(`机器 ${machine.hostId} 现在开不出隧道（${ensured.reason}：${ensured.detail}）`)
+        const origin = ensured.handle.origin
+        return {
+          origin,
+          // 凭据自愈要能读启动网址，回源办法与清单层共用同一份隧道句柄。
+          getCookie: async () => {
+            const outcome = await credentials.resolve(machine.hostId, origin, () => readLaunchUrl(machine.hostId))
+            return outcome.ok ? { ok: true as const, cookie: outcome.cookie } : { ok: false as const, reason: outcome.reason }
+          },
+        }
+      },
+    })),
+  )
+  return new Relay({ knownHostIds: new Set(config.machines.map(machine => machine.hostId)), clients: pool })
+}
+
+/**
+ * 进程内共用的那几件真件：SSH 面、隧道池、凭据层、按 hostId 的机器表，
+ * 以及凭据自愈要用的读启动网址。
+ *
+ * 清单层与转发层共用同一份（见 apply 里的注释）：这是端口唯一真相的前提。
+ */
+interface RelayRuntime {
+  ssh: RelaySshFacade
+  tunnels: TunnelPool
+  credentials: MachineCredentials
+  byHost: ReadonlyMap<string, RelayMachineConfig>
+  readLaunchUrl(hostId: string): Promise<string | undefined>
+}
+
+function buildRuntime(config: MobileRelayConfig, deps: RelayAssemblyDeps): RelayRuntime {
   const ssh = deps.ssh ?? createSshFacade(config.sshKnownHostsPath)
   const tunnels = new TunnelPool(
     config.statePath,
-    {
-      // 箭头函数保住 this：manager 的方法取出来裸传会丢接收者。
-      ensureTunnel: (connection, remotePort, opts) => ssh.ensureTunnel(connection, remotePort, opts),
-    },
+    // 箭头函数保住 this：manager 的方法取出来裸传会丢接收者。
+    { ensureTunnel: (connection, remotePort, opts) => ssh.ensureTunnel(connection, remotePort, opts) },
     config.sshKnownHostsPath,
   )
   const credentials = new MachineCredentials(new CredentialStore(config.statePath))
@@ -254,6 +305,23 @@ function buildRegistryDeps(config: MobileRelayConfig, deps: RelayAssemblyDeps): 
     // 整份清单的时间预算。
     return await ssh.readLaunchUrl(connection, machine.logPath, 3_000)
   }
+  return { ssh, tunnels, credentials, byHost, readLaunchUrl }
+}
+
+/**
+ * 装配清单算子要吃的面：隧道池与凭据层是真件，SSH 面按需注入。
+ *
+ * 端口这件事在这里合拢：池子按 hostId 固定分配并落盘，再把**同一个号**交给
+ * SSH 层去开转发。凭据绑定的 authority（`127.0.0.1:<落盘号>`）必须与真实监听
+ * 口是同一个号——分家之后每次请求都 401，自愈也救不回来，而且现场看着像
+ * 「网络问题」，极难定位。
+ */
+function buildRegistryDeps(
+  config: MobileRelayConfig,
+  deps: RelayAssemblyDeps,
+  runtime: RelayRuntime,
+): HostRegistryDeps {
+  const { tunnels, credentials, readLaunchUrl } = runtime
   // 缝的覆盖项**逐个并入**同一份依赖，不做「命中即早退」：早退会让后面的缝
   // 静默失效——测试里两条缝一起传，第二条形同虚设，而真网络恰好快速失败，
   // 断言照样绿。宁可多写两行，也不要留一个会静默吃掉参数的缝。
@@ -343,6 +411,95 @@ function registerHostsRoute(
       }),
     'threadharbor-mobile-relay: hosts route',
   )
+}
+
+/**
+ * 转发面的路由登记（Task 8）：清单之外的手机请求都在这里。
+ *
+ * 前三道门与 hosts 清单完全一致（admit → 方法 → origin 绑定），不多也不少：
+ * 手机走的是同一个公网入口，凭据也绑在同一个 origin 上，只给其中一部分接口
+ * 加门等于给攻击者留一条绕路的旁门。origin 绑定排在方法之后，是因为拒绝分支
+ * 的短体要与官方 /api 一致（admit 先答），而 origin 是中转自己的判断。
+ *
+ * 会话类接口用 prefix 登记（webServer.register 只有 exact/prefix，没有路径
+ * 参数），真正的形状校验在 Relay.parse 里做——段数、hostId 登记、sid 白名单、
+ * 动作段四道一起过才放行。
+ */
+function registerHubRoutes(ctx: RelayRouteContext, relay: Relay, originHost: string): void {
+  const expected = originHost.toLowerCase()
+  relay.attachClients()
+
+  type Req = { method?: string | undefined; url?: string | undefined; headers?: Record<string, string | string[] | undefined> | undefined }
+  type Res = { writeHead(status: number, headers?: Record<string, string | number | string[]>): void; end(chunk?: string): void }
+
+  /**
+   * 前三道门：admit（与官方 /api 同一面，拒绝分支短体固定）→ 方法 → origin 绑定。
+   * 返回 true 才放行。少一道就是给攻击者留一条绕路的旁门，所以与 hosts 清单
+   * 用的是同一套次序与同样的短体。
+   */
+  const gate = (req: Req, res: Res, allow: string): boolean => {
+    const admission = ctx.connection.admit(req as never)
+    if ('rejection' in admission) {
+      res.writeHead(admission.rejection)
+      res.end(admission.rejection === 401 ? 'unauthorized' : 'forbidden')
+      return false
+    }
+    if ((req.method ?? 'GET') !== allow) {
+      res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8', allow })
+      res.end('method not allowed')
+      return false
+    }
+    const host = req.headers?.host
+    if (typeof host !== 'string' || host.toLowerCase() !== expected) {
+      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+      res.end('forbidden')
+      return false
+    }
+    return true
+  }
+
+  const register = (path: string, method: 'GET' | 'POST', label: string, handler: (req: Req, res: Res, url: URL) => Promise<void>) => {
+    ctx.effect(
+      () =>
+        ctx.webServer.register({
+          kind: 'prefix',
+          path,
+          async handler(req, res) {
+            const typedReq = req as unknown as Req
+            if (!gate(typedReq, res as unknown as Res, method)) return
+            await handler(typedReq, res as unknown as Res, new URL(req.url ?? path, 'http://relay.invalid'))
+          },
+        }),
+      `threadharbor-mobile-relay: ${label}`,
+    )
+  }
+
+  // 会话类接口共用一个 prefix 登记，形状（哪一段是动作）在 Relay.parse 里判。
+  register(RELAY_SESSIONS_PATH, 'GET', 'sessions', (req, res, url) => {
+    if (url.pathname.endsWith('/prompt')) return relay.handlePrompt(req, res, url)
+    if (url.pathname.endsWith('/cancel')) return relay.handleCancel(req, res, url)
+    if (url.pathname.endsWith('/messages')) return relay.handleMessages(req, res, url)
+    return relay.handleSessions(req, res, url)
+  })
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: RELAY_ANSWER_PATH,
+        async handler(req, res) {
+          const typedReq = req as unknown as Req
+          if (!gate(typedReq, res as unknown as Res, 'POST')) return
+          await relay.handleAnswer(typedReq, res as unknown as Res)
+        },
+      }),
+    'threadharbor-mobile-relay: answer',
+  )
+  // 事件流：宿主没给升级面就只留 HTTP 面——手机会看到「事件流不可用」，
+  // 而不是整个中转起不来。
+  ctx.webServer.registerUpgrade?.({
+    path: RELAY_EVENTS_PATH,
+    handler: (socket, _head) => relay.connectEvents(socket as never),
+  })
 }
 
 /**

@@ -140,16 +140,15 @@ const VALID_CONFIG: MobileRelayConfig = {
 }
 
 describe('apply 的装载行为', () => {
-  it('导出名与注入面和组合行对齐；合法配置只挂 /threadharbor/relay/hosts 一条路由', () => {
-    expect(name).toBe('threadharbor-mobile-relay')
-    expect(inject).toContain('webServer')
-    expect(inject).toContain('connection')
+  it('导出名与注入面和组合行对齐；合法配置挂三条路由（清单 / 会话 prefix / 应答）', () => {
+    // 挂几条是接线契约的一部分：少一条是功能缺失，多一条是有人复制粘贴。
     const { run, routes } = captureAppliedRoutes(VALID_CONFIG)
-    expect(run).not.toThrow()
-    expect(routes).toHaveLength(1)
-    expect(routes[0]?.kind).toBe('exact')
-    expect(routes[0]?.path).toBe(RELAY_HOSTS_PATH)
-    expect(RELAY_HOSTS_PATH).toBe('/threadharbor/relay/hosts')
+    run()
+    expect(routes.map(route => `${route.kind} ${route.path}`)).toEqual([
+      'exact /threadharbor/relay/hosts',
+      'prefix /threadharbor/relay/hosts/',
+      'exact /threadharbor/relay/answer',
+    ])
   })
 
   it('mobileOrigin 非规范化（大写 authority）：形状门放行，装载抛错且一条路由都不注册', () => {

@@ -160,6 +160,9 @@ export class MachineClient {
   }
 
   /** 注册某类事件（下行 item 帧按 value.type 分类）的监听器；返回退订函数。 */
+  /**
+   * 订阅某类事件；type 传 `'*'` 表示订阅全部。返回退订函数。
+   */
   onEvent(type: string, listener: (value: unknown) => void): () => void {
     let set = this.listeners.get(type)
     if (!set) {
@@ -368,11 +371,16 @@ export class MachineClient {
     }
   }
 
+  /**
+   * 派发一帧事件。`*` 是通配订阅：汇流层要把各机所有事件原样转发给手机，
+   * 而事件类型由上游定（审批、会话更新、状态……），逐个类型在订阅方登记
+   * 等于把上游的事件词表抄一份过来——上游加一种，汇流就静默漏一种。
+   */
   private dispatch(type: string, value: unknown): void {
-    const set = this.listeners.get(type)
-    if (set === undefined) return
-    for (const listener of set) {
-      listener(value)
+    for (const key of [type, '*']) {
+      const set = this.listeners.get(key)
+      if (set === undefined) continue
+      for (const listener of set) listener(value)
     }
   }
 }

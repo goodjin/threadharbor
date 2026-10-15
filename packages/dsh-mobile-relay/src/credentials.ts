@@ -69,6 +69,9 @@ function cookiePairOf(response: Response): string | undefined {
  * 拿到的是无 cookie 的落点页。manual 同时保证令牌网址不会被重定向带去别
  * 的源。
  */
+/** 换凭据这一步的预算：与读启动日志同档（3s），压在整份清单的 10s 之内。 */
+const EXCHANGE_TIMEOUT_MS = 3_000
+
 export async function exchangeLaunchToken(
   origin: string,
   launchUrl: string,
@@ -80,8 +83,16 @@ export async function exchangeLaunchToken(
   const token = tokenOfLaunchUrl(launchUrl)
   if (token === undefined) return { error: 'bad-launch-url' }
   let response: Response
+  // 显式超时：这一步是「隧道活着但远端 DSH 挂起」形态下唯一无界的调用——
+  // 隧道能建、端口在听、远端 accept 之后不答，于是永远挂着。挂着时这一机在
+  // 清单里既不算可达、也不产生 error（被上面的 allSettled 静默吃掉），整份
+  // 清单只能被路由层的 10s 兜成空。3s 是本机内各步预算里最长的一档，压得住。
+  const abort = AbortSignal.timeout(EXCHANGE_TIMEOUT_MS)
   try {
-    response = await doFetch(new URL(`/?token=${encodeURIComponent(token)}`, originUrl), { redirect: 'manual' })
+    response = await doFetch(new URL(`/?token=${encodeURIComponent(token)}`, originUrl), {
+      redirect: 'manual',
+      signal: abort,
+    })
   } catch {
     // 传输失败不外带原始错误：它的文本可能包含完整请求 URL（即令牌）。
     return { error: 'unreachable' }
