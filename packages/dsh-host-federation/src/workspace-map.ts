@@ -25,8 +25,10 @@ export type SessionLike = {
   readonly archived?: boolean
   /** Pinned rows lead their project in the tree. */
   readonly pinned?: boolean
-  /** Last activity stamp; orders the tree's 最近更新 sort. */
+  /** Last activity stamp; orders the tree's 最近更新 sort (last human prompt). */
   readonly updatedAt?: number
+  /** True while a turn is in flight. */
+  readonly running?: boolean
 }
 
 export type WorkspaceSession = {
@@ -40,6 +42,7 @@ export type WorkspaceSession = {
   readonly pinned?: boolean
   readonly archived?: boolean
   readonly updatedAt?: number
+  readonly running?: boolean
 }
 
 /** The bucket for sessions that belong to no workspace. */
@@ -95,6 +98,7 @@ function describe(
     ...(session.pinned === true ? { pinned: true } : {}),
     ...(session.archived === true ? { archived: true } : {}),
     ...(typeof session.updatedAt === 'number' ? { updatedAt: session.updatedAt } : {}),
+    ...(session.running === true ? { running: true } : {}),
   }
 }
 

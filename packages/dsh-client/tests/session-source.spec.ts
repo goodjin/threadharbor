@@ -52,13 +52,13 @@ describe('buildHostSessions', () => {
     }
   })
 
-  it('置顶/归档/最近更新穿层不丢（回归：最终映射曾剥掉它们）', () => {
+  it('置顶/归档/最近更新/进行中穿层不丢（回归：最终映射曾剥掉它们）', () => {
     const service = {
       list: {
         getSnapshot: () => ({
           ids: ['s1', 's2'],
           byId: {
-            s1: { displayTitle: '置顶的', updatedAt: 100 },
+            s1: { displayTitle: '置顶的', updatedAt: 100, running: true },
             s2: { displayTitle: '归档的', updatedAt: 200 },
           },
         }),
@@ -73,8 +73,9 @@ describe('buildHostSessions', () => {
     }
     const read = buildHostSessions(workspaces, readSessionSources({ sessions: service }).sessions)
     const rows = read.ok ? read.sessions : []
-    expect(rows.find(r => r.sessionId === 's1')).toMatchObject({ pinned: true, updatedAt: 100 })
+    expect(rows.find(r => r.sessionId === 's1')).toMatchObject({ pinned: true, updatedAt: 100, running: true })
     expect(rows.find(r => r.sessionId === 's2')).toMatchObject({ archived: true, updatedAt: 200 })
+    expect(rows.find(r => r.sessionId === 's2')).not.toHaveProperty('running')
   })
 
   it('当前会话判定：主视图占用的行胜出（原生同款规则）', () => {

@@ -49,8 +49,10 @@ export type HostSession = {
   readonly pinned?: boolean
   /** Archived rows stay out of sight until the tree's filter asks for them. */
   readonly archived?: boolean
-  /** Last activity stamp; orders the tree's 最近更新 sort. */
+  /** Last activity stamp; orders the tree's 最近更新 sort (last human prompt). */
   readonly updatedAt?: number
+  /** True while a turn is in flight (api-session/status running). */
+  readonly running?: boolean
 }
 
 export type ProjectGroup = {

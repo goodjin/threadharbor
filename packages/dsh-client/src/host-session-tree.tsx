@@ -56,15 +56,16 @@ function passesFilter(session: { archived?: boolean }, filterBy: FilterBy): bool
 function readViewOptions(): { orderBy: OrderBy; filterBy: FilterBy } {
   try {
     const parsed: unknown = JSON.parse(localStorage.getItem(VIEW_KEY) ?? '{}')
-    if (typeof parsed !== 'object' || parsed === null) return { orderBy: 'manual', filterBy: 'hide' }
+    if (typeof parsed !== 'object' || parsed === null) return { orderBy: 'updated', filterBy: 'hide' }
     const orderBy = (parsed as { orderBy?: unknown }).orderBy
     const filterBy = (parsed as { filterBy?: unknown }).filterBy
     return {
-      orderBy: orderBy === 'updated' ? 'updated' : 'manual',
+      // Default 最近更新: updatedAt is last human prompt (or createdAt).
+      orderBy: orderBy === 'manual' ? 'manual' : 'updated',
       filterBy: filterBy === 'show' || filterBy === 'only' ? filterBy : 'hide',
     }
   } catch {
-    return { orderBy: 'manual', filterBy: 'hide' }
+    return { orderBy: 'updated', filterBy: 'hide' }
   }
 }
 
@@ -439,10 +440,19 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                           data-session-row={session.sessionId}
                           data-active={currentSessionId === session.sessionId ? 'true' : undefined}
                           data-pinned={session.pinned === true ? 'true' : undefined}
+                          data-running={session.running === true ? 'true' : undefined}
                           onClick={() => {
                             if (host.self) setOpenFailed(openLocalSession(ctx, session.sessionId) === false)
                           }}
                         >
+                          {session.running === true
+                            ? <span
+                                className={styles.sessionRunning}
+                                data-session-running
+                                title={t('panel.tree.sessionRunning')}
+                                aria-label={t('panel.tree.sessionRunning')}
+                              />
+                            : null}
                           {session.pinned === true ? <span className={styles.sessionPin} data-session-pinned>📌</span> : null}
                           <span className={styles.sessionTitle}>
                             {renaming?.kind === 'session' && renaming.key === session.sessionId

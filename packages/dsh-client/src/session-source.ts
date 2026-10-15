@@ -24,6 +24,11 @@ export type SourceSession = {
   readonly sessionId: string
   readonly title: string
   readonly projectTitle: string
+  readonly pinned?: boolean
+  readonly archived?: boolean
+  readonly updatedAt?: number
+  /** True while a turn is in flight (sessions.list byId.running). */
+  readonly running?: boolean
 }
 
 /** What one read produced: rows, or the reason there are none. */
@@ -59,8 +64,10 @@ export type SessionListSource = {
     readonly origin?: string
     /** Retention ledger; a positive mainView marks the open session. */
     readonly retainedBy?: { readonly mainView?: number }
-    /** Last activity stamp, from the summary and prompt metadata; orders 最近更新. */
+    /** Last activity stamp, from the summary and prompt metadata; orders 最近更新 (last human prompt). */
     readonly updatedAt?: number
+    /** True while a turn is in flight (api-session/status). */
+    readonly running?: boolean
   }>>
   /** Present when the service exposes one; change notifications for republish. */
   readonly subscribe?: (listener: () => void) => () => void
@@ -145,6 +152,9 @@ function sessionSource(value: unknown): SessionListSource | undefined {
     title?: string
     blank?: boolean
     origin?: string
+    updatedAt?: number
+    running?: boolean
+    retainedBy?: { mainView?: number }
   }> = {}
   for (const [id, row] of Object.entries(byId)) {
     if (!isRecord(row)) continue
@@ -153,6 +163,7 @@ function sessionSource(value: unknown): SessionListSource | undefined {
     const blank = row['blank']
     const origin = row['origin']
     const updatedAt = row['updatedAt']
+    const running = row['running']
     const retainedBy = row['retainedBy']
     rows[id] = {
       ...(typeof displayTitle === 'string' ? { displayTitle } : {}),
@@ -160,6 +171,7 @@ function sessionSource(value: unknown): SessionListSource | undefined {
       ...(blank === true ? { blank: true } : {}),
       ...(typeof origin === 'string' ? { origin } : {}),
       ...(typeof updatedAt === 'number' ? { updatedAt } : {}),
+      ...(running === true ? { running: true } : {}),
       ...(isRecord(retainedBy) ? { retainedBy: { ...(typeof retainedBy['mainView'] === 'number' ? { mainView: retainedBy['mainView'] } : {}) } } : {}),
     }
   }
@@ -283,6 +295,7 @@ export function buildHostSessions(
           ...(workspaces.archivedSessionIds.includes(id) ? { archived: true } : {}),
           ...(workspaces.pinnedSessionIds?.includes(id) ? { pinned: true } : {}),
           ...(typeof sessions.byId[id]?.updatedAt === 'number' ? { updatedAt: sessions.byId[id]!.updatedAt } : {}),
+          ...(sessions.byId[id]?.running === true ? { running: true } : {}),
         }))
     : [...new Set(workspaces.items.flatMap(row => [...row.sessionIds]))].map(id => ({
         sessionId: id,
@@ -295,8 +308,9 @@ export function buildHostSessions(
   const placed = sessionsFromWorkspaces(workspacesLike, { sessions: sessionLikes, includeArchived: true })
   return {
     ok: true,
-    // pinned/archived/updatedAt must ride along: the tree's view options
-    // (排序/归档筛选) read them, and the final map once stripped them silently.
+    // pinned/archived/updatedAt/running must ride along: the tree's view
+    // options and the active-turn marker read them; a final map once stripped
+    // them silently.
     sessions: placed.map(row => ({
       projectId: row.projectId,
       sessionId: row.sessionId,
@@ -305,6 +319,7 @@ export function buildHostSessions(
       ...(row.pinned === true ? { pinned: true } : {}),
       ...(row.archived === true ? { archived: true } : {}),
       ...(typeof row.updatedAt === 'number' ? { updatedAt: row.updatedAt } : {}),
+      ...(row.running === true ? { running: true } : {}),
     })),
   }
 }
