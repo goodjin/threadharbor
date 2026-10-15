@@ -92,6 +92,35 @@
 **教训**：`reachable:false` 是个不吭声的故障——没有信号，现场只能逐个排除，而且很容易
 把自己排除过的方向当成已排除的方向。给这类出口**留一个自报状态的字段**，比事后推理便宜得多。
 
+## 转发面：另外两处只在真机上暴露的错
+
+### 7. 会话前缀只放行 GET，发消息与中断在真机上是 405
+
+看（清单、历史）和发（prompt、cancel）是一条前缀路由，但登记时只写了 GET。现场表现
+特别有欺骗性：清单正常、能读历史，只有「发」的动作永远 405，看着像手机端按钮没反应。
+
+### 8. 三个端点的参数形状是照感觉写的
+
+线上的字段名就是宿主方法声明的**形参名**（只有 `list` 写作 `_request`，别处都不带下划线），
+而参数对象的内容照抄 `packages/dsh-client` 里那份已经在用的实现：
+
+| 端点 | 中转原先发的 | 宿主要的 |
+| --- | --- | --- |
+| `session/list` | `{_request:{}}` | `{_request:{}}` ✓ |
+| `session/page` | `{_request:{sessionId}}` | `{request:{address:{kind:'session',sessionId},throughSeq:-1}}` |
+| `session/cancel` | `{_request:{sessionId}}` | `{request:{sessionId}}` |
+| `session/prompt` | `{request:{sessionId,text}}` | `{request:{requestId,sessionId,mode:'queue',content:[{type:'text',text}]}}` |
+| `$events/result` | `{clientId,eventId,outcome}` | ✓ |
+
+真机上的证据：修好后三个端点都不再报描述符不匹配，而是回 `session "x" not found`——
+**参数形状被接受了**，只是那个会话本来就不存在（这是拿一个假会话号打的）。
+
+### 9. 落点选了 console，等于没落
+
+上一条修完立刻被这条挡住：`console.warn` 的输出**没有出现在任何日志文件里**（插件跑在
+worker 里）。落点最终改成 state.json 旁边那个只追加的 relay.log——这也是把第 3 条的原文
+捞出来的方式。
+
 ## 第二台机器带来的第六处缺陷：指纹登记命令产出 ssh 不认的行
 
 `scripts/relay-setup.sh` 给的登记命令是「把别名顶到 `ssh-keyscan` 的输出前面」。但
