@@ -48,15 +48,15 @@
 
 **背景事实（已核对，2026-10-14）：** tencent01 = `212.64.11.60`，SSH `tencent01-root`（root）/ `tencent01-ts`（tailnet 100.84.120.35，用户 hello）；已装并在跑 Tailscale；Node v20.20.2；未装 DSH。tailnet 里可连到本机 22 端口。本机日常 DSH 监听 `127.0.0.1:3081`，启动未带 `--trusted-host`，`tailscale serve` 无配置。`ws@8.21.3`/`8.22.0` 已在工作区 store 可离线安装。
 
-- [ ] **Step 1: 升级 tencent01 的 Node 到 22.19+ 或 24**
+- [x] **Step 1: 升级 tencent01 的 Node 到 22.19+ 或 24**
 
 经 SSH 在 tencent01 上安装新版 Node（不动系统自带 v20），确认 `ssh tencent01-root 'node -v'` 落在 `^22.19.0 || >=24.0.0`。若该机无 nvm，先装 nvm 再装版本。
 
-- [ ] **Step 2: 在 tencent01 上装 DSH + ThreadHarbor（暂不含新插件）**
+- [x] **Step 2: 在 tencent01 上装 DSH + ThreadHarbor（暂不含新插件）**
 
 按 `docs/install.zh.md`（核对时间 2026-10-15）里的安装在 tencent01 上装 DSH Web 与 ThreadHarbor，用独立家目录（不要碰本机那三个既有家目录）。启动时带 `--trusted-host <公网域名>`（域名以用户实际提供的为准；若用户尚未给出公网域名，用一个占位域名先跑通其余步骤，并在证据文档里标注该占位，Step 6 会暴露缺项）。把实际用的启动命令、家目录路径与配置文件位置记进证据文档。
 
-- [ ] **Step 3: 写探针脚本 `scripts/probe-relay-wire.mjs`**
+- [x] **Step 3: 写探针脚本 `scripts/probe-relay-wire.mjs`**
 
 一个 Node 脚本，按顺序实测并逐条打印结论（每条标注「实测」或「源码钉死 + 出处」）：
 
@@ -67,16 +67,16 @@
 5. 用 `ws` 库带 `Cookie` 头升级 `ws://127.0.0.1:<freePort>/api/remote.mux`，发 open 帧订阅 `$events`（`payload` 恰为 `{"args":{}}`），打印是否收到 `ready` 帧与其 `clientId` 是否存在；并**实测 Node 内置 `WebSocket` 是否能带自定义头**（预期不能，据此确认必须用 `ws`）；
 6. 打印 `tailscale status --json` 里可见的对端名数量。
 
-- [ ] **Step 4: 跑探针并把结论写进证据文档**
+- [x] **Step 4: 跑探针并把结论写进证据文档**
 
 `node scripts/probe-relay-wire.mjs --machine tencent01-... --port 3081`（参数按 Step 1/2 的实际值）。新建 `docs/research/2026-10-16-relay-spike.md`：每条结论一行，标「实测」或「源码钉死（文件:行）」，并写明核对时间 2026-10-16。**任一条失败就停下报告，不要继续 Task 2**——通道不成立时整个方案要改。
 
-- [ ] **Step 5: 跑全量测试与类型检查（本任务未改产品代码，应与基线一致）**
+- [x] **Step 5: 跑全量测试与类型检查（本任务未改产品代码，应与基线一致）**
 
 Run: `npm run test && npm run typecheck`
 Expected: 与基线同数通过、0 失败。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add scripts/probe-relay-wire.mjs docs/research/2026-10-16-relay-spike.md
@@ -96,30 +96,30 @@ git commit -m "docs(relay): 阶段 0 真机验证——SSH 隧道换 cookie、WS
 
 **注意：** `remoteExec` 与 `materializeAuth` 是 manager 的 private 方法，本任务在类内新增公开方法复用它们，不导出新的内部面。远端命令固定为 `grep -h '^LAUNCH_URL=' <logPath> | tail -1`（默认 `remoteLogPath` 取 `~/.dsh-threadharbor/dsh-web.log`——实际路径以 Step 1/2 在 tencent01 上确认的为准，确认后写进方法默认参数注释）。
 
-- [ ] **Step 1: 写失败用例**
+- [x] **Step 1: 写失败用例**
 
 `packages/dsh-host-federation/tests/launch-url.spec.ts`：用假 SSH 执行面（沿用 `tests/ssh-manager.spec.ts` 注入 exec 的方式）喂三种 stdout——含两行 `LAUNCH_URL=`（断言取最后一行）、只有 `ALREADY_RUNNING=1`（断言 `undefined`）、空（断言 `undefined`）。
 
-- [ ] **Step 2: 跑用例确认失败**
+- [x] **Step 2: 跑用例确认失败**
 
 Run: `npx vitest run packages/dsh-host-federation/tests/launch-url.spec.ts`
 Expected: FAIL，`readLaunchUrl is not a function`。
 
-- [ ] **Step 3: 实现 `readLaunchUrl`**
+- [x] **Step 3: 实现 `readLaunchUrl`**
 
 在 `DshSshManager` 里加公开方法：`await this.remoteExec(this.materializeAuth(config), script, timeoutMs ?? 15_000)`，用既有 `parseDeployMarkers` 的行解析逻辑（同一份 `startsWith('LAUNCH_URL=')` 规则；`parseDeployMarkers` 取的是最后一次出现，行为正好一致，直接复用它解析 stdout 即可），stdout 空或命令非零退出时返回 `undefined`，任何异常也返回 `undefined`（取不到不是致命事）。
 
-- [ ] **Step 4: 跑用例确认通过**
+- [x] **Step 4: 跑用例确认通过**
 
 Run: `npx vitest run packages/dsh-host-federation/tests/launch-url.spec.ts`
 Expected: PASS（3 个用例）。
 
-- [ ] **Step 5: 跑全量与类型检查**
+- [x] **Step 5: 跑全量与类型检查**
 
 Run: `npm run test && npm run typecheck`
 Expected: 0 失败，类型干净。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add packages/dsh-host-federation/src/ssh/manager.ts packages/dsh-host-federation/tests/launch-url.spec.ts
@@ -159,30 +159,30 @@ export interface MobileRelayConfig {
 
 `Config` 用 schemastery 声明：`mobileOrigin` 复用 `MOBILE_ORIGIN_PATTERN`；`machines` 为对象数组，逐项校验 `hostId`/`target` 为非空无空白字符串、`remotePort` 为 1–65535 整数；`sshKnownHostsPath`/`statePath` 为非空字符串。`apply` 开头调用 `assertMobileOrigin`（从 `@threadharbor/dsh-mobile-entry/pair-url` 导入），再做 `hostId` 唯一性与「不含大写字母/尾点/空白」的校验——坏名字装载即失败，不静默跳过。
 
-- [ ] **Step 1: 写失败用例**
+- [x] **Step 1: 写失败用例**
 
 `packages/dsh-mobile-relay/tests/load.spec.ts`：用假 ctx（`webServer.register` 收集器、`connection` 假件）调 `apply`——① 合法配置下注册了 hello 与 `/threadharbor/relay/hosts` 两条路由；② `mobileOrigin` 非规范化（如 `https://Example.COM`）时抛错且**未注册任何路由**；③ 两台机器 `hostId` 重复时抛错；④ `hostId` 含大写字母时抛错。
 
-- [ ] **Step 2: 跑用例确认失败**
+- [x] **Step 2: 跑用例确认失败**
 
 Run: `npx vitest run packages/dsh-mobile-relay/tests/load.spec.ts`
 Expected: FAIL（模块不存在）。
 
-- [ ] **Step 3: 实现骨架**
+- [x] **Step 3: 实现骨架**
 
 `src/index.ts` 照 `packages/dsh-mobile-entry/src/index.ts` 的四件套写：`export const name = 'threadharbor-mobile-relay'`、`export const inject = ['webServer', 'connection']`、`export const Config: Schema`、`export function apply(ctx, config?)`。本任务只注册两条路由：静态壳（复用 `registerMobileRoutes`，但传入 `mobileDir` 指向依赖包的 `mobile/` 目录、模式 `hub`，见 Task 9）与 `/threadharbor/relay/hosts` 的占位（返回 `{hosts: []}`，Task 7 填实）。依赖声明：`@deepseek-ai/schemastery`、`@threadharbor/dsh-mobile-entry`、`@threadharbor/dsh-host-federation`（`workspace:^`）。
 
-- [ ] **Step 4: 跑用例确认通过**
+- [x] **Step 4: 跑用例确认通过**
 
 Run: `npx vitest run packages/dsh-mobile-relay/tests/load.spec.ts`
 Expected: PASS（4 个用例）。
 
-- [ ] **Step 5: 跑全量与类型检查**
+- [x] **Step 5: 跑全量与类型检查**
 
 Run: `npm run test && npm run typecheck`
 Expected: 0 失败；`tests/plugin.spec.ts` 与 `tests/wiring.spec.ts` 都通过（新包已进依赖名单与组合行，装配门禁能找到它）。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add packages/dsh-mobile-relay package.json tsconfig.json tests/plugin.spec.ts cordis.patch.yml pnpm-lock.yaml
@@ -206,30 +206,30 @@ git commit -m "feat(relay): 中转插件骨架与装载接线（配置校验 + �
 
 **测试用注入面：** `fetchLike` 与 `readLaunchUrl` 都由测试传假件；状态文件用 `mkdtemp` 临时目录。
 
-- [ ] **Step 1: 写失败用例（覆盖评审重点 4）**
+- [x] **Step 1: 写失败用例（覆盖评审重点 4）**
 
 `credentials.spec.ts`：① 已存 cookie 时 `resolve` 不发任何请求直接返回该 cookie；② 无 cookie 时调 `readLaunchUrl` 拿令牌 → `exchangeLaunchToken` → 记住并返回；③ `readLaunchUrl` 返回 `undefined` 时 `resolve` 返回 `{ok:false, reason:'missing-launch-url'}`；④ 交换应答无 `set-cookie` 时返回 `no-cookie`；⑤ 连续两次 401 后调用方应能判脏（用例会断言第二次 `resolve` 会再试一次重换，重换仍失败则返回 `no-cookie`）。
 
-- [ ] **Step 2: 跑用例确认失败**
+- [x] **Step 2: 跑用例确认失败**
 
 Run: `npx vitest run packages/dsh-mobile-relay/tests/credentials.spec.ts`
 Expected: FAIL（模块不存在）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `CredentialStore` 用 `node:fs` 的 `mkdirSync(dir, {recursive:true, mode:0o700})`、`writeFileSync(path, body, {mode:0o600})`、`readFileSync`，JSON 解析失败时当空表（并在注释写明：家目录文件损坏时按「凭据全无」处理，走重新换取，不静默使用半份数据）。`exchangeLaunchToken` 只接受 `https?` 同源 origin，令牌只出现在这一次请求的 URL 里，不进错误消息。`MachineCredentials.resolve` 内部缓存当次进程内的 cookie，`fetchLike` 默认 `globalThis.fetch`。
 
-- [ ] **Step 4: 跑用例确认通过**
+- [x] **Step 4: 跑用例确认通过**
 
 Run: `npx vitest run packages/dsh-mobile-relay/tests/credentials.spec.ts`
 Expected: PASS（5 个用例）。
 
-- [ ] **Step 5: 跑全量与类型检查**
+- [x] **Step 5: 跑全量与类型检查**
 
 Run: `npm run test && npm run typecheck`
 Expected: 0 失败。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add packages/dsh-mobile-relay/src/credentials.ts packages/dsh-mobile-relay/tests/credentials.spec.ts
@@ -251,30 +251,30 @@ git commit -m "feat(relay): 各机凭据换取、持久化与失效自愈（令�
 
 **行为：** 端口从 41100 起找空闲端口（`net.createServer().listen(0)` 探测可用性，或直接取系统分配端口——实现时选一种并在注释写明），分配结果写进 `statePath` 的 JSON；进程重启后先读回分配，端口不变（评审重点 3）。同一 `hostId` 重复 `ensure` 返回同一 handle，不重复开隧道。`hostKeyFingerprint` 为 `'unapproved'` 时不建隧道，直接返回 `fingerprint-unapproved`。
 
-- [ ] **Step 1: 写失败用例（覆盖评审重点 3）**
+- [x] **Step 1: 写失败用例（覆盖评审重点 3）**
 
 `tunnels.spec.ts` 用假 `ensureTunnel`（记录调用次数、返回假 endpoint）：① 首次 `ensure` 分配端口并落盘；② 新建 `TunnelPool` 实例（同 statePath）后 `ensure` 拿到**同一端口**、且假 `ensureTunnel` 被调用次数为 2 次但端口未变（第二次是新进程的正常重建）；③ 同实例内重复 `ensure` 不再调用假隧道；④ `fingerprint` 为 `'unapproved'` 时返回 `fingerprint-unapproved` 且不调用假隧道。
 
-- [ ] **Step 2: 跑用例确认失败**
+- [x] **Step 2: 跑用例确认失败**
 
 Run: `npx vitest run packages/dsh-mobile-relay/tests/tunnels.spec.ts`
 Expected: FAIL（模块不存在）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 用 `ssh2` 之外的既有路径：注入 `deps.ensureTunnel` 由调用方（Task 7 装配处）传 `DshSshManager.ensureTunnel` 的绑定；本文件只管分配、持久化、去重与错误分类。SshConnectionConfig 由 `RelayMachineConfig` 拼 `{target, port, user, identityFile, hostKeyFingerprint}`，指纹从 `knownHostsPath` 对应的 known_hosts 里查（查不到即 `'unapproved'`）。
 
-- [ ] **Step 4: 跑用例确认通过**
+- [x] **Step 4: 跑用例确认通过**
 
 Run: `npx vitest run packages/dsh-mobile-relay/tests/tunnels.spec.ts`
 Expected: PASS（4 个用例）。
 
-- [ ] **Step 5: 跑全量与类型检查**
+- [x] **Step 5: 跑全量与类型检查**
 
 Run: `npm run test && npm run typecheck`
 Expected: 0 失败。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add packages/dsh-mobile-relay/src/tunnels.ts packages/dsh-mobile-relay/tests/tunnels.spec.ts
@@ -298,30 +298,30 @@ git commit -m "feat(relay): SSH 隧道池——本地端口固定分配并随状
 
 **行为：** `call` 发 `POST <origin>/api/<endpoint>`，信封 `{type:'client-request', rpcId, method:endpoint, payload:{args}}`，带 `Cookie` 头；HTTP 401 → `{ok:false, kind:'unauthorized'}`（交上层触发重换凭据），`result.ok===true` → `{ok:true, value}`，其余按 `rpc-error`/`transport` 归类。`connect()` 建 WS（`ws` 库，`headers:{Cookie}`），发 open 帧订阅 `$events`；收到 `item` 帧按 `value.type` 派发；`error` 帧派发为 `'error'`；`end` 帧视为断线；断线按 1s→2s→5s→10s 退避重连并重放订阅（阶梯与 `mobile/wire.js` 的 `BACKOFF_STEPS_MS` 同值）。`answer` 走 HTTP `POST <origin>/api/$events/result`，**发与 `call` 相同的完整信封** `{type:'client-request', rpcId, method:'$events/result', payload:{args:{clientId,eventId,outcome}}}`——宿主对每个 `/api/<endpoint>` POST 都先过信封校验且 `method` 须逐字等于路径端点（`reference/deepseek-harness/packages/client/connection/src/rpc-host.ts` 的 `clientRequestSchema`），漏信封会被直接拒；永不 reject。
 
-- [ ] **Step 1: 写失败用例**
+- [x] **Step 1: 写失败用例**
 
 `machine-client.spec.ts`：① `call` 的请求 URL/方法/头/信封逐字断言；② 401 → `unauthorized`；③ `result.ok=false` → `rpc-error` 且带宿主消息；④ 假 socket 收 `ready` 帧后 `answer` 用该 `clientId`；⑤ 断线后按退避重连并重发 open 帧（用 `vi.useFakeTimers`）；⑥ `answer` 在 `ready` 之前调用返回 `{ok:false}` 且不发请求。
 
-- [ ] **Step 2: 跑用例确认失败**
+- [x] **Step 2: 跑用例确认失败**
 
 Run: `npx vitest run packages/dsh-mobile-relay/tests/machine-client.spec.ts`
 Expected: FAIL（模块不存在）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `openSocket` 默认实现用 `ws` 的 `new WebSocket(url, {headers:{Cookie: cookie}})`，适配成与手机页同形的最小 socket（`send/close/onopen/onmessage/onclose`）。`ws` 版本用 `^8.21.0`（与 DSH 自身依赖一致，工作区可离线安装），装完更新 `pnpm-lock.yaml`。
 
-- [ ] **Step 4: 跑用例确认通过**
+- [x] **Step 4: 跑用例确认通过**
 
 Run: `npx vitest run packages/dsh-mobile-relay/tests/machine-client.spec.ts`
 Expected: PASS（6 个用例）。
 
-- [ ] **Step 5: 跑全量与类型检查**
+- [x] **Step 5: 跑全量与类型检查**
 
 Run: `npm run test && npm run typecheck`
 Expected: 0 失败。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add packages/dsh-mobile-relay/src/machine-client.ts packages/dsh-mobile-relay/src/wire.ts packages/dsh-mobile-relay/tests/machine-client.spec.ts packages/dsh-mobile-relay/package.json pnpm-lock.yaml
@@ -342,30 +342,30 @@ git commit -m "feat(relay): 单机客户端——带 cookie 的 RPC 与事件流
 
 **行为：** 查 `queryTailscalePeers(run)` 拿对端（3s 到点按失败处置，折成 `error` 字段）；只保留配置里登记过的 `hostId`（未登记的对端不进清单）；对每台并发 `ensure` 隧道并探 `/threadharbor/mobile/hello`（2s 预算、5s 缓存，形状照 `packages/dsh-mobile-entry/src/peers.ts` 的 `probeDsh`），据探测结果定 `running`；`reachable` 取隧道结果；`credential` 由凭据层当前状态给出。坏名字在 Task 3 装载期已拒，这里不再兜。
 
-- [ ] **Step 1: 写失败用例**
+- [x] **Step 1: 写失败用例**
 
 `hosts.spec.ts`：① 假 tailnet 返回 3 个对端、配置只登记 2 台 → 清单 2 台且不含未登记者；② `hello` 探测 200 → `running:true`，超时/非 200 → `false`；③ 隧道失败 → `reachable:false` 且 `running:false`；④ tailscale 查询抛错 → 返回 `{hosts:[], error:'…'}` 且 HTTP 仍 200；⑤ 缓存期内重复 `list()` 不重复打探测（断言假探测调用次数）。
 
-- [ ] **Step 2: 跑用例确认失败**
+- [x] **Step 2: 跑用例确认失败**
 
 Run: `npx vitest run packages/dsh-mobile-relay/tests/hosts.spec.ts`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现并接进 `index.ts`**
+- [x] **Step 3: 实现并接进 `index.ts`**
 
 路由先 `connection.admit(req)`（拒绝分支照抄 `pair-url.ts`），只接 GET（其余 405 带 `allow: GET`），应答 JSON 带 `cache-control: no-store` 与 `content-length`。
 
-- [ ] **Step 4: 跑用例确认通过**
+- [x] **Step 4: 跑用例确认通过**
 
 Run: `npx vitest run packages/dsh-mobile-relay/tests/hosts.spec.ts`
 Expected: PASS（5 个用例）。
 
-- [ ] **Step 5: 跑全量与类型检查**
+- [x] **Step 5: 跑全量与类型检查**
 
 Run: `npm run test && npm run typecheck`
 Expected: 0 失败。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add packages/dsh-mobile-relay/src/hosts.ts packages/dsh-mobile-relay/src/index.ts packages/dsh-mobile-relay/tests/hosts.spec.ts
@@ -557,6 +557,13 @@ git commit -m "docs(relay): 真机验收记录与手机侧走查清单"
 ```
 
 ---
+
+## 勾选状态更正（收口时）
+
+Task 1–7 的步骤一直是**没打勾但活干完了**——交付物逐个查过都在代码里（读远端启动网址、
+凭据层、隧道池、单机客户端、主机清单的算子都在），提交也在，只是前几轮没人回头把
+方框打上。这不是遗漏了工作，是遗漏了记账。Task 11 Step 2 保持未勾：那是真没做，
+要真人拿手机走一遍，机器代替不了。
 
 ## 自查记录
 
