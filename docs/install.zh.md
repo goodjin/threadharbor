@@ -161,6 +161,8 @@ dsh --profile web --dump-config
 
 6. **用 systemd 单元起，不用 `nohup`**（单元见 `deploy/threadharbor-relay.service`）。中转会 spawn ssh 隧道子进程，父进程退出**不会**把它们带走；重启几次之后，上一代的隧道还占着固定端口，新实例随即报「端口被占」并拒绝自动换号（换了号，已存凭据就对不上地址），清单于是一直显示不可达。单元里的 `KillMode=control-group` 会收走整组子进程，且只收自己这一组。
 
+7. **中转的内部故障落在 `relay.log`**（与 `state.json` 同目录，只追加）。手机侧只会看到 `machine-error` 这类有界文案——这是有意的——真正的细节在这里：`转发 session/page 到 X 失败（rpc-error）：…`。要排查中转先看这个文件。它**不经过 DSH 的日志系统**：插件跑在 worker 里，console 与 logger 的输出都不进运维在读的那份日志（真机实测）。
+
 ### 配置步骤
 
 1. **生成组合行片段**（脚本只打印，不改文件、不调 SSH）：
