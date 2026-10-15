@@ -22,6 +22,8 @@ export type SessionView = {
   readonly hostId: string
   /** Whether this tab is the one holding it. */
   readonly own: boolean
+  /** Pinned sessions lead their project, the way the native list seats them. */
+  readonly pinned?: boolean
 }
 
 export type ProjectView = {
@@ -88,12 +90,14 @@ function toHostView(host: RollUp['hosts'][number]): HostViewRow {
       label,
       baseLabel: label,
       sharedName: false,
-      sessions: project.sessions.map(entry => ({
+      // Pinned rows lead; the rest keep their published order untouched.
+      sessions: [...project.sessions].sort((a, b) => Number(b.pinned === true) - Number(a.pinned === true)).map(entry => ({
         sessionId: entry.sessionId,
         projectId: entry.projectId,
         title: entry.title,
         hostId: host.hostId,
         own: host.self,
+        ...(entry.pinned === true ? { pinned: true } : {}),
       })),
     }
   })

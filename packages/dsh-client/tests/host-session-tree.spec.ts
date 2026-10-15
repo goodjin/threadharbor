@@ -135,6 +135,88 @@ describe('HostSessionTree', () => {
     } finally { await unmount(root) }
   })
 
+  it('项目行点击折叠/展开并持久化；收纳超过 5 条时显示「展开其余」', async () => {
+    localStorage.removeItem('threadharbor.tree.projects')
+    const many = { hosts: [{ hostId: 'self', label: '本机', self: true, lastSeen: 1, sessionCount: 8, empty: false, projects: [{ projectId: 'w1', label: '研究', baseLabel: '研究', sharedName: false, sessions: Array.from({ length: 8 }, (_, i) => ({ sessionId: `s${i}`, projectId: 'w1', title: `会话${i}`, hostId: 'self', own: true })) }] }], totalSessions: 8, empty: false }
+    const { container, root } = await mountTree({ view: many })
+    try {
+      expect(container.querySelectorAll('[data-session-row]')).toHaveLength(5)
+      expect(container.querySelector('[data-action="tree-expand-more"]')?.textContent).toContain('展开其余 3 个会话')
+      click(container, '[data-action="tree-expand-more"]')
+      expect(container.querySelectorAll('[data-session-row]')).toHaveLength(8)
+      expect(container.querySelector('[data-action="tree-collapse-sessions"]')?.textContent).toContain('收起')
+      // 项目行点击 → 折叠
+      click(container, '[data-project-toggle]')
+      expect(container.querySelectorAll('[data-session-row]')).toHaveLength(0)
+      expect(JSON.parse(localStorage.getItem('threadharbor.tree.projects') ?? '[]')).toEqual(['w1'])
+    } finally { await unmount(root) }
+  })
+
+  it('项目菜单：重命名走行内输入提交，删除需二次确认；动作失败原文上树', async () => {
+    const renameCalls: Array<[string, string]> = []
+    const deleteCalls: string[] = []
+    const ctx = {
+      get: (name: string) => name === 'workspaces'
+        ? { rename: async (id: string, t: string) => { if (t === '炸') throw new Error('名字冲突'); renameCalls.push([id, t]); return { ok: true } }, delete: async (id: string) => { deleteCalls.push(id); return { ok: true } } }
+        : name === 'uiWorkspace' ? {} : undefined,
+    }
+    const { container, root } = await mountTree({ ctx })
+    try {
+      click(container, '[data-project-group="w1"] [data-action="row-menu"]')
+      click(container, '[data-action="menu-rename-workspace"]')
+      const input = container.querySelector('[data-rename-input]')
+      if (input === null) throw new Error('rename input missing')
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, '新项目名')
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      await act(async () => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })) })
+      expect(renameCalls).toEqual([['w1', '新项目名']])
+      click(container, '[data-project-group="w1"] [data-action="row-menu"]')
+      click(container, '[data-action="menu-delete-workspace"]')
+      expect(deleteCalls).toEqual([])
+      click(container, '[data-action="menu-confirm-delete"]')
+      expect(deleteCalls).toEqual(['w1'])
+    } finally { await unmount(root) }
+  })
+
+  it('会话菜单：归档/置顶/分叉经接收者调用，失败原文上树', async () => {
+    const calls: string[] = []
+    const ui = {
+      archiveSession: async (id: string) => { calls.push(`archive:${id}`) },
+      pinSession: async (id: string) => { calls.push(`pin:${id}`) },
+      forkSession: async () => { throw new Error('分叉被拒') },
+    }
+    const ctx = { get: (name: string) => name === 'uiWorkspace' ? ui : name === 'workspaces' ? {} : undefined }
+    const { container, root } = await mountTree({ ctx })
+    try {
+      click(container, '[data-session-row="s1"] [data-action="row-menu"]')
+      click(container, '[data-action="menu-archive-session"]')
+      click(container, '[data-session-row="s1"] [data-action="row-menu"]')
+      click(container, '[data-action="menu-pin-session"]')
+      click(container, '[data-session-row="s1"] [data-action="row-menu"]')
+      await act(async () => {
+        click(container, '[data-action="menu-fork-session"]')
+        await Promise.resolve()
+      })
+      expect(calls).toEqual(['archive:s1', 'pin:s1'])
+      expect(container.querySelector('[data-tree-action-error]')?.textContent).toContain('分叉被拒')
+    } finally { await unmount(root) }
+  })
+
+  it('置顶的会话行排在项目最前并带标记', async () => {
+    const pinned = { hosts: [{ hostId: 'self', label: '本机', self: true, lastSeen: 1, sessionCount: 2, empty: false, projects: [{ projectId: 'w1', label: '研究', baseLabel: '研究', sharedName: false, sessions: [
+      { sessionId: 'sa', projectId: 'w1', title: '普通', hostId: 'self', own: true },
+      { sessionId: 'sb', projectId: 'w1', title: '置顶的', hostId: 'self', own: true, pinned: true },
+    ] }] }], totalSessions: 2, empty: false }
+    const { container, root } = await mountTree({ view: pinned })
+    try {
+      const first = container.querySelector('[data-session-row]')
+      expect(first?.getAttribute('data-session-row')).toBe('sb')
+      expect(first?.getAttribute('data-pinned')).toBe('true')
+    } finally { await unmount(root) }
+  })
+
   it('展开态记忆：本机默认展开，远端展开后写入 localStorage', async () => {
     const first = await mountTree()
     try {

@@ -40,6 +40,8 @@ export type WorkspaceListSource = {
     readonly sessionIds: readonly string[]
   }[]
   readonly archivedSessionIds: readonly string[]
+  /** Registry-global pin set; pinned rows lead their project. Optional: older projections carry none. */
+  readonly pinnedSessionIds?: readonly string[]
   readonly state: string
   /** Present when the service exposes one; change notifications for republish. */
   readonly subscribe?: (listener: () => void) => () => void
@@ -118,9 +120,12 @@ function workspaceSource(value: unknown): WorkspaceListSource | undefined {
     rows.push({ workspaceId, title, path, sessionIds })
   }
   const subscribe = subscriberOf(value)
+  const pinnedRaw = snapshot['pinnedSessionIds']
+  const pinned = Array.isArray(pinnedRaw) ? pinnedRaw : []
   return {
     items: rows,
     archivedSessionIds: archived.filter((id): id is string => typeof id === 'string'),
+    pinnedSessionIds: pinned.filter((id): id is string => typeof id === 'string'),
     state,
     ...(subscribe === undefined ? {} : { subscribe }),
   }
@@ -272,11 +277,13 @@ export function buildHostSessions(
           sessionId: id,
           title: sessions.byId[id]?.displayTitle ?? sessions.byId[id]?.title ?? '',
           ...(workspaces.archivedSessionIds.includes(id) ? { archived: true } : {}),
+          ...(workspaces.pinnedSessionIds?.includes(id) ? { pinned: true } : {}),
         }))
     : [...new Set(workspaces.items.flatMap(row => [...row.sessionIds]))].map(id => ({
         sessionId: id,
         title: '',
         ...(workspaces.archivedSessionIds.includes(id) ? { archived: true } : {}),
+        ...(workspaces.pinnedSessionIds?.includes(id) ? { pinned: true } : {}),
       }))
   const placed = sessionsFromWorkspaces(workspacesLike, { sessions: sessionLikes })
   return {

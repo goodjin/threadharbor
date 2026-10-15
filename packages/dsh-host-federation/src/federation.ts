@@ -45,6 +45,8 @@ export type HostSession = {
   readonly title: string
   /** The project's own name, when the host knows it. */
   readonly projectTitle?: string
+  /** Pinned sessions lead their project in the tree (native seating rule). */
+  readonly pinned?: boolean
 }
 
 export type ProjectGroup = {
