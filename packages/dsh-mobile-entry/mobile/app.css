@@ -129,6 +129,12 @@ button[data-action='approve'] {
   font-size: 13px;
 }
 
+/* 机器行上「为什么进不去」那半句：跟 lastSeen 同一类，但要看清楚，所以加重。 */
+.hint-warn {
+  color: #7c2d12;
+  font-weight: 600;
+}
+
 .list-error, .list-loading, .list-empty, .conv-error, .conv-loading {
   color: var(--muted);
   margin: 12px 0;

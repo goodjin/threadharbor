@@ -134,6 +134,23 @@ function pairingGuideMachine(reason) {
  * `machineLabel` / `lastSeenText` 是可选的：缺省不渲染，保证直连模式的 DOM
  * 与改之前逐字相同。
  */
+/**
+ * 机器行上那半句「为什么进不去」。只认中转给的两条真实取值：
+ * `reason === 'fingerprint-unapproved'` 是指纹没登记（要跑登记命令），
+ * `credential !== 'ok'` 且原因是别的（换不到凭据，多半那台机器的 DSH 没起）。
+ * 认不出的组合一律不渲染——宁可不说，也不要说错方向。
+ */
+function credentialHint(machine) {
+  if (machine.credential === undefined || machine.credential === 'ok') return ''
+  if (machine.reason === 'fingerprint-unapproved') {
+    return '<span class="hint hint-warn">需先确认指纹</span>'
+  }
+  if (machine.reason === 'ssh-failed' || machine.reason === 'credential-missing') {
+    return '<span class="hint hint-warn">隧道通但凭据没换到</span>'
+  }
+  return ''
+}
+
 export function renderHostList(state) {
   const { peers = [], machines, error, loading } = state ?? {}
   if (Array.isArray(machines)) {
@@ -149,9 +166,14 @@ export function renderHostList(state) {
           : '<span class="mark mark-offline">离线</span>'
         const label = machineLabel(machine.name, machine.hostId)
         const hint = machine.lastSeenText === undefined ? '' : `<span class="hint">${escapeHtml(machine.lastSeenText)}</span>`
+        // 中转已经算好了这台机器「登没登记指纹 / 凭据换没换到」，install 与手机
+        // 文档也都写了这两种状态。以前这些字段传到了手机上却没人渲染，操作者只能
+        // 点了进去看到一句「正在重连」——那句话对「指纹没登记」完全是误导：那要
+        // 在中转上跑登记命令，不是等一会儿就好。
+        const blocked = credentialHint(machine)
         const disabled = online ? '' : ' aria-disabled="true"'
         parts.push(
-          `<li class="host"><span class="host-name">${escapeHtml(label)}</span>${mark}${hint}`
+          `<li class="host"><span class="host-name">${escapeHtml(label)}</span>${mark}${hint}${blocked}`
           + `<button type="button" class="host-enter" data-action="enter-machine" data-machine-id="${escapeHtml(machine.hostId)}"${disabled}>进入</button></li>`,
         )
       }

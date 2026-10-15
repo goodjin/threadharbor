@@ -672,3 +672,53 @@ describe('应答那一下断了：进配对引导（横幅挂着、只往顶栏�
   })
 })
 
+describe('机器行上要看得见「为什么进不去」', () => {
+  /**
+   * 中转早就把原因算好了（指纹没登记 / 凭据没换到），字段也一直传到手机上，
+   * 但页面上不显示——操作者点进去只看到「那台机器正在重连」。可「指纹没登记」
+   * 根本不会自己好：要在中转上跑登记命令。照那句提示干等着，最坏的结果是等到
+   * 手机没电也没解决。文档里写了这两种状态，页面上却没有，这就是不对。
+   */
+  function machineRows(machines: unknown[]): Promise<string> {
+    return (async () => {
+      const root = host()
+      await bootApp(root, {
+        backend: {
+          mode: 'hub',
+          async listHosts() { return { hosts: machines } },
+          async listSessions() { return { items: [] } },
+          async pageMessages() { return { conv: { items: [] } } },
+          async prompt() { return { ok: true } },
+          async cancel() { return { ok: true } },
+          async answer() { return { ok: true } },
+          connectEvents() { return { close() {} } },
+        } as never,
+      })
+      await settle(8)
+      return root.innerHTML
+    })()
+  }
+
+  it('指纹没登记 → 写「需先确认指纹」', async () => {
+    const html = await machineRows([{ hostId: HOST_A, name: 'MacBook', online: true, credential: 'missing', reason: 'fingerprint-unapproved' }])
+    expect(html).toContain('需先确认指纹')
+  })
+
+  it('隧道通了但凭据没换到 → 写「隧道通但凭据没换到」', async () => {
+    const html = await machineRows([{ hostId: HOST_A, name: 'MacBook', online: true, credential: 'missing', reason: 'ssh-failed' }])
+    expect(html).toContain('隧道通但凭据没换到')
+  })
+
+  it('一切正常的那台**不能**带这两句', async () => {
+    const html = await machineRows([{ hostId: HOST_A, name: 'MacBook', online: true, credential: 'ok' }])
+    expect(html).not.toContain('需先确认指纹')
+    expect(html).not.toContain('隧道通但凭据没换到')
+  })
+
+  it('认不出的组合宁可不说，也不要说错方向', async () => {
+    const html = await machineRows([{ hostId: HOST_A, name: 'MacBook', online: true, credential: 'missing', reason: 'some-future-reason' }])
+    expect(html).not.toContain('需先确认指纹')
+    expect(html).not.toContain('隧道通但凭据没换到')
+  })
+})
+
