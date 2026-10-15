@@ -529,7 +529,7 @@ function commandExists(name: string): boolean {
   return result.status === 0
 }
 
-function buildInstallScript(input: {
+export function buildInstallScript(input: {
   readonly channel: string
   readonly releaseDir: string
   readonly nodePath: string
