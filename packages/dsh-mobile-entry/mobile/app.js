@@ -24,6 +24,8 @@
  * 逃进 MuxConnection 的重连定时器回调，否则退避循环会永久卡死。
  */
 
+import { createMachineBackend } from './backend-machine.js'
+import { createHubBackend } from './backend-hub.js'
 import {
   MUX_PATH,
   MuxConnection,
@@ -143,7 +145,20 @@ export function nextScrollTop(mode, anchor, newHeight) {
  */
 export async function bootApp(root, deps = {}) {
   const fetchLike = deps.fetchLike ?? ((...args) => globalThis.fetch(...args))
+  // 服务端在 index.html 里注入的模式（{"mode":"hub"}）。注入的 config 优先，
+  // 其次看 window 上的全局（页面直开时没有），都没有就是直连。
+  const injectedMode = deps.mode
+    ?? (typeof globalThis.__THREADHARBOR_MOBILE__ === 'object' && globalThis.__THREADHARBOR_MOBILE__ !== null
+      ? globalThis.__THREADHARBOR_MOBILE__.mode
+      : undefined)
+  if (injectedMode === 'hub' && deps.backend === undefined) {
+    deps = { ...deps, backend: createHubBackend({ fetchLike, WebSocketCtor: deps.WebSocketCtor }) }
+  }
   const WebSocketCtor = deps.WebSocketCtor ?? globalThis.WebSocket
+  // 后端是「数据从哪来」的唯一出处。不注入时用直连那套，且它的每个方法都只是
+  // 转交下面这些既有调用——直连行为不是靠两套代码保持一致，而是没有第二套。
+  const isHub = deps.backend !== undefined && deps.backend.mode === 'hub'
+  const eventsHolder = { handle: null }
 
   let rpcSeq = 0
   let connection = null
@@ -155,10 +170,16 @@ export async function bootApp(root, deps = {}) {
   // 滚动意图：由改状态的代码声明，render 消费后归 keep。
   let convScrollIntent = 'bottom'
 
+  /**
+   * 中转模式下 `machineId` 是「现在看的是哪台机器」；null 表示停在机器清单屏。
+   * 直连模式全程为 null——那条路上没有第二台机器可切。
+   */
   const state = {
     screen: 'boot',
     guideReason: null,
     errorMessage: '',
+    machineId: null,
+    machines: [],
     hosts: { peers: [], error: undefined, loading: false },
     sessions: [],
     sessionsShown: SESSIONS_BATCH,
@@ -169,7 +190,10 @@ export async function bootApp(root, deps = {}) {
     olderLoading: false,
     draft: '',
     approvals: new Map(),
+    /** 事件 id → 它来自哪台机器。应答按它路由，不按「当前在看哪台」。 */
+    approvalHosts: new Map(),
     pendingAnswers: new Set(),
+    sessionsError: undefined,
     mux: 'connecting',
     muxDetail: '',
   }
@@ -203,6 +227,14 @@ export async function bootApp(root, deps = {}) {
     return state.sessions.find(item => item?.sessionId === state.sessionId) ?? null
   }
 
+  /** 当前机器的显示名（没有选中机器时为 null——直连模式一直是 null）。 */
+  function currentMachineLabel() {
+    if (state.machineId === null) return null
+    const machine = state.machines.find(item => item?.hostId === state.machineId)
+    if (machine === undefined) return null
+    return machine.name ?? state.machineId
+  }
+
   function visibleSessions() {
     return state.sessions.slice(0, state.sessionsShown)
   }
@@ -212,7 +244,7 @@ export async function bootApp(root, deps = {}) {
     const chip = root.querySelector('#mux-state')
     if (chip !== null) {
       chip.textContent = muxStateText()
-      chip.hidden = !(state.screen === 'hosts' || state.screen === 'sessions' || state.screen === 'conversation')
+      chip.hidden = !(state.screen === 'hosts' || state.screen === 'machines' || state.screen === 'sessions' || state.screen === 'conversation')
       chip.className = `mux-state mux-${state.mux}`
     }
     const banners = root.querySelector('#banners')
@@ -238,14 +270,26 @@ export async function bootApp(root, deps = {}) {
         main.innerHTML = renderErrorScreen(state.errorMessage)
         tabbar.innerHTML = ''
         break
+      case 'machines':
+        main.innerHTML = renderHostList({
+          machines: state.machines,
+          error: state.hosts.error,
+          loading: state.hosts.loading,
+        })
+        tabbar.innerHTML = ''
+        break
       case 'hosts':
         main.innerHTML = renderHostList(state.hosts)
         tabbar.innerHTML = tabbarHtml('hosts')
         break
       case 'sessions':
-        main.innerHTML = renderSessionList({
+        main.innerHTML = (isHub && state.machineId !== null
+          ? '<button type="button" class="ghost" data-action="back-to-machines">← 换机器</button>'
+          : '')
+        + renderSessionList({
           items: visibleSessions(),
           hasMore: state.sessions.length > state.sessionsShown,
+          machineLabel: currentMachineLabel(),
         })
         tabbar.innerHTML = tabbarHtml('sessions')
         break
@@ -312,6 +356,15 @@ export async function bootApp(root, deps = {}) {
     state.muxDetail = ''
     state.screen = 'boot'
     render()
+    if (isHub) {
+      // 中转模式：首屏就是机器清单，选定机器之后才去取那台机的会话。
+      // 放在直连那步之前——它自己不走本机的 RPC 通道。
+      state.screen = 'machines'
+      render()
+      await loadMachines()
+      openHubEvents()
+      return
+    }
     let outcome
     try {
       outcome = await rpcCall(fetchLike, SESSION_LIST_ENDPOINT, { _request: {} }, `boot-${++rpcSeq}`)
@@ -346,6 +399,80 @@ export async function bootApp(root, deps = {}) {
     state.errorMessage = outcome.message
   }
 
+  // ---------- 机器清单（中转模式） ----------
+
+  async function loadMachines() {
+    state.hosts = { peers: [], error: undefined, loading: true }
+    render()
+    try {
+      const body = await state.backend.listHosts()
+      state.machines = Array.isArray(body?.hosts) ? body.hosts : []
+      state.hosts = { peers: [], error: body?.error, loading: false }
+    } catch (error) {
+      state.machines = []
+      state.hosts = { peers: [], error: messageOf(error), loading: false }
+    }
+    render()
+  }
+
+  /**
+   * 进入某台机器：会话代际 +1，让上一台机器在途的慢应答整体作废。不这么做的话，
+   * A 的应答回来时会画到 B 上——不报错，操作者却读到了另一台机器的内容。
+   */
+  async function enterMachine(hostId) {
+    const machine = state.machines.find(item => item?.hostId === hostId)
+    if (machine === undefined) return
+    if (machine.online === false || machine.reachable === false) return
+    convGeneration += 1
+    state.machineId = hostId
+    state.sessions = []
+    state.sessionsError = undefined
+    state.sessionId = null
+    state.conv = null
+    state.screen = 'sessions'
+    state.sessionsShown = SESSIONS_BATCH
+    render()
+    await refreshSessions()
+  }
+
+  function backToMachines() {
+    convGeneration += 1
+    state.machineId = null
+    state.sessions = []
+    state.sessionId = null
+    state.conv = null
+    state.screen = 'machines'
+    render()
+  }
+
+  /** 事件流：每帧带 hostId，据此更新对应机器的状态与该机的待批事项。 */
+  function openHubEvents() {
+    if (eventsHolder.handle !== null) return
+    eventsHolder.handle = state.backend.connectEvents({
+      onEvent(hostId, type, value) {
+        if (typeof hostId !== 'string') return
+        if (type === 'approval/request' && value !== null && typeof value === 'object') {
+          const eventId = String(value.id ?? '')
+          if (eventId.length === 0) return
+          state.approvalHosts.set(eventId, hostId)
+          const machine = state.machines.find(item => item?.hostId === hostId)
+          state.approvals.set(eventId, { ...value, machineLabel: machine?.name ?? hostId })
+          render()
+          return
+        }
+        if (type === 'session/update' && hostId === state.machineId) {
+          void refreshSessions()
+          if (state.screen === 'conversation') void refreshConversation()
+        }
+      },
+      onStatus(status, detail) {
+        state.mux = status === 'online' ? 'online' : status === 'connecting' ? 'connecting' : 'offline'
+        state.muxDetail = detail ?? ''
+        render()
+      },
+    })
+  }
+
   // ---------- 主机清单 ----------
 
   async function loadHosts() {
@@ -374,6 +501,20 @@ export async function bootApp(root, deps = {}) {
     if (refreshingSessions) return
     refreshingSessions = true
     try {
+      if (isHub) {
+        if (state.machineId === null) return
+        const body = await state.backend.listSessions(state.machineId)
+        if (typeof body?.error === 'string') {
+          state.sessions = []
+          state.sessionsError = body.error
+          render()
+          return
+        }
+        state.sessionsError = undefined
+        state.sessions = Array.isArray(body?.items) ? body.items : []
+        if (state.screen === 'sessions' || state.screen === 'conversation') render()
+        return
+      }
       const outcome = await rpcCall(fetchLike, SESSION_LIST_ENDPOINT, { _request: {} }, `sessions-${++rpcSeq}`)
       if (outcome.ok === true) {
         state.sessions = Array.isArray(outcome.result?.items) ? outcome.result.items : []
@@ -408,6 +549,12 @@ export async function bootApp(root, deps = {}) {
   // ---------- 会话内容 ----------
 
   async function rpcSessionPage(sessionId, throughSeq, maxMessages, label) {
+    if (isHub && state.machineId !== null) {
+      const body = await state.backend.pageMessages(state.machineId, sessionId, throughSeq, maxMessages)
+      if (typeof body?.error === 'string') return { ok: false, kind: 'rpc-error', message: body.error }
+      if (body?.conv === undefined) return { ok: false, kind: 'rpc-error', message: '那台机器没有返回会话内容' }
+      return { ok: true, result: body.conv }
+    }
     return rpcCall(fetchLike, SESSION_HISTORY_ENDPOINT, {
       request: { address: { kind: 'session', sessionId }, throughSeq, maxMessages },
     }, `${label}-${++rpcSeq}`)
@@ -563,6 +710,17 @@ export async function bootApp(root, deps = {}) {
 
   async function sendPrompt(text) {
     if (state.sessionId === null) return
+    if (isHub && state.machineId !== null) {
+      const result = await state.backend.prompt(state.machineId, state.sessionId, text)
+      if (result.ok === true) {
+        state.draft = ''
+        void refreshConversation()
+      } else {
+        state.convError = result.message
+      }
+      render()
+      return
+    }
     const outcome = await rpcCall(fetchLike, SESSION_PROMPT_ENDPOINT, {
       request: {
         requestId: makeRequestId(rpcSeq),
@@ -589,6 +747,14 @@ export async function bootApp(root, deps = {}) {
 
   async function stopSession() {
     if (state.sessionId === null) return
+    if (isHub && state.machineId !== null) {
+      const result = await state.backend.cancel(state.machineId, state.sessionId)
+      if (result.ok !== true) state.convError = result.message
+      await refreshSessions()
+      await refreshConversation()
+      render()
+      return
+    }
     const outcome = await rpcCall(fetchLike, SESSION_CANCEL_ENDPOINT, {
       request: { sessionId: state.sessionId },
     }, `cancel-${++rpcSeq}`)
@@ -675,7 +841,29 @@ export async function bootApp(root, deps = {}) {
   // ---------- 应答 ----------
 
   async function answerApproval(eventId, approve) {
-    if (connection === null || state.pendingAnswers.has(eventId)) return
+    if (state.pendingAnswers.has(eventId)) return
+    if (isHub) {
+      // 归属靠事件带来的 hostId：应答必须回到发起它的那台机器，不能按「当前
+      // 在看哪台」猜——操作者可能正看着 B，A 的待批却先弹出来。
+      const hostId = state.approvalHosts.get(eventId)
+      if (hostId === undefined) return
+      state.pendingAnswers.add(eventId)
+      render()
+      const outcome = await state.backend.answer(hostId, eventId, {
+        kind: 'result',
+        value: approve ? 'allowed-once' : 'rejected',
+      })
+      state.pendingAnswers.delete(eventId)
+      if (outcome.ok === true) {
+        state.approvals.delete(eventId)
+        state.approvalHosts.delete(eventId)
+      } else {
+        state.muxDetail = outcome.message
+      }
+      render()
+      return
+    }
+    if (connection === null) return
     // 在途标记：横幅按钮渲染成 disabled（UI 不邀双击），重复派发在此拦下。
     state.pendingAnswers.add(eventId)
     render()
@@ -710,7 +898,13 @@ export async function bootApp(root, deps = {}) {
         }
         break
       }
-      case 'refresh-hosts': void loadHosts(); break
+      case 'enter-machine': {
+        const hostId = target.getAttribute('data-machine-id')
+        if (hostId !== null) void enterMachine(hostId)
+        break
+      }
+      case 'back-to-machines': backToMachines(); break
+      case 'refresh-hosts': void (isHub ? loadMachines() : loadHosts()); break
       case 'load-more-sessions':
         state.sessionsShown += SESSIONS_BATCH
         render()
@@ -754,6 +948,50 @@ export async function bootApp(root, deps = {}) {
       state.draft = event.target.value
     }
   }
+
+  // 直连后端：每个方法都转交既有调用，行为与今天逐字一致。
+  state.backend = deps.backend ?? createMachineBackend({
+    listSessions: async () => {
+      const outcome = await rpcCall(fetchLike, SESSION_LIST_ENDPOINT, { _request: {} }, `sessions-${++rpcSeq}`)
+      return outcome.ok === true ? { items: outcome.result?.items ?? [] } : { error: outcome.message }
+    },
+    pageMessages: (sessionId, throughSeq, maxMessages) => rpcSessionPage(sessionId, throughSeq, maxMessages, 'page'),
+    prompt: async (sessionId, text) => {
+      const outcome = await rpcCall(fetchLike, SESSION_PROMPT_ENDPOINT, {
+        request: {
+          requestId: makeRequestId(rpcSeq),
+          sessionId,
+          mode: 'queue',
+          content: [{ type: 'text', text }],
+          clientTimeZone: clientTimeZone(),
+        },
+      }, `prompt-${++rpcSeq}`)
+      return outcome.ok === true ? { ok: true } : { ok: false, message: outcome.message }
+    },
+    cancel: async sessionId => {
+      const outcome = await rpcCall(fetchLike, SESSION_CANCEL_ENDPOINT, { request: { sessionId } }, `cancel-${++rpcSeq}`)
+      return outcome.ok === true ? { ok: true } : { ok: false, message: outcome.message }
+    },
+    answer: async (eventId, outcome) => {
+      if (connection === null) return { ok: false, message: '事件通道还没连上' }
+      return await connection.answer(eventId, outcome)
+    },
+    connectEvents: handlers => {
+      openConnection(handlers)
+      return {
+        close() {
+          if (connection !== null) connection.close()
+          connection = null
+        },
+      }
+    },
+    listHosts: async () => {
+      const response = await fetchLike(PEERS_PATH)
+      if (response.status !== 200) return { peers: [], error: `主机清单请求失败：HTTP ${response.status}` }
+      const body = JSON.parse(await response.text())
+      return { peers: Array.isArray(body?.peers) ? body.peers : [], error: typeof body?.error === 'string' ? body.error : undefined }
+    },
+  })
 
   shell()
   await boot()

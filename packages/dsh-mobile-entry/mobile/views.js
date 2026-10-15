@@ -17,6 +17,11 @@
  */
 
 /** HTML 转义：&, <, >, ", ' 全量替换。 */
+/** 机器显示名：有名用名，没名退回 hostId（手机上一眼看不出是哪台是最糟的）。 */
+function machineLabel(name, hostId) {
+  return typeof name === 'string' && name.length > 0 ? name : String(hostId ?? '')
+}
+
 export function escapeHtml(value) {
   return String(value)
     .replaceAll('&', '&amp;')
@@ -88,8 +93,42 @@ export function pairingGuideView(reason) {
  * peers 只是展示（v1 每台机器各自伺服自己的页面，不跨域连接）；tailscale
  * 查询失败时 error 带原文，清单区提示不可用，其余功能不受影响。
  */
+/**
+ * 主机清单。两种模式共用这一个视图：
+ * - 直连：`peers` 是本机 tailnet 里的发现结果（今天的行为，一字未改）；
+ * - 中转：`machines` 是中转登记的机器清单，每行带 `hostId` 与机器名，
+ *   离线的行点不动（没有会话可看）。
+ *
+ * `machineLabel` / `lastSeenText` 是可选的：缺省不渲染，保证直连模式的 DOM
+ * 与改之前逐字相同。
+ */
 export function renderHostList(state) {
-  const { peers = [], error, loading } = state ?? {}
+  const { peers = [], machines, error, loading } = state ?? {}
+  if (Array.isArray(machines)) {
+    const parts = []
+    if (error !== undefined) parts.push(`<p class="list-error">机器清单暂时拿不到：${escapeHtml(error)}</p>`)
+    if (loading === true) parts.push('<p class="list-loading">正在获取机器清单…</p>')
+    if (machines.length > 0) {
+      parts.push('<ul class="host-list">')
+      for (const machine of machines) {
+        const online = machine.online !== false && machine.reachable !== false
+        const mark = online
+          ? '<span class="mark mark-online">在线</span>'
+          : '<span class="mark mark-offline">离线</span>'
+        const label = machineLabel(machine.name, machine.hostId)
+        const hint = machine.lastSeenText === undefined ? '' : `<span class="hint">${escapeHtml(machine.lastSeenText)}</span>`
+        const disabled = online ? '' : ' aria-disabled="true"'
+        parts.push(
+          `<li class="host"><span class="host-name">${escapeHtml(label)}</span>${mark}${hint}`
+          + `<button type="button" class="host-enter" data-action="enter-machine" data-machine-id="${escapeHtml(machine.hostId)}"${disabled}>进入</button></li>`,
+        )
+      }
+      parts.push('</ul>')
+    } else if (loading !== true && error === undefined) {
+      parts.push('<p class="list-empty">中转站还没登记任何机器。</p>')
+    }
+    return parts.join('')
+  }
   const parts = []
   if (error !== undefined) {
     parts.push(`<p class="list-error">本机 Tailscale 不可用：${escapeHtml(error)}</p>`)
@@ -134,8 +173,12 @@ function sessionTitle(item) {
  * 会话列表屏。state：{ items:[SessionSummary], hasMore }。
  * hasMore 为真时渲染「加载更早」（app.js 做客户端分页，每次多亮一批）。
  */
+/**
+ * 会话列表。`machineLabel` 缺省不渲染——直连模式下不显示机器名（今天没有这个
+ * 概念，显示一个空标签只会在每行后面多出一段空白）。
+ */
 export function renderSessionList(state) {
-  const { items = [], hasMore = false } = state ?? {}
+  const { items = [], hasMore = false, machineLabel = null } = state ?? {}
   const parts = []
   if (items.length === 0) {
     parts.push('<p class="list-empty">还没有会话。可以在桌面端新建一个。</p>')
@@ -143,9 +186,13 @@ export function renderSessionList(state) {
     parts.push('<ul class="session-list">')
     for (const item of items) {
       const runningMark = item.running ? '<span class="badge badge-running">运行中</span>' : ''
+      const machine = typeof machineLabel === 'string' && machineLabel.length > 0
+        ? `<span class="badge badge-machine">${escapeHtml(machineLabel)}</span>`
+        : ''
       parts.push(
         '<li>'
         + `<button type="button" class="session-item" data-action="open-session" data-session-id="${escapeHtml(item.sessionId)}">`
+        + machine
         + `<span class="session-title">${escapeHtml(sessionTitle(item))}</span>`
         + `<span class="session-meta">${runningMark}<time>${formatTime(item.updatedAt)}</time></span>`
         + '</button>'
@@ -269,8 +316,14 @@ export function renderApprovalBanners(items) {
         ? item.reason
         : '请求执行工具'
     const disabled = item.pending === true ? ' disabled' : ''
+    // 机器名只在有值时渲染：中转模式下两台机器可能同时有待批事项，不标明来源
+    //就只能靠猜。直连模式没有这个字段，DOM 与改之前逐字相同。
+    const from = typeof item.machineLabel === 'string' && item.machineLabel.length > 0
+      ? `<p class="approval-machine">来自 ${escapeHtml(item.machineLabel)}</p>`
+      : ''
     return [
       '<div class="approval">',
+      from,
       `<p class="approval-title">待批准：工具 ${escapeHtml(item.toolName)}</p>`,
       `<p class="approval-reason">${escapeHtml(reason)}</p>`,
       '<div class="approval-actions">'

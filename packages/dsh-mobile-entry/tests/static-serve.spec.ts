@@ -278,3 +278,34 @@ describe('prefix 路由的 index 准入（带令牌经官方 authorizeIndex 换 
     expect(connection.calls).toHaveLength(0)
   })
 })
+
+describe('index.html 的模式注入', () => {
+  it('hub 模式：注入 {"mode":"hub"}，页面据此连中转站', async () => {
+    const { resolveMobileAsset } = await import('../src/static-serve.ts')
+    const asset = resolveMobileAsset('/threadharbor/mobile', undefined, 'hub')
+    expect(asset.status).toBe(200)
+    if (asset.status !== 200) return
+    expect(asset.body).toContain('window.__THREADHARBOR_MOBILE__ = {"mode":"hub"}')
+    expect(asset.body).not.toContain('__MOBILE_CONFIG__')
+  })
+
+  it('缺省是直连：注入 {"mode":"machine"}', async () => {
+    const { resolveMobileAsset } = await import('../src/static-serve.ts')
+    const asset = resolveMobileAsset('/threadharbor/mobile')
+    expect(asset.status).toBe(200)
+    if (asset.status !== 200) return
+    expect(asset.body).toContain('window.__THREADHARBOR_MOBILE__ = {"mode":"machine"}')
+  })
+
+  it('非 index 文件不做注入', async () => {
+    const { injectMobileConfig } = await import('../src/static-serve.ts')
+    const line = 'window.__THREADHARBOR_MOBILE__ = __MOBILE_CONFIG__'
+    expect(injectMobileConfig(line, 'app.js', 'hub')).toBe(line)
+  })
+
+  it('模式取值不是那两种之一时按 machine 处置（不把任意内容塞进 HTML）', async () => {
+    const { injectMobileConfig } = await import('../src/static-serve.ts')
+    const out = injectMobileConfig('<script>window.__THREADHARBOR_MOBILE__ = __MOBILE_CONFIG__</script>', 'index.html', '</script>' as never)
+    expect(out).toBe('<script>window.__THREADHARBOR_MOBILE__ = {"mode":"machine"}</script>')
+  })
+})

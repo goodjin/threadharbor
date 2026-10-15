@@ -33,6 +33,8 @@ function hubBackendStub() {
   const calls: { fn: string; hostId?: string }[] = []
   const sessions = deferred<{ items: unknown[] } | { error: string }>()
   const pages = new Map<string, Deferred<{ conv: unknown } | { error: string }>>()
+  /** 每台机的历史应答按调用次序排队：第一次是「游标探测」，第二次才是真取页。 */
+  const pageTurns = new Map<string, number>()
   const pageFor = (hostId: string) => {
     const existing = pages.get(hostId)
     if (existing !== undefined) return existing
@@ -40,6 +42,8 @@ function hubBackendStub() {
     pages.set(hostId, created)
     return created
   }
+  /** 游标探测的固定应答：宿主对超界 throughSeq 报 past cursor N（N=日志末端）。 */
+  const cursorProbe = { error: 'session page request past cursor 12' }
   const backend = {
     mode: 'hub' as const,
     async listHosts() {
@@ -47,7 +51,8 @@ function hubBackendStub() {
       return {
         hosts: [
           { hostId: HOST_A, name: 'MacBook', running: true, reachable: true, online: true },
-          { hostId: HOST_B, name: '工位机', running: false, reachable: false, online: false },
+          { hostId: HOST_B, name: '工位机', running: true, reachable: true, online: true },
+          { hostId: '离线机', name: '老笔记本', running: false, reachable: false, online: false },
         ],
       }
     },
@@ -57,6 +62,9 @@ function hubBackendStub() {
     },
     async pageMessages(hostId: string) {
       calls.push({ fn: 'pageMessages', hostId })
+      const turn = pageTurns.get(hostId) ?? 0
+      pageTurns.set(hostId, turn + 1)
+      if (turn === 0) return cursorProbe // 第一次是游标探测
       return await pageFor(hostId).promise
     },
     async prompt(hostId: string) {
@@ -104,8 +112,9 @@ describe('中转模式：机器维度', () => {
 
     expect(root.textContent).toContain('MacBook')
     expect(root.textContent).toContain('工位机')
+    expect(root.textContent).toContain('离线')
 
-    sessions.resolve({ items: [{ sessionId: 's1', title: '来自 A 的会话' }] })
+    sessions.resolve({ items: [{ sessionId: 's1', projections: { values: { title: '来自 A 的会话' } } }] })
     clickText(root, '[data-machine-id="mac-a"]')
     await settle(8)
 
@@ -114,28 +123,60 @@ describe('中转模式：机器维度', () => {
   })
 
   it('从 A 切到 B 后，A 的慢 pageMessages 应答不得画到 B 上（评审重点 2）', async () => {
-    const { backend, sessions, pageFor } = hubBackendStub()
+    const { backend, calls, sessions, pageFor } = hubBackendStub()
     const root = host()
     await bootApp(root, { backend })
     await settle()
 
-    sessions.resolve({ items: [{ sessionId: 'sA', title: 'A 的会话' }, { sessionId: 'sB', title: 'B 的会话' }] })
-    // 先在 A 上打开会话，让它的 page 应答悬在半空。
+    const twoSessions = {
+      items: [
+        { sessionId: 'sA', projections: { values: { title: 'A 的会话' } } },
+        { sessionId: 'sB', projections: { values: { title: 'B 的会话' } } },
+      ],
+    }
+    sessions.resolve(twoSessions)
     clickText(root, '[data-machine-id="mac-a"]')
     await settle(8)
-    const pendingA = pageFor(HOST_A)
 
-    // 不等 A 的应答，直接切到 B 并打开另一个会话。
-    sessions.resolve({ items: [{ sessionId: 'sA', title: 'A 的会话' }, { sessionId: 'sB', title: 'B 的会话' }] })
-    const back = root.querySelector('[data-action="back-to-hosts"]')
-    if (back === null) throw new Error('找不到返回机器清单的入口')
-    back.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    // 真的在 A 上打开一个会话：它的历史应答悬在半空（用例不 resolve 它）。
+    clickText(root, '[data-session-id="sA"]')
+    await settle(6)
+    const pendingA = pageFor(HOST_A) // A 的真取页悬着
+    // 两次：一次游标探测（立即回），一次真取页（悬着不答）。
+    expect(calls.filter(call => call.fn === 'pageMessages' && call.hostId === HOST_A).length).toBe(2)
+
+    // 不等 A 的应答，先退回该机的会话列表，再换到 B 打开另一个会话。
+    clickText(root, '[data-action="back"]')
+    await settle(4)
+    clickText(root, '[data-action="back-to-machines"]')
     await settle(6)
     clickText(root, '[data-machine-id="linux-b"]')
     await settle(8)
-    pendingA.resolve({ conv: { records: [{ type: 'text', text: 'A 的秘密内容' }] } })
+    clickText(root, '[data-session-id="sB"]')
+    await settle(6)
+    pageFor(HOST_B).resolve({
+      conv: {
+        records: [
+          { seq: 1, event: { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'B 的正常内容' }] } } } },
+        ],
+      },
+    })
     await settle(8)
+    // 此刻界面确实是 B 的那个会话（标题来自 B 的会话清单）。
+    expect(root.textContent).toContain('B 的会话')
+    expect(root.textContent).not.toContain('A 的会话')
 
+    // 现在 A 那条迟到的应答才回来。它属于 A，绝不能画到 B 的界面上。
+    pendingA.resolve({
+      conv: {
+        records: [
+          { seq: 1, event: { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'A 的秘密内容' }] } } } },
+        ],
+      },
+    })
+    await settle(10)
+
+    expect(root.textContent).toContain('B 的会话')
     expect(root.textContent).not.toContain('A 的秘密内容')
   })
 

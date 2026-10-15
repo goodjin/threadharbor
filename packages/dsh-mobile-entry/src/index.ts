@@ -21,6 +21,8 @@ export const inject = ['webServer', 'connection']
 /** apply 收到的组合配置形状（Config 的解析结果）；mobileOrigin 缺省时 pair-url 应答 500。 */
 export interface MobileEntryConfig {
   mobileOrigin?: string
+  /** 手机页模式：machine=直连本机（缺省），hub=连中转站。中转包传 hub。 */
+  readonly mode?: 'machine' | 'hub'
 }
 
 /**
