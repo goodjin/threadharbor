@@ -47,6 +47,10 @@ export type HostSession = {
   readonly projectTitle?: string
   /** Pinned sessions lead their project in the tree (native seating rule). */
   readonly pinned?: boolean
+  /** Archived rows stay out of sight until the tree's filter asks for them. */
+  readonly archived?: boolean
+  /** Last activity stamp; orders the tree's 最近更新 sort. */
+  readonly updatedAt?: number
 }
 
 export type ProjectGroup = {

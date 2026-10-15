@@ -52,6 +52,31 @@ describe('buildHostSessions', () => {
     }
   })
 
+  it('置顶/归档/最近更新穿层不丢（回归：最终映射曾剥掉它们）', () => {
+    const service = {
+      list: {
+        getSnapshot: () => ({
+          ids: ['s1', 's2'],
+          byId: {
+            s1: { displayTitle: '置顶的', updatedAt: 100 },
+            s2: { displayTitle: '归档的', updatedAt: 200 },
+          },
+        }),
+        subscribe: () => () => {},
+      },
+    }
+    const workspaces = {
+      items: [{ workspaceId: 'w1', title: '研究', path: '/a/研究', sessionIds: ['s1', 's2'] }],
+      archivedSessionIds: ['s2'],
+      pinnedSessionIds: ['s1'],
+      state: 'idle',
+    }
+    const read = buildHostSessions(workspaces, readSessionSources({ sessions: service }).sessions)
+    const rows = read.ok ? read.sessions : []
+    expect(rows.find(r => r.sessionId === 's1')).toMatchObject({ pinned: true, updatedAt: 100 })
+    expect(rows.find(r => r.sessionId === 's2')).toMatchObject({ archived: true, updatedAt: 200 })
+  })
+
   it('当前会话判定：主视图占用的行胜出（原生同款规则）', () => {
     const service = {
       list: {
@@ -141,7 +166,7 @@ describe('buildHostSessions', () => {
     }
   })
 
-  it('filters archived sessions the host has set aside', () => {
+  it('归档的会话带标记随行：可见性由树的筛选选项决定，数据面只标记', () => {
     const read = buildHostSessions(
       {
         items: [{ workspaceId: 'w1', title: 'Web', path: '/w', sessionIds: ['s1', 's2'] }],
@@ -151,7 +176,10 @@ describe('buildHostSessions', () => {
       { ids: ['s1', 's2'], byId: { s1: { displayTitle: '修登录' }, s2: { displayTitle: '旧会话' } } },
     )
     expect(read.ok).toBe(true)
-    if (read.ok) expect(read.sessions.map(row => row.sessionId)).toEqual(['s1'])
+    if (read.ok) {
+      expect(read.sessions.map(row => row.sessionId)).toEqual(['s1', 's2'])
+      expect(read.sessions.find(row => row.sessionId === 's2')).toMatchObject({ archived: true })
+    }
   })
 
   it('keeps a session no workspace claims under 未归组', () => {

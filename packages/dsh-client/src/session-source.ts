@@ -59,6 +59,8 @@ export type SessionListSource = {
     readonly origin?: string
     /** Retention ledger; a positive mainView marks the open session. */
     readonly retainedBy?: { readonly mainView?: number }
+    /** Last activity stamp, from the summary and prompt metadata; orders 最近更新. */
+    readonly updatedAt?: number
   }>>
   /** Present when the service exposes one; change notifications for republish. */
   readonly subscribe?: (listener: () => void) => () => void
@@ -150,12 +152,14 @@ function sessionSource(value: unknown): SessionListSource | undefined {
     const title = row['title']
     const blank = row['blank']
     const origin = row['origin']
+    const updatedAt = row['updatedAt']
     const retainedBy = row['retainedBy']
     rows[id] = {
       ...(typeof displayTitle === 'string' ? { displayTitle } : {}),
       ...(typeof title === 'string' ? { title } : {}),
       ...(blank === true ? { blank: true } : {}),
       ...(typeof origin === 'string' ? { origin } : {}),
+      ...(typeof updatedAt === 'number' ? { updatedAt } : {}),
       ...(isRecord(retainedBy) ? { retainedBy: { ...(typeof retainedBy['mainView'] === 'number' ? { mainView: retainedBy['mainView'] } : {}) } } : {}),
     }
   }
@@ -278,6 +282,7 @@ export function buildHostSessions(
           title: sessions.byId[id]?.displayTitle ?? sessions.byId[id]?.title ?? '',
           ...(workspaces.archivedSessionIds.includes(id) ? { archived: true } : {}),
           ...(workspaces.pinnedSessionIds?.includes(id) ? { pinned: true } : {}),
+          ...(typeof sessions.byId[id]?.updatedAt === 'number' ? { updatedAt: sessions.byId[id]!.updatedAt } : {}),
         }))
     : [...new Set(workspaces.items.flatMap(row => [...row.sessionIds]))].map(id => ({
         sessionId: id,
@@ -285,14 +290,21 @@ export function buildHostSessions(
         ...(workspaces.archivedSessionIds.includes(id) ? { archived: true } : {}),
         ...(workspaces.pinnedSessionIds?.includes(id) ? { pinned: true } : {}),
       }))
-  const placed = sessionsFromWorkspaces(workspacesLike, { sessions: sessionLikes })
+  // Archived rows ride along marked; the tree's filter option decides sight
+  // (native keeps the same split: data plane marks, view layer filters).
+  const placed = sessionsFromWorkspaces(workspacesLike, { sessions: sessionLikes, includeArchived: true })
   return {
     ok: true,
+    // pinned/archived/updatedAt must ride along: the tree's view options
+    // (排序/归档筛选) read them, and the final map once stripped them silently.
     sessions: placed.map(row => ({
       projectId: row.projectId,
       sessionId: row.sessionId,
       title: row.title,
       projectTitle: row.projectTitle,
+      ...(row.pinned === true ? { pinned: true } : {}),
+      ...(row.archived === true ? { archived: true } : {}),
+      ...(typeof row.updatedAt === 'number' ? { updatedAt: row.updatedAt } : {}),
     })),
   }
 }

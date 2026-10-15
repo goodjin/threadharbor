@@ -24,6 +24,10 @@ export type SessionView = {
   readonly own: boolean
   /** Pinned sessions lead their project, the way the native list seats them. */
   readonly pinned?: boolean
+  /** Archived rows render only under the tree's show-archived filters. */
+  readonly archived?: boolean
+  /** Last activity stamp; orders the tree's 最近更新 sort. */
+  readonly updatedAt?: number
 }
 
 export type ProjectView = {
@@ -98,6 +102,8 @@ function toHostView(host: RollUp['hosts'][number]): HostViewRow {
         hostId: host.hostId,
         own: host.self,
         ...(entry.pinned === true ? { pinned: true } : {}),
+        ...(entry.archived === true ? { archived: true } : {}),
+        ...(typeof entry.updatedAt === 'number' ? { updatedAt: entry.updatedAt } : {}),
       })),
     }
   })

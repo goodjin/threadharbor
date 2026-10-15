@@ -23,6 +23,10 @@ export type SessionLike = {
   readonly sessionId: string
   readonly title: string
   readonly archived?: boolean
+  /** Pinned rows lead their project in the tree. */
+  readonly pinned?: boolean
+  /** Last activity stamp; orders the tree's 最近更新 sort. */
+  readonly updatedAt?: number
 }
 
 export type WorkspaceSession = {
@@ -32,6 +36,10 @@ export type WorkspaceSession = {
   readonly title: string
   readonly projectTitle: string
   readonly projectPath: string
+  /** View-option flags that must survive the mapping (pinned/archived/stamp). */
+  readonly pinned?: boolean
+  readonly archived?: boolean
+  readonly updatedAt?: number
 }
 
 /** The bucket for sessions that belong to no workspace. */
@@ -84,6 +92,9 @@ function describe(
     title: session.title.trim() === '' ? `会话 ${session.sessionId}` : session.title,
     projectTitle,
     projectPath,
+    ...(session.pinned === true ? { pinned: true } : {}),
+    ...(session.archived === true ? { archived: true } : {}),
+    ...(typeof session.updatedAt === 'number' ? { updatedAt: session.updatedAt } : {}),
   }
 }
 

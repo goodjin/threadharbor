@@ -25,8 +25,48 @@ export type SessionActionsCtx = { get(name: string): unknown }
 
 const EXPANDED_KEY = 'threadharbor.tree.expanded'
 const COLLAPSED_KEY = 'threadharbor.tree.projects'
+const VIEW_KEY = 'threadharbor.tree.view'
 /** The native list's overflow cap: idle groups show this many, then 展开其余. */
 const IDLE_SESSION_LIMIT = 5
+/** History-search debounce and result cap, mirroring the native list's feel. */
+const SEARCH_DEBOUNCE_MS = 200
+const SEARCH_RESULT_LIMIT = 20
+
+type OrderBy = 'manual' | 'updated'
+type FilterBy = 'hide' | 'show' | 'only'
+type RemoteSearch = { readonly status: 'idle' | 'pending' | 'ready'; readonly items: readonly { sessionId: string; title: string }[]; readonly hasMore: boolean }
+
+type SessionsSearchHost = {
+  readonly search?: (query: string, signal?: AbortSignal) => Promise<{ ok: boolean; value?: { items: { sessionId: string; title?: string }[]; hasMore?: boolean }; error?: { message?: string } }>
+}
+
+/** Order per the tree's view option: pinned lead, then manual or 最近更新. */
+function orderSessions<T extends { pinned?: boolean; updatedAt?: number }>(sessions: readonly T[], orderBy: OrderBy): T[] {
+  const pinnedFirst = (a: T, b: T): number => Number(b.pinned === true) - Number(a.pinned === true)
+  return [...sessions].sort((a, b) => pinnedFirst(a, b) || (orderBy === 'updated' ? (b.updatedAt ?? 0) - (a.updatedAt ?? 0) : 0))
+}
+
+/** The tree's archived filter: the native list's three sight modes. */
+function passesFilter(session: { archived?: boolean }, filterBy: FilterBy): boolean {
+  if (filterBy === 'show') return true
+  if (filterBy === 'only') return session.archived === true
+  return session.archived !== true
+}
+
+function readViewOptions(): { orderBy: OrderBy; filterBy: FilterBy } {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(VIEW_KEY) ?? '{}')
+    if (typeof parsed !== 'object' || parsed === null) return { orderBy: 'manual', filterBy: 'hide' }
+    const orderBy = (parsed as { orderBy?: unknown }).orderBy
+    const filterBy = (parsed as { filterBy?: unknown }).filterBy
+    return {
+      orderBy: orderBy === 'updated' ? 'updated' : 'manual',
+      filterBy: filterBy === 'show' || filterBy === 'only' ? filterBy : 'hide',
+    }
+  } catch {
+    return { orderBy: 'manual', filterBy: 'hide' }
+  }
+}
 
 type Props = {
   readonly view: RollUpView
@@ -65,6 +105,69 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
   const [collapsedProjects, setCollapsedProjects] = useState<readonly string[]>(() => readJsonArray(COLLAPSED_KEY))
   /** Projects whose 展开其余 footer is currently open; transient like the native list's. */
   const [overflowOpen, setOverflowOpen] = useState<readonly string[]>([])
+  /** View options (排序/归档筛选), remembered like the native list remembers its own. */
+  const [{ orderBy, filterBy }, setViewOptions] = useState(readViewOptions)
+  const [optionsOpen, setOptionsOpen] = useState(false)
+  /** The search box's live text; a non-empty query swaps the tree for flat results. */
+  const [query, setQuery] = useState('')
+  const [remote, setRemote] = useState<RemoteSearch>({ status: 'idle', items: [], hasMore: false })
+  const [searchError, setSearchError] = useState<string | null>(null)
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(VIEW_KEY, JSON.stringify({ orderBy, filterBy }))
+    } catch {
+      // Convenience-only, same as the other view memories.
+    }
+  }, [orderBy, filterBy])
+
+  // History search: debounced, abortable, honest about rejection. The native
+  // list debounces the same way against the same controller method.
+  useEffect(() => {
+    const normalized = query.trim()
+    if (normalized === '') {
+      setRemote({ status: 'idle', items: [], hasMore: false })
+      setSearchError(null)
+      return
+    }
+    const controller = new AbortController()
+    setRemote({ status: 'pending', items: [], hasMore: false })
+    const timer = window.setTimeout(() => {
+      const host = (() => {
+        try {
+          return ctx.get('sessions') as SessionsSearchHost | undefined
+        } catch {
+          return undefined
+        }
+      })()
+      if (typeof host?.search !== 'function') {
+        setRemote({ status: 'ready', items: [], hasMore: false })
+        return
+      }
+      host.search(normalized, controller.signal).then(result => {
+        if (controller.signal.aborted) return
+        if (result.ok !== true) {
+          setSearchError(result.error?.message ?? '会话历史搜索被拒绝')
+          setRemote({ status: 'ready', items: [], hasMore: false })
+          return
+        }
+        setSearchError(null)
+        setRemote({
+          status: 'ready',
+          items: (result.value?.items ?? []).map(item => ({ sessionId: item.sessionId, title: item.title ?? '' })),
+          hasMore: result.value?.hasMore === true,
+        })
+      }, (reason: unknown) => {
+        if (controller.signal.aborted) return
+        setSearchError(reason instanceof Error ? reason.message : String(reason))
+        setRemote({ status: 'ready', items: [], hasMore: false })
+      })
+    }, SEARCH_DEBOUNCE_MS)
+    return () => {
+      window.clearTimeout(timer)
+      controller.abort()
+    }
+  }, [ctx, query])
 
   useEffect(() => {
     try {
@@ -110,9 +213,73 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
       : renameSession(ctx, state.key, state.draft.trim()))
   }, [ctx, renaming, run])
 
+  const normalizedQuery = query.trim()
+  // Flat search results: local title matches first, then history hits, deduped.
+  const localMatches = normalizedQuery === '' ? [] : view.hosts.find(host => host.self)?.projects
+    .flatMap(project => project.sessions
+      .filter(session => passesFilter(session, filterBy) && session.title.toLowerCase().includes(normalizedQuery.toLowerCase()))
+      .map(session => ({ sessionId: session.sessionId, title: session.title, projectId: project.projectId })))
+    ?? []
+  const seen = new Set(localMatches.map(row => row.sessionId))
+  const historyMatches = remote.items.filter(row => !seen.has(row.sessionId)).map(row => ({ ...row, projectId: undefined as string | undefined }))
+  const allResults = [...localMatches, ...historyMatches].slice(0, SEARCH_RESULT_LIMIT)
+  const resultCount = localMatches.length + historyMatches.length
+
   return (
     <div className={styles.tree} data-host-tree>
-      {view.hosts.map(host => {
+      <div className={styles.searchBar}>
+        <input
+          className={styles.searchInput}
+          data-search-input
+          type="text"
+          value={query}
+          placeholder={t('panel.tree.searchPlaceholder')}
+          onChange={event => { setQuery(event.target.value) }}
+        />
+        {query !== ''
+          ? <button type="button" className={styles.searchClear} data-action="search-clear" title={t('panel.tree.searchClear')} onClick={() => { setQuery('') }}>✕</button>
+          : null}
+        <button
+          type="button"
+          className={styles.rowMenu}
+          data-action="view-options"
+          title={t('panel.tree.viewOptions')}
+          onClick={() => { setOptionsOpen(current => !current) }}
+        >
+          ⚙
+        </button>
+      </div>
+      {optionsOpen
+        ? <div className={styles.menu} data-view-options-menu>
+            <button type="button" className={styles.menuItem} data-action="order-manual" data-checked={orderBy === 'manual' ? 'true' : undefined} onClick={() => { setViewOptions({ orderBy: 'manual', filterBy }) }}>{t('panel.tree.orderManual')}</button>
+            <button type="button" className={styles.menuItem} data-action="order-updated" data-checked={orderBy === 'updated' ? 'true' : undefined} onClick={() => { setViewOptions({ orderBy: 'updated', filterBy }) }}>{t('panel.tree.orderUpdated')}</button>
+            <button type="button" className={styles.menuItem} data-action="filter-hide-archived" data-checked={filterBy === 'hide' ? 'true' : undefined} onClick={() => { setViewOptions({ orderBy, filterBy: 'hide' }) }}>{t('panel.tree.filterHideArchived')}</button>
+            <button type="button" className={styles.menuItem} data-action="filter-show-archived" data-checked={filterBy === 'show' ? 'true' : undefined} onClick={() => { setViewOptions({ orderBy, filterBy: 'show' }) }}>{t('panel.tree.filterShowArchived')}</button>
+            <button type="button" className={styles.menuItem} data-action="filter-only-archived" data-checked={filterBy === 'only' ? 'true' : undefined} onClick={() => { setViewOptions({ orderBy, filterBy: 'only' }) }}>{t('panel.tree.filterOnlyArchived')}</button>
+          </div>
+        : null}
+      {normalizedQuery !== ''
+        ? (
+          <div className={styles.searchResults} data-search-results>
+            {allResults.map(row => (
+              <button
+                key={row.sessionId}
+                type="button"
+                className={styles.sessionRow}
+                data-search-result={row.sessionId}
+                data-active={currentSessionId === row.sessionId ? 'true' : undefined}
+                onClick={() => { setOpenFailed(openLocalSession(ctx, row.sessionId) === false) }}
+              >
+                <span className={styles.sessionTitle}>{row.title === '' ? row.sessionId : row.title}</span>
+              </button>
+            ))}
+            {remote.status === 'pending' ? <p className={styles.note} data-search-pending>{t('panel.tree.searchPending')}</p> : null}
+            {searchError !== null ? <p className={styles.error} data-search-error>{t('panel.tree.searchFailed')}{searchError}</p> : null}
+            {remote.status === 'ready' && resultCount === 0 && searchError === null ? <p className={styles.note} data-search-empty>{t('panel.tree.searchNoMatches')}</p> : null}
+            {remote.hasMore && resultCount > SEARCH_RESULT_LIMIT ? <p className={styles.note}>{t('panel.tree.searchHasMore', { n: SEARCH_RESULT_LIMIT })}</p> : null}
+          </div>
+          )
+        : view.hosts.map(host => {
         const open = host.self || expanded.includes(host.hostId)
         return (
           <section
@@ -148,9 +315,10 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
               : null}
             {open ? host.projects.map(project => {
               const projectOpen = !collapsedProjects.includes(project.projectId)
+              const visible = orderSessions(project.sessions.filter(session => passesFilter(session, filterBy)), orderBy)
               const overflow = overflowOpen.includes(project.projectId)
-              const hiddenCount = project.sessions.length - IDLE_SESSION_LIMIT
-              const shown = overflow ? project.sessions : project.sessions.slice(0, IDLE_SESSION_LIMIT)
+              const hiddenCount = visible.length - IDLE_SESSION_LIMIT
+              const shown = overflow ? visible : visible.slice(0, IDLE_SESSION_LIMIT)
               const projectMenu = menu?.kind === 'project' && menu.key === project.projectId
               return (
                 <div key={project.projectId} className={styles.project} data-project-group={project.projectId}>
@@ -212,7 +380,7 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                           : <button type="button" data-action="menu-delete-workspace" className={styles.menuItem} onClick={() => { setConfirmingDelete(project.projectId) }}>{t('panel.tree.menuDeleteWorkspace')}</button>}
                       </div>
                     : null}
-                  {projectOpen ? [...shown].sort((a, b) => Number(b.pinned === true) - Number(a.pinned === true)).map(session => {
+                  {projectOpen ? shown.map(session => {
                     const sessionMenu = menu?.kind === 'session' && menu.key === session.sessionId
                     return (
                       <div key={session.sessionId}>
@@ -280,8 +448,7 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
           </section>
         )
       })}
-      {openFailed
-        ? <p className={styles.error} data-open-failed>{t('panel.tree.openFailed')}</p>
+      {openFailed        ? <p className={styles.error} data-open-failed>{t('panel.tree.openFailed')}</p>
         : null}
       {actionError !== null
         ? <p className={styles.error} data-tree-action-error>{t('panel.tree.actionFailed')}{actionError}</p>

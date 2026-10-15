@@ -217,6 +217,73 @@ describe('HostSessionTree', () => {
     } finally { await unmount(root) }
   })
 
+  it('搜索框：标题即筛出本机结果，历史搜索并入去重，无匹配有文案', async () => {
+    localStorage.removeItem('threadharbor.tree.view')
+    const searched: string[] = []
+    const sessions = {
+      search: async (query: string) => {
+        searched.push(query)
+        return { ok: true, value: { items: [{ sessionId: 's9', title: '远端历史命中' }], hasMore: false } }
+      },
+    }
+    const ctx = { get: (name: string) => name === 'sessions' ? sessions : name === 'uiWorkspace' ? {} : undefined }
+    const { container, root } = await mountTree({ ctx })
+    try {
+      const input = container.querySelector('[data-search-input]')
+      if (input === null) throw new Error('search input missing')
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, '会话')
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      // 本机标题含「登录」的行 + 远端历史命中（去重后合并为扁平结果）
+      await act(async () => { await new Promise(resolve => { setTimeout(resolve, 260) }) })
+      const results = [...container.querySelectorAll('[data-search-result]')].map(r => r.getAttribute('data-search-result'))
+      expect(results).toContain('s1')
+      expect(results).toContain('s9')
+      expect(searched).toEqual(['会话'])
+      // 清除回到树
+      click(container, '[data-action="search-clear"]')
+      expect(container.querySelectorAll('[data-search-result]')).toHaveLength(0)
+    } finally { await unmount(root) }
+  })
+
+  it('无匹配：两路都空时显示「无匹配会话」，搜索拒绝时原文报错', async () => {
+    const sessions = { search: async () => { throw new Error('历史索引未就绪') } }
+    const ctx = { get: (name: string) => name === 'sessions' ? sessions : name === 'uiWorkspace' ? {} : undefined }
+    const { container, root } = await mountTree({ ctx })
+    try {
+      const input = container.querySelector('[data-search-input]')
+      if (input === null) throw new Error('search input missing')
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, 'zzz')
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      await act(async () => { await new Promise(resolve => { setTimeout(resolve, 260) }) })
+      expect(container.querySelector('[data-search-error]')?.textContent).toContain('历史索引未就绪')
+    } finally { await unmount(root) }
+  })
+
+  it('视图选项：最近更新排序生效且置顶仍前；筛选可切到仅已归档并持久化', async () => {
+    localStorage.removeItem('threadharbor.tree.view')
+    const withStamps = { hosts: [{ hostId: 'self', label: '本机', self: true, lastSeen: 1, sessionCount: 3, empty: false, projects: [{ projectId: 'w1', label: '研究', baseLabel: '研究', sharedName: false, sessions: [
+      { sessionId: 'old', projectId: 'w1', title: '旧的', hostId: 'self', own: true, updatedAt: 1 },
+      { sessionId: 'new', projectId: 'w1', title: '新的', hostId: 'self', own: true, updatedAt: 9 },
+      { sessionId: 'arch', projectId: 'w1', title: '归档的', hostId: 'self', own: true, archived: true, updatedAt: 5 },
+    ] }] }], totalSessions: 3, empty: false }
+    const { container, root } = await mountTree({ view: withStamps, ctx: { get: () => undefined } })
+    try {
+      // 默认：隐藏已归档
+      expect([...container.querySelectorAll('[data-session-row]')].map(r => r.getAttribute('data-session-row'))).toEqual(['old', 'new'])
+      click(container, '[data-action="view-options"]')
+      click(container, '[data-action="order-updated"]')
+      expect([...container.querySelectorAll('[data-session-row]')].map(r => r.getAttribute('data-session-row'))).toEqual(['new', 'old'])
+      // 选项菜单不自动收起，直接切换筛选
+      click(container, '[data-action="filter-only-archived"]')
+      expect([...container.querySelectorAll('[data-session-row]')].map(r => r.getAttribute('data-session-row'))).toEqual(['arch'])
+      expect(JSON.parse(localStorage.getItem('threadharbor.tree.view') ?? '{}')).toMatchObject({ orderBy: 'updated', filterBy: 'only' })
+    } finally { await unmount(root) }
+  })
+
   it('展开态记忆：本机默认展开，远端展开后写入 localStorage', async () => {
     const first = await mountTree()
     try {

@@ -25,6 +25,27 @@ const rollUp = (hosts: readonly unknown[]): RollUp => ({ hosts }) as RollUp
 
 const session = (sessionId: string, projectId = 'p1', title = sessionId) => ({ projectId, sessionId, title })
 
+describe('视图穿层：归档与最近更新随会话行走', () => {
+  it('archived/updatedAt/pinned 都到 SessionView，置顶排前', () => {
+    const rows = [
+      { projectId: 'p', sessionId: 'sa', title: '普通', updatedAt: 5 },
+      { projectId: 'p', sessionId: 'sb', title: '置顶', updatedAt: 1, pinned: true },
+      { projectId: 'p', sessionId: 'sc', title: '归档', updatedAt: 9, archived: true },
+    ]
+    const view = rollUpView({
+      hosts: [{
+        hostId: 'h', hostTitle: '机', self: true, lastSeen: 1,
+        projects: [{ projectId: 'p', sessions: rows }],
+        sessions: rows,
+      }],
+    })
+    const sessions = view.hosts[0]!.projects[0]!.sessions
+    expect(sessions.map(x => x.sessionId)).toEqual(['sb', 'sa', 'sc'])
+    expect(sessions.find(x => x.sessionId === 'sb')).toMatchObject({ pinned: true, updatedAt: 1 })
+    expect(sessions.find(x => x.sessionId === 'sc')).toMatchObject({ archived: true, updatedAt: 9 })
+  })
+})
+
 describe('rollUpView', () => {
   it('puts this host first, then the others by name', () => {
     // The machine you are on is the one you are most likely to want.

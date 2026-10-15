@@ -251,3 +251,42 @@
   text-align: left;
   cursor: pointer;
 }
+
+/* Search bar and flat results (native list header's search, tree-flavored). */
+.searchBar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+}
+
+.searchBar .rowMenu {
+  opacity: 1;
+}
+
+.searchInput {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 13px;
+  background: transparent;
+  color: inherit;
+}
+
+.searchClear {
+  flex: none;
+  border: none;
+  background: transparent;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font: inherit;
+  color: rgba(127, 127, 127, 0.9);
+  cursor: pointer;
+}
+
+.menuItem[data-checked='true'] {
+  font-weight: 600;
+}
