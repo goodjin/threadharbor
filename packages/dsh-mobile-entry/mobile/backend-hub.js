@@ -49,8 +49,12 @@ export function createHubBackend(opts = {}) {
       'not-found': '中转上没有这台机器的登记',
       'bad-request': '中转没认这次请求，请核对入口域名',
       'credential-stale': '那台机器正在重新连接，稍后再试',
+      'answer-failed': '这条待批没送到那台机器，看它上面 DSH 的状态',
     }
     if (typeof known[slug] === 'string') return known[slug]
+    // 中转给的本来就常是一句人话（例如「中转站请求失败：HTTP 502」），
+    // 那种不能再套一句「不认识的错误码」——加了反而比原来更难懂。
+    if (/\s/.test(slug) || /[^\x20-\x7e]/.test(slug)) return slug
     return `中转回了一个不认识的错误码：${slug}`
   }
 
@@ -149,7 +153,9 @@ export function createHubBackend(opts = {}) {
       if (body?.ok === true) return { ok: true }
       // kind 一并带出去：手机要靠它分「重配对」与「那台机器在重连」。
       const kind = typeof body?.kind === 'string' ? body.kind : undefined
-      const message = body?.error ?? body?.message ?? '应答没有送到那台机器'
+      // 走 reasonText：应答失败的代号（answer-failed）与转发那边是同一类东西，
+      // 不翻译的话横幅上就是「answer-failed」——正是 19c1dad 要清掉的那一类。
+      const message = reasonText(body?.error ?? body?.message ?? '这条应答没有送到那台机器')
       return kind === undefined ? { ok: false, message } : { ok: false, kind, message }
     },
 

@@ -719,9 +719,17 @@ describe('机器行上要看得见「为什么进不去」', () => {
     expect(html).toContain('需先确认指纹')
   })
 
-  it('隧道通了但凭据没换到 → 写「隧道通但凭据没换到」', async () => {
-    const html = await machineRows([{ hostId: HOST_A, name: 'MacBook', online: true, credential: 'missing', reason: 'ssh-failed' }])
+  it('凭据没换到 → 写「隧道通但凭据没换到」', async () => {
+    const html = await machineRows([{ hostId: HOST_A, name: 'MacBook', online: true, credential: 'missing', reason: 'credential-missing' }])
     expect(html).toContain('隧道通但凭据没换到')
+  })
+
+  it('隧道没建起来 → 不能写「隧道通但凭据没换到」（那是反方向）', async () => {
+    // ssh-failed 是 ensure 直接失败了：隧道压根没起来。写成「隧道通了」会把人
+    // 引去查凭据、反复重试，而真正要动的是 ssh 那条路（密钥、指纹、网络）。
+    const html = await machineRows([{ hostId: HOST_A, name: 'MacBook', online: false, credential: 'missing', reason: 'ssh-failed' }])
+    expect(html).toContain('连不上那台机器')
+    expect(html).not.toContain('隧道通但凭据没换到')
   })
 
   it('一切正常的那台**不能**带这两句', async () => {
@@ -811,3 +819,34 @@ describe('中转模式下刷新机器清单（原来没有这个按钮，两件�
     expect(root.innerHTML).toContain('approval-machine">来自 MacBook')
   })
 })
+
+
+describe('应答那条路上的错误代号也别原样显示', () => {
+  // 走真的 createHubBackend：这几条要验的正是 answer() 里那句翻译，替身答不出。
+  function hubAnswering(body: unknown) {
+    return createHubBackend({
+      fetchLike: (async () => ({ status: 200, text: async () => JSON.stringify(body) })) as never,
+      WebSocketCtor: (class { close() {} }) as never,
+    })
+  }
+
+  it('中转回 answer-failed → 不是把代号甩给操作者', async () => {
+    const result = await hubAnswering({ error: 'answer-failed' }).answer('mac-a', 'evt-1', { kind: 'result', value: 'allowed-once' })
+    expect(result.ok).toBe(false)
+    expect(result.message).not.toContain('answer-failed')
+    expect(result.message).toContain('这条待批没送到那台机器')
+  })
+
+  it('中转本来就在说一句人话时，不要再套「不认识的错误码」', async () => {
+    // 「中转站请求失败：HTTP 502」本身就是人话，再加前缀比原来更难懂。
+    const result = await hubAnswering({ message: '中转站请求失败：HTTP 502' }).answer('mac-a', 'evt-1', { kind: 'result', value: 'rejected' })
+    expect(result.message).toBe('中转站请求失败：HTTP 502')
+    expect(result.message).not.toContain('不认识的错误码')
+  })
+
+  it('真·不认识的短代号仍然原样带出来（藏了就变成「什么都没发生」）', async () => {
+    const result = await hubAnswering({ error: 'brand-new-code-42' }).answer('mac-a', 'evt-1', { kind: 'result', value: 'rejected' })
+    expect(result.message).toContain('brand-new-code-42')
+  })
+})
+

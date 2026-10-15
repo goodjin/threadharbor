@@ -145,7 +145,13 @@ function credentialHint(machine) {
   if (machine.reason === 'fingerprint-unapproved') {
     return '<span class="hint hint-warn">需先确认指纹</span>'
   }
-  if (machine.reason === 'ssh-failed' || machine.reason === 'credential-missing') {
+  if (machine.reason === 'ssh-failed') {
+    // ssh-failed 是**隧道没建起来**（ensure 直接失败了），跟凭据换没换到完全
+    // 不是一层。写成「隧道通但凭据没换到」会把人引到完全相反的方向：他会去
+    // 查凭据、反复重试，而真正要动的是 ssh 那条路（密钥、指纹、网络）。
+    return '<span class="hint hint-warn">连不上那台机器，隧道没建起来</span>'
+  }
+  if (machine.reason === 'credential-missing') {
     return '<span class="hint hint-warn">隧道通但凭据没换到</span>'
   }
   return ''
