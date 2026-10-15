@@ -178,10 +178,14 @@ $(if [ -n "$USER_NAME" ]; then echo "          user: ${USER_NAME}"; fi)$(if [ -n
 
      中转按别名查指纹，查不到就不建隧道，那台机器在清单上永远显示「需先确认
      指纹」——症状与「机器离线」很像，但它拒绝的是没核对过的主机。
-     人工登记一行（先 ssh-keyscan 核对再写进去）：
+     人工登记一行（先 ssh-keyscan 核对再写进去）。**只取 keytype 与公钥两段**：
+     ssh-keyscan 的第一段是主机名，保留它会插到别名与 keytype 中间，整行解析
+     散掉——症状是「登记了却仍然提示指纹未登记」（真机上栽过）。
+     同理不要用 -H：它哈希的是**主机名**那一段，而中转是按别名查的，主机段被哈希
+     成 \|1|... 之后别名就再也对不上了。
 
-       ssh-keyscan -t ed25519 ${TARGET} > /tmp/th-key
-       echo "${ALIAS} \$(cat /tmp/th-key)" >> ${KNOWN_HOSTS}
+       ssh-keyscan -t ed25519 ${TARGET} 2>/dev/null | grep -v '^#' > /tmp/th-key
+       awk '{print \$2, \$3}' /tmp/th-key | sed "s|^|${ALIAS} |" >> ${KNOWN_HOSTS}
 
   2. 那台机器的 DSH 要监听 127.0.0.1:${REMOTE_PORT}——公网不经它。
   3. 中转自身：dsh 启动要带 --trusted-host <mobileOrigin 的主机名>，否则中转

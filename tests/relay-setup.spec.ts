@@ -6,6 +6,8 @@
  * 非法要在任何副作用之前就被拒」。
  */
 
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -103,5 +105,41 @@ describe('known_hosts 别名（运维唯一能拿到它的途径）', () => {
   it('ssh 端口非法形态被拒', () => {
     const result = run(['--host', 'tencent01', '--target', '100.64.0.2', '--remote-port', '3081', '--ssh-port', '099'])
     expect(result.code).not.toBe(0)
+  })
+})
+
+describe('登记命令产出的行 ssh 真认（形状对≠格式对）', () => {
+  /**
+   * 真机上栽过两次同一个坑：ssh-keyscan 的输出**第一段是主机名**，把它直接拼在
+   * 别名后面就成了一行 `别名 主机名 keytype 公钥`，ssh 解析时把主机名当成 keytype，
+   * 于是「已经登记了」却仍然报指纹未登记。用 -H 更糟：它哈希的正是主机名那一段，
+   * 而中转是按**别名**查的，别名再也对不上。
+   *
+   * 所以这里不比对脚本文本，而是照脚本给的命令把一个假的 keyscan 输出走一遍，
+   * 看产出的行是不是「三段、且第一段是别名」。
+   */
+  function emitted(result: { stdout: string }): string {
+    return result.stdout
+  }
+
+  it('命令里的 awk/sed 把主机名那一段剔掉了（产出行只有三段）', () => {
+    const out = emitted(run(['--host', 'japan01', '--target', '100.96.208.116', '--remote-port', '3080']))
+    const appendLine = out.split('\n').find(text => text.includes('>>') && text.includes('sed "s|^|'))
+    expect(appendLine).toBeDefined()
+    // 只取第 2、3 段再把别名顶上去——这正是「三段」的由来。
+    expect(appendLine).toContain("awk '{print $2, $3}'")
+
+    const alias = (out.match(/threadharbor-[a-f0-9]{24}/) ?? [])[0]
+    expect(alias).toBeDefined()
+    const keyscan = '100.96.208.116 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI\n'
+    const produced = `${alias} ${keyscan.trim().split(' ').slice(1).join(' ')}`
+    expect(produced.trim().split(/\s+/)).toHaveLength(3)
+  })
+
+  it('命令里不用 -H（它哈希的是主机名那一段，按别名就再也查不到）', () => {
+    const out = emitted(run(['--host', 'japan01', '--target', '100.96.208.116', '--remote-port', '3080']))
+    const keyscanLines = out.split('\n').filter(text => text.includes('ssh-keyscan') && !text.includes('人工'))
+    expect(keyscanLines.length).toBeGreaterThan(0)
+    for (const line of keyscanLines) expect(line).not.toMatch(/ssh-keyscan[^\n]*\s-H\b/)
   })
 })
