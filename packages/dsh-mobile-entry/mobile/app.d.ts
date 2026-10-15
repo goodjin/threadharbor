@@ -63,3 +63,9 @@ export declare function nextScrollTop(
 /** 启动应用：建壳、探测配对、渲染、挂事件。boot 完成后首屏已渲染。 */
 export declare function bootApp(root: HTMLElement, deps?: BootDeps): Promise<void>
 
+/**
+ * 机器最后一次被联系上的时间，说成「多久之前」；在线的机器与从未成功联系过
+ * 的机器都返回 undefined（不编时间）。
+ */
+export declare function lastSeenTextOf(host: unknown, now?: number): string | undefined
+

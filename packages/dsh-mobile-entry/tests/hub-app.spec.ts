@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest'
-import { bootApp } from '../mobile/app.js'
+import { bootApp, lastSeenTextOf } from '../mobile/app.js'
 
 interface Deferred<T> {
   promise: Promise<T>
@@ -218,3 +218,25 @@ describe('中转模式：后端抽象', () => {
     expect(root.textContent).toContain('ThreadHarbor 手机端')
   })
 })
+
+describe('断掉的机器要能说清它最后一次有动静是什么时候', () => {
+  const now = Date.now()
+  const ago = (ms: number) => ({ online: true, reachable: true, lastSeenAt: now - ms })
+
+  it('在线的机器不带这句话（正常状态不需要额外解释）', () => {
+    expect(lastSeenTextOf(ago(60_000), now)).toBeUndefined()
+  })
+
+  it('断掉的机器按量级说「多久之前」', () => {
+    expect(lastSeenTextOf({ ...ago(30_000), reachable: false }, now)).toBe('刚刚还有动静')
+    expect(lastSeenTextOf({ ...ago(9 * 60_000), reachable: false }, now)).toBe('9 分钟前还有动静')
+    expect(lastSeenTextOf({ ...ago(3 * 3_600_000), reachable: false }, now)).toBe('3 小时前还有动静')
+    expect(lastSeenTextOf({ ...ago(50 * 3_600_000), reachable: false }, now)).toBe('2 天前还有动静')
+  })
+
+  it('从来没成功联系过（没有 lastSeenAt）就不编时间（别显示 1970 年）', () => {
+    expect(lastSeenTextOf({ online: true, reachable: false }, now)).toBeUndefined()
+    expect(lastSeenTextOf({ online: false, reachable: false, lastSeenAt: '刚才' }, now)).toBeUndefined()
+  })
+})
+

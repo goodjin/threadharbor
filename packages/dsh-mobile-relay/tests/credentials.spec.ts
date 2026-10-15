@@ -138,7 +138,7 @@ describe('CredentialStore（整对 cookie 的持久化）', () => {
 
 describe('StateStore（凭据与端口分配共用一份状态文档）', () => {
   it('新文件读出初始文档：version 1、两段皆空', () => {
-    expect(new StateStore(statePathInTemp()).read()).toEqual({ version: 1, credentials: [], tunnels: {} })
+    expect(new StateStore(statePathInTemp()).read()).toEqual({ version: 1, credentials: [], tunnels: {}, lastSeen: {} })
   })
 
   it('两段同住一份文档，先后写入互不抹账（凭据与端口分配共存，谁也不吃掉谁的账）', () => {
@@ -153,6 +153,7 @@ describe('StateStore（凭据与端口分配共用一份状态文档）', () => 
       version: 1,
       credentials: [{ hostId: HOST, cookie: STORED_COOKIE, obtainedAt: 7 }],
       tunnels: { [HOST]: { port: 41234 }, 'host-b': { port: 41235 } },
+      lastSeen: {},
     })
   })
 

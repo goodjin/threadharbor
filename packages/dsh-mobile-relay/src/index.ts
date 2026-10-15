@@ -17,6 +17,7 @@ import { Relay, RELAY_ANSWER_PATH, RELAY_EVENTS_PATH, RELAY_SESSIONS_PATH } from
 import { RelayClientPool } from './client-pool.ts'
 import { TunnelPool, type TunnelEnsureResult } from './tunnels.ts'
 import { CredentialStore, MachineCredentials } from './credentials.ts'
+import { StateStore } from './state.ts'
 import type { SshConnectionConfig } from '@threadharbor/dsh-host-federation/ssh/types'
 import { DshSshManager } from '@threadharbor/dsh-host-federation/ssh/manager'
 import { WebSocketServer } from 'ws'
@@ -266,7 +267,7 @@ export function apply(ctx: RelayRouteContext, config?: MobileRelayConfig, deps: 
   // 的 authority 与真实监听口就此分家——表现是「某台机器恒 401，自愈也救不
   // 回来」，而现场看着像网络问题。
   const runtime = deps.registry === undefined ? buildRuntime(config, deps) : undefined
-  const registry = deps.registry ?? new HostRegistry(buildRegistryDeps(config, deps, runtime!))
+  const registry = deps.registry ?? new HostRegistry(buildRegistryDeps(config, deps, runtime!, new StateStore(config.statePath)))
   // 比 hostname 不比 host：`URL.host` 会保留非默认端口（https://x:8443 → x:8443），
   // 而反代透传的 Host 头在默认端口下不带端口——那样配的站点会被整站 403。
   // 端口不参与比对：中转对外只有一个入口，端口由反代终结，写进配置反而多一处
@@ -377,12 +378,17 @@ function buildRegistryDeps(
   config: MobileRelayConfig,
   deps: RelayAssemblyDeps,
   runtime: RelayRuntime,
+  state: StateStore,
 ): HostRegistryDeps {
   const { tunnels, credentials, readLaunchUrl } = runtime
   // 缝的覆盖项**逐个并入**同一份依赖，不做「命中即早退」：早退会让后面的缝
   // 静默失效——测试里两条缝一起传，第二条形同虚设，而真网络恰好快速失败，
   // 断言照样绿。宁可多写两行，也不要留一个会静默吃掉参数的缝。
-  const overrides: Partial<HostRegistryDeps> = {}
+  const overrides: Partial<HostRegistryDeps> = {
+    // 每次真的联系上就记一笔：机器之后断掉时，手机上还能说出「最后一次是
+    // 什么时候」，而不是只看到一个没有时间信息的「离线」。
+    lastSeen: state,
+  }
   if (deps.tailscalePeers !== undefined) {
     // 缝给的是「对端列表」，但清单层要的是命令执行面——中间仍走联邦包那份真
     // 解析器（MagicDNS 全名去尾点、Online 布尔、100.x 首地址这些规则都在那边）。

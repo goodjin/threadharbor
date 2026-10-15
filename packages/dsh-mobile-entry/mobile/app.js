@@ -406,7 +406,12 @@ export async function bootApp(root, deps = {}) {
     render()
     try {
       const body = await state.backend.listHosts()
-      state.machines = Array.isArray(body?.hosts) ? body.hosts : []
+      // 断掉的机器补一句「最后一次有动静是什么时候」：否则「离线很久」与
+      // 「从来没成功过」在界面上长得一模一样。看板已经把 lastSeenText 这个位
+      // 备好了，之前没有东西往里填。
+      state.machines = Array.isArray(body?.hosts)
+        ? body.hosts.map(host => ({ ...host, lastSeenText: lastSeenTextOf(host) }))
+        : []
       state.hosts = { peers: [], error: body?.error, loading: false }
     } catch (error) {
       state.machines = []
@@ -995,4 +1000,25 @@ export async function bootApp(root, deps = {}) {
 
   shell()
   await boot()
+}
+
+/**
+ * 机器最后一次被联系上的时间，说成「多久之前」。中转在清单里给的是
+ * `lastSeenAt`（epoch 毫秒）；在线的机器不需要这句话，所以只有断掉的才补。
+ *
+ * 导出是为了能被用例直接问：这个文案错了不影响功能，但会让「离线」看起来像
+ * 「死了」或「没问题」，两种都误导人。
+ */
+export function lastSeenTextOf(host, now = Date.now()) {
+  if (host === null || typeof host !== 'object') return undefined
+  const online = host.online !== false && host.reachable !== false
+  if (online) return undefined
+  const at = host.lastSeenAt
+  if (typeof at !== 'number' || !Number.isFinite(at)) return undefined
+  const minutes = Math.floor((now - at) / 60000)
+  if (minutes < 1) return '刚刚还有动静'
+  if (minutes < 60) return `${minutes} 分钟前还有动静`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours} 小时前还有动静`
+  return `${Math.floor(hours / 24)} 天前还有动静`
 }

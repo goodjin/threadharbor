@@ -81,6 +81,7 @@ function makeRegistry(deps: Partial<HostRegistryDeps> & Pick<HostRegistryDeps, '
     readLaunchUrl: deps.readLaunchUrl ?? READ_LAUNCH_URL,
     run: deps.run ?? runWith(['mac-a', 'linux-b']),
     probeFetch: deps.probeFetch ?? probeWith(200).fetch,
+    ...(deps.lastSeen === undefined ? {} : { lastSeen: deps.lastSeen }),
   })
 }
 
@@ -302,5 +303,54 @@ describe('relay hosts 清单', () => {
 describe('relay hosts 常量', () => {
   it('清单路径是 relay 前缀下的 hosts', () => {
     expect(RELAY_HOSTS_PATH).toBe('/threadharbor/relay/hosts')
+  })
+})
+
+describe('lastSeenAt（断掉的机器也要能说清它最后一次有动静是什么时候）', () => {
+  function withLastSeen() {
+    const seen = new Map<string, number>()
+    return {
+      seen,
+      lastSeen: {
+        markSeen(hostId: string, at = 1000): number { seen.set(hostId, at); return at },
+        lastSeenOf: (hostId: string): number | undefined => seen.get(hostId),
+      },
+    }
+  }
+
+  it('联系上的那一拍就记下时刻，并随清单返回', async () => {
+    const { seen, lastSeen } = withLastSeen()
+    const result = await makeRegistry({ machines: [MACHINE_A], lastSeen }).list()
+    expect(result.hosts[0]?.credential).toBe('ok')
+    expect(result.hosts[0]?.lastSeenAt).toBe(1000)
+    expect(seen.get('mac-a')).toBe(1000)
+  })
+
+  it('后来断了：仍带最后一次联系上的时刻（不是清空）', async () => {
+    const { lastSeen } = withLastSeen()
+    await makeRegistry({ machines: [MACHINE_A], lastSeen }).list()
+    const result = await makeRegistry({
+      machines: [MACHINE_A],
+      lastSeen,
+      tunnels: tunnelsWith(() => ({ ok: false, reason: 'ssh-failed', detail: '退出码 255' })),
+    }).list()
+    expect(result.hosts[0]?.reachable).toBe(false)
+    expect(result.hosts[0]?.lastSeenAt).toBe(1000)
+  })
+
+  it('从来没成功联系过：就不带这个字段（别让手机显示「1970 年」）', async () => {
+    const { lastSeen } = withLastSeen()
+    const result = await makeRegistry({
+      machines: [MACHINE_A],
+      lastSeen,
+      tunnels: tunnelsWith(() => ({ ok: false, reason: 'fingerprint-unapproved', detail: '未登记' })),
+    }).list()
+    expect('lastSeenAt' in (result.hosts[0] ?? {})).toBe(false)
+  })
+
+  it('装配层没给这个面时清单照常（少一个标注胜过猜一个）', async () => {
+    const result = await makeRegistry({ machines: [MACHINE_A] }).list()
+    expect(result.hosts[0]?.credential).toBe('ok')
+    expect('lastSeenAt' in (result.hosts[0] ?? {})).toBe(false)
   })
 })

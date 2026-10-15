@@ -84,6 +84,14 @@ export interface HostRegistryDeps {
    * 各台机的日志路径不共用一个值，回调拿不到机器就无从查起。
    */
   readLaunchUrl: (hostId: string) => Promise<string | undefined>
+  /**
+   * 最后联系上的时刻的账（形如 StateStore）。缺省就不给 lastSeenAt：装配层
+   * 没接这个面时，少一个标注胜过猜一个。
+   */
+  lastSeen?: {
+    markSeen(hostId: string, at?: number): number
+    lastSeenOf(hostId: string): number | undefined
+  }
   /** tailscale 命令执行面；缺省走联邦包的真 execFile。 */
   run?: TailscaleStatusRun
   /** 探测用 fetch；缺省走全局 fetch。 */
@@ -108,6 +116,17 @@ export type RelayHost = {
   readonly reason?: 'fingerprint-unapproved' | 'ssh-failed' | 'credential-missing'
   /** 一句人话细节，给运维看；含目标与 stderr 片段，不含任何凭据。 */
   readonly detail?: string
+  /**
+   * 这台机器最后一次**真的联系上**的时刻（epoch 毫秒）。之前联系过但现在断了
+   * 的机器才有它——手机上据此说「最后一次有动静是 3 分钟前」，把「离线很久」
+   * 与「从来没成功过」分开。从没成功过就不带这个字段。
+   */
+  readonly lastSeenAt?: number
+}
+
+/** 没联系过就不带这个字段（别让手机显示「1970 年」）。 */
+function lastSeenField(at: number | undefined): { lastSeenAt?: number } {
+  return at === undefined ? {} : { lastSeenAt: at }
 }
 
 /** 清单结果；tailscale 查询失败时 hosts 为空、error 带原因（接口仍 200）。 */
@@ -170,6 +189,7 @@ export class HostRegistry {
         credential: 'missing',
         reason: tunnel.reason,
         detail: tunnel.detail,
+        ...lastSeenField(this.lastSeenOf(machine)),
       }
     }
     const { origin } = tunnel.handle
@@ -188,15 +208,24 @@ export class HostRegistry {
         // 带上换凭据那一步的细节（如 HTTP 401/403）：「令牌被拒」与「解析不出
         // cookie」的处置完全相反，现场必须能一眼分开。
         detail: `机器 ${machine.hostId} 的凭据未就绪（${outcome.reason}${outcome.detail === undefined ? '' : `，${outcome.detail}`}）`,
+        ...lastSeenField(this.lastSeenOf(machine)),
       }
     }
+    // 联系上了就记一笔：这一拍之后它再断，手机上还能说出「最后一次是什么时候」。
+    const lastSeenAt = this.deps.lastSeen?.markSeen(machine.hostId)
     return {
       hostId: machine.hostId,
       online,
       running,
       reachable: true,
       credential: 'ok',
+      ...(lastSeenAt === undefined ? {} : { lastSeenAt }),
     }
+  }
+
+  /** 一台断掉的机器上一次被联系到是什么时候；没联系过就 undefined。 */
+  private lastSeenOf(machine: RelayMachineConfig): number | undefined {
+    return this.deps.lastSeen?.lastSeenOf(machine.hostId)
   }
 
   /** 带 5s 缓存的 hello 探测：缓存里还年轻的结果直接用，过期的重新探。 */

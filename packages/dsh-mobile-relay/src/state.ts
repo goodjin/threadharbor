@@ -34,10 +34,16 @@ export interface RelayStateDocument {
   readonly version: 1
   readonly credentials: readonly StoredCredential[]
   readonly tunnels: Readonly<Record<string, unknown>>
+  /**
+   * 每台机器最后一次**真的联系上**的时刻（epoch 毫秒）。机器离线时手机上
+   * 要能说清「它最后一次有动静是什么时候」——不然「离线」和「从配好到现在
+   * 都没成功过」在界面上长得一模一样。
+   */
+  readonly lastSeen: Readonly<Record<string, number>>
 }
 
 function emptyDocument(): RelayStateDocument {
-  return { version: 1, credentials: [], tunnels: {} }
+  return { version: 1, credentials: [], tunnels: {}, lastSeen: {} }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -63,13 +69,23 @@ function normalizeDocument(value: unknown): RelayStateDocument {
   if (value['version'] !== 1) throw new Error('状态文档版本不认识')
   if (!Array.isArray(value['credentials'])) throw new Error('credentials 段不是数组')
   if (!isRecord(value['tunnels'])) throw new Error('tunnels 段不是对象')
+  // lastSeen 允许整段缺失（升级前的文档没有它）：缺了当作「都没见过」，
+  // 这是可安全补齐的默认值，不该把已有的凭据与隧道分配一起作废。
+  const lastSeen: Record<string, number> = {}
+  if (value['lastSeen'] !== undefined) {
+    if (!isRecord(value['lastSeen'])) throw new Error('lastSeen 段不是对象')
+    for (const [hostId, at] of Object.entries(value['lastSeen'])) {
+      if (typeof at !== 'number' || !Number.isFinite(at)) throw new Error('lastSeen 条目形状不对')
+      lastSeen[hostId] = at
+    }
+  }
   const credentials: StoredCredential[] = []
   for (const entry of value['credentials'] as unknown[]) {
     const parsed = parseCredential(entry)
     if (parsed === undefined) throw new Error('credentials 条目形状不对')
     credentials.push(parsed)
   }
-  return { version: 1, credentials, tunnels: value['tunnels'] }
+  return { version: 1, credentials, tunnels: value['tunnels'], lastSeen }
 }
 
 /**
@@ -107,6 +123,17 @@ export class StateStore {
    * mutate 抛错时不落盘，文档保持原样。mutate 里不要再做 I/O——它拿到
    * 的快照一旦落盘就可能已过时。
    */
+  /** 记下「这台机器刚刚真的联系上了」，返回记下的时刻（供调用方直接回给手机）。 */
+  markSeen(hostId: string, at = Date.now()): number {
+    this.update(doc => ({ ...doc, lastSeen: { ...doc.lastSeen, [hostId]: at } }))
+    return at
+  }
+
+  /** 某台机器最后一次联系上的时刻；从来没有过就是 undefined。 */
+  lastSeenOf(hostId: string): number | undefined {
+    return this.read().lastSeen[hostId]
+  }
+
   update(mutate: (doc: RelayStateDocument) => RelayStateDocument): RelayStateDocument {
     const next = mutate(this.read())
     this.write(next)
