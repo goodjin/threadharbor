@@ -303,8 +303,9 @@ export function apply(ctx: RelayRouteContext, config?: MobileRelayConfig, deps: 
     // 机器就一直显示不可达——而端口是「一经分配就固定」的，不肯换号。
     // systemd 的 KillMode=control-group 只兜得住整机重启，兜不住插件热重载。
     ctx.effect(
-      () => async () => {
-        await runtime.tunnels.closeAll()
+      () => () => {
+        // 同步收：宿主的处置器不等 Promise（见 closeAllNow 的注释）。
+        runtime.tunnels.closeAllNow()
         relay?.stop()
       },
       'threadharbor-mobile-relay: shutdown',

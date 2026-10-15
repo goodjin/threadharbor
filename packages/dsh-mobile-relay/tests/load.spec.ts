@@ -493,8 +493,10 @@ describe('停机收尾：重载不能把上一代的隧道留在原地', () => {
     )
     expect(shutDown).toEqual([])
 
-    // 模拟宿主卸载（插件热重载）：所有 disposer 都得跑完。
-    for (const dispose of first.disposers.splice(0)) await dispose()
+    // 模拟宿主卸载（插件热重载）：处置器是**同步调用、不等 Promise** 的
+    // （宿主那边就是一句 undo()），所以这里也不能 await——await 了就看不出
+    // 「收隧道」到底是在当场发生还是被推迟到了微任务之后。
+    for (const dispose of first.disposers.splice(0)) dispose()
     expect(shutDown).toEqual(['tunnels'])
 
     // 重载不该撞重复登记——这一条本来就绿（路由都包在 effect 里）。

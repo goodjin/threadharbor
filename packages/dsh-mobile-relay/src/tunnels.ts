@@ -177,6 +177,21 @@ export class TunnelPool {
     })
   }
 
+  /**
+   * 停机用的**同步**收尾：不排队，当场收。
+   *
+   * 为什么不能只有上面那个排队版：宿主的处置器是同步调用、不等 Promise 的
+   * （`core/scope/src/store.ts` 里就是一句 `undo()`）。排队版把收隧道推到微任务
+   * 之后，于是「插件重载」与「新一代抢同一个固定端口」之间只剩运气——真机上
+   * 的症状是上一代仍占着 41100，新一代 ssh-failed。
+   */
+  closeAllNow(): void {
+    this.handles.clear()
+    const closing = this.deps.closeTunnel?.()
+    // 处置器不会等它：这里只是不让它变成没人接的 rejection。
+    if (closing !== undefined) void Promise.resolve(closing).catch(() => {})
+  }
+
   /** 在串行队列里跑一个作业；前一个作业失败不堵后一个。 */
   private enqueue<T>(job: () => Promise<T>): Promise<T> {
     const run = this.tail.then(job, job)
