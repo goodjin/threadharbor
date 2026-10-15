@@ -11,8 +11,8 @@
 | # | 项 | 结论 | 证据 |
 |---|---|---|---|
 | 1 | 插件装载成功，组合行与配置生效 | 通过 | `GET /threadharbor/mobile/hello` → `200 {"mobile":true}`（公网入口，带口令）。装载期曾报 `$.machines[0].logPath missing required value`，补上 `logPath` 后装载成功——报错点名了缺哪个字段，正是 Task 7b I4 那条修复要的效果 |
-| 2 | `/threadharbor/relay/hosts` 返回已登记机器 | 部分通过 | 返回 `{"hosts":[{"hostId":"tencent01","online":true,"running":false,"reachable":false,"credential":"missing"}]}`。`online:true` 说明 tailnet 发现真跑通了；但 `reachable:false`：**隧道未建立**（见下方「未通过项」）。第二台机器**待加**（`japan01`/`jinmac-mini` 在 tailnet 上在线，待配 SSH 与指纹） |
-| 3 | 经隧道取 cookie 并代理一次 `session/list` | **不通过** | 依赖第 2 项的隧道，未达成 |
+| 2 | `/threadharbor/relay/hosts` 返回已登记机器 | 通过 | 返回 `{"hosts":[{"hostId":"tencent01","online":true,"running":true,"reachable":true,"credential":"missing","reason":"credential-missing","detail":"机器 tencent01 的凭据未就绪（no-cookie）"}]}`。`online`（tailnet 发现）、`reachable`（SSH 隧道）、`running`（对端 hello 200）三段都真跑通了。第二台机器**待加**（`japan01`/`jinmac-mini` 在 tailnet 上在线，待配 SSH 与指纹） |
+| 3 | 经隧道取 cookie 并代理一次 `session/list` | **不通过** | 隧道已通，但凭据换不到（`credential-missing` / `no-cookie`）。启动令牌换 cookie 这一步尚未走通 |
 | 4 | 事件流收到真机 `ready` 帧；手机侧应答 | 待用户 | 手机侧未参与 |
 | 5 | 重启后端口分配不变、cookie 复用 | 待用户 | 依赖第 3 项 |
 | 6 | 停掉某台机器的 DSH 后该机显示离线、其余不受影响 | 待用户 | 只有一台机器，且隧道未通 |
@@ -34,18 +34,31 @@
 因为别名把 SSH 端口纳入哈希）。真机上按脚本给的值登记后别名核对一致
 （`threadharbor-563336ce4c9a9a72687422c7`），本地与云主机算出同一个值。用例 3 条钉住。
 
+## 为什么最初「隧道建不起来」——两次都排错了方向
+
+最初清单是 `reachable:false`，没有任何原因。排查时我先后排除了指纹、SSH 可达、隧道命令本身，
+手工跑 `ssh -N -L …` 都是通的，于是**停在「插件内部有问题」这个结论上**——其实方向就错了。
+
+真正的原因是 known_hosts 里那一行**只有别名、没有公钥**（我上一轮追加时把公钥部分丢了），
+中转查指纹查不到，于是否决建隧道。证据是最后给清单补上的 `reason`/`detail` 两个字段：
+一眼就是 `fingerprint-unapproved`，并直接写出了目标地址。
+
+**教训**：`reachable:false` 是个不吭声的故障——没有信号，现场只能逐个排除，而且很容易
+把自己排除过的方向当成已排除的方向。给这类出口**留一个自报状态的字段**，比事后推理便宜得多。
+
 ## 未通过项（待查）
 
-**隧道建不起来（第 2/3 项的前置）。** 已排除的：
+**凭据换不到（第 3 项的前置）。** 隧道与探测都通，只有「读启动令牌换 cookie」这一步是
+`no-cookie`。已排除的：
 
 - 指纹闸门 —— 别名条目已按脚本给出的值登记，`grep -c '^threadharbor-' known_hosts` = 1；
 - SSH 可达 —— `ssh -o BatchMode=yes root@100.84.120.35` 通；
 - 隧道命令本身 —— 手工跑 `ssh -N -L 41100:127.0.0.1:3080 -o ExitOnForwardFailure=yes
   -o StrictHostKeyChecking=yes root@100.84.120.35` 无报错跑到超时。
 
-待查：插件内部 `ensureTunnel` 那一段为什么没把上面这条命令跑成功（可能与 SSH 身份、
-manager 的调用参数或端口分配有关）。**这一项在修好之前，中转的多机能力在真机上还不可用**；
-单机的手机页不受影响（走的是既有直连路径）。
+待查：`readLaunchUrl` 读远端启动日志 → 取带令牌网址 → 换 cookie 这条链上具体断在哪一步
+（读不到网址？换到但没拿到 cookie？）。**这一项在修好之前，转发与事件仍然不可用**——
+机器能看见、能探活，但中转拿不到进那台机器的凭据；单机的手机页不受影响（走既有直连路径）。
 
 ## 部署形态（本次实测确认的事实）
 

@@ -90,13 +90,24 @@ export interface HostRegistryDeps {
   probeFetch?: HostProbeFetch
 }
 
-/** 清单里一台机器的形状。 */
+/**
+ * 清单里一台机器的形状。
+ *
+ * `reason` / `detail` 是**给运维看的自报状态**：一台机器不可达时只有
+ * reachable:false 是不够的——隧道没开出来、指纹没登记、凭据没换到，看上去
+ * 几乎一模一样，现场只能靠猜。加一条短原因（枚举）+ 一句人话细节，
+ * 手机只渲染 reason 对应的短文案，detail 不上手机。
+ */
 export type RelayHost = {
   readonly hostId: string
   readonly online: boolean
   readonly running: boolean
   readonly reachable: boolean
   readonly credential: 'ok' | 'missing'
+  /** 不可达/凭据缺失的短原因枚举；一切正常时不出现。 */
+  readonly reason?: 'fingerprint-unapproved' | 'ssh-failed' | 'credential-missing'
+  /** 一句人话细节，给运维看；含目标与 stderr 片段，不含任何凭据。 */
+  readonly detail?: string
 }
 
 /** 清单结果；tailscale 查询失败时 hosts 为空、error 带原因（接口仍 200）。 */
@@ -150,16 +161,39 @@ export class HostRegistry {
     const tunnel = await this.deps.tunnels.ensure(machine)
     if (!tunnel.ok) {
       // 隧道都拉不起来，凭据无从谈起：这时报「凭据缺失」是误导，如实说不可达。
-      return { hostId: machine.hostId, online, running: false, reachable: false, credential: 'missing' }
+      // 把原因带出去——不然这台机器「不可达」和「指纹没登记」在清单上长得一样。
+      return {
+        hostId: machine.hostId,
+        online,
+        running: false,
+        reachable: false,
+        credential: 'missing',
+        reason: tunnel.reason,
+        detail: tunnel.detail,
+      }
     }
     const { origin } = tunnel.handle
-    const credential = (await this.deps.credentials.resolve(machine.hostId, origin, () => this.deps.readLaunchUrl(machine.hostId))).ok ? 'ok' : 'missing'
+    const outcome = await this.deps.credentials.resolve(machine.hostId, origin, () => this.deps.readLaunchUrl(machine.hostId))
+    const running = await this.probeHelloCached(origin)
+    // 隧道通了但凭据没换到：这是**另一回事**（机器的 DSH 起来了，但我们进不去），
+    // 必须与「隧道没开出来」区分开，否则两者的处置完全不同。
+    if (!outcome.ok) {
+      return {
+        hostId: machine.hostId,
+        online,
+        running,
+        reachable: true,
+        credential: 'missing',
+        reason: 'credential-missing',
+        detail: `机器 ${machine.hostId} 的凭据未就绪（${outcome.reason}）`,
+      }
+    }
     return {
       hostId: machine.hostId,
       online,
-      running: await this.probeHelloCached(origin),
+      running,
       reachable: true,
-      credential,
+      credential: 'ok',
     }
   }
 

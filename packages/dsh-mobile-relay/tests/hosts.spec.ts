@@ -124,9 +124,33 @@ describe('relay hosts 清单', () => {
 
     const { hosts } = await registry.list()
 
+    // 带原因与细节：不可达必须自报原因，否则「隧道没开」与「指纹没登记」
+    // 在清单上长得一模一样，现场只能靠猜。
     expect(hosts).toEqual([
-      { hostId: 'mac-a', online: true, running: false, reachable: false, credential: 'missing' },
+      {
+        hostId: 'mac-a',
+        online: true,
+        running: false,
+        reachable: false,
+        credential: 'missing',
+        reason: 'ssh-failed',
+        detail: 'ssh 退出码 255',
+      },
     ])
+  })
+
+  it('隧道通了但凭据没换到 → 与「隧道没开」区分开（处置完全不同）', async () => {
+    const registry = makeRegistry({
+      machines: [MACHINE_A],
+      tunnels: tunnelsWith(() => ({ ok: true, origin: 'http://127.0.0.1:41100' })),
+      credentials: { async resolve() { return { ok: false as const, reason: 'no-cookie' as const } } },
+    })
+
+    const [host] = (await registry.list()).hosts
+
+    expect(host).toMatchObject({ reachable: true, credential: 'missing', reason: 'credential-missing' })
+    // 隧道通了就算可达——机器在跑只是另一回事，不该混进同一个原因里。
+    expect(host?.detail).toContain('no-cookie')
   })
 
   it('tailscale 查询出错时返回空清单与 error，不抛给调用方', async () => {
