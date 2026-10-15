@@ -75,8 +75,17 @@ export interface RelayRouteContext {
   effect(factory: () => unknown, label?: string): unknown
   webServer: {
     register(route: RelayRoute): () => void
-    /** WebSocket 升级登记（可选面：没它就不挂事件流，其余 HTTP 面照常）。 */
-    registerUpgrade?(route: { path: string; handler: (socket: unknown, head: unknown) => void }): () => void
+    /**
+     * WebSocket 升级登记（可选面：没它就不挂事件流，其余 HTTP 面照常）。
+     *
+     * handler 的签名与宿主 WebUpgradeRoute 一致：`(req, socket, head)`。
+     * **req 不能省**——准入、方法和 origin 绑定三道门全靠它，少一道就是给
+     * 事件流留了一条绕开配对的旁门（事件流承载全部机器的会话内容与审批）。
+     */
+    registerUpgrade?(route: {
+      path: string
+      handler: (req: unknown, socket: unknown, head: unknown) => void | Promise<void>
+    }): () => void
   }
   connection: RelayConnection
 }
@@ -267,7 +276,15 @@ function buildRelay(config: MobileRelayConfig, runtime: RelayRuntime): Relay {
       },
     })),
   )
-  return new Relay({ knownHostIds: new Set(config.machines.map(machine => machine.hostId)), clients: pool })
+  // 401 自愈的接线点：上游 401 说明 cookie 已被对端作废（那台 DSH 重启过），
+  // 必须**判脏到凭据层**，否则 resolve 的缓存与盘上条目一直是坏 cookie：
+  // 401 → 重建客户端 → 同一个坏 cookie → 恒 401，重启中转也恢复不了。
+  // onCredentialStale 里 invalidate 同时清内存缓存与盘上条目（credentials.ts）。
+  return new Relay({
+    knownHostIds: new Set(config.machines.map(machine => machine.hostId)),
+    clients: pool,
+    onCredentialStale: hostId => credentials.invalidate(hostId),
+  })
 }
 
 /**
@@ -458,6 +475,15 @@ function registerHubRoutes(ctx: RelayRouteContext, relay: Relay, originHost: str
     return true
   }
 
+  /** 与 {@link gate} 同序同条件的升级面版本，只是拒绝方式换成 destroy。 */
+  const upgradeGate = (req: Req): boolean => {
+    const admission = ctx.connection.admit(req as never)
+    if ('rejection' in admission) return false
+    if ((req.method ?? 'GET') !== 'GET') return false
+    const host = req.headers?.host
+    return typeof host === 'string' && host.toLowerCase() === expected
+  }
+
   const register = (path: string, method: 'GET' | 'POST', label: string, handler: (req: Req, res: Res, url: URL) => Promise<void>) => {
     ctx.effect(
       () =>
@@ -498,7 +524,18 @@ function registerHubRoutes(ctx: RelayRouteContext, relay: Relay, originHost: str
   // 而不是整个中转起不来。
   ctx.webServer.registerUpgrade?.({
     path: RELAY_EVENTS_PATH,
-    handler: (socket, _head) => relay.connectEvents(socket as never),
+    // 与 HTTP 面同一套三道门，顺序也一致：admit → 方法 → origin 绑定。
+    // 升级面没有 res 可写状态码，过关的方式是**直接毁掉 socket**：握手还没
+    // 完成，此刻不回帧就是最干净的拒绝。
+    handler: (req, socket, head) => {
+      const typedReq = req as Req
+      if (!upgradeGate(typedReq)) {
+        ;(socket as { destroy?: () => void }).destroy?.()
+        return
+      }
+      void head // 升级头的字节由 relay 内部的握手处理，不在这里转交
+      return relay.connectEvents(socket as never)
+    },
   })
 }
 

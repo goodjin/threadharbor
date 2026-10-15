@@ -7,8 +7,8 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { RelayMachineConfig } from '../src/index.ts'
@@ -67,7 +67,7 @@ function host(options: { rejection?: 401 | 403 } = {}): { ctx: RelayRouteContext
 }
 
 /** 直接调用 handler，收下它对响应生命周期的完整处置。 */
-async function call(handler: RouteHandler, req: { method?: string; headers?: Record<string, string> }) {
+async function call(handler: RouteHandler, req: { method?: string; url?: string; headers?: Record<string, string> }) {
   const state = { status: 0, headers: {} as Record<string, string | number | string[] | undefined>, body: '' }
   const res = {
     writeHead(status: number, headers?: Record<string, string | number | string[]>) {

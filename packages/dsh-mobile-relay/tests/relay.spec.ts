@@ -22,17 +22,24 @@ function fakeClient() {
   const handlers = new Map<string, (value: unknown) => void>()
   /** 假件要能换结果：上游 401 / 上游报错这两种形态分别靠它造。 */
   const state: { result: unknown } = { result: { ok: true as const, value: { ok: true } } }
+  /** connect 被调次数：C1 的判别面。 */
+  const counters = { connects: 0 }
+  /** 可换的应答结果：上游报错时 answer 带回原文，用它造。 */
+  const answerState: { outcome: { ok: boolean; message?: string } } = { outcome: { ok: true } }
   const client = {
     calls,
     answers,
     state,
+    get connects() { return counters.connects },
+    get answerOutcome() { return answerState.outcome },
+    set answerOutcome(value: { ok: boolean; message?: string }) { answerState.outcome = value },
     async call(endpoint: string, args: unknown) {
       calls.push({ endpoint, args })
       return state.result as { ok: true; value: unknown }
     },
     async answer(eventId: string, outcome: EventOutcome) {
       answers.push({ eventId, outcome })
-      return { ok: true }
+      return answerState.outcome
     },
     onEvent(type: string, listener: (value: unknown) => void) {
       if (type === '*') client.lastEventType = '*'
@@ -40,7 +47,7 @@ function fakeClient() {
       return () => handlers.delete(type)
     },
     lastEventType: '',
-    connect() {},
+    connect() { counters.connects += 1 },
     close() {},
   }
   return {
@@ -48,6 +55,9 @@ function fakeClient() {
     calls,
     answers,
     state,
+    get connects() { return counters.connects },
+    get answerOutcome() { return answerState.outcome },
+    set answerOutcome(value: { ok: boolean; message?: string }) { answerState.outcome = value },
     emit(type: string, value: unknown) {
       handlers.get(type)?.(value)
       handlers.get('*')?.(value)
@@ -248,5 +258,103 @@ describe('常量', () => {
     expect(RELAY_SESSIONS_PATH).toBe('/threadharbor/relay/hosts/')
     expect(RELAY_EVENTS_PATH).toBe('/threadharbor/relay/events')
     expect(RELAY_ANSWER_PATH).toBe('/threadharbor/relay/answer')
+  })
+})
+
+describe('评审补的接线用例（C1/C2/I1/I2 的判别力）', () => {
+  /** 转发一律走公开面：handleMessages + 一个把上游结果设好的假客户端。 */
+  function relayWith(client: ReturnType<typeof fakeClient>, extra: Record<string, unknown> = {}) {
+    return new Relay({ knownHostIds: new Set(['host-a']), clients: { clientFor: async () => client.client, invalidate: () => {}, closeAll: () => {} }, ...extra })
+  }
+
+  async function messagesVia(relay: Relay, url: string) {
+    const { state, res } = recorder()
+    await relay.handleMessages(
+      { method: 'GET', url, headers: {} } as never,
+      res as never,
+      new URL(`http://x${url}`),
+    )
+    return state
+  }
+
+  const MESSAGES_URL = '/threadharbor/relay/hosts/host-a/sessions/s1/messages'
+
+  it('C1：挂上订阅必须建连（不连则事件不来、应答拿不到 clientId）', async () => {
+    const fake = fakeClient()
+    await relayWith(fake).attachClients()
+    expect(fake.connects).toBeGreaterThanOrEqual(1)
+  })
+
+  it('C2：上游 401 必须触达凭据层（只关客户端等于坏 cookie 永远用着）', async () => {
+    const fake = fakeClient()
+    fake.state.result = { ok: false, kind: 'unauthorized' }
+    let stale: string | undefined
+    const relay = relayWith(fake, { onCredentialStale: (hostId: string) => { stale = hostId } })
+    const state = await messagesVia(relay, MESSAGES_URL)
+    expect(state.body).toContain('credential-stale')
+    expect(stale).toBe('host-a')
+  })
+
+  it('I1：401 换掉客户端后，对账给它重挂订阅（否则该机事件永久静音）', async () => {
+    const seen: string[] = []
+    const first = fakeClient()
+    let current = first
+    const relay = new Relay({
+      knownHostIds: new Set(['host-a']),
+      clients: {
+        clientFor: async () => current.client,
+        invalidate: () => { current = fakeClient() }, closeAll: () => {},
+      },
+    })
+    relay.registerPhone({ on: () => {}, close: () => {}, send: (frame: string) => { seen.push(frame) } } as never)
+    await relay.attachClients()
+    current.emit('item', { t: 'one' })
+    relay.invalidateClient('host-a')
+    await relay.reconcile()
+    current.emit('item', { t: 'two' })
+    expect(seen).toHaveLength(2)
+  })
+
+  it('I1：启动时离线的机器，上线后对账能自己补上订阅', async () => {
+    const seen: string[] = []
+    const late = fakeClient()
+    let up = false
+    const relay = new Relay({
+      knownHostIds: new Set(['host-a']),
+      clients: { clientFor: async () => { if (!up) throw new Error('还没上线'); return late.client }, invalidate: () => {}, closeAll: () => {} },
+    })
+    relay.registerPhone({ on: () => {}, close: () => {}, send: (frame: string) => { seen.push(frame) } } as never)
+    await relay.attachClients() // 离线：静默跳过
+    up = true
+    await relay.reconcile()
+    late.emit('item', { t: 'late' })
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toContain('late')
+  })
+
+  it('I2a：应答失败只给固定文案（上游 error.message 原文不进应答体）', async () => {
+    const fake = fakeClient()
+    fake.answerOutcome = { ok: false, message: '上游内部：ENOENT /srv/secret/creds.json' }
+    const { state, res } = recorder()
+    await relayWith(fake).handleAnswer(req(RELAY_ANSWER_PATH, 'POST', { hostId: 'host-a', eventId: 'e1', outcome: { kind: 'next' } }), res as never)
+    expect(state.body).toContain('answer-failed')
+    expect(state.body).not.toContain('secret')
+  })
+
+  it('I2b：取客户端失败时与 rpc-error 同形（不泄露 SSH stderr 原文）', async () => {
+    const relay = new Relay({
+      knownHostIds: new Set(['host-a']),
+      clients: { clientFor: async () => { throw new Error('ssh failed: root@100.84.120.35: Permission denied (publickey)') }, invalidate: () => {}, closeAll: () => {} },
+    })
+    const state = await messagesVia(relay, MESSAGES_URL)
+    expect(state.body).toContain('machine-error')
+    expect(state.body).not.toContain('100.84')
+  })
+
+  it('尾随多余段一律 404（段数关不是冗余：多一段会被当真转发）', async () => {
+    const fake = fakeClient()
+    const state = await messagesVia(relayWith(fake), '/threadharbor/relay/hosts/host-a/sessions/s1/messages/extra')
+    expect(state.status).toBe(404)
+    expect(fake.calls).toHaveLength(0)
   })
 })

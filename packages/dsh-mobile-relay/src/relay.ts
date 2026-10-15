@@ -76,11 +76,18 @@ export interface RelayDeps {
 /** 转发结果 → 手机看到的应答体。 */
 type RelayBody = { ok: true; value: unknown } | { error: string }
 
+/** 挂上一台机器的事件订阅；detach 是唯一的解除方式（重挂时用）。 */
+interface AttachedClient {
+  readonly hostId: string
+  readonly client: MachineClient
+  readonly detach: () => void
+}
+
 export class Relay {
   private readonly deps: RelayDeps
   private readonly phones = new Set<PhoneSocket>()
   /** 已挂事件订阅的上游客户端：停机时按它退订，避免闭包把已关的连接留住。 */
-  private attached: { client: MachineClient; detach: () => void }[] = []
+  private attached: AttachedClient[] = []
 
   constructor(deps: RelayDeps) {
     this.deps = deps
@@ -94,15 +101,76 @@ export class Relay {
     await Promise.all([...this.deps.knownHostIds].map(hostId => this.attachOne(hostId)))
   }
 
-  /** 单机挂订阅；开不出隧道就跳过——该机这一轮没有事件，等下一轮清单再试。 */
+  /**
+   * 单机挂订阅**并建连**。两件事缺一不可：只挂不连的话 `'ready'` 帧不来，
+   * 事件一条都没有，应答也因为拿不到 clientId 而恒失败——而这在只挂订阅的
+   * 用例里完全看不出来（假客户端不建连也能 emit 事件）。
+   *
+   * 开不出隧道就跳过：这一轮没有事件。**下一轮会再试**——对账在 list()
+   * 之后由 {@link reconcile} 做，所以启动时离线的机器上线后能自己补上。
+   */
   private async attachOne(hostId: string): Promise<void> {
+    let client: MachineClient
     try {
-      const client = await this.deps.clients.clientFor(hostId)
-      const detach = client.onEvent('*', (value) => this.broadcast(hostId, value))
-      this.attached.push({ client, detach })
+      client = await this.deps.clients.clientFor(hostId)
     } catch {
-      /* 这台机现在用不了：不开连接，也不影响其余机器的汇流 */
+      // 这台机现在用不了（隧道没开出来、离线）。顺手把旧订阅摘掉：池子里
+      // 已经没有那个客户端了，挂着它只是让这台机看起来还在汇流里。
+      this.dropAttachment(hostId)
+      return
     }
+    const existing = this.attachedBy(hostId)
+    // 按**客户端对象**判重，不是按 hostId：401 之后池子里换的是一个全新对象，
+    // 按 hostId 判重会让「已经挂着」成立，于是订阅仍留在被 close 的旧客户端上，
+    // 这台机器的事件从此永久静音。
+    if (existing !== undefined) {
+      if (existing.client === client) {
+        client.connect() // 幂等：补一次建连
+        return
+      }
+      this.dropAttachment(hostId)
+    }
+    const detach = client.onEvent('*', (value) => this.broadcast(hostId, value))
+    client.connect()
+    this.attached.push({ hostId, client, detach })
+  }
+
+  /** 摘掉该机当前的订阅项（没有则无动作）。 */
+  private dropAttachment(hostId: string): void {
+    const index = this.attached.findIndex(entry => entry.hostId === hostId)
+    if (index < 0) return
+    this.attached[index]?.detach()
+    this.attached.splice(index, 1)
+  }
+
+  /** 该机当前挂着的订阅项；没有则 undefined。 */
+  private attachedBy(hostId: string): AttachedClient | undefined {
+    return this.attached.find(entry => entry.hostId === hostId)
+  }
+
+  /**
+   * 订阅与池子对账（清单每轮之后调）：把「池里有、这边没挂」的机器补上，
+   * 把「这边挂着、池里已经没有了」的摘掉。
+   *
+   * 第二条是必须的：401 触发的 invalidate 会关掉客户端并从池里删掉，
+   * 下一轮重新拿到的是**新客户端对象**，旧订阅挂在已被 close 的对象上——
+   * 不摘不补的话，那台机器的事件从此永久静音。
+   */
+  reconcile(hostIds: Iterable<string> = this.deps.knownHostIds): Promise<void> {
+    const wanted = new Set(hostIds)
+    for (const hostId of [...this.attached.map(entry => entry.hostId)]) {
+      if (!wanted.has(hostId)) this.dropAttachment(hostId)
+    }
+    return this.attachClients()
+  }
+
+  /**
+   * 作废某机的客户端（401 之后、或运维要求重连）。调用方随后调 {@link reconcile}
+   * 才会把新客户端重挂到汇流上——分开是有意的：作废是同步的，重挂要开隧道，
+   * 不能塞在同一次调用里拖住应答。
+   */
+  invalidateClient(hostId: string): void {
+    this.deps.clients.invalidate(hostId)
   }
 
   /** 手机接上事件流。 */
@@ -205,8 +273,19 @@ export class Relay {
     if (!this.deps.knownHostIds.has(hostId)) return notFound(res)
     if (!SID_PATTERN.test(eventId)) return notFound(res)
 
-    const result = await (await this.deps.clients.clientFor(hostId)).answer(eventId, outcome)
-    respondJson(res, 200, JSON.stringify(result.ok ? { ok: true } : { error: 'answer-failed', message: result.message ?? '' }))
+    let result: Awaited<ReturnType<MachineClient['answer']>>
+    try {
+      result = await (await this.deps.clients.clientFor(hostId)).answer(eventId, outcome)
+    } catch (error) {
+      // 与 forward 同一纪律：客户端都取不到（隧道/SSH 层失败），走 machine-error，
+      // 不把 SSH 的 stderr 原文当成应答内容推给手机。
+      this.deps.clients.invalidate(hostId)
+      respondJson(res, 200, JSON.stringify({ error: 'machine-error' }))
+      return
+    }
+    // 应答失败也只给固定文案。MachineClient.answer 的 message 含上游
+    // error.message 原文（那台机器内部说了什么），它属于日志，不属于应答体。
+    respondJson(res, 200, JSON.stringify(result.ok ? { ok: true } : { error: 'answer-failed' }))
   }
 
   /** 一次转发的共同外壳：取客户端、发 RPC、把结果映射成手机看得懂的形状。 */
@@ -223,8 +302,11 @@ export class Relay {
       // 开不出来就算这一机现在用不了，不该把整个转发请求拖成 500。
       const client = await this.deps.clients.clientFor(hostId)
       result = await client.call(endpoint, args)
-    } catch (error) {
-      respondJson(res, 200, JSON.stringify({ error: 'machine-error', message: messageOf(error) }))
+    } catch {
+      // 取客户端失败 = 隧道/SSH 层失败，messageOf(error) 里是 ssh 的 stderr
+      // 原文（含 user@host 这类内部信息）。与下面的 rpc-error 分支**同形**：
+      // 都只回 {error:'machine-error'}，细节进日志。
+      respondJson(res, 200, JSON.stringify({ error: 'machine-error' }))
       return
     }
     if (result.ok) {
