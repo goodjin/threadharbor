@@ -397,7 +397,7 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                           className={styles.newSession}
                           title={t('panel.tree.newSession')}
                           data-action="tree-new-session"
-                          onClick={event => { event.stopPropagation(); startSessionInProject(ctx, project.projectId) }}
+                          onClick={event => { event.stopPropagation(); void run(() => startSessionInProject(ctx, project.projectId)) }}
                         >
                           <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
                             <path d="M13.5 7.2 V12 a1.5 1.5 0 0 1 -1.5 1.5 H5 L2.5 15.5 V3 A1.5 1.5 0 0 1 4 1.5 h4.3" />
@@ -421,7 +421,7 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                         锚到块上会落到整组会话的下方，离按钮隔十几行。 */}
                     {projectMenu
                       ? <div className={styles.menu} data-row-menu>
-                          <button type="button" data-action="menu-new-session" className={styles.menuItem} onClick={() => { setMenu(null); startSessionInProject(ctx, project.projectId) }}>{t('panel.tree.newSession')}</button>
+                          {/* 新会话不进菜单（2026-10-16 用户决定）：行尾加号图标就是唯一入口。 */}
                           <button type="button" data-action="menu-rename-workspace" className={styles.menuItem} onClick={() => { setMenu(null); setRenaming({ kind: 'project', key: project.projectId, draft: project.label }) }}>{t('panel.tree.menuRenameWorkspace')}</button>
                           {confirmingDelete === project.projectId
                             ? <button type="button" data-action="menu-confirm-delete" className={styles.menuItemDanger} onClick={() => { setConfirmingDelete(null); void run(() => deleteWorkspace(ctx, project.projectId)) }}>{t('panel.tree.menuConfirmDelete')}</button>

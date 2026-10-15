@@ -119,12 +119,47 @@ describe('HostSessionTree', () => {
     } finally { await unmount(root) }
   })
 
-  it('本机项目行内「新会话」→ startSession(项目)', async () => {
-    const { container, root, ctx } = await mountTree()
+  it('本机项目行加号 → 直连建会话并揭示；失败原文上树', async () => {
+    const created: Array<{ workspaceId: string; sessionId?: string }> = []
+    const opened: string[] = []
+    const ctx = {
+      get: (name: string) => {
+        if (name === 'sessions') {
+          return {
+            create: async (opts: { workspaceId: string; sessionId?: string }) => { created.push(opts); return { ok: true, value: { sessionId: opts.sessionId ?? 'fresh-1' } } },
+            list: { getSnapshot: () => ({ ids: [], byId: {} }) },
+          }
+        }
+        if (name === 'workspaces') return { list: { getSnapshot: () => ({ items: [], archivedSessionIds: [] }) } }
+        if (name === 'uiWorkspace') return { openSession: (id: string) => { opened.push(id) } }
+        return undefined
+      },
+    }
+    const { container, root } = await mountTree({ ctx })
     try {
-      click(container, '[data-project-group="w1"] [data-action="tree-new-session"]')
-      expect(ctx.started).toEqual(['w1'])
+      await act(async () => {
+        click(container, '[data-project-group="w1"] [data-action="tree-new-session"]')
+        await Promise.resolve()
+      })
+      expect(created).toEqual([{ workspaceId: 'w1' }])
+      expect(opened).toEqual(['fresh-1'])
     } finally { await unmount(root) }
+    const failing = {
+      get: (name: string) => {
+        if (name === 'sessions') return { create: async () => ({ ok: false, error: { message: '目录正忙' } }), list: { getSnapshot: () => ({ ids: [], byId: {} }) } }
+        if (name === 'workspaces') return { list: { getSnapshot: () => ({ items: [], archivedSessionIds: [] }) } }
+        if (name === 'uiWorkspace') return { openSession: () => {} }
+        return undefined
+      },
+    }
+    const second = await mountTree({ ctx: failing })
+    try {
+      await act(async () => {
+        click(second.container, '[data-project-group="w1"] [data-action="tree-new-session"]')
+        await Promise.resolve()
+      })
+      expect(second.container.querySelector('[data-tree-action-error]')?.textContent).toContain('目录正忙')
+    } finally { await unmount(second.root) }
   })
 
   it('本机打开派发失败：树上如实说，不静默', async () => {
@@ -163,6 +198,7 @@ describe('HostSessionTree', () => {
     const { container, root } = await mountTree({ ctx })
     try {
       click(container, '[data-project-group="w1"] [data-action="row-menu"]')
+      expect(container.querySelector('[data-action="menu-new-session"]')).toBeNull()
       click(container, '[data-action="menu-rename-workspace"]')
       const input = container.querySelector('[data-rename-input]')
       if (input === null) throw new Error('rename input missing')

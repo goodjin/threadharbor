@@ -20,13 +20,9 @@ const tryGet = (ctx: CtxLike, name: string): unknown => {
 
 /** Call through the receiver: these are prototype methods, and a detached call loses `this`. */
 type WithOpenSession = { readonly openSession: (sessionId: string) => void }
-type WithStartSession = { readonly startSession: (workspaceId: string) => void }
 
 const hasOpenSession = (value: unknown): value is WithOpenSession =>
   typeof (value as { openSession?: unknown } | null | undefined)?.['openSession'] === 'function'
-
-const hasStartSession = (value: unknown): value is WithStartSession =>
-  typeof (value as { startSession?: unknown } | null | undefined)?.['startSession'] === 'function'
 
 /** Open an existing session. `false` means: not dispatched, caller shows why. */
 export function openLocalSession(ctx: CtxLike, sessionId: string): boolean {
@@ -40,21 +36,80 @@ export function openLocalSession(ctx: CtxLike, sessionId: string): boolean {
   }
 }
 
-/** Start a new session inside a project. `false` means: not dispatched. */
-export function startSessionInProject(ctx: CtxLike, workspaceId: string): boolean {
-  const ui = tryGet(ctx, 'uiWorkspace')
-  if (!hasStartSession(ui)) return false
+const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error)
+
+/** The workspace's unarchived blank sessions, straight from the two snapshots. */
+function blankSessionIdsOf(ctx: CtxLike, workspaceId: string): string[] {
   try {
-    ui.startSession(workspaceId)
-    return true
+    const workspaces = ctx.get('workspaces') as {
+      list?: { getSnapshot(): { items?: { workspaceId: string; sessionIds: readonly string[] }[]; archivedSessionIds?: readonly string[] } }
+    } | undefined
+    const sessions = ctx.get('sessions') as {
+      list?: { getSnapshot(): { ids?: readonly string[]; byId?: Record<string, { blank?: boolean }> } }
+    } | undefined
+    const snapshot = workspaces?.list?.getSnapshot()
+    const workspace = snapshot?.items?.find(item => item.workspaceId === workspaceId)
+    if (workspace === undefined) return []
+    const archived = new Set(snapshot?.archivedSessionIds ?? [])
+    const summaries = sessions?.list?.getSnapshot()
+    return workspace.sessionIds.filter(id => summaries?.byId?.[id]?.blank === true && !archived.has(id))
   } catch {
-    return false
+    return []
+  }
+}
+
+/** The controller's create resolves to the new session id directly; the
+ * Remote envelope ({ok, value}) appears on other builds — accept both. */
+type CreateOutcome = string | { readonly ok: boolean; readonly value?: { readonly sessionId?: string }; readonly error?: { readonly message?: string } }
+type SessionsCreateHost = {
+  readonly create?: (options: { workspaceId: string; sessionId?: string }) => Promise<CreateOutcome>
+}
+
+const sessionIdOf = (outcome: CreateOutcome): { sessionId?: string | undefined; rejected?: string } => {
+  if (typeof outcome === 'string') return { sessionId: outcome }
+  if (outcome.ok === true) return { sessionId: outcome.value?.sessionId }
+  return { rejected: outcome.error?.message ?? '会话创建被拒绝' }
+}
+
+/**
+ * Start a new session inside a project, the native flow rebuilt from parts
+ * this tree has already proven live (2026-10-16)： the sessions controller's
+ * create (same channel rename uses) plus uiWorkspace.openSession (same call
+ * row clicks use). Native's own uiWorkspace.startSession dispatches but then
+ * dies silently inside its navigation hop — no RPC, no notice, no console —
+ * so the tree drives the two verified ends itself.
+ *
+ * Blank reuse mirrors the native rule: an existing blank session of this
+ * workspace is re-created-in-place instead of piling up new blanks.
+ */
+export async function startSessionInProject(ctx: CtxLike, workspaceId: string): Promise<string | undefined> {
+  try {
+    const sessions = ctx.get('sessions') as SessionsCreateHost | undefined
+    if (typeof sessions?.create !== 'function') return 'sessions 服务未就绪'
+    const ui = tryGet(ctx, 'uiWorkspace')
+    if (!hasOpenSession(ui)) return 'uiWorkspace 服务未就绪'
+    // Blank reuse, native rule: an unarchived blank session this workspace
+    // already claims is re-created-in-place instead of piling up new blanks.
+    const blankIds = blankSessionIdsOf(ctx, workspaceId)
+    for (const blankId of blankIds) {
+      const reused = sessionIdOf(await sessions.create({ workspaceId, sessionId: blankId }))
+      if (reused.sessionId !== undefined) {
+        ui.openSession(reused.sessionId)
+        return undefined
+      }
+      // A held writer means the blank got claimed; fall through to a fresh one.
+    }
+    const created = sessionIdOf(await sessions.create({ workspaceId }))
+    if (created.rejected !== undefined) return created.rejected
+    if (created.sessionId === undefined) return '会话创建未返回编号'
+    ui.openSession(created.sessionId)
+    return undefined
+  } catch (error) {
+    return messageOf(error)
   }
 }
 
 /** Workspace-row actions: called through the receiver so `this` survives. */
-
-const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error)
 
 export async function renameWorkspace(ctx: CtxLike, workspaceId: string, title: string): Promise<string | undefined> {
   try {
