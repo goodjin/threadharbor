@@ -43,6 +43,14 @@ export function createHubBackend(opts = {}) {
    * 认不出的代号照原样显示、只是加上「不认识的错误码」几个字：把它藏起来
    * 等于把一个真问题变成「什么都没发生」。
    */
+  /** 取不到中转（网络/反代/它自己）时的说法：说清「不是操作者的问题」与下一步。 */
+  const transportText = error => {
+    const detail = error instanceof Error && typeof error.message === 'string' ? error.message : ''
+    return detail.length > 0
+      ? `连不上中转站，稍后重试（${detail}）`
+      : '连不上中转站，稍后重试'
+  }
+
   const reasonText = slug => {
     const known = {
       'machine-error': '那台机器没接住这次请求，看它上面 DSH 的状态',
@@ -62,8 +70,24 @@ export function createHubBackend(opts = {}) {
   const sessionsPath = hostId => `${root}/hosts/${hostOf(hostId)}/sessions`
 
   /** 一次转发的共同外壳：形状对齐直连后端（ok/value 或 error）。 */
+  /**
+   * 一次中转请求。**绝不抛**——这是这一层唯一的硬要求。
+   *
+   * 之前这里 let fetch 的 rejection 与 JSON.parse 的失败直接往上冒，而调用它的
+   * 四个动作（打开会话、加载更早、发消息、停止）都没接 try/catch。后果不是报错，
+   * 是卡住：中转在用的时候断了，打开会话就一直停在「正在加载会话…」，发消息则
+   * 什么也不做——操作者只会以为网络慢。而「连不上」这件事本身是随时会发生的
+   * （网络抖动、反代重启），不是异常路径。
+   *
+   * 清单与机器那两条路本来就有 catch，那才是本来的待遇；这里补齐其余的。
+   */
   async function relay(path, init) {
-    const response = await fetchLike(path, init)
+    let response
+    try {
+      response = await fetchLike(path, init)
+    } catch (error) {
+      return { ok: false, kind: 'error', message: transportText(error) }
+    }
     if (response.status === 401 || response.status === 403) {
       // 手机**自己**与中转站的连接过期了：只有重新配对能救。kind 用 'unpaired'，
       // 与直连同一支（views.js 的 guidanceReasonForKind 只认这三个词），否则
@@ -73,7 +97,14 @@ export function createHubBackend(opts = {}) {
     if (response.status !== 200) {
       return { error: `中转站请求失败：HTTP ${response.status}` }
     }
-    const body = JSON.parse(await response.text())
+    let body
+    try {
+      body = JSON.parse(await response.text())
+    } catch {
+      // 200 但不是 JSON：反代出错页、中转半路重启都会这样。这一条不兜住的话，
+      // 上面的四个调用点同样会卡在「等应答」。
+      return { ok: false, kind: 'error', message: '中转站回的不是预期的内容，稍后重试' }
+    }
     if (body && body.error === 'credential-stale') {
       // 中转说**那台机器**的凭据脏了——重配手机没有用，中转自己会换掉再重试。
       // 所以这句话不能说「需要重新配对」：照着做的人会白白重来一遍。

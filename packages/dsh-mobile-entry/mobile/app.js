@@ -195,8 +195,14 @@ export async function bootApp(root, deps = {}) {
     sessionsError: undefined,
     mux: 'connecting',
     muxDetail: '',
-    /** 最近一次「应答没送出去」的一句话；在横幅那一带显示，任何屏都看得到。 */
-    answerError: undefined,
+    /**
+     * 最近一次「操作没成」的一句话：应答、发消息、停止。放在横幅那一带，任何屏
+     * 都看得到，且**不会被下一次成功刷新抹掉**。
+     *
+     * 为什么不用会话那一格：那里放的是「这次没取到内容」，一次成功刷新就会把它
+     * 顶掉——而停止失败恰恰会被紧接着的刷新抹掉，操作者看到的就是「按了没反应」。
+     */
+    noticeError: undefined,
   }
 
   function shell() {
@@ -253,8 +259,8 @@ export async function bootApp(root, deps = {}) {
       // 应答那一下没送出去要说一句。之前它塞在「事件通道」那一格，而那一格只在
       // 通道断开时才显示那句话——通道好好的（常见情形）就一个字都不露，横幅
       // 挂在那里不消失，人只会以为还在转圈。
-      const notice = typeof state.answerError === 'string' && state.answerError.length > 0
-        ? `<p class="notice-error" role="alert">${escapeHtml(state.answerError)}</p>`
+      const notice = typeof state.noticeError === 'string' && state.noticeError.length > 0
+        ? `<p class="notice-error" role="alert">${escapeHtml(state.noticeError)}</p>`
         : ''
       banners.innerHTML = notice + renderApprovalBanners(
         [...state.approvals.values()].map(item => ({ ...item, pending: state.pendingAnswers.has(item.eventId) })),
@@ -762,9 +768,12 @@ export async function bootApp(root, deps = {}) {
       const result = await state.backend.prompt(state.machineId, state.sessionId, text)
       if (result.ok === true) {
         state.draft = ''
+        state.noticeError = undefined
         void refreshConversation()
       } else {
-        state.convError = result.message
+        // 放常驻那一句而不是会话那一格：草稿还留着，操作者随时可能自己再点一次，
+        // 得让他知道刚才那条没出去。放会话那格会被下一次成功刷新顶掉。
+        state.noticeError = result.message
       }
       render()
       return
@@ -797,7 +806,13 @@ export async function bootApp(root, deps = {}) {
     if (state.sessionId === null) return
     if (isHub && state.machineId !== null) {
       const result = await state.backend.cancel(state.machineId, state.sessionId)
-      if (result.ok !== true) state.convError = result.message
+      if (result.ok !== true) {
+        // 这里必须用常驻那一句：紧接着的 refreshConversation 一成功，会话那格就被
+        // 清掉，停止失败的话一个字都不剩——按了跟没按一样。
+        state.noticeError = result.message
+      } else {
+        state.noticeError = undefined
+      }
       await refreshSessions()
       await refreshConversation()
       render()
@@ -912,7 +927,7 @@ export async function bootApp(root, deps = {}) {
       if (outcome.ok === true) {
         state.approvals.delete(eventId)
         state.approvalHosts.delete(eventId)
-        state.answerError = undefined
+        state.noticeError = undefined
         render()
         return
       }
@@ -925,7 +940,7 @@ export async function bootApp(root, deps = {}) {
         render()
         return
       }
-      state.answerError = outcome.message
+      state.noticeError = outcome.message
       render()
       return
     }

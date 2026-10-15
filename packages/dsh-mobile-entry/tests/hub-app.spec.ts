@@ -850,3 +850,122 @@ describe('应答那条路上的错误代号也别原样显示', () => {
   })
 })
 
+describe('中转在用的时候断了（网络抖动、反代重启）', () => {
+  /**
+   * 这一整组是同一个病根的表现：**中转后端以前会把「取不到」直接往上抛**，而打开
+   * 会话、加载更早、发消息、停止这四个动作都没接 try/catch。后果不是报错，是
+   * 「没反应」——会话一直转圈、发消息按了像没按。反代重启一下就复现，而那是运维
+   * 的日常动作，不是异常路径。
+   *
+   * 现在中转后端保证不抛（取不到就返回一个说法的对象），这组用例盯的是**界面得
+   * 说人话**，不是盯后端抛不抛——后者由第一条盯。
+   */
+  function relayGone(mode: 'reject-fetch' | 'not-json') {
+    return createHubBackend({
+      fetchLike: (async () => {
+        if (mode === 'reject-fetch') throw new TypeError('Failed to fetch')
+        return { status: 200, text: async () => '<html>502 Bad Gateway</html>' }
+      }) as never,
+      WebSocketCtor: (class { close() {} }) as never,
+    })
+  }
+
+  interface HubOptions {
+    pageMessages?: () => Promise<unknown>
+    prompt?: () => Promise<unknown>
+    cancel?: () => Promise<unknown>
+    running?: boolean
+  }
+
+  /** 开机 → 进入那台机器。中转模式比直连多这一步，别绕过。 */
+  async function bootIntoMachine(root: HTMLElement, options: HubOptions): Promise<void> {
+    const broken = relayGone('reject-fetch')
+    await bootApp(root, {
+      backend: {
+        mode: 'hub',
+        async listHosts() { return { hosts: [{ hostId: HOST_A, name: 'MacBook', running: true, reachable: true, online: true }] } },
+        async listSessions() {
+          return { items: [{ sessionId: 's1', title: '在做的事', running: options.running === true }] }
+        },
+        pageMessages: options.pageMessages ?? (() => broken.pageMessages(HOST_A, 's1', 1, 1)),
+        prompt: options.prompt ?? (() => broken.prompt(HOST_A, 's1', 'x')),
+        cancel: options.cancel ?? (() => broken.cancel(HOST_A, 's1')),
+        async answer() { return { ok: true } },
+        connectEvents() { return { close() {} } },
+      } as never,
+    })
+    await settle(8)
+    const enter = root.querySelector(`[data-action="enter-machine"][data-machine-id="${HOST_A}"]`) as HTMLElement
+    expect(enter).not.toBeNull()
+    enter.click()
+    await settle(10)
+  }
+
+  function openTheSession(root: HTMLElement): void {
+    const open = root.querySelector('[data-action="open-session"][data-session-id="s1"]') as HTMLElement
+    expect(open).not.toBeNull()
+    open.click()
+  }
+
+  it('后端取不到时不抛（抛了上层那几个动作就都没接）', async () => {
+    const backend = relayGone('reject-fetch')
+    await expect(backend.listSessions(HOST_A)).resolves.toBeTruthy()
+    await expect(backend.pageMessages(HOST_A, 's1', 5, 1)).resolves.toBeTruthy()
+    await expect(backend.prompt(HOST_A, 's1', '在吗')).resolves.toBeTruthy()
+    await expect(backend.cancel(HOST_A, 's1')).resolves.toBeTruthy()
+    await expect(backend.answer(HOST_A, 'e1', { kind: 'result', value: 'rejected' })).resolves.toBeTruthy()
+  })
+
+  it('fetch 挂掉与 200-非-JSON 都要给出能看懂的说法', async () => {
+    const gone = await relayGone('reject-fetch').listSessions(HOST_A)
+    expect(gone.error).toContain('连不上中转站')
+    const notJson = await relayGone('not-json').listSessions(HOST_A)
+    expect(notJson.error).toContain('中转站回的不是预期的内容')
+  })
+
+  it('打开会话时中转断了 → 不再永远停在「正在加载会话…」', async () => {
+    const root = host()
+    await bootIntoMachine(root, {})
+    openTheSession(root)
+    await settle(12)
+    // 关键：加载态必须结束，而且要留下一句能看懂的话。
+    expect(root.innerHTML).not.toContain('正在加载会话')
+    expect(root.innerHTML).toContain('连不上中转站')
+  })
+
+  it('发消息时中转断了 → 草稿留着，并且说清没发出去', async () => {
+    const root = host()
+    await bootIntoMachine(root, { pageMessages: async () => ({ conv: { records: [] } }) })
+    openTheSession(root)
+    await settle(12)
+    const form = root.querySelector('#prompt-form') as HTMLFormElement
+    expect(form).not.toBeNull()
+    const draft = root.querySelector('#prompt-input') as HTMLInputElement
+    draft.value = '这条要发出去'
+    draft.dispatchEvent(new Event('input', { bubbles: true }))
+    await settle(4)
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    await settle(12)
+    // 没发出去就不能清草稿：清了就再也看不出刚才那条去哪了。
+    expect((root.querySelector('#prompt-input') as HTMLInputElement).value).toBe('这条要发出去')
+    expect(root.innerHTML).toContain('连不上中转站')
+  })
+
+  it('停止时中转断了 → 说一句，不装成停了', async () => {
+    const root = host()
+    // 会话必须在跑，「停止」按钮才画得出来（views.js 只在 running 时给）。
+    // 上一版没设 running，用例遇上按钮不存在就静静跳过——那等于什么都没验。
+    await bootIntoMachine(root, {
+      pageMessages: async () => ({ conv: { records: [] } }),
+      running: true,
+    })
+    openTheSession(root)
+    await settle(12)
+    const stop = root.querySelector('[data-action="stop"]') as HTMLElement | null
+    expect(stop).not.toBeNull()
+    stop!.click()
+    await settle(12)
+    expect(root.innerHTML).toContain('连不上中转站')
+  })
+})
+
