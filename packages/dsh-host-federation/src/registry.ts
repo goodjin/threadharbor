@@ -37,7 +37,7 @@ export type HostRegistration = {
    * and pasted private keys never live here — they are session-only.
    */
   readonly ssh?: HostSshInfo
-  /** 最近一次从这台主机读到的远端读数（remote-report.ts 的形状）；没读到过就没有。 */
+  /** The latest remote read returned by that machine (the remote-report.ts shape); absent until one is read. */
   readonly remote?: RemoteReport
   /** When the registration was made, in the page's clock. */
   readonly createdAt: number
@@ -127,9 +127,11 @@ export function hostRegistry(storage: RegistryStorage, now: () => number = Date.
   }): RegistrationResult
   remove(hostId: string): boolean
   /**
-   * 记下最近一次从这台主机读到的远端读数。读数是读回来的事实，不是操作者
-   * 输入，所以不走 add 的校验路径：只按 parseRemoteReport 复核一次，站不住
-   * 的值返回 false 什么都不写；其余字段原样保留。
+   * Record the latest remote read this machine returned. A read result is a
+   * fact read back, not operator input, so the add-time validation path does
+   * not run: the value is re-checked once through parseRemoteReport, and one
+   * that cannot stand returns false with nothing written. Every other field
+   * of the entry is kept as it was.
    */
   recordRemote(hostId: string, report: RemoteReport): boolean
 } {
