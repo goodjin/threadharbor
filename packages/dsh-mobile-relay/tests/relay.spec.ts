@@ -537,3 +537,38 @@ describe('历史分页参数要透传（写死游标 = 手机翻不动历史）'
   })
 })
 
+describe('应答失败必须落点（否则三种失败在手机上长得一样、又什么都不留）', () => {
+  async function answerWith(result: { ok: boolean; message?: string }, log: string[]): Promise<unknown> {
+    const relay = new Relay({
+      knownHostIds: new Set(['host-a']),
+      clients: { clientFor: async () => ({ answer: async () => result }) as never, invalidate: () => {}, closeAll: () => {} },
+      log: line => log.push(line),
+    })
+    const { state, res } = recorder()
+    await relay.handleAnswer(
+      req(RELAY_ANSWER_PATH, 'POST', { hostId: 'host-a', eventId: 'ev-1', outcome: { kind: 'next' } }),
+      res as never,
+    )
+    return JSON.parse(state.body)
+  }
+
+  it('上游拒绝：手机拿固定文案，日志里有那一台的原文', async () => {
+    const log: string[] = []
+    expect(await answerWith({ ok: false, message: '会话已经结束了' }, log)).toEqual({ error: 'answer-failed' })
+    expect(log.join()).toContain('host-a')
+    expect(log.join()).toContain('会话已经结束了')
+  })
+
+  it('上游没给原因也要留一行（没原因的失败最难查）', async () => {
+    const log: string[] = []
+    expect(await answerWith({ ok: false }, log)).toEqual({ error: 'answer-failed' })
+    expect(log.join()).toContain('上游没有给原因')
+  })
+
+  it('成功不写日志（日志只用来找问题，不用来记流水）', async () => {
+    const log: string[] = []
+    expect(await answerWith({ ok: true }, log)).toEqual({ ok: true })
+    expect(log).toEqual([])
+  })
+})
+

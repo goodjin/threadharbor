@@ -350,6 +350,14 @@ export class Relay {
     }
     // 应答失败也只给固定文案。MachineClient.answer 的 message 含上游
     // error.message 原文（那台机器内部说了什么），它属于日志，不属于应答体。
+    //
+    // 但**必须落点**：answer() 把每一种失败都折成 {ok:false, message} 而不是
+    // 抛（凭据没换到、上游拒绝、机器根本连不上——三种在手机上长得一模一样）。
+    // 上一版只给取客户端那一步记了日志，于是「隧道通着但那台机器没应答」这一档
+    // 什么都不留：真机上连发三次失败的应答，日志行数一动不动。
+    if (!result.ok) {
+      this.log(`应答 ${hostId} 失败（事件 ${eventId}）：${result.message ?? '上游没有给原因'}`)
+    }
     respondJson(res, 200, JSON.stringify(result.ok ? { ok: true } : { error: 'answer-failed' }))
   }
 
