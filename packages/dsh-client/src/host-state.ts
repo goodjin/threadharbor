@@ -8,6 +8,11 @@
  * 文案仍然归 locales.ts。
  */
 
+// 这两个词表的唯一声明在 '@threadharbor/dsh-host-federation' 的
+// remote-report.ts；这里转出同名别名，本文件的 HostFacts 就地按名使用。
+import type { RemoteDeployment, RemoteLiveness } from '@threadharbor/dsh-host-federation'
+export type { RemoteDeployment, RemoteLiveness }
+
 /** 本机自己的事实永远优先：self 状态下其余事实一律不看。 */
 export type HostReach = 'unchecked' | 'checking' | 'reachable' | 'unreachable'
 
@@ -23,11 +28,6 @@ export type HostFacts = {
   readonly reach: HostReach
   readonly reported: boolean
 }
-
-// 这两个词表来自 '@threadharbor/dsh-host-federation'；本任务先就地声明，
-// Task 2 再改为从彼处转出，词面保持一致。
-type RemoteDeployment = 'undeployed' | 'deployed' | 'unknown'
-type RemoteLiveness = 'stopped' | 'running' | 'unknown'
 
 /** 主机上显示的那一个状态词，九选一、不重叠。 */
 export type HostStatus = 'self' | 'reading' | 'undeployed' | 'stopped'

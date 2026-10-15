@@ -10,6 +10,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { HOST_REGISTRY_KEY, hostRegistry, normalizeAddress } from '../src/registry.ts'
+import type { RemoteReport } from '../src/remote-report.ts'
 
 function fakeStorage(initial: Record<string, string> = {}): {
   storage: { getItem(key: string): string | null; setItem(key: string, value: string): void }
@@ -263,5 +264,76 @@ describe('hostRegistry', () => {
       expect(entry?.hostId).toBe('thin')
       expect(entry?.ssh).toBeUndefined()
     })
+  })
+})
+
+describe('hostRegistry 的 recordRemote', () => {
+  const report: RemoteReport = {
+    deployment: 'deployed',
+    liveness: 'running',
+    port: 3081,
+    readAt: 500,
+  }
+
+  it('写入后 list() 能读回同一个 remote（换个实例经存储也读得到）', () => {
+    const { storage } = fakeStorage()
+    const registry = hostRegistry(storage, () => 100)
+    registry.add({ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' })
+    expect(registry.recordRemote('bench', report)).toBe(true)
+    expect(registry.list()[0]?.remote).toEqual(report)
+    expect(hostRegistry(storage).list()[0]?.remote).toEqual(report)
+  })
+
+  it('对不存在的 hostId 返回 false 且什么都不写', () => {
+    const { storage, dump } = fakeStorage()
+    const registry = hostRegistry(storage)
+    expect(registry.recordRemote('ghost', report)).toBe(false)
+    expect(dump()).toEqual({})
+  })
+
+  it('写入后 address、launchUrl、ssh、createdAt 一个都不变', () => {
+    const { storage } = fakeStorage()
+    const registry = hostRegistry(storage, () => 100)
+    registry.add({
+      hostId: 'edge',
+      hostTitle: '边缘',
+      address: 'http://100.64.0.2:3081',
+      launchUrl: 'http://100.64.0.2:3081/?token=abc',
+      ssh: {
+        target: '100.64.0.2',
+        port: 22,
+        user: 'deploy',
+        authMode: 'identityFile',
+        identityFile: '/Users/me/.ssh/id_ed25519',
+        remoteWebPort: 3081,
+      },
+    })
+    const before = registry.list()[0]
+    const newer: RemoteReport = { ...report, readAt: 900 }
+    expect(registry.recordRemote('edge', newer)).toBe(true)
+    const after = registry.list()[0]
+    expect(after?.address).toBe(before?.address)
+    expect(after?.launchUrl).toBe(before?.launchUrl)
+    expect(after?.ssh).toEqual(before?.ssh)
+    expect(after?.createdAt).toBe(before?.createdAt)
+    expect(after?.remote).toEqual(newer)
+  })
+
+  it('解析不出读数的值不写入，原条目原样保留', () => {
+    const { storage } = fakeStorage()
+    const registry = hostRegistry(storage, () => 100)
+    registry.add({ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' })
+    const before = registry.list()
+    expect(registry.recordRemote('bench', { readAt: 'not a number' } as unknown as RemoteReport)).toBe(false)
+    expect(registry.list()).toEqual(before)
+  })
+
+  it('旧条目（JSON 里没有 remote 键）读出时 remote 为 undefined，不报错', () => {
+    const { storage } = fakeStorage({ [HOST_REGISTRY_KEY]: JSON.stringify([
+      { hostId: 'old', hostTitle: '旧', address: 'http://192.168.1.20:3081', createdAt: 5 },
+    ]) })
+    const entry = hostRegistry(storage).list()[0]
+    expect(entry?.hostId).toBe('old')
+    expect(entry?.remote).toBeUndefined()
   })
 })

@@ -15,6 +15,8 @@
  */
 
 import { isValidHostId } from './identity.ts'
+import { parseRemoteReport } from './remote-report.ts'
+import type { RemoteReport } from './remote-report.ts'
 
 /** One registered host, as the operator entered it. */
 export type HostRegistration = {
@@ -35,6 +37,8 @@ export type HostRegistration = {
    * and pasted private keys never live here — they are session-only.
    */
   readonly ssh?: HostSshInfo
+  /** 最近一次从这台主机读到的远端读数（remote-report.ts 的形状）；没读到过就没有。 */
+  readonly remote?: RemoteReport
   /** When the registration was made, in the page's clock. */
   readonly createdAt: number
 }
@@ -122,6 +126,12 @@ export function hostRegistry(storage: RegistryStorage, now: () => number = Date.
     readonly ssh?: SshInfoInput
   }): RegistrationResult
   remove(hostId: string): boolean
+  /**
+   * 记下最近一次从这台主机读到的远端读数。读数是读回来的事实，不是操作者
+   * 输入，所以不走 add 的校验路径：只按 parseRemoteReport 复核一次，站不住
+   * 的值返回 false 什么都不写；其余字段原样保留。
+   */
+  recordRemote(hostId: string, report: RemoteReport): boolean
 } {
   const read = (): HostRegistration[] => {
     const raw = storage.getItem(HOST_REGISTRY_KEY)
@@ -194,6 +204,15 @@ export function hostRegistry(storage: RegistryStorage, now: () => number = Date.
       write(next)
       return true
     },
+    recordRemote: (hostId, report) => {
+      const parsed = parseRemoteReport(report)
+      if (parsed === undefined) return false
+      const entries = read()
+      const index = entries.findIndex(entry => entry.hostId === hostId)
+      if (index === -1) return false
+      write(entries.map((entry, i) => i === index ? { ...entry, remote: parsed } : entry))
+      return true
+    },
   }
 }
 
@@ -208,12 +227,14 @@ function parseEntry(item: unknown): HostRegistration | undefined {
   const createdAt = record['createdAt']
   const launchUrl = record['launchUrl']
   const ssh = parseSshInfo(record['ssh'])
+  const remote = parseRemoteReport(record['remote'])
   return {
     hostId,
     hostTitle: typeof hostTitle === 'string' && hostTitle !== '' ? hostTitle : hostId,
     address,
     ...(typeof launchUrl === 'string' && launchUrl !== '' ? { launchUrl } : {}),
     ...(ssh === undefined ? {} : { ssh }),
+    ...(remote === undefined ? {} : { remote }),
     createdAt: typeof createdAt === 'number' && Number.isFinite(createdAt) ? createdAt : 0,
   }
 }
