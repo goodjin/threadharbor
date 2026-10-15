@@ -30,6 +30,8 @@ export const ROUTE_OPERATION = '/api/threadharbor.host-ssh.operation'
 export const ROUTE_PEER = '/api/threadharbor.host-ssh.peer'
 export const ROUTE_REMOTE_SESSIONS = '/api/threadharbor.host-remote.sessions'
 export const ROUTE_CONNECT = '/api/threadharbor.host-ssh.connect'
+export const ROUTE_CHECK = '/api/threadharbor.host-ssh.check'
+export const ROUTE_SERVE = '/api/threadharbor.host-ssh.serve'
 
 export type Config = {
   knownHostsPath?: string
@@ -162,6 +164,23 @@ export function apply(ctx: unknown, config: Config = {}): void {
     return result
   })
 
+  register(ROUTE_CHECK, async body => {
+    const record = body as Record<string, unknown>
+    const ssh = manager.parseApprovedConfig(record['ssh'])
+    const report = await manager.checkPeer(ssh, portOf(record['remoteWebPort']))
+    log.info('ssh peer check', { target: ssh.target, ready: report.ready, steps: report.steps.map(step => `${step.id}:${step.state}`).join(',') })
+    return report
+  })
+
+  register(ROUTE_SERVE, async body => {
+    const record = body as Record<string, unknown>
+    const ssh = manager.parseApprovedConfig(record['ssh'])
+    const port = portOf(record['remoteWebPort'])
+    await manager.configureServe(ssh, port)
+    log.info('tailscale serve configured', { target: ssh.target, port })
+    return await manager.checkPeer(ssh, port)
+  })
+
   register(ROUTE_INSPECT, async body => {
     const ssh = manager.parseInspectionConfig((body as Record<string, unknown>)['ssh'])
     const keys = await manager.inspectAll(ssh)
@@ -207,6 +226,12 @@ export function apply(ctx: unknown, config: Config = {}): void {
   }
 
   process.stderr.write('[threadharbor] ssh-deploy routes registered\n')
+}
+
+function portOf(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 65_535) throw new Error('remoteWebPort 无效')
+  return value
 }
 
 function parseDeployRequest(record: Record<string, unknown>): SshDeployRequest {

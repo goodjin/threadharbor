@@ -15,6 +15,15 @@ import { readReleaseVersion, resolveReleaseDirectory } from './release.ts'
 import { DEFAULT_REMOTE_DSH_PLUGINS } from './deploy-plugins.ts'
 import { buildRemoteAgentsPatchYaml } from './remote-agents.ts'
 import { parsePeerStatus, type PeerStatus } from './peer-status.ts'
+import {
+  buildPeerCheckScript,
+  buildServeScript,
+  derivePeerCheckSteps,
+  launchToken,
+  parsePeerCheckOutput,
+  type PeerCheckReport,
+  type PeerHttpsProbe,
+} from './peer-check.ts'
 
 export type SshManagerOptions = {
   readonly knownHostsPath: string
@@ -100,6 +109,56 @@ export class DshSshManager {
     } finally {
       this.cleanupTempKeys()
     }
+  }
+
+  /**
+   * One SSH round trip reading every readiness fact of a peer meant to be
+   * reached through `tailscale serve`, then an HTTPS probe of its ts.net URL
+   * from this machine. Never throws for a missing piece — only for SSH trust
+   * or credential failures, which the UI shows on the `ssh` step.
+   */
+  async checkPeer(config: SshConnectionConfig, remoteWebPort?: number): Promise<PeerCheckReport> {
+    const port = remoteWebPort ?? this.options.defaultRemoteWebPort
+    const materialized = await this.trustAndMaterialize(config)
+    try {
+      const probe = await this.remoteExec(materialized, buildPeerCheckScript(port), this.handshakeBudgetMs())
+      if (probe.code === 255) {
+        throw new Error(`无法使用当前 SSH 凭据连接目标主机：${probe.stderr.trim() || 'ssh 退出码 255'}`)
+      }
+      let facts = parsePeerCheckOutput(probe.stdout, port)
+      // The peer record knows the real port when it differs from the default.
+      if (remoteWebPort === undefined && facts.peer.port !== undefined && facts.peer.port !== port) {
+        const again = await this.remoteExec(materialized, buildPeerCheckScript(facts.peer.port), this.handshakeBudgetMs())
+        if (again.code === 0) facts = parsePeerCheckOutput(again.stdout, facts.peer.port)
+      }
+      const https = facts.serveUrl === undefined ? undefined : await probeServeHttps(facts.serveUrl, launchToken(facts.peer))
+      return derivePeerCheckSteps(facts, https)
+    } finally {
+      this.cleanupTempKeys()
+    }
+  }
+
+  /** Point `tailscale serve` (HTTPS 443) on the peer at its DSH loopback port. */
+  async configureServe(config: SshConnectionConfig, remoteWebPort?: number): Promise<void> {
+    const port = remoteWebPort ?? this.options.defaultRemoteWebPort
+    const materialized = await this.trustAndMaterialize(config)
+    try {
+      const result = await this.remoteExec(materialized, buildServeScript(port), this.handshakeBudgetMs())
+      if (result.code !== 0) {
+        throw new Error(`配置 tailscale serve 失败：${result.stderr.trim() || `退出码 ${result.code}`}`)
+      }
+    } finally {
+      this.cleanupTempKeys()
+    }
+  }
+
+  private async trustAndMaterialize(config: SshConnectionConfig): Promise<SshConnectionConfig> {
+    if (config.hostKeyFingerprint === 'unapproved') throw new Error('hostKeyFingerprint is required')
+    const scans = await this.scan(config)
+    const scan = scans.find(candidate => candidate.hostKeyFingerprint === config.hostKeyFingerprint)
+    if (scan === undefined) throw new Error('SSH host key changed or does not match the approved fingerprint')
+    this.persistKnownHost(config, scan.knownHostLine)
+    return await this.materializeAuth(config)
   }
 
   async deploy(
@@ -473,6 +532,34 @@ export class DshSshManager {
     if (outcome.exited === undefined) return
     if (outcome.exited === 0 && await portListening(localPort, 8)) return
     throw new Error(`SSH 隧道建立失败（退出码 ${outcome.exited ?? 1}）：${error.trim()}`)
+  }
+}
+
+/**
+ * Probe the ts.net origin from this machine: plain GET for reachability, then
+ * the tokenized URL (no redirect following) to confirm the token is accepted.
+ */
+export async function probeServeHttps(
+  origin: string,
+  token: string | undefined,
+  fetcher: typeof fetch = fetch,
+  timeoutMs = 8_000,
+): Promise<PeerHttpsProbe> {
+  const get = async (url: string): Promise<Response> =>
+    await fetcher(url, { redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) })
+  let base: Response
+  try {
+    base = await get(`${origin}/`)
+  } catch (error) {
+    return { reachable: false, error: error instanceof Error ? error.message : String(error) }
+  }
+  if (base.status >= 500) return { reachable: false, status: base.status, error: `HTTP ${base.status}` }
+  if (token === undefined) return { reachable: true, status: base.status }
+  try {
+    const authed = await get(`${origin}/?token=${encodeURIComponent(token)}`)
+    return { reachable: true, status: authed.status, authOk: authed.status < 400 }
+  } catch (error) {
+    return { reachable: true, authOk: false, error: error instanceof Error ? error.message : String(error) }
   }
 }
 
