@@ -75,8 +75,13 @@ DSH 配置。
 
 | 事实 | 取值 |
 |---|---|
+| `readable` | 这台主机的远端状态读得到吗（有可用的已批准 SSH 凭据）。直连主机为 `false` |
 | `reach` | `unchecked` / `checking` / `reachable` / `unreachable` |
 | `reported` | 对方页面开着时有没有回连本机频道（取自频道在场快照，即今日 `HostListRow.online`） |
+
+`readable` 是必需的而非冗余：直连主机与「SSH 凭据不可用」的主机，`deployment` 与
+`liveness` 同为 `unknown`，只有 `readable` 能让推导函数把两者分开——前者按本机探测
+给状态词，后者如实说不知道。
 
 ### 4.2 推导表
 
@@ -92,7 +97,7 @@ DSH 配置。
 | 可达 | `liveness = running` 且 `reach = reachable` 且未回连 |
 | 未连接 | `liveness = running` 且 `reach = unreachable`（隧道未建或已断） |
 | 未验证 | `liveness = running` 且 `reach` 为 `unchecked` 或 `checking`（没探测过 / 正在探测） |
-| 未知 | SSH 托管的主机但读不到（没凭据 / 凭据错 / 连不上 / 超时） |
+| 未知 | `readable` 为真但读不到（`deployment = unknown`）：没凭据 / 凭据错 / 连不上 / 超时 |
 
 三条约束：
 
@@ -116,6 +121,8 @@ export type HostReach = 'unchecked' | 'checking' | 'reachable' | 'unreachable'
 
 export type HostFacts = {
   readonly self: boolean
+  /** 这台主机的远端状态读得到吗；false = 直连主机，退回本机探测。 */
+  readonly readable: boolean
   readonly deployment: HostDeployment
   readonly liveness: HostLiveness
   readonly reach: HostReach
@@ -128,7 +135,13 @@ export type HostStatus =
 
 /** The word the host list shows. */
 export function hostStatus(facts: HostFacts, reading: boolean): HostStatus
+
+/** The buttons the detail page offers for one status, primary first. */
+export function hostActions(status: HostStatus): readonly HostAction[]
 ```
+
+`HostDeployment` / `HostLiveness` 不另起一套：直接复用 §10 里登记簿存的那个
+`RemoteReport` 的同名字面量联合，避免两份同义类型。
 
 ## 5. 按钮表
 
