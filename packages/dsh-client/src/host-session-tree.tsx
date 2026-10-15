@@ -330,7 +330,11 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                       title={project.label}
                       onClick={() => { toggleProject(project.projectId) }}
                     >
-                      <span className={projectOpen ? styles.caretOpen : styles.caret}>▸</span>
+                      <span className={styles.caretSlot} data-caret={projectOpen ? 'open' : 'closed'}>
+                        <svg className={styles.caretIcon} viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+                          <path d="M5.5 3.5 L11.5 8 L5.5 12.5 Z" fill="currentColor" />
+                        </svg>
+                      </span>
                       <span className={styles.projectLabel}>
                         {renaming?.kind === 'project' && renaming.key === project.projectId
                           ? <input
@@ -355,7 +359,10 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                           data-action="tree-new-session"
                           onClick={event => { event.stopPropagation(); startSessionInProject(ctx, project.projectId) }}
                         >
-                          ＋
+                          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M13.5 7.2 V12 a1.5 1.5 0 0 1 -1.5 1.5 H5 L2.5 15.5 V3 A1.5 1.5 0 0 1 4 1.5 h4.3" />
+                            <path d="M11.5 1.5 v4 M9.5 3.5 h4" />
+                          </svg>
                         </button>
                       : null}
                     <button

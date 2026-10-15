@@ -94,6 +94,9 @@
 }
 
 .newSession {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   font: inherit;
   border: none;
   background: transparent;
@@ -172,14 +175,20 @@
   cursor: pointer;
 }
 
-.caret,
-.caretOpen {
+.caretSlot {
   flex: none;
-  color: rgba(127, 127, 127, 0.8);
-  font-size: 10px;
+  display: inline-flex;
+  align-items: center;
+  width: 16px;
+  height: 16px;
+  color: var(--dsw-alias-label-secondary, rgba(127, 127, 127, 0.9));
 }
 
-.caretOpen {
+.caretIcon {
+  transition: transform 120ms ease;
+}
+
+.caretSlot[data-caret='open'] .caretIcon {
   transform: rotate(90deg);
 }
 

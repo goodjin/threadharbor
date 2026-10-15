@@ -440,7 +440,11 @@
   height: 32px;
   padding: 0 16px;
   box-sizing: border-box;
-  background: var(--dsw-alias-bg-layer-2);
+  /* 2026-10-15 用户反馈：表头要有自己的框、与记录之间要有横线。带子底色
+     不能用 bg-layer-2（在设置卡片里解析成同色白，等于隐形），改用明确的
+     浅灰带 + 底部分隔线，两条都钉在卡片的描边色上。 */
+  background: rgba(127, 127, 127, 0.08);
+  border-bottom: 1px solid var(--dsw-alias-settings-card-stroke);
   color: var(--dsw-alias-label-caption);
   font-size: 11px;
   font-weight: 600;
