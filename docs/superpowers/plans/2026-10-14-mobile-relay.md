@@ -382,37 +382,37 @@ git commit -m "feat(relay): 主机清单——tailnet 发现 + 隧道内 hello �
 - 测试：`packages/dsh-mobile-relay/tests/hub-routes.spec.ts`
 
 **接口：**
-- 产出路径常量：`RELAY_HOSTS_PATH`（Task 7）、`RELAY_SESSIONS_PATH = '/threadharbor/relay/hosts/'`（prefix，下同）、`RELAY_EVENTS_PATH = '/threadharbor/relay/events'`（WS）
+- 产出路径常量：`RELAY_HOSTS_PATH`（Task 7）、`RELAY_SESSIONS_PATH = '/threadharbor/relay/hosts'`（prefix，**不带尾斜杠**；宿主的前缀匹配是 startsWith(前缀 + "/")，自带斜杠会让任何请求都不命中——真机上栽过）、`RELAY_EVENTS_PATH = '/threadharbor/relay/events'`（WS）
 - `export class Relay { constructor(deps: { hosts: HostRegistry; clients: ClientPool; credentials: MachineCredentials }); handleSessions(req, res, url: URL): Promise<void>; handlePrompt(req, res, url: URL): Promise<void>; handleCancel(req, res, url: URL): Promise<void>; handleMessages(req, res, url: URL): Promise<void>; handleAnswer(req, res): Promise<void>; connectEvents(socket, head): void; async start(): Promise<void>; async stop(): Promise<void> }`
 
 **路径解析：** `webServer.register` 只有 `exact` 与 `prefix` 两种匹配（无路径参数），所以 `/threadharbor/relay/hosts/` 用 prefix 注册，在 handler 内用 `new URL(req.url, 'http://relay.invalid').pathname` 拆段：`['hosts', hostId, 'sessions'[, sid[,'messages'|'prompt'|'cancel']]]`；段数或形状不符一律 404 JSON `{"error":"not-found"}`。**hostId 与 sid 在转发前必须按白名单校验**（hostId 必须在配置登记内、sid 必须匹配 `^[\w.:-]{1,128}$`），防止把任意路径拼进上游 URL。
 
 **行为：** 每个 `hostId` 对应一个 `MachineClient`（`ClientPool` 懒建、复用）。事件：手机连 `ws://<relay>/threadharbor/relay/events`（用 `webServer.registerUpgrade`），`Relay` 把各机 `MachineClient` 的事件加上 `hostId` 后广播给所有已连手机；手机断开只摘它自己，不影响上游。`POST /threadharbor/relay/answer` 体为 `{hostId, eventId, outcome}`，转给对应机器的 `answer`（评审重点 1）。所有 HTTP 出口先 `admit`。
 
-- [ ] **Step 1: 写失败用例（覆盖评审重点 1）**
+- [x] **Step 1: 写失败用例（覆盖评审重点 1）**
 
 `hub-routes.spec.ts`：① 两台假机器各发一个 `approval/request` → 手机端收到两条且都带 `hostId`；② 对 A 的 `answer` 只落到 A 的假客户端（断言 B 未被调用）；③ `hostId` 不在配置内 → 404；④ `sid` 含 `/../` → 404（不发起上游调用）；⑤ 未准入（admit 返回 `{rejection:401}`）→ 401 且短体 `'unauthorized'`；⑥ 上游 401 → 接口返回 `{error:'credential-stale'}` 并触发该机凭据重换一次。
 
-- [ ] **Step 2: 跑用例确认失败**
+- [x] **Step 2: 跑用例确认失败**
 
 Run: `npx vitest run packages/dsh-mobile-relay/tests/hub-routes.spec.ts`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `relay.ts` 持有 `Map<hostId, MachineClient>` 与 `Set<已连手机>`；`start()` 为每台机器建客户端并 `connect()`，`stop()` 全部关闭。WS 帧用与手机页一致的信封：`{type:'item', hostId, value}`（值原样透传 `MachineClient` 派发的 `value`），手机端据此更新对应机器的状态。
 
-- [ ] **Step 4: 跑用例确认通过**
+- [x] **Step 4: 跑用例确认通过**
 
 Run: `npx vitest run packages/dsh-mobile-relay/tests/hub-routes.spec.ts`
 Expected: PASS（6 个用例）。
 
-- [ ] **Step 5: 跑全量与类型检查**
+- [x] **Step 5: 跑全量与类型检查**
 
 Run: `npm run test && npm run typecheck`
 Expected: 0 失败。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add packages/dsh-mobile-relay/src/hub-routes.ts packages/dsh-mobile-relay/src/relay.ts packages/dsh-mobile-relay/src/index.ts packages/dsh-mobile-relay/tests/hub-routes.spec.ts
@@ -448,30 +448,30 @@ git commit -m "feat(relay): 对手机的转发接口与跨机事件汇流（应�
 
 `backend-machine` 忽略 `hostId`（直连本机），`backend-hub` 走 `/threadharbor/relay/*` 与 `/threadharbor/relay/events`。`index.html` 里放一行占位 `<script>window.__THREADHARBOR_MOBILE__ = __MOBILE_CONFIG__</script>`，`static-serve.ts` 在返回 index.html 时把它替换成 `{"mode":"machine"}` 或 `{"mode":"hub"}`（中转包传 `mode:'hub'`）。既有导出（`nextScrollTop`、`makeSocketFactory`、`bootApp`）签名不变。
 
-- [ ] **Step 1: 写失败用例**
+- [x] **Step 1: 写失败用例**
 
 `hub-app.spec.ts`（jsdom）：① 首屏是机器清单，点某台进入该机会话列表（断言请求 URL 带该 `hostId`）；② 事件带 `hostId` 只更新对应机器的状态；③ **评审重点 2**：从 A 切到 B 后，A 的慢 `pageMessages` 应答不得画到 B 上（用 deferred 应答复现）；④ 审批应答请求体带 `hostId`；⑤ 机器离线时该机行显示离线且进入后显示「最后读到的时间」；⑥ `mode:'machine'` 时首屏行为与今天一致（复用既有 `app.spec.ts` 的入口用例，不重复写）。
 
-- [ ] **Step 2: 跑用例确认失败**
+- [x] **Step 2: 跑用例确认失败**
 
 Run: `npx vitest run packages/dsh-mobile-entry/tests/hub-app.spec.ts`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `app.js` 里所有取数据的调用改为走 `state.backend`；新增 `state.machineId`（`null` = 在机器清单屏）；`convGeneration` 递增条件扩展为「打开会话 / 切换机器 / 返回清单 / 重 boot」；会话条目与审批横幅在 hub 模式下显示机器名（views 新增可选 `machineLabel` 字段，缺省不渲染——保证直连模式的 DOM 不变）。中转包的 `registerMobileRoutes` 调用传 `{ mobileDir, mode:'hub' }`。
 
-- [ ] **Step 4: 跑用例确认通过（并确认直连模式无回归）**
+- [x] **Step 4: 跑用例确认通过（并确认直连模式无回归）**
 
 Run: `npx vitest run packages/dsh-mobile-entry/tests/hub-app.spec.ts packages/dsh-mobile-entry/tests/app.spec.ts packages/dsh-mobile-entry/tests/views.spec.ts`
 Expected: 全部 PASS，既有直连用例一条不改就过（若有失败，说明抽象漏了既有行为，先修抽象）。
 
-- [ ] **Step 5: 跑全量与类型检查**
+- [x] **Step 5: 跑全量与类型检查**
 
 Run: `npm run test && npm run typecheck`
 Expected: 0 失败。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add packages/dsh-mobile-entry/mobile packages/dsh-mobile-entry/src/static-serve.ts packages/dsh-mobile-entry/tests vitest.config.ts
@@ -488,30 +488,30 @@ git commit -m "feat(mobile): 手机页机器维度与双后端（直连模式行
 
 **接口：** `scripts/relay-setup.sh --host <tailnet 名> --target <ssh 目标> --remote-port <dsh 端口> [--user <用户>] [--identity <私钥路径>]`；`--help` 只打用法。脚本做三件事：① 校验端口（拒绝前导零形态的 `0[0-9]*`，照 `scripts/mobile-setup.sh` 的既有校验写法）；② 校验 `host` 是不含大写/尾点/空白的合法 tailnet 名；③ 打印要加进云主机 `cordis.patch.yml` 的组合行片段（含 `mobileOrigin`、机器条目、`sshKnownHostsPath`、`statePath`），不代用户改文件。
 
-- [ ] **Step 1: 写失败用例**
+- [x] **Step 1: 写失败用例**
 
 `tests/relay-setup.spec.ts`（沿用 `tests/release-scripts.spec.ts` 那种「spawn 脚本再断言输出」的方式；注意 `scripts/mobile-setup.sh` 本身没有自动测试，本任务为新脚本建立首个）：① `--help` 只输出用法不含副作用；② 端口 `099` 被拒（先于任何 SSH 调用）；③ `host` 含大写被拒；④ 合法参数输出含 `- id: threadharbor-mobile-relay` 与 `mobileOrigin:` 的片段。
 
-- [ ] **Step 2: 跑用例确认失败**
+- [x] **Step 2: 跑用例确认失败**
 
 Run: `npx vitest run tests/relay-setup.spec.ts`
 Expected: FAIL（脚本不存在）。
 
-- [ ] **Step 3: 实现脚本与文档**
+- [x] **Step 3: 实现脚本与文档**
 
 文档补三节：云主机通道（为什么手机不需要 Tailscale、数据走 SSH 隧道、tailnet 只做发现）、云主机准备清单（照 Task 1 实测过的事实写，含 Node 版本要求）、手机打不开时的排查三步（VPN 通道占用 → 代理直连规则 → 证书信任）。README 核对时间更新为 2026-10-16。
 
-- [ ] **Step 4: 跑用例确认通过**
+- [x] **Step 4: 跑用例确认通过**
 
 Run: `npx vitest run tests/relay-setup.spec.ts && bash -n scripts/relay-setup.sh`
 Expected: PASS，语法检查通过。
 
-- [ ] **Step 5: 跑全量与类型检查**
+- [x] **Step 5: 跑全量与类型检查**
 
 Run: `npm run test && npm run typecheck`
 Expected: 0 失败。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add scripts/relay-setup.sh tests/relay-setup.spec.ts docs/mobile-client.zh.md docs/install.zh.md README.md
@@ -536,7 +536,7 @@ git commit -m "docs(relay): 云主机通道说明、准备清单与手机侧排�
 
 **手机侧（人工，与用户一起做，写成可抄的清单）：** 公网域名首访无证书警告 → 扫云主机桌面面板的码配对 → 机器清单 → 进会话 → 读历史 → 发消息 → 批权限（桌面同时开着，验证先到先得与「已在别处处理」）→ 停回合 → 切另一台机器 → 断网/重连。清单按上表的编号组织，每步写明「预期看到什么」。
 
-- [ ] **Step 1: 逐条跑机器侧验收并记录**
+- [x] **Step 1: 逐条跑机器侧验收并记录**
 
 每条一行：编号、结论（通过/不通过）、证据来源（命令与关键输出，不含凭据原文）、核对时间。
 
@@ -544,12 +544,12 @@ git commit -m "docs(relay): 云主机通道说明、准备清单与手机侧排�
 
 未做的人工项明确标「待用户」，不要写成通过。
 
-- [ ] **Step 3: 跑全量与类型检查**
+- [x] **Step 3: 跑全量与类型检查**
 
 Run: `npm run test && npm run typecheck`
 Expected: 0 失败。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add docs/research/2026-10-16-relay-acceptance.md
@@ -565,3 +565,23 @@ git commit -m "docs(relay): 真机验收记录与手机侧走查清单"
 - **类型一致：** `RelayMachineConfig`/`MobileRelayConfig` 只在 Task 3 定义，Task 5/7/8 引用；`TunnelHandle`、`RelayHost`、`RpcResult`、`MachineClient`、`CredentialStore` 各自只定义一次。
 - **评审重点：** 五条分别对应 Task 8（应答归属）、Task 9（机器切换残留）、Task 5（端口漂移）、Task 4（凭据自愈）、Task 3（首访信任），每条都有指定用例。
 - **比例：** 计划比设计文档长，但每个任务都带可独立测试的交付物，没有把实现代码抄进计划。
+
+## 收口时的修正（计划与现实的差异）
+
+计划写的时候，有几处**计划本身就带着错**，只有真机跑起来才暴露；此处就地更正，免得照计划「修回去」：
+
+1. **`RELAY_SESSIONS_PATH` 不能带尾斜杠**（见 Task 8 接口一节的更正）。计划里写的是带斜杠的版本，
+   实现照着写就得到一条永不命中的路由——清单照常 200，转发全 404，像配置问题。
+2. **转发参数要照抄 `packages/dsh-client` 里那份已在用的调用**（`session/prompt` 要
+   `requestId`/`mode`/`content` 分片；`session/page` 与 `session/cancel` 的线上字段名是 `request`
+   而不是 `_request`——只有 `list` 的形参写作 `_request`）。计划只给了路径与白名单，没给参数形状，
+   三处都是照感觉写的。
+3. **会话前缀要同时放行 GET 与 POST**：看与发是一条路由，`prompt`/`cancel` 是 POST。
+4. **内部故障的落点必须落在运维读得到的文件里**：插件跑在 worker 里，console 与 DSH 的 logger
+   都不进那份日志，细节只剩「有界文案」等于把问题藏起来。
+5. **事件面需要真正的 WebSocket 握手**：裸 TCP 上 `send(JSON…)` 不是帧，也没人写 101。
+
+对应的真机验收证据与逐条修复记在 `docs/research/2026-10-16-relay-acceptance.md`。
+
+**未完成：** Task 11 Step 2（手机侧清单与用户一起走）。机器侧能自动验的都过了；手机侧那十步需要真人、
+真会话与真审批，因此明确标为「待用户」而不是通过。
