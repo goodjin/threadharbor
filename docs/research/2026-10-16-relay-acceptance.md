@@ -11,11 +11,12 @@
 | # | 项 | 结论 | 证据 |
 |---|---|---|---|
 | 1 | 插件装载成功，组合行与配置生效 | 通过 | `GET /threadharbor/mobile/hello` → `200 {"mobile":true}`（公网入口，带口令）。装载期曾报 `$.machines[0].logPath missing required value`，补上 `logPath` 后装载成功——报错点名了缺哪个字段，正是 Task 7b I4 那条修复要的效果 |
-| 2 | `/threadharbor/relay/hosts` 返回已登记机器 | 通过 | 返回 `{"hosts":[{"hostId":"tencent01","online":true,"running":true,"reachable":true,"credential":"missing","reason":"credential-missing","detail":"机器 tencent01 的凭据未就绪（no-cookie）"}]}`。`online`（tailnet 发现）、`reachable`（SSH 隧道）、`running`（对端 hello 200）三段都真跑通了。第二台机器**待加**（`japan01`/`jinmac-mini` 在 tailnet 上在线，待配 SSH 与指纹） |
-| 3 | 经隧道取 cookie 并代理一次 `session/list` | **不通过** | 隧道已通，但凭据换不到（`credential-missing` / `no-cookie`）。启动令牌换 cookie 这一步尚未走通 |
-| 4 | 事件流收到真机 `ready` 帧；手机侧应答 | 待用户 | 手机侧未参与 |
-| 5 | 重启后端口分配不变、cookie 复用 | 待用户 | 依赖第 3 项 |
-| 6 | 停掉某台机器的 DSH 后该机显示离线、其余不受影响 | 待用户 | 只有一台机器，且隧道未通 |
+| 2 | `/threadharbor/relay/hosts` 返回已登记机器 | 通过 | 返回 `{"hosts":[{"hostId":"tencent01","online":true,"running":true,"reachable":true,"credential":"ok"}]}`。四段全真：tailnet 发现、SSH 隧道、对端 hello 200、凭据换取。第二台机器**待加**（`japan01`/`jinmac-mini` 在 tailnet 上在线，待配 SSH、指纹与专用私钥） |
+| 3 | 经隧道取 cookie 并代理一次 `session/list` | 通过 | `GET /threadharbor/relay/hosts/tencent01/sessions` → `{"ok":true,"value":{"items":[]}}`。真隧道、真 RPC、真 cookie；`items` 为空是因为这台实例上还没有会话 |
+| 4 | 事件流 | 待用户 | 手机侧未参与；机器侧只验到 `attachOne` 会建连（C1 修复后有判别力用例） |
+| 5 | 重启后端口分配不变、cookie 复用、无需人工干预 | 通过 | 改用 systemd 单元后连续重启多次：端口始终是 41100（落盘分配沿用），cookie 复用（`credential: ok`），重启后无人干预 |
+
+| 6 | 停掉某台机器的 DSH 后该机显示离线、其余不受影响 | 待加机器后再验 | 现在只有一台机器可验 |
 
 ### 指纹闸门（真机验证，通过）
 
@@ -23,7 +24,41 @@
 去连一个没核对过的主机。手工验证：`ssh root@100.84.120.35` 报 `Host key verification failed`，
 而清单同时返回 200 与机器条目——拒绝发生在隧道层，不是整个接口挂掉。
 
-## 验收发现的产品缺陷（已修）
+## 验收发现的四处产品缺陷（全部已修）
+
+### 1. 转发面的前缀路由**永远不会命中**
+
+会话类接口登记的前缀自带结尾斜杠（`/threadharbor/relay/hosts/`），而宿主的前缀匹配是
+「相等，或以 `前缀 + "/"` 开头」。于是它实际要求请求路径以 `//` 开头——**一条都不匹配**。
+清单那条 exact 路由照常 200，于是现场症状是「清单正常、转发全 404」，极像配置或隧道问题。
+
+修：前缀去掉尾斜杠，并在登记处加装载期断言（前缀以斜杠结尾直接抛错）。
+
+### 2. 启动网址读错了日志形态
+
+换凭据要读那台机器的启动日志拿令牌，而读取只认 `LAUNCH_URL=` 这行——那是**部署流程**写进
+日志的标记。一台手工起的 dsh 只打印 `dsh web: <网址>`，于是 grep 命中的是**很久以前某次部署**
+留下的旧标记：长度一样、内容不同，换凭据时对方回 401，而日志里明明有新鲜令牌。
+
+修：两种形态都认，并按出现顺序取最后一条（日志只追加，位置就是时间）。
+
+### 3. 会话列表少了一层参数壳
+
+上游 RPC 的描述符要求每个方法都有一个 `_request` 请求对象，清单这个方法传的是空对象，
+上游回 `args fields do not match the descriptor: missing "_request"`。中转把它压成
+`machine-error`，看起来像「那台机器坏了」。
+
+修：补上空壳，并加用例钉住参数形状。
+
+### 4. 有界化等于静默（两次都栽在这）
+
+`machine-error` 这类内部故障，手机只拿到有界文案是对的——但那之前的注释写着「细节进日志」，
+而**代码里没有任何地方写日志**。结果就是：真机上一句 machine-error，谁也查不下去。
+
+修：加了内部故障落点（hostId + 动作 + 错误首行，不含凭据），并用真机抓到了上面第 3 条的原文。
+注意落点选 `console`：DSH 自己的 logger 输出不进运维真正在读的那份追加日志（真机实测搜不到）。
+
+## 部署形态（修正）
 
 **`known_hosts` 的别名没有任何途径能让运维知道。** 中转按 `threadharbor-<sha256(target\0ssh端口) 前24位>`
 这个**算出来的别名**查指纹，而不是按 IP。原先 `scripts/relay-setup.sh` 只写「known_hosts 里要有
@@ -46,19 +81,25 @@
 **教训**：`reachable:false` 是个不吭声的故障——没有信号，现场只能逐个排除，而且很容易
 把自己排除过的方向当成已排除的方向。给这类出口**留一个自报状态的字段**，比事后推理便宜得多。
 
-## 未通过项（待查）
+## 从 nohup 换成 systemd（真机实测的必要改动）
 
-**凭据换不到（第 3 项的前置）。** 隧道与探测都通，只有「读启动令牌换 cookie」这一步是
-`no-cookie`。已排除的：
+原来用 `setsid nohup` 起实例，连着重启几次之后，**上一代的 ssh 隧道还活着**并占着中转的
+固定端口；新实例随即报「端口已被其他进程占用」并拒绝自动换号（换了号，已存凭据就对不上地址），
+清单于是一直显示不可达。父进程退出不等于子进程被收走——这正是 nohup 给不了的东西。
 
-- 指纹闸门 —— 别名条目已按脚本给出的值登记，`grep -c '^threadharbor-' known_hosts` = 1；
-- SSH 可达 —— `ssh -o BatchMode=yes root@100.84.120.35` 通；
-- 隧道命令本身 —— 手工跑 `ssh -N -L 41100:127.0.0.1:3080 -o ExitOnForwardFailure=yes
-  -o StrictHostKeyChecking=yes root@100.84.120.35` 无报错跑到超时。
+改用 `deploy/threadharbor-relay.service`（`KillMode=control-group`）：stop/restart 收走整组子进程，
+机器上别的 ssh（japan01 等既有隧道）不受影响。实测重启后 41100 无残留监听，下一次请求按需重建。
 
-待查：`readLaunchUrl` 读远端启动日志 → 取带令牌网址 → 换 cookie 这条链上具体断在哪一步
-（读不到网址？换到但没拿到 cookie？）。**这一项在修好之前，转发与事件仍然不可用**——
-机器能看见、能探活，但中转拿不到进那台机器的凭据；单机的手机页不受影响（走既有直连路径）。
+**顺带查出第二件事**：这台主机上**没有私钥文件**，SSH 自连一直是靠我交互会话转发进来的 agent
+（`SSH_AUTH_SOCK`）。systemd 起的实例没有这个环境变量，于是 `Permission denied (publickey…)`。
+给中转配了专用私钥（`/root/.ssh/th-relay`，公钥进 `authorized_keys`，配置里 `identityFile`）。
+
+这条要写进准备清单：**中转要有自己的私钥，不能依赖交互会话的 agent**。
+
+## 未通过项
+
+- 第二台机器（japan01 / jinmac-mini）：待配 SSH、指纹与私钥后加进机器表。
+- 手机侧十步清单：**全部待用户**。
 
 ## 部署形态（本次实测确认的事实）
 

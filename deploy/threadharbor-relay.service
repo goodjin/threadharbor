@@ -1,0 +1,32 @@
+# 云主机上的中转实例（ThreadHarbor DSH web）。
+#
+# 为什么用单元而不是 nohup/setsid：dsh 会 spawn ssh 隧道子进程，而**子进程
+# 不会跟着 dsh 一起死**。真机上实测：重启几次之后，上一代的 ssh 还占着中转的
+# 固定端口，新实例随即报「端口已被其他进程占用」并拒绝自动换号（换号会让已存
+# 凭据对不上地址），于是中转在清单上一直显示不可达。
+# KillMode=control-group 让 stop/restart 收走整组子进程——这正是 nohup 给不了的。
+#
+# 安装：
+#   install -m 644 deploy/threadharbor-relay.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now threadharbor-relay
+#
+[Unit]
+Description=ThreadHarbor 中转（DSH web，手机公网入口的落点）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Environment=DSH_HOME=/root/.dsh-threadharbor-stable
+ExecStart=/usr/local/bin/dsh --profile web --no-open --port 3080 --host 127.0.0.1 --trusted-host dsh.agentlab.fun
+Restart=always
+RestartSec=5
+KillMode=control-group
+# 只杀自己这一组：单元里的 ssh 隧道随 dsh 收走，但机器上别的 ssh（japan01 等
+# 既有的隧道）不受影响。
+StandardOutput=append:/root/.local/state/threadharbor/stable/dsh-web.log
+StandardError=append:/root/.local/state/threadharbor/stable/dsh-web.log
+
+[Install]
+WantedBy=multi-user.target
