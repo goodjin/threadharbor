@@ -19,11 +19,22 @@ import { TunnelPool, type TunnelEnsureResult } from './tunnels.ts'
 import { CredentialStore, MachineCredentials } from './credentials.ts'
 import type { SshConnectionConfig } from '@threadharbor/dsh-host-federation/ssh/types'
 import { DshSshManager } from '@threadharbor/dsh-host-federation/ssh/manager'
+import { WebSocketServer } from 'ws'
 
 export { RELAY_HOSTS_PATH } from './hosts.ts'
 export { RELAY_ANSWER_PATH, RELAY_EVENTS_PATH, RELAY_SESSIONS_PATH, Relay } from './relay.ts'
 
 export const name = 'threadharbor-mobile-relay'
+
+/**
+ * 事件面共用的 ws 服务端（noServer：握手由插件自己那三道门决定）。
+ * 每个进程一个足够——noServer 模式下它不监听端口，只是握手的状态机。
+ */
+let eventSocketServer: WebSocketServer | undefined
+function getEventSocketServer(): WebSocketServer | undefined {
+  if (eventSocketServer === undefined) eventSocketServer = new WebSocketServer({ noServer: true })
+  return eventSocketServer
+}
 
 /** webServer 挂路由；connection 做准入（admit）。 */
 export const inject = ['webServer', 'connection']
@@ -481,6 +492,28 @@ function registerHubRoutes(ctx: RelayRouteContext, relay: Relay, originHost: str
     return true
   }
 
+  /**
+   * 握手与帧：把裸 TCP 交给 ws 的 noServer 模式，由它写 101 并接管帧编解码。
+   *
+   * 这一层以前是缺的——处理器直接把裸 socket 当 WebSocket 用，写的不是帧、
+   * 也没有 101，于是手机侧永远「连接中」。协议（ready / item）仍在 Relay 里。
+   * ws 是本包已声明的依赖（客户端那一侧在用），这里只是同一个库的第二种用法。
+   */
+  const upgradeFace = (req: Req, socket: unknown, head: unknown, relay: Relay): void => {
+    const wss = getEventSocketServer()
+    if (wss === undefined) {
+      // ws 不可用（装载环境缺依赖）：毁掉连接，而不是让它半死不活地挂着。
+      ;(socket as { destroy?: () => void }).destroy?.()
+      return
+    }
+    wss.handleUpgrade(
+      req as never,
+      socket as never,
+      head as Buffer,
+      ws => { relay.connectEvents(ws as never) },
+    )
+  }
+
   /** 与 {@link gate} 同序同条件的升级面版本，只是拒绝方式换成 destroy。 */
   const upgradeGate = (req: Req): boolean => {
     const admission = ctx.connection.admit(req as never)
@@ -539,12 +572,13 @@ function registerHubRoutes(ctx: RelayRouteContext, relay: Relay, originHost: str
     // 完成，此刻不回帧就是最干净的拒绝。
     handler: (req, socket, head) => {
       const typedReq = req as Req
+      // 三道门先过：升级面没有 res 可写状态码，握手还没完成，此刻不回帧就是
+      // 最干净的拒绝（直接毁掉 socket）。
       if (!upgradeGate(typedReq)) {
         ;(socket as { destroy?: () => void }).destroy?.()
         return
       }
-      void head // 升级头的字节由 relay 内部的握手处理，不在这里转交
-      return relay.connectEvents(socket as never)
+      upgradeFace(typedReq, socket, head, relay)
     },
   })
 }

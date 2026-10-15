@@ -220,6 +220,17 @@ export class Relay {
   }
 
   /** 事件流升级（WebSocket）：手机连上来先给一帧 ready，让它知道汇流已就绪。 */
+  /**
+   * 手机接上事件流（socket 已经是 WebSocket 语义的对象：send/close 都能用）。
+   *
+   * 握手与帧编解码**不在这里**：把回环 TCP 套上 HTTP 101 与帧格式是 ws 的活，
+   * 由装配层在登记升级面时做（见 index.ts 的 upgradeFace）。这里只管协议：
+   * 登记、发出第一帧 ready、之后每条事件按 `{type:'item',hostId,value}` 广播。
+   *
+   * 曾经这里是拿裸 TCP 调 `socket.send(JSON…)`——那不是 WebSocket 帧，也没人
+   * 写过 101 握手，于是这个面在真机上**一次都没连上过**（症状：手机侧一直
+   * 「连接中」）。真机验收才把它逼出来。
+   */
   connectEvents(socket: PhoneSocket): void {
     this.registerPhone(socket)
     try {
