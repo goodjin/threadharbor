@@ -197,6 +197,32 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
     setOverflowOpen(current => current.includes(projectId) ? current.filter(id => id !== projectId) : [...current, projectId])
   }, [])
 
+  // Floating menus (2026-10-16 用户反馈)：行尾 ⋯ 与 ⚙ 的选择框是浮层下拉，
+  // 不占列表的排版空间；点外部或按 Esc 收起，和原生一致。
+  useEffect(() => {
+    if (menu === null && !optionsOpen) return
+    const onPointerDown = (event: MouseEvent): void => {
+      const target = event.target
+      if (!(target instanceof Element)) return
+      if (target.closest('[data-row-menu], [data-view-options-menu], [data-action="row-menu"], [data-action="view-options"]') === null) {
+        setMenu(null)
+        setOptionsOpen(false)
+      }
+    }
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        setMenu(null)
+        setOptionsOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [menu, optionsOpen])
+
   /** Run one row action; a rejection lands on the tree verbatim, never silently. */
   const run = useCallback(async (dispatch: () => Promise<string | undefined>) => {
     setMenu(null)
@@ -390,7 +416,7 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                   {projectOpen ? shown.map(session => {
                     const sessionMenu = menu?.kind === 'session' && menu.key === session.sessionId
                     return (
-                      <div key={session.sessionId}>
+                      <div key={session.sessionId} className={styles.sessionWrap}>
                         <button
                           type="button"
                           className={styles.sessionRow}

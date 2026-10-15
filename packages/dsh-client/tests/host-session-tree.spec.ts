@@ -284,6 +284,35 @@ describe('HostSessionTree', () => {
     } finally { await unmount(root) }
   })
 
+  it('⋯ 菜单是浮层下拉：点外部、按 Esc 都收起；条目照常派发', async () => {
+    const archive: string[] = []
+    const ui = { archiveSession: async (id: string) => { archive.push(id) } }
+    const ctx = { get: (name: string) => name === 'uiWorkspace' ? ui : name === 'workspaces' ? {} : undefined }
+    const { container, root } = await mountTree({ ctx })
+    try {
+      click(container, '[data-session-row="s1"] [data-action="row-menu"]')
+      expect(container.querySelector('[data-row-menu]')).not.toBeNull()
+      // 点外部收起
+      await act(async () => {
+        document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+      })
+      expect(container.querySelector('[data-row-menu]')).toBeNull()
+      // 重开，按 Esc 收起
+      click(container, '[data-session-row="s1"] [data-action="row-menu"]')
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      })
+      expect(container.querySelector('[data-row-menu]')).toBeNull()
+      // 重开后条目仍派发
+      click(container, '[data-session-row="s1"] [data-action="row-menu"]')
+      await act(async () => {
+        click(container, '[data-action="menu-archive-session"]')
+        await Promise.resolve()
+      })
+      expect(archive).toEqual(['s1'])
+    } finally { await unmount(root) }
+  })
+
   it('展开态记忆：本机默认展开，远端展开后写入 localStorage', async () => {
     const first = await mountTree()
     try {
