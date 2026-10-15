@@ -285,14 +285,31 @@ export function apply(ctx: RelayRouteContext, config?: MobileRelayConfig, deps: 
   // 测了 `Relay.reconcile` 这个方法本身，没有一条用例问「谁调它」，于是启动时
   // 离线、上线后本该补上订阅的那台机器，手机永远收不到它的动静。
   let relay: Relay | undefined
-  if (runtime !== undefined) relay = buildRelay(config, runtime, makeRelayLogger(config))
+  // 内部故障的落点。手机侧只拿到有界的 {error:'machine-error'}，细节在这里。
+  //
+  // 落点是自己那个只追加文件，不是 console 也不是 ctx.logger——两条都试过：
+  // 插件跑在 worker 里，console 的输出与 DSH logger 的输出**都不进**运维在读的
+  // 那份日志（真机实测：文件里搜不到一个字）。细节丢了等于没写。
+  // 写失败也不抛：这是在处理一个已经出错的请求，再抛一层只会盖掉真正的错误。
+  const log = makeRelayLogger(config)
+  if (runtime !== undefined) relay = buildRelay(config, runtime, log)
   registerHostsRoute(
     ctx,
     registry,
     new URL(mobileOrigin).hostname,
     deps.listTimeoutMs ?? LIST_TIMEOUT_MS,
     // 转发面没装配时没有订阅可对账。
-    relay === undefined ? undefined : (hostIds: readonly string[]) => { void relay?.reconcile(hostIds) },
+    //
+    // 对账是应答之后另起的一拍，所以**必须自己接住拒绝**：onEvent/connect 抛错
+    // 会让 reconcile 的 Promise 变成 rejected，没人接就是一次未处理拒绝——在
+    // worker 里没人看得见，却可能把整个插件带下去。
+    relay === undefined
+      ? undefined
+      : (hostIds: readonly string[]) => {
+          relay?.reconcile(hostIds).catch(error => {
+            log(`订阅对账失败：${error instanceof Error ? error.message : String(error)}`)
+          })
+        },
   )
   if (relay !== undefined) registerHubRoutes(ctx, relay, new URL(mobileOrigin).hostname)
   if (runtime !== undefined) {

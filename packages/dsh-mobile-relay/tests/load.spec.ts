@@ -531,3 +531,48 @@ describe('停机收尾：重载不能把上一代的隧道留在原地', () => {
     await expect(pool.closeAll()).resolves.toBeUndefined()
   })
 })
+
+describe('订阅对账那一拍必须自己接住拒绝（没人接就是一次未处理拒绝）', () => {
+  it('reconcile 抛错时：一行落点记下，手机那一拍的应答不受影响', async () => {
+    const { ctx, routes } = assemblyCtx()
+    const dir = mkdtempSync(join(tmpdir(), 'relay-reconcile-reject-'))
+    // 中转的落点文件名是定的：与 state.json 同目录的 relay.log。
+    const logPath = join(dir, 'relay.log')
+    const config: MobileRelayConfig = {
+      mobileOrigin: 'https://relay.example.com',
+      sshKnownHostsPath: join(dir, 'known_hosts'),
+      statePath: join(dir, 'state.json'),
+      machines: [{ hostId: 'gooddemacbook-pro', target: '100.64.0.2', remotePort: 3081, logPath: '/l.log' }],
+    }
+    apply(ctx, config, {
+      // 让挂订阅那一步炸：onEvent 在挂上之后由客户端自己抛，是这条路上唯一的
+      // 真实抛点（clientFor 那边 attachOne 已经自己接住了）。
+      ssh: {
+        ensureTunnel: async () => 'x',
+        readLaunchUrl: async () => undefined,
+      },
+      tailscalePeers: [{ name: 'gooddemacbook-pro', online: true }],
+      probeStatus: 200,
+    })
+    const hosts = routes.find(route => route.path === '/threadharbor/relay/hosts')
+    if (hosts === undefined) throw new Error('没有清单路由')
+
+    const original = Relay.prototype.reconcile
+    Relay.prototype.reconcile = function failing() { return Promise.reject(new Error('挂订阅时炸了')) }
+    try {
+      const state = { status: 0 }
+      // 应答这一拍不该被对账的失败带崩。
+      await hosts.handler(
+        { method: 'GET', url: '/threadharbor/relay/hosts', headers: { host: 'relay.example.com' } },
+        { writeHead: (status: number) => { state.status = status }, end: () => {} },
+      )
+      expect(state.status).toBe(200)
+    } finally {
+      Relay.prototype.reconcile = original
+    }
+    // 失败本身要有一行落点：静默的失败最难查。
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(readFileSync(logPath, 'utf8')).toContain('挂订阅时炸了')
+  })
+})
+
