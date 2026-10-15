@@ -87,7 +87,9 @@ export function HostSessionTree({ view, ctx, onOpenHostPage, initialExpanded, t 
               ? <p className={styles.note} data-undeployed-note>{t('panel.tree.undeployedNote')}</p>
               : null}
             {host.note !== undefined
-              ? <p className={styles.error} data-host-error>{t('panel.tree.fetchFailedTitle')}{host.note}</p>
+              ? host.self
+                ? <p className={styles.note} data-local-note>{host.note}</p>
+                : <p className={styles.error} data-host-error>{t('panel.tree.fetchFailedTitle')}{host.note}</p>
               : null}
             {open && !host.self && host.projects.length === 0 && host.undeployed !== true
               ? <p className={styles.note}>{t('panel.tree.noSessions')}</p>

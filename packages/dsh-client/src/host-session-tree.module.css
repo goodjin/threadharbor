@@ -1,11 +1,13 @@
-/* 左侧主机树：对齐原生工作区列表观感的简化复刻（§8.5：升级时人工对齐）。 */
+/* 左侧主机树：对齐原生工作区列表观感的复刻（§8.5：升级时人工对齐）。
+   行高/字号/内距取自原生实测：项目行 34px、会话行 32px、字号 14、内距 0 8px。
+   层级约定：主机与项目同级缩进（主机用独立配色标记），仅会话缩进一级。 */
 
 .tree {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
   padding: 4px;
-  font-size: 13px;
+  font-size: 14px;
   min-height: 0;
   overflow-y: auto;
 }
@@ -14,7 +16,7 @@
 .hostUndeployed {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
 }
 
 .hostUndeployed {
@@ -22,11 +24,13 @@
 }
 
 .hostRow {
+  font: inherit;
   display: flex;
   align-items: center;
   gap: 6px;
   width: 100%;
-  padding: 4px 6px;
+  height: 34px;
+  padding: 0 8px;
   border: none;
   border-radius: 6px;
   background: transparent;
@@ -51,31 +55,35 @@
   background: #3fb950;
 }
 
+/* 主机行的独立标记色：取原生分区标题的弱化灰。 */
 .hostLabel {
   flex: 1;
-  font-weight: 500;
+  font-weight: 600;
+  color: #81858c;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .hostCount {
-  font-size: 11px;
-  opacity: 0.6;
+  font-size: 12px;
+  color: #81858c;
   font-variant-numeric: tabular-nums;
 }
 
+/* 项目与主机同级：不缩进，只有会话缩进。 */
 .project {
   display: flex;
   flex-direction: column;
-  padding-left: 13px;
 }
 
 .projectRow {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 3px 6px;
+  height: 34px;
+  padding: 0 8px;
+  border-radius: 6px;
 }
 
 .projectLabel {
@@ -83,17 +91,18 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  opacity: 0.85;
 }
 
 .newSession {
+  font: inherit;
   border: none;
   background: transparent;
   color: inherit;
   opacity: 0.5;
   cursor: pointer;
-  padding: 0 4px;
+  padding: 2px 4px;
   border-radius: 4px;
+  line-height: 1;
 }
 
 .newSession:hover {
@@ -102,9 +111,12 @@
 }
 
 .sessionRow {
-  display: block;
+  font: inherit;
+  display: flex;
+  align-items: center;
   width: 100%;
-  padding: 3px 6px 3px 20px;
+  height: 32px;
+  padding: 0 8px 0 24px;
   border: none;
   border-radius: 6px;
   background: transparent;
@@ -126,14 +138,15 @@
 
 .note {
   margin: 0;
-  padding: 2px 6px 2px 19px;
+  padding: 2px 8px 2px 24px;
   font-size: 12px;
   opacity: 0.6;
+  overflow-wrap: anywhere;
 }
 
 .error {
   margin: 0;
-  padding: 2px 6px 2px 19px;
+  padding: 2px 8px 2px 24px;
   font-size: 12px;
   color: #f85149;
   overflow-wrap: anywhere;

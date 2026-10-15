@@ -48,7 +48,14 @@ export type WorkspaceListSource = {
 /** The session projection this module needs, narrowed from `ctx.get('sessions')`. */
 export type SessionListSource = {
   readonly ids: readonly string[]
-  readonly byId: Readonly<Record<string, { readonly displayTitle?: string; readonly title?: string }>>
+  readonly byId: Readonly<Record<string, {
+    readonly displayTitle?: string
+    readonly title?: string
+    /** Native list rule: blank sessions (never messaged) stay hidden. */
+    readonly blank?: boolean
+    /** Native list rule: subagent child sessions never list as rows. */
+    readonly origin?: string
+  }>>
   /** Present when the service exposes one; change notifications for republish. */
   readonly subscribe?: (listener: () => void) => () => void
 }
@@ -124,14 +131,23 @@ function sessionSource(value: unknown): SessionListSource | undefined {
   const ids = snapshot['ids']
   const byId = snapshot['byId']
   if (!Array.isArray(ids) || !isRecord(byId)) return undefined
-  const rows: Record<string, { displayTitle?: string; title?: string }> = {}
+  const rows: Record<string, {
+    displayTitle?: string
+    title?: string
+    blank?: boolean
+    origin?: string
+  }> = {}
   for (const [id, row] of Object.entries(byId)) {
     if (!isRecord(row)) continue
     const displayTitle = row['displayTitle']
     const title = row['title']
+    const blank = row['blank']
+    const origin = row['origin']
     rows[id] = {
       ...(typeof displayTitle === 'string' ? { displayTitle } : {}),
       ...(typeof title === 'string' ? { title } : {}),
+      ...(blank === true ? { blank: true } : {}),
+      ...(typeof origin === 'string' ? { origin } : {}),
     }
   }
   const subscribe = subscriberOf(value)
@@ -218,11 +234,16 @@ export function buildHostSessions(
   // Archived marks ride the workspace projection's registry-global set; the
   // federation filters on them, so a set-aside session leaves the tree.
   const sessionLikes: readonly SessionLike[] = sessions !== undefined
-    ? sessions.ids.map(id => ({
-        sessionId: id,
-        title: sessions.byId[id]?.displayTitle ?? sessions.byId[id]?.title ?? '',
-        ...(workspaces.archivedSessionIds.includes(id) ? { archived: true } : {}),
-      }))
+    ? sessions.ids
+        // Same visibility rules the native workspace list applies: a blank
+        // session (created but never messaged — its fallback title echoes the
+        // directory name) and subagent children never become rows.
+        .filter(id => sessions.byId[id]?.blank !== true && sessions.byId[id]?.origin !== 'subagent')
+        .map(id => ({
+          sessionId: id,
+          title: sessions.byId[id]?.displayTitle ?? sessions.byId[id]?.title ?? '',
+          ...(workspaces.archivedSessionIds.includes(id) ? { archived: true } : {}),
+        }))
     : [...new Set(workspaces.items.flatMap(row => [...row.sessionIds]))].map(id => ({
         sessionId: id,
         title: '',

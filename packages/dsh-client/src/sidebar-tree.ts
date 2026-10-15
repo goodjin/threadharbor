@@ -164,9 +164,22 @@ export function ShadowTreeHost({ ctx, registry, t = fallbackT, selectPanel, fetc
 
   useEffect(() => {
     readLocal()
+    // Services publish their own changes; the interval is only the fallback
+    // for projections without a subscribe seat — otherwise a fresh page shows
+    // 「还在加载」 for up to a full poll period after hydration.
+    const sources = readSessionSources({
+      workspaces: ctx.get('workspaces'),
+      sessions: ctx.get('sessions'),
+    })
+    const unsubscribes = [sources.workspaces?.subscribe, sources.sessions?.subscribe]
+      .filter((subscribe): subscribe is (listener: () => void) => () => void => typeof subscribe === 'function')
+      .map(subscribe => subscribe(readLocal))
     const localTimer = window.setInterval(readLocal, pollMs ?? LOCAL_POLL_MS)
-    return () => { window.clearInterval(localTimer) }
-  }, [readLocal, pollMs])
+    return () => {
+      for (const dispose of unsubscribes) dispose()
+      window.clearInterval(localTimer)
+    }
+  }, [readLocal, pollMs, ctx])
 
   useEffect(() => {
     const run = (): void => {

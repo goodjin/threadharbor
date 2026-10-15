@@ -52,6 +52,53 @@ describe('buildHostSessions', () => {
     }
   })
 
+  it('经完整服务形状读取：blank/origin 字段透传到过滤（回归：收窄层曾把它们丢掉）', () => {
+    const service = {
+      list: {
+        getSnapshot: () => ({
+          ids: ['s1', 's9', 's10'],
+          byId: {
+            s1: { displayTitle: '修登录', blank: false },
+            s9: { displayTitle: 'Web', blank: true },
+            s10: { displayTitle: '子代理', origin: 'subagent' },
+          },
+        }),
+        subscribe: () => () => {},
+      },
+    }
+    const sources = readSessionSources({ sessions: service })
+    expect(sources.sessions?.subscribe).toBeTypeOf('function')
+    const read = buildHostSessions(
+      { items: [{ workspaceId: 'w1', title: 'Web', path: '/w', sessionIds: ['s1', 's9', 's10'] }], archivedSessionIds: [], state: 'idle' },
+      sources.sessions,
+    )
+    expect(read.ok).toBe(true)
+    if (read.ok) expect(read.sessions.map(row => row.sessionId)).toEqual(['s1'])
+  })
+
+  it('空白会话与子代理会话不进树（对齐原生列表的可见性规则）', () => {
+    const read = buildHostSessions(
+      {
+        items: [{ workspaceId: 'w1', title: 'Web', path: '/w', sessionIds: ['s1', 's9', 's10', 's11'] }],
+        archivedSessionIds: [],
+        state: 'idle',
+      },
+      {
+        ids: ['s1', 's9', 's10', 's11'],
+        byId: {
+          s1: { displayTitle: '修登录' },
+          s9: { title: 'Web', blank: true },
+          s10: { displayTitle: '子代理跑的活', origin: 'subagent' },
+          s11: { displayTitle: '正常' },
+        },
+      },
+    )
+    expect(read.ok).toBe(true)
+    if (read.ok) {
+      expect(read.sessions.map(row => row.sessionId)).toEqual(['s1', 's11'])
+    }
+  })
+
   it('filters archived sessions the host has set aside', () => {
     const read = buildHostSessions(
       {

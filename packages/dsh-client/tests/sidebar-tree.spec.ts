@@ -135,6 +135,72 @@ describe('槽位组件在无注入 props 时的生产真相', () => {
   })
 })
 
+describe('ShadowTreeHost（容器接线：本机订阅与提示措辞）', () => {
+  it('服务发布变更即刻重读：不等 30 秒轮询', async () => {
+    const listeners: Array<() => void> = []
+    const workspaces = {
+      list: { getSnapshot: () => ({ state: 'loading', items: [], archivedSessionIds: [] }) },
+      subscribe: (listener: () => void) => { listeners.push(listener); return () => {} },
+    }
+    const sessions = {
+      list: { getSnapshot: () => ({ ids: [], byId: {} }) },
+      subscribe: (listener: () => void) => { listeners.push(listener); return () => {} },
+    }
+    const services = { workspaces, sessions }
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(ShadowTreeHost, { ctx: { get: (name: string) => services[name] }, registry: makeRegistry([]) }))
+    })
+    try {
+      expect(container.querySelector('[data-local-note]')?.textContent ?? '').toContain('还在加载')
+      // 服务水合完成并发布
+      const ready = {
+        list: {
+          getSnapshot: () => ({
+            state: 'idle',
+            items: [{ workspaceId: 'w1', title: 'Web', path: '/w', sessionIds: ['s1'] }],
+            archivedSessionIds: [],
+          }),
+        },
+        subscribe: workspaces.subscribe,
+      }
+      const sessionsReady = {
+        list: { getSnapshot: () => ({ ids: ['s1'], byId: { s1: { displayTitle: '修登录' } } }) },
+        subscribe: sessions.subscribe,
+      }
+      ;(services as Record<string, unknown>).workspaces = ready
+      ;(services as Record<string, unknown>).sessions = sessionsReady
+      await act(async () => { for (const notify of listeners) notify() })
+      expect(container.querySelector('[data-local-note]')).toBeNull()
+      expect(container.querySelector('[data-project-group="w1"]')).not.toBeNull()
+      expect(container.querySelector('[data-session-row="s1"]')?.textContent).toContain('修登录')
+    } finally {
+      await act(async () => { root.unmount() })
+    }
+  })
+
+  it('本机未就绪的提示不带「拉取失败」前缀（本机是读，不是拉）', async () => {
+    const workspaces = { list: { getSnapshot: () => ({ state: 'loading', items: [], archivedSessionIds: [] }) } }
+    const sessions = { list: { getSnapshot: () => ({ ids: [], byId: {} }) } }
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(ShadowTreeHost, { ctx: { get: (name: string) => name === 'workspaces' ? workspaces : sessions }, registry: makeRegistry([]) }))
+    })
+    try {
+      const note = container.querySelector('[data-local-note]')?.textContent ?? ''
+      expect(note).toContain('还在加载')
+      expect(note.startsWith('拉取失败')).toBe(false)
+      expect(container.querySelector('[data-host-error]')).toBeNull()
+    } finally {
+      await act(async () => { root.unmount() })
+    }
+  })
+})
+
 describe('ShadowTreeHost（容器接线）', () => {
   afterEach(() => { vi.restoreAllMocks() })
 
