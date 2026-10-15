@@ -1,4 +1,6 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -6,6 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   CONTENT_TYPES,
   HELLO_PATH,
+  injectMobileConfig,
   MOBILE_PREFIX,
   registerMobileRoutes,
   resolveMobileAsset,
@@ -17,6 +20,9 @@ import {
  * 与包内真实的 mobile/ 目录隔离。
  */
 const TEMP_INDEX_HTML = '<!doctype html><html lang="zh"><title>临时占位壳</title></html>'
+
+/** 带那行占位的真页面壳（占位符本身刻意不在用例里重写一遍，抄错就假绿）。 */
+const REAL_INDEX_HTML = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'mobile', 'index.html'), 'utf8')
 
 const tempDirs: string[] = []
 function makeMobileDir(): string {
@@ -307,5 +313,53 @@ describe('index.html 的模式注入', () => {
     const { injectMobileConfig } = await import('../src/static-serve.ts')
     const out = injectMobileConfig('<script>window.__THREADHARBOR_MOBILE__ = __MOBILE_CONFIG__</script>', 'index.html', '</script>' as never)
     expect(out).toBe('<script>window.__THREADHARBOR_MOBILE__ = {"mode":"machine"}</script>')
+  })
+})
+
+describe('mode 由本包的 Config 决定（写在中转包那一行没人读，手机页会静默停在直连模式）', () => {
+  /** 手机页 index.html 里那行注入的实际内容。 */
+  function injectedLine(html: string, mode?: 'machine' | 'hub'): string {
+    return injectMobileConfig(html, 'index.html', mode === 'hub' ? 'hub' : 'machine')
+  }
+
+  it('Config 声明了 mode：运维加这一行不会因未知字段被拒', async () => {
+    const { Config } = await import('../src/index.ts')
+    expect(() => Config({ mobileOrigin: 'https://relay.example.com', mode: 'hub' })).not.toThrow()
+  })
+
+  it('mode: hub 真的能流到注入的那一行（装配层实测，不只测 schema）', async () => {
+    const { apply } = await import('../src/index.ts')
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-mobile-entry-mode-'))
+    tempDirs.push(dir)
+    // 真实的 index.html 里那行占位：服务端就是替换它的右侧。
+    writeFileSync(join(dir, 'index.html'), REAL_INDEX_HTML, 'utf8')
+    const registered: { path: string, handler: (req: unknown, res: unknown) => void }[] = []
+    const ctx = {
+      // 处置器工厂要真的跑一遍，否则什么都不会被登记——那种假件会让用例空转。
+      effect: (fn: () => unknown) => fn(),
+      webServer: {
+        register: (route: { path: string, handler: (req: unknown, res: unknown) => void }) => {
+          registered.push(route)
+          return () => {}
+        },
+      },
+      connection: { authorizeMobileIndex: async (_req: unknown, serve: () => Promise<unknown>) => await serve() },
+    }
+    apply(ctx as never, { mobileOrigin: 'https://relay.example.com', mode: 'hub' })
+    const page = registered.find(route => route.path === MOBILE_PREFIX)
+    expect(page).toBeDefined()
+    const chunks: string[] = []
+    await page!.handler(
+      { method: 'GET', url: '/threadharbor/mobile/', headers: { host: 'relay.example.com' } },
+      { writeHead() {}, end(chunk?: string) { chunks.push(chunk ?? '') } },
+    )
+    // 只看**注入的那一行**。整页里到处都有 "mode":"hub" 这几个字（页面自举
+    // 注释里就写着），断言整篇会永远通过——那种假绿正是这里要防的。
+    const injected = /window\.__THREADHARBOR_MOBILE__\s*=\s*([^<]+)/.exec(chunks.join(''))?.[1] ?? ''
+    expect(injected.trim()).toBe('{"mode":"hub"}')
+  })
+
+  it('不给就是直连（缺省不变，旧配置不受影响）', () => {
+    expect(injectedLine(REAL_INDEX_HTML)).toContain('"mode":"machine"')
   })
 })

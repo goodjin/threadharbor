@@ -446,7 +446,7 @@ git commit -m "feat(relay): 对手机的转发接口与跨机事件汇流（应�
 }
 ```
 
-`backend-machine` 忽略 `hostId`（直连本机），`backend-hub` 走 `/threadharbor/relay/*` 与 `/threadharbor/relay/events`。`index.html` 里放一行占位 `<script>window.__THREADHARBOR_MOBILE__ = __MOBILE_CONFIG__</script>`，`static-serve.ts` 在返回 index.html 时把它替换成 `{"mode":"machine"}` 或 `{"mode":"hub"}`（中转包传 `mode:'hub'`）。既有导出（`nextScrollTop`、`makeSocketFactory`、`bootApp`）签名不变。
+`backend-machine` 忽略 `hostId`（直连本机），`backend-hub` 走 `/threadharbor/relay/*` 与 `/threadharbor/relay/events`。`index.html` 里放一行占位 `<script>window.__THREADHARBOR_MOBILE__ = __MOBILE_CONFIG__</script>`，`static-serve.ts` 在返回 index.html 时把它替换成 `{"mode":"machine"}` 或 `{"mode":"hub"}`。既有导出（`nextScrollTop`、`makeSocketFactory`、`bootApp`）签名不变。
 
 - [x] **Step 1: 写失败用例**
 
@@ -459,7 +459,7 @@ Expected: FAIL。
 
 - [x] **Step 3: 实现**
 
-`app.js` 里所有取数据的调用改为走 `state.backend`；新增 `state.machineId`（`null` = 在机器清单屏）；`convGeneration` 递增条件扩展为「打开会话 / 切换机器 / 返回清单 / 重 boot」；会话条目与审批横幅在 hub 模式下显示机器名（views 新增可选 `machineLabel` 字段，缺省不渲染——保证直连模式的 DOM 不变）。中转包的 `registerMobileRoutes` 调用传 `{ mobileDir, mode:'hub' }`。
+`app.js` 里所有取数据的调用改为走 `state.backend`；新增 `state.machineId`（`null` = 在机器清单屏）；`convGeneration` 递增条件扩展为「打开会话 / 切换机器 / 返回清单 / 重 boot」；会话条目与审批横幅在 hub 模式下显示机器名（views 新增可选 `machineLabel` 字段，缺省不渲染——保证直连模式的 DOM 不变）。手机页包（`threadharbor-mobile-entry`）的 Config 上加 `mode: hub`——**不是**中转包：注入发生在手机页包返回页面时，写在中转包那一行没人读，手机页会静默停在直连模式。
 
 - [x] **Step 4: 跑用例确认通过（并确认直连模式无回归）**
 

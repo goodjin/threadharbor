@@ -153,6 +153,9 @@ fi
 # 别的途径知道这个别名，所以脚本必须把它算出来。
 ALIAS="threadharbor-$(printf '%s\0%s' "$TARGET" "$SSH_PORT" | shasum -a 256 | cut -c1-24)"
 KNOWN_HOSTS="${KNOWN_HOSTS:-/root/.ssh/known_hosts}"
+# 机器侧 DSH 的日志路径：凭据是从这个文件里 grep 出来的启动标记（LAUNCH_URL=）换的。
+# 它在 Config 里是**必填**，漏了这一行整份配置装载即拒——照脚本抄也用不成。
+MACHINE_LOG_PATH="${MACHINE_LOG_PATH:-$HOME/.dsh/logs/web.log}"
 
 cat <<EOF
 把下面这段加进云主机的 cordis.patch.yml（按需改 mobileOrigin 与 statePath）：
@@ -168,7 +171,17 @@ cat <<EOF
         - hostId: ${HOST}
           target: ${TARGET}
           remotePort: ${REMOTE_PORT}
+          # 机器侧 DSH 的日志路径（凭据就从这里换）。按实际位置改。
+          logPath: ${MACHINE_LOG_PATH}
 $(if [ -n "$USER_NAME" ]; then echo "          user: ${USER_NAME}"; fi)$(if [ -n "$IDENTITY" ]; then echo "          identityFile: ${IDENTITY}"; fi)
+
+  - id: threadharbor-mobile-entry
+    config:
+      # 上面那个 origin，同一个源。手机页的配对链接要用它。
+      mobileOrigin: https://dsh.agentlab.fun
+      # 中转模式：手机连中转站而不是直连单机。**这一行加在中转包那一行没用**——
+      # 中转包不碰手机页路由，写在那里没人读，手机页会静默停在直连模式。
+      mode: hub
 
 机器侧还要做的三件事：
 

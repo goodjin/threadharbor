@@ -21,7 +21,13 @@ export const inject = ['webServer', 'connection']
 /** apply 收到的组合配置形状（Config 的解析结果）；mobileOrigin 缺省时 pair-url 应答 500。 */
 export interface MobileEntryConfig {
   mobileOrigin?: string
-  /** 手机页模式：machine=直连本机（缺省），hub=连中转站。中转包传 hub。 */
+  /**
+   * 手机页模式：machine=直连本机（缺省），hub=连中转站。
+   *
+   * 它属于**本包**而不是中转包：中转包压根不碰手机页的路由，注入发生在本包
+   * 返回页面时。写在中转包那一行不会报错、也不生效（没人读），手机页会静默
+   * 停在直连模式——整个中转界面根本不出现。
+   */
   readonly mode?: 'machine' | 'hub'
 }
 
@@ -33,6 +39,11 @@ export interface MobileEntryConfig {
  */
 export const Config: Schema = Schema.object({
   mobileOrigin: Schema.string().pattern(MOBILE_ORIGIN_PATTERN).description('手机端根网址的源（如 https://mac1.example.ts.net）'),
+  // 不加 required() 就是「可缺省」（本仓库其余可选字段同款）。值用 pattern 限死
+  // 两个词：这个 schemastery 版本没有 literal，而枚举外的值必须**装载即拒**——
+  // 静默当成 machine 的后果是手机页停在直连模式，看起来像「配了没用」。
+  mode: Schema.string().pattern(/^(machine|hub)$/)
+    .description('手机页模式：machine=直连本机（缺省），hub=连中转站。中转模式下要在这**一行**加 mode: hub'),
 })
 
 /**
