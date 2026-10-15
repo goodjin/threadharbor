@@ -110,7 +110,20 @@ export function createHubBackend(opts = {}) {
       const open = () => {
         if (closed) return
         handlers.onStatus?.('connecting', '')
-        socket = new WebSocketCtor(`ws://${location.host}${EVENTS_PATH}`)
+        // 按页面协议选 ws/wss：中转的入口是 HTTPS，写死 ws:// 会被浏览器的
+        // 混合内容策略当场拦掉（Chrome 还在构造期同步抛 SecurityError），事件
+        // 通道就永远连不上。与直连分支 app.js 的取法同款。
+        const protocol = globalThis.location?.protocol === 'https:' ? 'wss:' : 'ws:'
+        const host = globalThis.location?.host ?? ''
+        try {
+          socket = new WebSocketCtor(`${protocol}//${host}${EVENTS_PATH}`)
+        } catch (error) {
+          // 构造期抛错（混合内容、URL 非法）也要落到「连不上」而不是把异常
+          // 顺着 boot() 一路炸出去——直连分支有 makeSocketFactory 专管这一档。
+          socket = null
+          handlers.onStatus?.('offline', error instanceof Error ? error.message : String(error))
+          return
+        }
         socket.onopen = () => {
           attempts = 0
           handlers.onStatus?.('online', '')
@@ -123,7 +136,11 @@ export function createHubBackend(opts = {}) {
             return
           }
           if (frame?.type === 'item' && typeof frame.hostId === 'string') {
-            handlers.onEvent(frame.hostId, frame.value?.type ?? 'item', frame.value)
+            const value = frame.value
+            // ready 是**连接级**的（那台机器的事件流已就绪），不是业务事件：
+            // 手机的状态由 onStatus 报，混进 onEvent 只会让界面多一条看不懂的分支。
+            if (value?.type === 'ready') return
+            handlers.onEvent(frame.hostId, value?.type ?? 'item', value)
           }
         }
         socket.onclose = () => {

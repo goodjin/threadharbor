@@ -11,6 +11,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { bootApp, lastSeenTextOf } from '../mobile/app.js'
+import { createHubBackend, EVENTS_PATH } from '../mobile/backend-hub.js'
 
 interface Deferred<T> {
   promise: Promise<T>
@@ -237,6 +238,227 @@ describe('断掉的机器要能说清它最后一次有动静是什么时候', (
   it('从来没成功联系过（没有 lastSeenAt）就不编时间（别显示 1970 年）', () => {
     expect(lastSeenTextOf({ online: true, reachable: false }, now)).toBeUndefined()
     expect(lastSeenTextOf({ online: false, reachable: false, lastSeenAt: '刚才' }, now)).toBeUndefined()
+  })
+})
+
+describe('事件通道的地址与构造（HTTPS 入口下这两点各自足以致死）', () => {
+  /** 起一个假的 location：协议与 host 是唯一被用到的东西。 */
+  function withLocation(protocol: string, host: string): () => void {
+    const previous = (globalThis as { location?: unknown }).location
+    Object.defineProperty(globalThis, 'location', { value: { protocol, host }, configurable: true })
+    return () => {
+      if (previous === undefined) delete (globalThis as { location?: unknown }).location
+      else Object.defineProperty(globalThis, 'location', { value: previous, configurable: true })
+    }
+  }
+
+  function collect(): { backend: ReturnType<typeof createHubBackend>; urls: string[] } {
+    const urls: string[] = []
+    class FakeSocket {
+      close() {}
+      constructor(url: string) { urls.push(url) }
+    }
+    return { backend: createHubBackend({ WebSocketCtor: FakeSocket as never }), urls }
+  }
+
+  it('HTTPS 页面用 wss（写死 ws:// 会被混合内容策略当场拦掉）', () => {
+    const restore = withLocation('https:', 'dsh.agentlab.fun')
+    try {
+      const { backend, urls } = collect()
+      backend.connectEvents({ onStatus: () => {} })
+      expect(urls[0]).toBe(`wss://dsh.agentlab.fun${EVENTS_PATH}`)
+    } finally {
+      restore()
+    }
+  })
+
+  it('HTTP 页面（本地开发）仍用 ws', () => {
+    const restore = withLocation('http:', '127.0.0.1:3080')
+    try {
+      const { backend, urls } = collect()
+      backend.connectEvents({ onStatus: () => {} })
+      expect(urls[0]).toBe(`ws://127.0.0.1:3080${EVENTS_PATH}`)
+    } finally {
+      restore()
+    }
+  })
+
+  it('构造期抛错（混合内容等）落到「连不上」，不把异常顺着 boot() 炸出去', () => {
+    const restore = withLocation('https:', 'dsh.agentlab.fun')
+    try {
+      const statuses: { state: string; detail: string }[] = []
+      class ThrowingSocket {
+        constructor() { throw new Error('Mixed Content') }
+        close() {}
+      }
+      const backend = createHubBackend({ WebSocketCtor: ThrowingSocket as never })
+      expect(() => backend.connectEvents({ onStatus: (state, detail) => statuses.push({ state, detail }) })).not.toThrow()
+      expect(statuses.at(-1)?.state).toBe('offline')
+      expect(statuses.at(-1)?.detail).toContain('Mixed Content')
+    } finally {
+      restore()
+    }
+  })
+})
+
+describe('中转模式的待批横幅（词表错位过一次：横幅永远不出现）', () => {
+  /**
+   * 建一个真被后端持有的假 socket：后端是 `new` 出来再挂 onmessage 的，
+   * 替身必须把实例交回来，否则推帧推到一个没人看的对象上。
+   */
+  function hubSocket() {
+    const seen: { type: string; hostId: string; value: unknown }[] = []
+    let live: { onmessage: ((e: { data: string }) => void) | null } | null = null
+    class FakeSocket {
+      onmessage: ((e: { data: string }) => void) | null = null
+      onopen: (() => void) | null = null
+      onclose: (() => void) | null = null
+      onerror: (() => void) | null = null
+      constructor(_url: string) { live = this as unknown as typeof live }
+      close() {}
+    }
+    const backend = createHubBackend({ WebSocketCtor: FakeSocket as never })
+    backend.connectEvents({
+      onStatus: () => {},
+      onEvent: (hostId, type, value) => { seen.push({ type, hostId, value }) },
+    })
+    return {
+      seen,
+      /** 推一帧**上游原样形状**的 item：中转广播的就是 {type:'item',hostId,value}。 */
+      push(hostId: string, value: unknown) {
+        if (live === null) throw new Error('socket 没建起来')
+        ;(live as { onmessage: (e: { data: string }) => void }).onmessage({
+          data: JSON.stringify({ type: 'item', hostId, value }),
+        })
+      },
+    }
+  }
+
+  it('waterfall 帧（上游原样）→ 交给 app 的是协议里的名字，不是自造的 approval/request', () => {
+    const socket = hubSocket()
+    socket.push('host-a', {
+      type: 'waterfall',
+      event: 'approval/request',
+      eventId: 'evt-77',
+      agentId: 'agent-1',
+      request: { toolName: 'bash', displayReason: '要执行 ls' },
+    })
+    expect(socket.seen[0]?.type).toBe('waterfall')
+    expect(socket.seen[0]?.hostId).toBe('host-a')
+    // 横幅要用的字段与直连分支同形：eventId + request.*
+    const value = socket.seen[0]?.value as { event?: string; eventId?: string; request?: { toolName?: string } }
+    expect(value.event).toBe('approval/request')
+    expect(value.eventId).toBe('evt-77')
+    expect(value.request?.toolName).toBe('bash')
+  })
+
+  it('emit 帧（api-session/*）原样带出事件名，交给既有的 emit 处理器', () => {
+    const socket = hubSocket()
+    socket.push('host-a', { type: 'emit', event: 'api-session/message', data: {} })
+    expect(socket.seen[0]?.type).toBe('emit')
+    expect((socket.seen[0]?.value as { event?: string }).event).toBe('api-session/message')
+  })
+
+  it('cancel 帧带 eventId（别的端先答了就把卡撤掉）', () => {
+    const socket = hubSocket()
+    socket.push('host-a', { type: 'cancel', eventId: 'evt-77' })
+    expect(socket.seen[0]?.type).toBe('cancel')
+    expect((socket.seen[0]?.value as { eventId?: string }).eventId).toBe('evt-77')
+  })
+
+  it('ready 帧不当作业务事件抛给界面', () => {
+    const socket = hubSocket()
+    socket.push('host-a', { type: 'ready', clientId: 'c-1', host: 'dsh' })
+    expect(socket.seen).toEqual([])
+  })
+})
+
+/**
+ * 这一条是把**整条链路**钉住的那一条：上游原样形状的帧 → 中转后端解包 →
+ * 真 app 渲染出横幅。
+ *
+ * 上面的用例只问「后端把什么交出去了」，问不到「界面认不认」——上一版正是
+ * 这么全绿的：后端转交的是协议词表，应用层却按一套自造的词表去判，两边各自
+ * 通过，合起来横幅永远不出现。
+ */
+describe('中转模式的端到端：上游原样帧 → 界面', () => {
+  function hubBackendWithLiveSocket() {
+    let live: { onmessage: ((e: { data: string }) => void) | null; onopen: (() => void) | null; close(): void } | null = null
+    class FakeSocket {
+      onmessage: ((e: { data: string }) => void) | null = null
+      onopen: (() => void) | null = null
+      onclose: (() => void) | null = null
+      onerror: (() => void) | null = null
+      constructor(_url: string) { live = this as unknown as typeof live }
+      close() {}
+    }
+    const answers: { hostId: string; eventId: string }[] = []
+    const backend = {
+      mode: 'hub' as const,
+      async listHosts() {
+        return { hosts: [{ hostId: HOST_A, name: 'MacBook', running: true, reachable: true, online: true }] }
+      },
+      async listSessions() { return { items: [] } },
+      async pageMessages() { return { conv: { items: [] } } },
+      async prompt() { return { ok: true } },
+      async cancel() { return { ok: true } },
+      async answer(hostId: string, eventId: string) { answers.push({ hostId, eventId }); return { ok: true } },
+      connectEvents: (handlers: { onStatus: (s: string, d: string) => void; onEvent: (h: string, t: string, v: unknown) => void }) => {
+        // 这里走**真的** hub 后端：只有它会把 {type:'item',hostId,value} 解成
+        // app 认得的回调参数。用替身就又回到「各自钉住各自那套词表」。
+        return createHubBackend({
+          WebSocketCtor: FakeSocket as never,
+          fetchLike: (async () => ({ status: 200, text: async () => '{}' })) as never,
+        }).connectEvents(handlers)
+      },
+    }
+    return {
+      backend,
+      answers,
+      push(value: unknown, hostId = HOST_A) {
+        if (live === null) throw new Error('socket 没建起来')
+        ;(live as { onmessage: (e: { data: string }) => void }).onmessage({
+          data: JSON.stringify({ type: 'item', hostId, value }),
+        })
+      },
+    }
+  }
+
+  it('上游原样的 waterfall 帧 → 顶部出现待批横幅，标明来自哪台机器', async () => {
+    const { backend, push } = hubBackendWithLiveSocket()
+    const root = host()
+    await bootApp(root, { backend: backend as never })
+    await settle()
+
+    push({
+      type: 'waterfall',
+      event: 'approval/request',
+      eventId: 'evt-88',
+      agentId: 'agent-1',
+      request: { toolName: 'bash', displayReason: '要执行 ls' },
+    })
+    await settle()
+
+    expect(root.innerHTML).toContain('待批准')
+    expect(root.innerHTML).toContain('要执行 ls')
+    expect(root.innerHTML).toContain('MacBook')
+  })
+
+  it('横幅的答复回到**发起它的那台**机器（哪怕操作者正看着另一台）', async () => {
+    const { backend, push, answers } = hubBackendWithLiveSocket()
+    const root = host()
+    await bootApp(root, { backend: backend as never })
+    await settle()
+
+    push({ type: 'waterfall', event: 'approval/request', eventId: 'evt-89', request: { toolName: 'bash' } }, HOST_B)
+    await settle()
+
+    const button = root.querySelector('[data-action="approve"][data-event-id="evt-89"]') as HTMLElement | null
+    expect(button).not.toBeNull()
+    button?.click()
+    await settle()
+
+    expect(answers).toEqual([{ hostId: HOST_B, eventId: 'evt-89' }])
   })
 })
 

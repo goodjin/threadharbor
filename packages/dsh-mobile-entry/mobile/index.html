@@ -21,5 +21,15 @@
          按裸占位符替换时先改掉这里。 -->
     <script>window.__THREADHARBOR_MOBILE__ = __MOBILE_CONFIG__</script>
     <script type="module" src="/threadharbor/mobile/app.js"></script>
+    <!-- 自举：app.js 只导出 bootApp，不自己启动——它在用例里被直接调用，
+         真浏览器里由这一行启动。用相对路径：页面在 /threadharbor/mobile/ 下，
+         前缀将来变了也不会指到别处去。
+         bootApp 自己接住启动期的失败（渲染错误屏），这里不 await、不再包一层
+         try：包了反而会把「启动失败」这件事藏起来。 -->
+    <script type="module">
+      import { bootApp } from './app.js'
+      const root = document.getElementById('app')
+      if (root !== null) void bootApp(root)
+    </script>
   </body>
 </html>

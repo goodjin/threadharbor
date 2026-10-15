@@ -33,6 +33,7 @@ import {
   SESSION_HISTORY_ENDPOINT,
   SESSION_LIST_ENDPOINT,
   SESSION_PROMPT_ENDPOINT,
+  PEERS_PATH,
   rpcCall,
 } from './wire.js'
 import {
@@ -46,9 +47,6 @@ import {
   renderSessionList,
   stateFold,
 } from './views.js'
-
-/** 本机 peers 接口（Task 5 的 exact 路由，同源 GET）。 */
-const PEERS_PATH = '/threadharbor/mobile/peers'
 
 /** session/page 一页最多取多少条 durable 记录。 */
 const PAGE_SIZE = 50
@@ -456,19 +454,28 @@ export async function bootApp(root, deps = {}) {
     eventsHolder.handle = state.backend.connectEvents({
       onEvent(hostId, type, value) {
         if (typeof hostId !== 'string') return
-        if (type === 'approval/request' && value !== null && typeof value === 'object') {
-          const eventId = String(value.id ?? '')
-          if (eventId.length === 0) return
-          state.approvalHosts.set(eventId, hostId)
-          const machine = state.machines.find(item => item?.hostId === hostId)
-          state.approvals.set(eventId, { ...value, machineLabel: machine?.name ?? hostId })
-          render()
+        // 词表只有一份：中转转发的是上游 mux 的原始 item（type 是
+        // waterfall/emit/cancel，事件名与字段都在同一层 value 上），所以这里
+        // **复用直连分支的处理器**，不另编一套词表——上一版自己编了
+        // 'approval/request'/'session/update' 这套线上不存在的名字，结果待批
+        // 横幅在中转模式下永远不出现、广播也永远不触发刷新。
+        if (type === 'waterfall') {
+          if (value?.event !== 'approval/request' || typeof value.eventId !== 'string') return
+          // 归属必须在入队前记下：应答要回到**发起它的那台**，而不是正在看的。
+          state.approvalHosts.set(value.eventId, hostId)
+          onWaterfall(value)
           return
         }
-        if (type === 'session/update' && hostId === state.machineId) {
-          void refreshSessions()
-          if (state.screen === 'conversation') void refreshConversation()
+        if (type === 'cancel') {
+          onCancelFrame(value)
+          return
         }
+        if (type === 'emit') {
+          // 别的机器的广播只更新它自己的会话；正在看的那台变了才补拉。
+          if (hostId === state.machineId) onEmit(value)
+          return
+        }
+        if (type === 'ready') return
       },
       onStatus(status, detail) {
         state.mux = status === 'online' ? 'online' : status === 'connecting' ? 'connecting' : 'offline'
