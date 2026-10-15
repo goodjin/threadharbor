@@ -572,3 +572,36 @@ describe('应答失败必须落点（否则三种失败在手机上长得一样�
   })
 })
 
+describe('停机：订阅项与各机连接都要收掉', () => {
+  /** 一个会数帧的手机（收尾时会被 close，这里只关心还收不收得到帧）。 */
+  function countingPhone(counter: { got: number }): never {
+    return { send: () => { counter.got++ }, on: () => {}, close: () => {} } as never
+  }
+
+  it('stop 之后：那台机器再出事件，**新接进来的手机**也收不到（订阅真摘了）', async () => {
+    const fake = fakeClient()
+    let closed = 0
+    const relay = new Relay({
+      knownHostIds: new Set([HOST_A]),
+      clients: {
+        clientFor: async () => fake.client,
+        invalidate: () => {},
+        closeAll: () => { closed++ },
+      },
+    })
+    const before = { got: 0 }
+    relay.registerPhone(countingPhone(before))
+    await relay.reconcile([HOST_A])
+    fake.emit('item', { type: 'item', value: 1 })
+    expect(before.got).toBe(1)
+
+    relay.stop()
+    // 停机后的新手机（重载后连上来的那一部）：不该收到**停机前那次订阅**的帧。
+    // 这一步不能靠「旧手机被摘掉」蒙混过关——那样订阅没摘也照样绿。
+    const after = { got: 0 }
+    relay.registerPhone(countingPhone(after))
+    fake.emit('item', { type: 'item', value: 2 })
+    expect(after.got).toBe(0)
+    expect(closed).toBe(1)
+  })
+})

@@ -208,6 +208,11 @@ function assertMachines(machines: readonly RelayMachineConfig[], sshKnownHostsPa
 export interface RelaySshFacade {
   ensureTunnel(config: SshConnectionConfig, remotePort: number, opts?: { readonly localPort?: number }): Promise<string>
   readLaunchUrl(config: SshConnectionConfig, remoteLogPath: string, timeoutMs?: number): Promise<string | undefined>
+  /**
+   * 收掉所有隧道（停机时用）。缺省时隧道池的 closeAll 只清内存句柄——
+   * ssh 子进程还活着，固定端口仍然被占着，重载后的新一代起不来。
+   */
+  closeTunnel?(): Promise<void> | void
 }
 
 /**
@@ -290,6 +295,21 @@ export function apply(ctx: RelayRouteContext, config?: MobileRelayConfig, deps: 
     relay === undefined ? undefined : (hostIds: readonly string[]) => { void relay?.reconcile(hostIds) },
   )
   if (relay !== undefined) registerHubRoutes(ctx, relay, new URL(mobileOrigin).hostname)
+  if (runtime !== undefined) {
+    // 停机收尾：把 SSH 隧道与各机连接都收掉。
+    //
+    // 漏了这一步的代价在真机上见过：隧道是 `-N` 起的独立子进程，插件卸载不会
+    // 带走它们，于是**上一代仍占着固定端口**，新一代起不来（报 ssh-failed），
+    // 机器就一直显示不可达——而端口是「一经分配就固定」的，不肯换号。
+    // systemd 的 KillMode=control-group 只兜得住整机重启，兜不住插件热重载。
+    ctx.effect(
+      () => async () => {
+        await runtime.tunnels.closeAll()
+        relay?.stop()
+      },
+      'threadharbor-mobile-relay: shutdown',
+    )
+  }
 }
 
 /**
@@ -352,7 +372,11 @@ function buildRuntime(config: MobileRelayConfig, deps: RelayAssemblyDeps): Relay
   const tunnels = new TunnelPool(
     config.statePath,
     // 箭头函数保住 this：manager 的方法取出来裸传会丢接收者。
-    { ensureTunnel: (connection, remotePort, opts) => ssh.ensureTunnel(connection, remotePort, opts) },
+    {
+      ensureTunnel: (connection, remotePort, opts) => ssh.ensureTunnel(connection, remotePort, opts),
+      // 绑上真实的收尾：隧道是 `-N` 起的独立子进程，不显式收就留在原地占端口。
+      closeTunnel: async () => { await ssh.closeTunnel?.() },
+    },
     config.sshKnownHostsPath,
   )
   const credentials = new MachineCredentials(new CredentialStore(config.statePath))
@@ -430,6 +454,7 @@ function createSshFacade(knownHostsPath: string): RelaySshFacade {
   return {
     ensureTunnel: (config, remotePort, opts) => manager.ensureTunnel(config, remotePort, opts),
     readLaunchUrl: (config, remoteLogPath, timeoutMs) => manager.readLaunchUrl(config, remoteLogPath, timeoutMs),
+    closeTunnel: () => manager.close(),
   }
 }
 

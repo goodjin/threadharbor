@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -16,6 +16,7 @@ import {
   type RelayRouteContext,
 } from '../src/index.ts'
 import { Relay } from '../src/relay.ts'
+import { TunnelPool } from '../src/tunnels.ts'
 
 /**
  * 骨架装载用例：中转包要作为组合行装载，装载器读到的是 `name` / `inject` /
@@ -369,28 +370,34 @@ describe('内部故障的落点（细节不能跟着有界文案一起消失）'
   })
 })
 
-describe('装配层的两条线（有方法不等于有人调）', () => {
-  function assemblyCtx() {
-    const upgrades = new Map<string, unknown>()
-    const disposers: (() => void)[] = []
-    const ctx = {
-      effect(factory: () => unknown) {
-        const result = factory()
-        if (typeof result === 'function') disposers.push(result as () => void)
-        return result
+/** 装配用的最小 ctx：登记的路由、升级路由与 disposer 都收在这里，便于断言。 */
+function assemblyCtx() {
+  const upgrades = new Map<string, unknown>()
+  const disposers: (() => unknown)[] = []
+  const routes: { path: string; handler: (req: unknown, res: unknown) => Promise<void> }[] = []
+  const ctx = {
+    effect(factory: () => unknown) {
+      const result = factory()
+      if (typeof result === 'function') disposers.push(result as () => void)
+      return result
+    },
+    webServer: {
+      register(route: { path: string; handler: (req: unknown, res: unknown) => Promise<void> }) {
+        routes.push(route as never)
+        return () => {}
       },
-      webServer: {
-        register() { return () => {} },
-        registerUpgrade(route: { path: string }) {
-          if (upgrades.has(route.path)) throw new Error(`duplicate upgrade route "${route.path}"`)
-          upgrades.set(route.path, route)
-          return () => { upgrades.delete(route.path) }
-        },
+      registerUpgrade(route: { path: string }) {
+        if (upgrades.has(route.path)) throw new Error(`duplicate upgrade route "${route.path}"`)
+        upgrades.set(route.path, route)
+        return () => { upgrades.delete(route.path) }
       },
-      connection: { admit: () => ({ peer: {} }) },
-    }
-    return { ctx: ctx as unknown as RelayRouteContext, upgrades, disposers }
+    },
+    connection: { admit: () => ({ peer: {} }) },
   }
+  return { ctx: ctx as unknown as RelayRouteContext, upgrades, disposers, routes }
+}
+
+describe('装配层的两条线（有方法不等于有人调）', () => {
 
   const assemblyDeps: RelayAssemblyDeps = {
     // 隧道开不出来：机器全程离线，正是「上线后要能补挂订阅」那个场景。
@@ -448,3 +455,77 @@ describe('装配层的两条线（有方法不等于有人调）', () => {
   })
 })
 
+describe('停机收尾：重载不能把上一代的隧道留在原地', () => {
+  function shutdownConfig(): { config: MobileRelayConfig; dir: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'relay-shutdown-'))
+    writeFileSync(join(dir, 'known_hosts'), '')
+    return {
+      dir,
+      config: {
+        mobileOrigin: 'https://relay.example.com',
+        sshKnownHostsPath: join(dir, 'known_hosts'),
+        statePath: join(dir, 'state.json'),
+        machines: [{ hostId: 'mac-a', target: '100.64.0.2', remotePort: 3081, logPath: '/l.log' }],
+      },
+    }
+  }
+
+  it('跑完卸载的 disposer 之后，SSH 隧道真的被收掉了（否则新一代抢不到固定端口）', async () => {
+    const { config } = shutdownConfig()
+    const shutDown: string[] = []
+    const deps: RelayAssemblyDeps = {
+      ssh: {
+        ensureTunnel: async () => 'x',
+        readLaunchUrl: async () => undefined,
+        closeTunnel: () => { shutDown.push('tunnels') },
+      },
+      tailscalePeers: [{ name: 'mac-a', online: true }],
+      probeStatus: 200,
+    }
+    const first = assemblyCtx()
+    apply(first.ctx, config, deps)
+    // 拉一次清单，让该机真的走一遍「开隧道 → 建客户端」（订阅挂在客户端上）。
+    const hosts = first.routes.find(route => route.path === '/threadharbor/relay/hosts')
+    if (hosts === undefined) throw new Error('没有清单路由')
+    await hosts.handler(
+      { method: 'GET', url: '/threadharbor/relay/hosts', headers: { host: 'relay.example.com' } },
+      { writeHead: () => {}, end: () => {} },
+    )
+    expect(shutDown).toEqual([])
+
+    // 模拟宿主卸载（插件热重载）：所有 disposer 都得跑完。
+    for (const dispose of first.disposers.splice(0)) await dispose()
+    expect(shutDown).toEqual(['tunnels'])
+
+    // 重载不该撞重复登记——这一条本来就绿（路由都包在 effect 里）。
+    const second = assemblyCtx()
+    expect(() => apply(second.ctx, config, deps)).not.toThrow()
+  })
+
+  it('收尾会把该机的 SSH 隧道真正收掉（真机见过孤儿占住固定端口）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'relay-shutdown2-'))
+    const killed: string[] = []
+    const pool = new TunnelPool(
+      join(dir, 'state.json'),
+      {
+        ensureTunnel: async () => 'http://127.0.0.1:41100',
+        closeTunnel: async () => { killed.push('closed') },
+      },
+      join(dir, 'known_hosts'),
+    )
+    await pool.ensure({ hostId: 'mac-a', target: '100.64.0.2', remotePort: 3081, logPath: '/l.log' })
+    await pool.closeAll()
+    expect(killed).toEqual(['closed'])
+  })
+
+  it('没给收尾钩子时 closeAll 只清内存句柄（这时必须说清楚它没杀进程）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'relay-shutdown3-'))
+    const pool = new TunnelPool(
+      join(dir, 'state.json'),
+      { ensureTunnel: async () => 'http://127.0.0.1:41100' },
+      join(dir, 'known_hosts'),
+    )
+    await pool.ensure({ hostId: 'mac-a', target: '100.64.0.2', remotePort: 3081, logPath: '/l.log' })
+    await expect(pool.closeAll()).resolves.toBeUndefined()
+  })
+})

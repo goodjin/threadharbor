@@ -82,11 +82,6 @@ export class RelayClientPool implements ClientPool {
     for (const client of this.clients.values()) client.close()
     this.clients.clear()
   }
-
-  /** 供接线自检：某机是否已建连接（不建）。 */
-  has(hostId: string): boolean {
-    return this.clients.has(hostId)
-  }
 }
 
 export type { ClientPool }
