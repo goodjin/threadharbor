@@ -7,7 +7,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { SshConnectionConfig, SshDeployProgress, SshDeployRequest, SshDeployResult, SshHostKeyCandidate } from './types.ts'
-import { composeLaunchUrl, parseAccessMode, parseDeployMarkers } from './access.ts'
+import { composeLaunchUrl, latestLaunchUrl, parseAccessMode, parseDeployMarkers } from './access.ts'
 import { run, runWithEnv } from './run.ts'
 import { freePort, portListening } from './port.ts'
 import { deploymentChannel, destination, parseSshInput, shellQuote } from './parse.ts'
@@ -125,15 +125,23 @@ export class DshSshManager {
     try {
       const materialized = await this.materializeAuth(config)
       try {
+        // 两种日志形态都要认：
+        //   LAUNCH_URL=<url>  —— 由本包的 deploy 写进日志的标记；
+        //   dsh web: <url>    —— dsh 自己启动时打印的那一行。
+        // 只认前者的后果很具体：一台**手工起的** dsh（没有 deploy 标记）会让
+        // 这条 grep 命中很久以前某次 deploy 留下的旧标记，于是换凭据时拿着
+        // 一个早已失效的启动令牌去换，对方回 401——而日志里明明有新令牌。
+        // 两条形态混在一条 grep 里、再取最后一行：日志是只追加的，最后一行
+        // 就是最新那次启动。
         const probe = await this.remoteExec(
           materialized,
-          `grep -h '^LAUNCH_URL=' ${target} | tail -1`,
+          `grep -hE '^(LAUNCH_URL=|dsh web: )' ${target} | tail -1`,
           timeoutMs ?? 15_000,
         )
         if (probe.code !== 0) return undefined
         // parseDeployMarkers keeps the last occurrence, so "latest marker
         // wins" holds even if the grep pipeline above ever grows noisier.
-        return parseDeployMarkers(probe.stdout).launchUrl
+        return latestLaunchUrl(probe.stdout)
       } finally {
         this.cleanupTempKeys()
       }

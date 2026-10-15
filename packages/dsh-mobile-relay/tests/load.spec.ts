@@ -146,7 +146,9 @@ describe('apply 的装载行为', () => {
     run()
     expect(routes.map(route => `${route.kind} ${route.path}`)).toEqual([
       'exact /threadharbor/relay/hosts',
-      'prefix /threadharbor/relay/hosts/',
+      // 前缀不带尾斜杠：宿主的前缀匹配是 startsWith(prefix + '/')，自带
+      // 斜杠会让任何请求都不命中（登记形状错的症状是「清单 200、转发全 404」）。
+      'prefix /threadharbor/relay/hosts',
       'exact /threadharbor/relay/answer',
     ])
   })

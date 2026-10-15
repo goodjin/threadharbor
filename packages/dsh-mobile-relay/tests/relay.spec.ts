@@ -190,7 +190,7 @@ describe('路径形状与白名单', () => {
     const { relay } = relayWith({ [HOST_A]: a })
     const { state, res } = recorder()
 
-    await relay.handleSessions(req(`${RELAY_SESSIONS_PATH}unknown-host/sessions`), res, urlOf(`${RELAY_SESSIONS_PATH}unknown-host/sessions`))
+    await relay.handleSessions(req(`${RELAY_SESSIONS_PATH}/unknown-host/sessions`), res, urlOf(`${RELAY_SESSIONS_PATH}/unknown-host/sessions`))
 
     expect(state.status).toBe(404)
     expect(JSON.parse(state.body)).toEqual({ error: 'not-found' })
@@ -200,7 +200,7 @@ describe('路径形状与白名单', () => {
   it('sid 含路径穿越 → 404，不发起上游调用', async () => {
     const a = fakeClient()
     const { relay } = relayWith({ [HOST_A]: a })
-    const bad = `${RELAY_SESSIONS_PATH}${HOST_A}/sessions/..%2F..%2Fetc/messages`
+    const bad = `${RELAY_SESSIONS_PATH}/${HOST_A}/sessions/..%2F..%2Fetc/messages`
     const { state, res } = recorder()
 
     await relay.handleMessages(req(bad), res, urlOf(bad))
@@ -212,7 +212,7 @@ describe('路径形状与白名单', () => {
   it('段数不符 → 404', async () => {
     const a = fakeClient()
     const { relay } = relayWith({ [HOST_A]: a })
-    const bad = `${RELAY_SESSIONS_PATH}${HOST_A}`
+    const bad = `${RELAY_SESSIONS_PATH}/${HOST_A}`
     const { state, res } = recorder()
 
     await relay.handleSessions(req(bad), res, urlOf(bad))
@@ -231,7 +231,7 @@ describe('上游失败的对手机表达', () => {
     relay.onStale = (hostId: string) => stale.push(hostId)
     const { state, res } = recorder()
 
-    await relay.handleSessions(req(`${RELAY_SESSIONS_PATH}${HOST_A}/sessions`), res, urlOf(`${RELAY_SESSIONS_PATH}${HOST_A}/sessions`))
+    await relay.handleSessions(req(`${RELAY_SESSIONS_PATH}/${HOST_A}/sessions`), res, urlOf(`${RELAY_SESSIONS_PATH}/${HOST_A}/sessions`))
 
     expect(state.status).toBe(200)
     expect(JSON.parse(state.body)).toEqual({ error: 'credential-stale' })
@@ -245,7 +245,7 @@ describe('上游失败的对手机表达', () => {
     const { relay } = relayWith({ [HOST_A]: a })
     const { state, res } = recorder()
 
-    await relay.handleSessions(req(`${RELAY_SESSIONS_PATH}${HOST_A}/sessions`), res, urlOf(`${RELAY_SESSIONS_PATH}${HOST_A}/sessions`))
+    await relay.handleSessions(req(`${RELAY_SESSIONS_PATH}/${HOST_A}/sessions`), res, urlOf(`${RELAY_SESSIONS_PATH}/${HOST_A}/sessions`))
 
     const body = JSON.parse(state.body)
     expect(body.error).toBe('machine-error')
@@ -255,7 +255,9 @@ describe('上游失败的对手机表达', () => {
 
 describe('常量', () => {
   it('三条路径都在 relay 前缀下', () => {
-    expect(RELAY_SESSIONS_PATH).toBe('/threadharbor/relay/hosts/')
+    // 尾斜杠是这条路径唯一致命的地方：宿主匹配用 prefix + '/'，自带斜杠即永不命中。
+    expect(RELAY_SESSIONS_PATH).toBe('/threadharbor/relay/hosts')
+    expect(RELAY_SESSIONS_PATH.endsWith('/')).toBe(false)
     expect(RELAY_EVENTS_PATH).toBe('/threadharbor/relay/events')
     expect(RELAY_ANSWER_PATH).toBe('/threadharbor/relay/answer')
   })
@@ -356,5 +358,61 @@ describe('评审补的接线用例（C1/C2/I1/I2 的判别力）', () => {
     const state = await messagesVia(relayWith(fake), '/threadharbor/relay/hosts/host-a/sessions/s1/messages/extra')
     expect(state.status).toBe(404)
     expect(fake.calls).toHaveLength(0)
+  })
+})
+
+describe('内部故障有落点（有界化不等于静默）', () => {
+  it('取客户端失败：应答有界，但日志里有 hostId 与原因', async () => {
+    const logs: string[] = []
+    const relay = new Relay({
+      knownHostIds: new Set(['host-a']),
+      clients: { clientFor: async () => { throw new Error('ssh 退出码 255') }, invalidate: () => {}, closeAll: () => {} },
+      log: message => { logs.push(message) },
+    })
+    const { state, res } = recorder()
+    await relay.handleMessages(
+      { method: 'GET', url: '/threadharbor/relay/hosts/host-a/sessions/s1/messages', headers: {} } as never,
+      res as never,
+      new URL('http://x/threadharbor/relay/hosts/host-a/sessions/s1/messages'),
+    )
+    expect(state.body).not.toContain('退出码')
+    expect(logs.join('\n')).toContain('host-a')
+    expect(logs.join('\n')).toContain('退出码')
+  })
+
+  it('上游 rpc-error：同样有界 + 有落点', async () => {
+    const logs: string[] = []
+    const fake = fakeClient()
+    fake.state.result = { ok: false, kind: 'rpc-error', message: '上游内部：ENOENT /srv/secret' }
+    const relay = new Relay({
+      knownHostIds: new Set(['host-a']),
+      clients: { clientFor: async () => fake.client, invalidate: () => {}, closeAll: () => {} },
+      log: message => { logs.push(message) },
+    })
+    const { state, res } = recorder()
+    await relay.handleMessages(
+      { method: 'GET', url: '/threadharbor/relay/hosts/host-a/sessions/s1/messages', headers: {} } as never,
+      res as never,
+      new URL('http://x/threadharbor/relay/hosts/host-a/sessions/s1/messages'),
+    )
+    expect(state.body).not.toContain('secret')
+    expect(logs.join('\n')).toContain('secret')
+  })
+})
+
+describe('上游 RPC 的参数形状（`_request` 壳）', () => {
+  it('会话列表也要带空的 _request（上游描述符要求每个方法有请求对象）', async () => {
+    const fake = fakeClient()
+    const relay = new Relay({
+      knownHostIds: new Set(['host-a']),
+      clients: { clientFor: async () => fake.client, invalidate: () => {}, closeAll: () => {} },
+    })
+    const { res } = recorder()
+    await relay.handleSessions(
+      { method: 'GET', url: '/threadharbor/relay/hosts/host-a/sessions', headers: {} } as never,
+      res as never,
+      new URL('http://x/threadharbor/relay/hosts/host-a/sessions'),
+    )
+    expect(fake.calls[0]?.args).toEqual({ _request: {} })
   })
 })

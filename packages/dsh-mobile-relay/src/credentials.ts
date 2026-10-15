@@ -23,7 +23,14 @@ export type { StoredCredential }
 /** resolve 的失败原因；面向调用方的分类，具体细节在各自函数的注释里。 */
 export type CredentialResolveFailure = 'missing-launch-url' | 'no-cookie' | 'unreachable'
 
-export type CredentialResolveOutcome = { ok: true; cookie: string } | { ok: false; reason: CredentialResolveFailure }
+/**
+ * resolve 的结果。失败时带一句**人话细节**给运维：同一个 `no-cookie` 可能是
+ * 「令牌被对端拒了」（HTTP 401/403，要人重新配对）和「应答解析不出来」
+ * （HTTP 200/303，代码问题）——两者的处置完全相反，不带状态码就只能靠猜。
+ */
+export type CredentialResolveOutcome =
+  | { ok: true; cookie: string }
+  | { ok: false; reason: CredentialResolveFailure; detail?: string }
 
 function parseHttpUrl(value: string): URL | undefined {
   let parsed: URL
@@ -76,7 +83,7 @@ export async function exchangeLaunchToken(
   origin: string,
   launchUrl: string,
   fetchLike?: typeof fetch,
-): Promise<{ cookie: string } | { error: string }> {
+): Promise<{ cookie: string } | { error: string; detail?: string }> {
   const doFetch = fetchLike ?? globalThis.fetch
   const originUrl = parseHttpUrl(origin)
   if (originUrl === undefined) return { error: 'bad-origin' }
@@ -98,7 +105,9 @@ export async function exchangeLaunchToken(
     return { error: 'unreachable' }
   }
   const cookie = cookiePairOf(response)
-  if (cookie === undefined) return { error: 'no-cookie' }
+  // 细节只带状态码：令牌的任何片段都不进这里（它是凭据），它去哪儿都会跟着
+  // 机器清单进手机。真要查令牌读没读对，去机器的启动日志上核对。
+  if (cookie === undefined) return { error: 'no-cookie', detail: `HTTP ${response.status}` }
   return { cookie }
 }
 
@@ -157,6 +166,15 @@ export class MachineCredentials {
   private readonly fetchLike: typeof fetch
   /** 进程内缓存：省掉每笔转发前的读盘；invalidate 时与盘上条目一起清。 */
   private readonly cache = new Map<string, string>()
+  /**
+   * 同一台机器在途的换取：并发调用共用一笔。
+   *
+   * 启动令牌**只能用一次**。清单层与转发层会在同一轮里各要一次凭据（一个是
+   * 自报状态，一个是拿 cookie 去连），没有这份去重时它们各换一次：先到的拿到
+   * 凭据，后到的吃一个 401，于是「凭据明明换到了」与「换凭据失败」会同时出现，
+   * 现场看起来像随机的网络故障。
+   */
+  private readonly pending = new Map<string, Promise<CredentialResolveOutcome>>()
 
   constructor(store: CredentialStore, fetchLike?: typeof fetch) {
     this.store = store
@@ -164,6 +182,22 @@ export class MachineCredentials {
   }
 
   async resolve(
+    hostId: string,
+    origin: string,
+    readLaunchUrl: () => Promise<string | undefined>,
+  ): Promise<CredentialResolveOutcome> {
+    const inFlight = this.pending.get(hostId)
+    if (inFlight !== undefined) return await inFlight
+    const run = this.resolveOnce(hostId, origin, readLaunchUrl)
+    this.pending.set(hostId, run)
+    try {
+      return await run
+    } finally {
+      this.pending.delete(hostId)
+    }
+  }
+
+  private async resolveOnce(
     hostId: string,
     origin: string,
     readLaunchUrl: () => Promise<string | undefined>,
@@ -183,7 +217,10 @@ export class MachineCredentials {
     if (launchUrl === undefined) return { ok: false, reason: 'missing-launch-url' }
     const exchanged = await exchangeLaunchToken(origin, launchUrl, this.fetchLike)
     if ('error' in exchanged) {
-      return { ok: false, reason: resolveReasonOf(exchanged.error) }
+      const detail = 'detail' in exchanged ? String(exchanged.detail) : ''
+      return detail === ''
+        ? { ok: false, reason: resolveReasonOf(exchanged.error) }
+        : { ok: false, reason: resolveReasonOf(exchanged.error), detail }
     }
     const entry: StoredCredential = { hostId, cookie: exchanged.cookie, obtainedAt: Date.now() }
     this.cache.set(hostId, entry.cookie)
@@ -195,6 +232,8 @@ export class MachineCredentials {
   invalidate(hostId: string): void {
     this.cache.delete(hostId)
     this.store.forget(hostId)
+    // 在途的那笔没有跟着作废的义务：它换到的是有效 cookie，落盘后下次直接用。
+    // 真正需要作废的是**下一笔**——所以不 cancel 在途，只让它正常收尾。
   }
 }
 

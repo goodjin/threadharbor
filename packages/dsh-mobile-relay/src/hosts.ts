@@ -70,7 +70,7 @@ export interface HostRegistryCredentials {
     hostId: string,
     origin: string,
     readLaunchUrl: () => Promise<string | undefined>,
-  ): Promise<{ ok: true; cookie: string } | { ok: false; reason: string }>
+  ): Promise<{ ok: true; cookie: string } | { ok: false; reason: string; detail?: string }>
 }
 
 /** 由装配层注入的面；生产真接，测试全换假件。 */
@@ -185,7 +185,9 @@ export class HostRegistry {
         reachable: true,
         credential: 'missing',
         reason: 'credential-missing',
-        detail: `机器 ${machine.hostId} 的凭据未就绪（${outcome.reason}）`,
+        // 带上换凭据那一步的细节（如 HTTP 401/403）：「令牌被拒」与「解析不出
+        // cookie」的处置完全相反，现场必须能一眼分开。
+        detail: `机器 ${machine.hostId} 的凭据未就绪（${outcome.reason}${outcome.detail === undefined ? '' : `，${outcome.detail}`}）`,
       }
     }
     return {

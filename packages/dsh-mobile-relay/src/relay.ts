@@ -25,7 +25,16 @@ import {
 import type { EventOutcome, MachineClient, RpcResult } from './machine-client.ts'
 
 /** 会话类接口的 prefix（hostId 与 sid 都在路径里，故只能 prefix 注册）。 */
-export const RELAY_SESSIONS_PATH = '/threadharbor/relay/hosts/'
+/**
+ * 会话类接口的**前缀**：不带结尾斜杠。
+ *
+ * 宿主的前缀匹配是 `pathname === prefix || pathname.startsWith(prefix + '/')`
+ * （reference/deepseek-harness 的 webserver）。所以登记一个自带结尾斜杠的
+ * 前缀，等于要求请求路径以 `//` 开头——**任何请求都不会命中**，而清单那条
+ * exact 路由照常 200，于是现场表现是「清单正常、转发全 404」，极像配置或
+ * 隧道的问题。尾斜杠由调用方自己拼。
+ */
+export const RELAY_SESSIONS_PATH = '/threadharbor/relay/hosts'
 /** 手机的事件流（WebSocket）。 */
 export const RELAY_EVENTS_PATH = '/threadharbor/relay/events'
 /** 审批应答（POST）。 */
@@ -71,6 +80,14 @@ export interface RelayDeps {
   clients: ClientPool
   /** 装配层提供的凭据自愈钩子（测试可覆盖）。 */
   onCredentialStale?: (hostId: string) => void
+  /**
+   * 内部故障的落点。**这是应答有界化的另一半**：手机只拿到
+   * `{error:'machine-error'}`，不拿上游原文与 SSH stderr——但那些细节不能
+   * 跟着消失。之前这里没有落点，于是「有界」等于「静默」：真机上只能看到
+   * 一句 machine-error，没有任何地方写得过它。日志里记 hostId、动作与错误
+   * 首行（不含凭据）。
+   */
+  log?: (message: string) => void
 }
 
 /** 转发结果 → 手机看到的应答体。 */
@@ -141,6 +158,11 @@ export class Relay {
     if (index < 0) return
     this.attached[index]?.detach()
     this.attached.splice(index, 1)
+  }
+
+  /** 内部故障落点；没装配就静默（测试与精简装配不必给）。 */
+  private log(message: string): void {
+    this.deps.log?.(`[中转] ${message}`)
   }
 
   /** 该机当前挂着的订阅项；没有则 undefined。 */
@@ -228,7 +250,11 @@ export class Relay {
   async handleSessions(req: IncomingMessageLike, res: ResponseLike, url: URL): Promise<void> {
     const parts = this.parse(url, 'sessions')
     if (parts === undefined) return notFound(res)
-    await this.forward(req, res, parts.hostId, SESSION_LIST_ENDPOINT, {})
+    // `_request` 这层壳是上游 RPC 描述符要求的形状：每个方法都要有一个
+    // 请求对象，哪怕它是空的。少这一层，上游回的是
+    // `args fields do not match the descriptor: missing "_request"`——
+    // 而中转把它压成 machine-error，现场看上去像「那台机器坏了」。
+    await this.forward(req, res, parts.hostId, SESSION_LIST_ENDPOINT, { _request: {} })
   }
 
   /** `<prefix>/<hostId>/sessions/<sid>/messages` → 该会话的历史消息。 */
@@ -277,6 +303,7 @@ export class Relay {
     try {
       result = await (await this.deps.clients.clientFor(hostId)).answer(eventId, outcome)
     } catch (error) {
+      this.log(`应答 ${hostId} 失败（取客户端）：${messageOf(error)}`)
       // 与 forward 同一纪律：客户端都取不到（隧道/SSH 层失败），走 machine-error，
       // 不把 SSH 的 stderr 原文当成应答内容推给手机。
       this.deps.clients.invalidate(hostId)
@@ -302,10 +329,11 @@ export class Relay {
       // 开不出来就算这一机现在用不了，不该把整个转发请求拖成 500。
       const client = await this.deps.clients.clientFor(hostId)
       result = await client.call(endpoint, args)
-    } catch {
+    } catch (error) {
       // 取客户端失败 = 隧道/SSH 层失败，messageOf(error) 里是 ssh 的 stderr
       // 原文（含 user@host 这类内部信息）。与下面的 rpc-error 分支**同形**：
       // 都只回 {error:'machine-error'}，细节进日志。
+      this.log(`转发 ${endpoint} 到 ${hostId} 失败（取客户端）：${messageOf(error)}`)
       respondJson(res, 200, JSON.stringify({ error: 'machine-error' }))
       return
     }
@@ -321,6 +349,7 @@ export class Relay {
       return
     }
     // rpc-error / transport 一律压成固定文案：上游原文可能含内部细节。
+    this.log(`转发 ${endpoint} 到 ${hostId} 失败（${result.kind}）：${messageOf(result.message)}`)
     respondJson(res, 200, JSON.stringify({ error: 'machine-error' }))
   }
 

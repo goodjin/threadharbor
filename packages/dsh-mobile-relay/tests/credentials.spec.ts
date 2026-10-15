@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import type { CredentialResolveOutcome } from '../src/credentials.ts'
 import { CredentialStore, exchangeLaunchToken, MachineCredentials } from '../src/credentials.ts'
 import { StateStore, type StoredCredential } from '../src/state.ts'
 
@@ -62,13 +63,15 @@ function fetchFake(...responses: Array<Response | Error>): { calls: FetchCall[];
 }
 
 /** 带 Set-Cookie 的最小应答；用真 Headers（getSetCookie 行为与生产一致）。 */
-function responseWith(setCookie: readonly string[]): Response {
+function responseWith(setCookie: readonly string[], status = 303): Response {
   const headers = new Headers()
   for (const value of setCookie) headers.append('set-cookie', value)
-  return { headers } as unknown as Response
+  return { headers, status } as unknown as Response
 }
 
 const NO_COOKIE_RESPONSE = responseWith([])
+/** 令牌被对端拒了：状态码不同，现场处置完全不同，必须能一眼分开。 */
+const REJECTED_RESPONSE = responseWith([], 401)
 
 describe('CredentialStore（整对 cookie 的持久化）', () => {
   it('put 后 get/list 原样读回；同 hostId 再 put 是覆盖不是追加；forget 只删指定的', () => {
@@ -256,7 +259,7 @@ describe('MachineCredentials.resolve（取 cookie 与失效自愈一次）', () 
       ORIGIN,
       readLaunchUrlOf,
     )
-    expect(result).toEqual({ ok: false, reason: 'no-cookie' })
+    expect(result).toEqual({ ok: false, reason: 'no-cookie', detail: 'HTTP 303' })
     expect(calls).toHaveLength(1)
     expectNoSecrets(result)
   })
@@ -306,7 +309,53 @@ describe('MachineCredentials.resolve（取 cookie 与失效自愈一次）', () 
     expect(await mc.resolve(HOST, ORIGIN, readLaunchUrlOf)).toEqual({ ok: true, cookie: 'dsh-auth-stale=old' })
     mc.invalidate(HOST)
     const second = await mc.resolve(HOST, ORIGIN, readLaunchUrlOf)
-    expect(second).toEqual({ ok: false, reason: 'no-cookie' })
+    expect(second).toEqual({ ok: false, reason: 'no-cookie', detail: 'HTTP 303' })
     expect(store.get(HOST)).toBeUndefined()
+  })
+})
+
+  it('令牌被拒（HTTP 401）与「应答没 cookie」要能分开（处置完全相反）', async () => {
+    const rejected = await new MachineCredentials(new CredentialStore(statePathInTemp()), fetchFake(REJECTED_RESPONSE).fetchLike)
+      .resolve(HOST, ORIGIN, readLaunchUrlOf)
+    expect(rejected).toEqual({ ok: false, reason: 'no-cookie', detail: 'HTTP 401' })
+
+    const unparsed = await new MachineCredentials(new CredentialStore(statePathInTemp()), fetchFake(NO_COOKIE_RESPONSE).fetchLike)
+      .resolve(HOST, ORIGIN, readLaunchUrlOf)
+    const detailOf = (outcome: CredentialResolveOutcome): string =>
+      outcome.ok ? '' : (outcome.detail ?? '')
+    expect(detailOf(rejected)).toBe('HTTP 401')
+    expect(detailOf(unparsed)).not.toBe(detailOf(rejected))
+  })
+
+describe('并发换取同一台机器的凭据', () => {
+  it('同一 hostId 的并发 resolve 只换一次令牌（启动令牌只能用一次）', async () => {
+    let exchanges = 0
+    const response = responseWith(['dsh-auth-abc=v1.token; Path=/'])
+    const fetchLike = (async () => {
+      exchanges += 1
+      return response
+    }) as unknown as typeof fetch
+
+    const creds = new MachineCredentials(new CredentialStore(statePathInTemp()), fetchLike)
+    const [first, second] = await Promise.all([
+      creds.resolve(HOST, ORIGIN, readLaunchUrlOf),
+      creds.resolve(HOST, ORIGIN, readLaunchUrlOf),
+    ])
+
+    expect(exchanges).toBe(1)
+    expect(first).toEqual(second)
+    expect(first.ok).toBe(true)
+  })
+
+  it('不同 hostId 各换各的（去重不能跨机器）', async () => {
+    let exchanges = 0
+    const response = responseWith(['dsh-auth-abc=v1.token; Path=/'])
+    const fetchLike = (async () => { exchanges += 1; return response }) as unknown as typeof fetch
+    const creds = new MachineCredentials(new CredentialStore(statePathInTemp()), fetchLike)
+    await Promise.all([
+      creds.resolve(HOST, ORIGIN, readLaunchUrlOf),
+      creds.resolve('other-host', ORIGIN, readLaunchUrlOf),
+    ])
+    expect(exchanges).toBe(2)
   })
 })

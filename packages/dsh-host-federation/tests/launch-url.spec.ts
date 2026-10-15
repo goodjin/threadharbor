@@ -156,7 +156,9 @@ describe('DshSshManager.readLaunchUrl', () => {
       expect(url).toBe('http://127.0.0.1:3080/?token=fresh')
       // 远端命令形状是简报钉死的契约：逐行筛标记后取最后一行。
       const script = await remoteScriptOf(root)
-      expect(script).toContain(`grep -h '^LAUNCH_URL='`)
+      // 两种日志形态都在同一条 grep 里：手工起的 dsh 只打印 `dsh web:`，
+      // 只认 LAUNCH_URL= 会让它命中很久以前 deploy 留下的旧令牌。
+      expect(script).toContain(`grep -hE '^(LAUNCH_URL=|dsh web: )'`)
       expect(script).toContain('| tail -1')
     } finally {
       manager.close()
@@ -178,6 +180,41 @@ describe('DshSshManager.readLaunchUrl', () => {
     try {
       const url = await manager.readLaunchUrl(config, log)
       expect(url).toBe('http://127.0.0.1:3080/?token=fresh')
+    } finally {
+      manager.close()
+    }
+  })
+})
+
+describe('readLaunchUrl 的两种日志形态', () => {
+  it('手工起的 dsh（只有 dsh web: 行）也要读得到网址', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'threadharbor-launch-'))
+    roots.push(root)
+    await installFakeSsh(root, {
+      stdout: ['[threadharbor] 别的噪声', 'dsh web: http://127.0.0.1:3080/?token=handstarted'].join('\n'),
+    })
+    const manager = makeManager(root)
+    try {
+      const url = await manager.readLaunchUrl(config, '/root/logs/dsh-web.log')
+      expect(url).toBe('http://127.0.0.1:3080/?token=handstarted')
+    } finally {
+      manager.close()
+    }
+  })
+
+  it('两种形态混在一起时取最后一条（日志只追加，最后一条才是最新那次启动）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'threadharbor-launch-'))
+    roots.push(root)
+    await installFakeSsh(root, {
+      stdout: [
+        'LAUNCH_URL=http://127.0.0.1:3080/?token=deploystale',
+        'dsh web: http://127.0.0.1:3080/?token=handfresh',
+      ].join('\n'),
+    })
+    const manager = makeManager(root)
+    try {
+      const url = await manager.readLaunchUrl(config, '/root/logs/dsh-web.log')
+      expect(url).toBe('http://127.0.0.1:3080/?token=handfresh')
     } finally {
       manager.close()
     }

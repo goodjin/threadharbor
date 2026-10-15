@@ -243,7 +243,12 @@ export function apply(ctx: RelayRouteContext, config?: MobileRelayConfig, deps: 
   // 转发面（Task 8）：清单之外的请求都走这里。装配不出 TunnelPool 的场合
   // （测试替身）就只挂清单——半套转发面比没有更难排查。
   if (runtime !== undefined) {
-    registerHubRoutes(ctx, buildRelay(config, runtime), new URL(mobileOrigin).hostname)
+    // 内部故障的落点。手机侧只拿到有界的 {error:'machine-error'}，细节在这里。
+    // 落点选 console 而非 ctx.logger：DSH 的 logger 输出不进那份运维真正在
+    // 读的追加日志（真机实测：日志文件里搜不到 logger 写的字），而插件的
+    // console 输出就在里面。细节丢了等于没写。
+    const log = (message: string): void => { console.warn(message) }
+    registerHubRoutes(ctx, buildRelay(config, runtime, log), new URL(mobileOrigin).hostname)
   }
 }
 
@@ -255,7 +260,7 @@ export function apply(ctx: RelayRouteContext, config?: MobileRelayConfig, deps: 
  * 池子会各自读盘、各自分配端口，配额会在两次分配之间分裂，表现是「某台机器
  * 偶尔 401，自愈也救不回来」。
  */
-function buildRelay(config: MobileRelayConfig, runtime: RelayRuntime): Relay {
+function buildRelay(config: MobileRelayConfig, runtime: RelayRuntime, log?: (message: string) => void): Relay {
   const { tunnels, credentials, readLaunchUrl } = runtime
   const pool = new RelayClientPool(
     config.machines.map(machine => ({
@@ -282,6 +287,7 @@ function buildRelay(config: MobileRelayConfig, runtime: RelayRuntime): Relay {
   // onCredentialStale 里 invalidate 同时清内存缓存与盘上条目（credentials.ts）。
   return new Relay({
     knownHostIds: new Set(config.machines.map(machine => machine.hostId)),
+    ...(log === undefined ? {} : { log }),
     clients: pool,
     onCredentialStale: hostId => credentials.invalidate(hostId),
   })
@@ -485,6 +491,10 @@ function registerHubRoutes(ctx: RelayRouteContext, relay: Relay, originHost: str
   }
 
   const register = (path: string, method: 'GET' | 'POST', label: string, handler: (req: Req, res: Res, url: URL) => Promise<void>) => {
+    // 前缀自带尾斜杠会让宿主的 `startsWith(prefix + '/')` 永远不成立（见
+    // RELAY_SESSIONS_PATH 的注释）。这条断言把「登记形状对不对」挡在装载期，
+    // 而不是等到真机上一次 404 才想起查路由表。
+    if (path.endsWith('/')) throw new Error(`中转前缀路由不能以斜杠结尾（会永不命中）：${path}`)
     ctx.effect(
       () =>
         ctx.webServer.register({
