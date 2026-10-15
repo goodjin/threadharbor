@@ -63,7 +63,39 @@ export function renderErrorScreen(message) {
  * - unpaired：没有本机凭据或凭据已失效——从桌面端的二维码入口重新扫码；
  * - untrusted：主机 403——域名不在 tailscale serve 的信任名单，查安装配置。
  */
-export function pairingGuideView(reason) {
+export function pairingGuideView(reason, mode = 'machine') {
+  // 中转模式下这两段文案必须换：凭据是对**中转站**的，不是对本机的，照直连那套
+  // 一步步做下来会拿自己电脑上的二维码去扫——扫完手机配到那台机器上，页面变成
+  // 直连模式，中转这条链路整个白走一遍，而且看上去「配对了」，最难查。
+  if (mode === 'hub') {
+    return [
+      '<section class="guide">',
+      reason === 'untrusted'
+        ? '<h1>中转站还没信任你</h1>'
+        : '<h1>还没跟中转站配对</h1>',
+      '<p>这台手机页与<strong>中转站</strong>的凭据已经失效，'
+        + (reason === 'untrusted'
+          ? '或者中转站拒绝了这次访问（HTTP 403）。'
+          : '或者从来没有建立过（HTTP 401）。')
+        + '</p>',
+      '<ol>',
+      '<li>在<strong>中转站那个页面</strong>（形如 '
+        + '<code>https://&lt;子域&gt;.&lt;主域&gt;/threadharbor/mobile/</code>）'
+        + '上打开「手机配对」面板——在你自己电脑上的 ThreadHarbor 里打开同一个网址也行；</li>',
+      '<li>出示二维码；</li>',
+      '<li>用这台手机<strong>重新扫码</strong>打开本页。</li>',
+      '</ol>',
+      '<p class="guide-warn">别用你自己电脑上 ThreadHarbor 桌面端那个二维码：'
+        + '那会把手机配到那台机器上，配完手机上打开的就不是中转页而是那台机器自己的直连页。</p>',
+      '<button type="button" data-action="retry-boot">重新检测</button>',
+      '</section>',
+    ].join('')
+  }
+  return pairingGuideMachine(reason)
+}
+
+/** 直连模式的引导文案：中转分支抽走后剩下的原文，保持逐字不变。 */
+function pairingGuideMachine(reason) {
   if (reason === 'untrusted') {
     return [
       '<section class="guide">',

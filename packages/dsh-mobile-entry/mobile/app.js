@@ -270,7 +270,7 @@ export async function bootApp(root, deps = {}) {
         tabbar.innerHTML = ''
         break
       case 'guide':
-        main.innerHTML = pairingGuideView(state.guideReason)
+        main.innerHTML = pairingGuideView(state.guideReason, isHub ? 'hub' : 'machine')
         tabbar.innerHTML = ''
         break
       case 'error':

@@ -600,8 +600,11 @@ describe('手机自己与中转站的连接断了 → 走配对引导（与直�
     // 认**引导屏**自己的结构与那句标题。不能拿「配对」两个字当判据：那句错误
     // 文案里也有这两个字（又会假绿一次）。引导屏只有它自己有 class=guide。
     expect(root.innerHTML).toContain('class="guide"')
-    expect(root.innerHTML).toContain('还没配对')
+    expect(root.innerHTML).toContain('还没跟中转站配对')
     expect(root.innerHTML).not.toContain('还没有会话')
+    // 关键一句：不能把人引到「自己电脑上的桌面端二维码」——那会把手机配到另一台
+    // 机器上，配完打开的是直连页，中转整条链路白走而且看着像配对了。
+    expect(root.innerHTML).toContain('别用你自己电脑上 ThreadHarbor 桌面端那个二维码')
   })
 })
 
