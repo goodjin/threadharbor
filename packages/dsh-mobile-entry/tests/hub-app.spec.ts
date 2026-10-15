@@ -491,13 +491,15 @@ describe('游标探测在两种后端上必须一致（真实形状：中转只�
     const { backend } = hubWithFetch([{ error: 'machine-error' }])
     const body = await backend.pageMessages('mac-a', 's1', Number.MAX_SAFE_INTEGER, 1)
     expect(body.error).toBe('machine-error')
+    expect(body.kind).toBeUndefined()
   })
 
   it('凭据过期不许折成空清单——那在界面上长得就是「这台机器还没有会话」', async () => {
-    const { backend } = hubWithFetch([{ ok: false, kind: 'unauthorized', message: '那台机器的凭据已过期，需要重新配对' }])
+    const { backend } = hubWithFetch([{ error: 'credential-stale' }])
     const body = await backend.listSessions('mac-a')
     expect(body.items).toBeUndefined()
-    expect(body.error).toContain('重新配对')
+    expect(body.error).toBe('那台机器正在重新连接，稍后再试')
+    expect(body.kind).toBe('error')
   })
 })
 
@@ -509,9 +511,24 @@ describe('prompt/cancel 不许假报成功（漏判 ok:false 的后果是草稿�
     })
   }
 
-  it('中转说凭据脏 → prompt 明确失败，界面因此保留草稿', async () => {
-    const backend = hubPosting({ ok: false, kind: 'unauthorized', message: '那台机器的凭据已过期，需要重新配对' })
-    expect(await backend.prompt('mac-a', 's1', '在吗')).toEqual({ ok: false, message: '那台机器的凭据已过期，需要重新配对' })
+  it('那台机器的凭据脏 → prompt 明确失败，且**不**让人重配对手机', async () => {
+    // 中转会自己把那台机器的凭据换掉再重试；让操作者去重配手机解决不了任何事，
+    // 只会白跑一趟。这句话写错方向比不给提示更糟。
+    const backend = hubPosting({ error: 'credential-stale' })
+    const result = await backend.prompt('mac-a', 's1', '在吗')
+    expect(result.ok).toBe(false)
+    expect(result.message).toBe('那台机器正在重新连接，稍后再试')
+    expect(result.message).not.toContain('重新配对')
+  })
+
+  it('中转回 401（手机自己的连接过期了）→ 那才需要重配对', async () => {
+    const backend = createHubBackend({
+      fetchLike: (async () => ({ status: 401, text: async () => '' })) as never,
+      WebSocketCtor: (class { close() {} }) as never,
+    })
+    const sessions = await backend.listSessions('mac-a')
+    expect(sessions.kind).toBe('unpaired')
+    expect(sessions.error).toContain('重新配对')
   })
 
   it('machine-error → prompt 明确失败（不是 ok:true）', async () => {
@@ -520,7 +537,7 @@ describe('prompt/cancel 不许假报成功（漏判 ok:false 的后果是草稿�
   })
 
   it('cancel 同理', async () => {
-    const backend = hubPosting({ ok: false, kind: 'unauthorized', message: '凭据过期' })
+    const backend = hubPosting({ error: 'credential-stale' })
     expect((await backend.cancel('mac-a', 's1')).ok).toBe(false)
   })
 
@@ -553,6 +570,37 @@ describe('会话这一拍失败要说出来（以前像「还没有会话」）'
     enter.click()
     await settle(12)
     expect(root.innerHTML).toContain('重新配对')
+    expect(root.innerHTML).not.toContain('还没有会话')
+  })
+})
+
+describe('手机自己与中转站的连接断了 → 走配对引导（与直连同一支路）', () => {
+  function hubWithUnpairedConnection() {
+    return {
+      mode: 'hub' as const,
+      async listHosts() { return { hosts: [{ hostId: HOST_A, name: 'MacBook', running: true, reachable: true, online: true }] } },
+      // 中转后端在 401/403 时给出的真实形状：kind 是 'unpaired'。
+      async listSessions() { return { error: '与中转站的连接已过期，需要重新配对', kind: 'unpaired' } },
+      async pageMessages() { return { error: '与中转站的连接已过期，需要重新配对', kind: 'unpaired' } },
+      async prompt() { return { ok: false, kind: 'unpaired', message: '与中转站的连接已过期，需要重新配对' } },
+      async cancel() { return { ok: false, kind: 'unpaired', message: '与中转站的连接已过期，需要重新配对' } },
+      async answer() { return { ok: true } },
+      connectEvents() { return { close() {} } },
+    }
+  }
+
+  it('进机器取会话时遇到它 → 界面变成配对引导，而不是一句错误文案', async () => {
+    const root = host()
+    await bootApp(root, { backend: hubWithUnpairedConnection() as never })
+    await settle(8)
+    const enter = root.querySelector('[data-action="enter-machine"][data-machine-id="mac-a"]') as HTMLElement
+    expect(enter).not.toBeNull()
+    enter.click()
+    await settle(12)
+    // 认**引导屏**自己的结构与那句标题。不能拿「配对」两个字当判据：那句错误
+    // 文案里也有这两个字（又会假绿一次）。引导屏只有它自己有 class=guide。
+    expect(root.innerHTML).toContain('class="guide"')
+    expect(root.innerHTML).toContain('还没配对')
     expect(root.innerHTML).not.toContain('还没有会话')
   })
 })

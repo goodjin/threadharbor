@@ -35,10 +35,14 @@ export interface HubEventsHandle {
 export interface HubBackend {
   readonly mode: 'hub'
   listHosts(): Promise<unknown>
-  /** 失败时给 {error}：凭据过期折叠出来的**空清单**在界面上像「没有会话」。 */
-  listSessions(hostId: string): Promise<{ items?: unknown[], error?: string }>
-  pageMessages(hostId: string, sessionId: string, throughSeq?: number, maxMessages?: number): Promise<{ conv?: unknown, error?: string }>
-  prompt(hostId: string, sessionId: string, text: string): Promise<{ ok: boolean, message?: string }>
+  /**
+   * 失败时给 {error, kind}：折叠出来的**空清单**在界面上像「没有会话」。
+   * kind 沿用直连那一支的词（unpaired / untrusted / error），手机靠它分
+   * 「要重新配对」与「那台机器在重连」——这两件事要做的动作完全不同。
+   */
+  listSessions(hostId: string): Promise<{ items?: unknown[], error?: string, kind?: string }>
+  pageMessages(hostId: string, sessionId: string, throughSeq?: number, maxMessages?: number): Promise<{ conv?: unknown, error?: string, kind?: string }>
+  prompt(hostId: string, sessionId: string, text: string): Promise<{ ok: boolean, kind?: string, message?: string }>
   cancel(hostId: string, sessionId: string): Promise<{ ok: boolean, message?: string }>
   answer(hostId: string, eventId: string, outcome: unknown): Promise<{ ok: boolean, message?: string }>
   connectEvents(handlers: HubEventHandlers): HubEventsHandle

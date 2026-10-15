@@ -521,6 +521,17 @@ export async function bootApp(root, deps = {}) {
         if (state.machineId === null) return
         const body = await state.backend.listSessions(state.machineId)
         if (typeof body?.error === 'string') {
+          // 手机与中转站的连接断了：进配对引导，与直连同一支路。少了这一步，
+          // 列表页只会写一句「与中转站的连接已过期」，操作者不知道该做什么。
+          const guide = guidanceReasonForKind(body.kind)
+          if (guide !== null) {
+            state.sessions = []
+            state.sessionsError = undefined
+            state.screen = 'guide'
+            state.guideReason = guide
+            render()
+            return
+          }
           state.sessions = []
           state.sessionsError = body.error
           render()
@@ -567,7 +578,8 @@ export async function bootApp(root, deps = {}) {
   async function rpcSessionPage(sessionId, throughSeq, maxMessages, label) {
     if (isHub && state.machineId !== null) {
       const body = await state.backend.pageMessages(state.machineId, sessionId, throughSeq, maxMessages)
-      if (typeof body?.error === 'string') return { ok: false, kind: 'rpc-error', message: body.error }
+      // 手机自己的连接断了走配对引导；那台机器在重连就只是这次没拿到内容。
+      if (typeof body?.error === 'string') return { ok: false, kind: body.kind ?? 'rpc-error', message: body.error }
       if (body?.conv === undefined) return { ok: false, kind: 'rpc-error', message: '那台机器没有返回会话内容' }
       return { ok: true, result: body.conv }
     }

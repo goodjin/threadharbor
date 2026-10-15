@@ -28,7 +28,7 @@ export function createHubBackend(opts = {}) {
    * 没有任何迹象能让人起疑。
    */
   const outcomeOf = body => {
-    if (body?.ok === false) return { ok: false, message: body.message ?? '那台机器的凭据需要重新配对' }
+    if (body?.ok === false) return { ok: false, kind: body.kind, message: body.message ?? '这次请求没有送到那台机器' }
     if (typeof body?.error === 'string') return { ok: false, message: body.error }
     return { ok: true }
   }
@@ -40,15 +40,19 @@ export function createHubBackend(opts = {}) {
   async function relay(path, init) {
     const response = await fetchLike(path, init)
     if (response.status === 401 || response.status === 403) {
-      return { ok: false, kind: 'unauthorized', message: '中转站拒绝了这次请求' }
+      // 手机**自己**与中转站的连接过期了：只有重新配对能救。kind 用 'unpaired'，
+      // 与直连同一支（views.js 的 guidanceReasonForKind 只认这三个词），否则
+      // 配对引导那条路根本走不到。
+      return { ok: false, kind: 'unpaired', message: '与中转站的连接已过期，需要重新配对' }
     }
     if (response.status !== 200) {
       return { error: `中转站请求失败：HTTP ${response.status}` }
     }
     const body = JSON.parse(await response.text())
     if (body && body.error === 'credential-stale') {
-      // 中转说那台机器的凭据该换了：按「需要重新配对」处置，与直连的 401 同路。
-      return { ok: false, kind: 'unauthorized', message: '那台机器的凭据已过期，需要重新配对' }
+      // 中转说**那台机器**的凭据脏了——重配手机没有用，中转自己会换掉再重试。
+      // 所以这句话不能说「需要重新配对」：照着做的人会白白重来一遍。
+      return { ok: false, kind: 'error', message: '那台机器正在重新连接，稍后再试' }
     }
     // 游标这一条要把那个**整数**带出来（其它错误只留文案）。少了这一步，
     // pageMessages 拿到的就只剩 'session-cursor' 三个字，探测无从还原。
@@ -82,7 +86,9 @@ export function createHubBackend(opts = {}) {
       const body = await relay(sessionsPath(hostId))
       // 凭据过期**不能**折成空清单：空清单在界面上长得就是「这台机器还没有
       // 会话」，操作者不会想到是凭据出了问题。
-      if (body?.ok === false) return { error: body.message ?? '那台机器的凭据需要重新配对' }
+      // kind 一起带出去：手机要靠它分「重配对」与「那台机器正在重连」——这两件事
+      // 要做的动作完全不同，混成一句「重新配对」会让人白白重来一遍。
+      if (body?.ok === false) return { error: body.message ?? '这次请求没有送到那台机器', kind: body.kind }
       if (body.error !== undefined) return body
       return { items: Array.isArray(body?.value?.items) ? body.value.items : [] }
     },
@@ -99,6 +105,7 @@ export function createHubBackend(opts = {}) {
       if (body?.error === 'session-cursor' && Number.isSafeInteger(body.cursor)) {
         return { error: `session page request past cursor ${body.cursor}` }
       }
+      if (body?.ok === false) return { error: body.message ?? '这次请求没有送到那台机器', kind: body.kind }
       if (body.error !== undefined) return body
       return { conv: body?.value }
     },
