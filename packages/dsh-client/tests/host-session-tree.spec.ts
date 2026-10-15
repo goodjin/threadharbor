@@ -299,7 +299,7 @@ describe('HostSessionTree', () => {
     } finally { await unmount(root) }
   })
 
-  it('视图选项：最近更新排序生效且置顶仍前；筛选可切到仅已归档并持久化', async () => {
+  it('视图选项：默认按最近更新（末次发送）降序；手动可切回；筛选可切到仅已归档并持久化', async () => {
     localStorage.removeItem('threadharbor.tree.view')
     const withStamps = { hosts: [{ hostId: 'self', label: '本机', self: true, lastSeen: 1, sessionCount: 3, empty: false, projects: [{ projectId: 'w1', label: '研究', baseLabel: '研究', sharedName: false, sessions: [
       { sessionId: 'old', projectId: 'w1', title: '旧的', hostId: 'self', own: true, updatedAt: 1 },
@@ -308,15 +308,40 @@ describe('HostSessionTree', () => {
     ] }] }], totalSessions: 3, empty: false }
     const { container, root } = await mountTree({ view: withStamps, ctx: { get: () => undefined } })
     try {
-      // 默认：隐藏已归档
-      expect([...container.querySelectorAll('[data-session-row]')].map(r => r.getAttribute('data-session-row'))).toEqual(['old', 'new'])
+      // 默认：隐藏已归档，且按 updatedAt 降序（末次发送/提示时间）
+      expect([...container.querySelectorAll('[data-session-row]')].map(r => r.getAttribute('data-session-row'))).toEqual(['new', 'old'])
       click(container, '[data-action="view-options"]')
+      click(container, '[data-action="order-manual"]')
+      expect([...container.querySelectorAll('[data-session-row]')].map(r => r.getAttribute('data-session-row'))).toEqual(['old', 'new'])
       click(container, '[data-action="order-updated"]')
       expect([...container.querySelectorAll('[data-session-row]')].map(r => r.getAttribute('data-session-row'))).toEqual(['new', 'old'])
       // 选项菜单不自动收起，直接切换筛选
       click(container, '[data-action="filter-only-archived"]')
       expect([...container.querySelectorAll('[data-session-row]')].map(r => r.getAttribute('data-session-row'))).toEqual(['arch'])
       expect(JSON.parse(localStorage.getItem('threadharbor.tree.view') ?? '{}')).toMatchObject({ orderBy: 'updated', filterBy: 'only' })
+    } finally { await unmount(root) }
+  })
+
+  it('活跃会话：进行中绿点；等待审批/提问琥珀点（pending 优先于 running）；空闲无标记', async () => {
+    localStorage.removeItem('threadharbor.tree.view')
+    const withLive = { hosts: [{ hostId: 'self', label: '本机', self: true, lastSeen: 1, sessionCount: 3, empty: false, projects: [{ projectId: 'w1', label: '研究', baseLabel: '研究', sharedName: false, sessions: [
+      { sessionId: 'busy', projectId: 'w1', title: '在跑', hostId: 'self', own: true, updatedAt: 9, running: true },
+      { sessionId: 'ask', projectId: 'w1', title: '等你', hostId: 'self', own: true, updatedAt: 8, running: true, pendingInteraction: 'question' as const },
+      { sessionId: 'idle', projectId: 'w1', title: '空闲', hostId: 'self', own: true, updatedAt: 1 },
+    ] }] }], totalSessions: 3, empty: false }
+    const { container, root } = await mountTree({ view: withLive, ctx: { get: () => undefined } })
+    try {
+      const busy = container.querySelector('[data-session-row="busy"]')
+      const ask = container.querySelector('[data-session-row="ask"]')
+      const idle = container.querySelector('[data-session-row="idle"]')
+      expect(busy?.getAttribute('data-live')).toBe('running')
+      expect(busy?.querySelector('[data-session-live="running"]')?.getAttribute('title')).toBe(zh['panel.tree.sessionRunning'])
+      expect(ask?.getAttribute('data-live')).toBe('question')
+      expect(ask?.querySelector('[data-session-live="question"]')?.getAttribute('title')).toBe(zh['panel.tree.sessionWaitingAnswer'])
+      expect(idle?.getAttribute('data-live')).toBeNull()
+      expect(idle?.querySelector('[data-session-live]')).toBeNull()
+      // ⋯ 锚定行尾（DOM 上为 sessionRow 最后一个子元素，CSS margin-left:auto）
+      expect(busy?.lastElementChild?.getAttribute('data-action')).toBe('row-menu')
     } finally { await unmount(root) }
   })
 

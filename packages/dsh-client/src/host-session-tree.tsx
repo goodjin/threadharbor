@@ -46,6 +46,26 @@ function orderSessions<T extends { pinned?: boolean; updatedAt?: number }>(sessi
   return [...sessions].sort((a, b) => pinnedFirst(a, b) || (orderBy === 'updated' ? (b.updatedAt ?? 0) - (a.updatedAt ?? 0) : 0))
 }
 
+
+/** Native live marker: pending interaction outranks a running turn (sidebar amber > green). */
+type LiveKind = 'running' | 'approval' | 'plan-review' | 'question'
+
+function liveKind(session: {
+  readonly running?: boolean
+  readonly pendingInteraction?: 'approval' | 'plan-review' | 'question'
+}): LiveKind | undefined {
+  const pending = session.pendingInteraction
+  if (pending === 'approval' || pending === 'plan-review' || pending === 'question') return pending
+  if (session.running === true) return 'running'
+  return undefined
+}
+
+function liveLabelKey(kind: LiveKind): 'panel.tree.sessionRunning' | 'panel.tree.sessionWaitingApproval' | 'panel.tree.sessionPlanReview' | 'panel.tree.sessionWaitingAnswer' {
+  if (kind === 'approval') return 'panel.tree.sessionWaitingApproval'
+  if (kind === 'plan-review') return 'panel.tree.sessionPlanReview'
+  if (kind === 'question') return 'panel.tree.sessionWaitingAnswer'
+  return 'panel.tree.sessionRunning'
+}
 /** The tree's archived filter: the native list's three sight modes. */
 function passesFilter(session: { archived?: boolean }, filterBy: FilterBy): boolean {
   if (filterBy === 'show') return true
@@ -56,15 +76,16 @@ function passesFilter(session: { archived?: boolean }, filterBy: FilterBy): bool
 function readViewOptions(): { orderBy: OrderBy; filterBy: FilterBy } {
   try {
     const parsed: unknown = JSON.parse(localStorage.getItem(VIEW_KEY) ?? '{}')
-    if (typeof parsed !== 'object' || parsed === null) return { orderBy: 'manual', filterBy: 'hide' }
+    if (typeof parsed !== 'object' || parsed === null) return { orderBy: 'updated', filterBy: 'hide' }
     const orderBy = (parsed as { orderBy?: unknown }).orderBy
     const filterBy = (parsed as { filterBy?: unknown }).filterBy
     return {
-      orderBy: orderBy === 'updated' ? 'updated' : 'manual',
+      // Default 最近更新: updatedAt is last human prompt (or createdAt).
+      orderBy: orderBy === 'manual' ? 'manual' : 'updated',
       filterBy: filterBy === 'show' || filterBy === 'only' ? filterBy : 'hide',
     }
   } catch {
-    return { orderBy: 'manual', filterBy: 'hide' }
+    return { orderBy: 'updated', filterBy: 'hide' }
   }
 }
 
@@ -431,6 +452,8 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                   </div>
                   {projectOpen ? shown.map(session => {
                     const sessionMenu = menu?.kind === 'session' && menu.key === session.sessionId
+                    const kind = liveKind(session)
+                    const liveLabel = kind === undefined ? undefined : t(liveLabelKey(kind))
                     return (
                       <div key={session.sessionId} className={styles.sessionWrap}>
                         <button
@@ -439,10 +462,23 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                           data-session-row={session.sessionId}
                           data-active={currentSessionId === session.sessionId ? 'true' : undefined}
                           data-pinned={session.pinned === true ? 'true' : undefined}
+                          data-running={session.running === true ? 'true' : undefined}
+                          data-pending={session.pendingInteraction}
+                          data-live={kind}
                           onClick={() => {
                             if (host.self) setOpenFailed(openLocalSession(ctx, session.sessionId) === false)
                           }}
                         >
+                          {kind !== undefined && liveLabel !== undefined
+                            ? <span
+                                className={styles.sessionLive}
+                                data-session-live={kind}
+                                data-session-running={kind === 'running' ? 'true' : undefined}
+                                data-kind={kind}
+                                title={liveLabel}
+                                aria-label={liveLabel}
+                              />
+                            : null}
                           {session.pinned === true ? <span className={styles.sessionPin} data-session-pinned>📌</span> : null}
                           <span className={styles.sessionTitle}>
                             {renaming?.kind === 'session' && renaming.key === session.sessionId

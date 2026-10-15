@@ -26,8 +26,12 @@ export type SessionView = {
   readonly pinned?: boolean
   /** Archived rows render only under the tree's show-archived filters. */
   readonly archived?: boolean
-  /** Last activity stamp; orders the tree's 最近更新 sort. */
+  /** Last activity stamp; orders the tree's 最近更新 sort (last human prompt). */
   readonly updatedAt?: number
+  /** True while a turn is in flight — the tree shows a leading marker. */
+  readonly running?: boolean
+  /** Native amber-dot pending interaction (approval / plan-review / question). */
+  readonly pendingInteraction?: 'approval' | 'plan-review' | 'question'
 }
 
 export type ProjectView = {
@@ -104,6 +108,12 @@ function toHostView(host: RollUp['hosts'][number]): HostViewRow {
         ...(entry.pinned === true ? { pinned: true } : {}),
         ...(entry.archived === true ? { archived: true } : {}),
         ...(typeof entry.updatedAt === 'number' ? { updatedAt: entry.updatedAt } : {}),
+        ...(entry.running === true ? { running: true } : {}),
+        ...(entry.pendingInteraction === 'approval'
+          || entry.pendingInteraction === 'plan-review'
+          || entry.pendingInteraction === 'question'
+          ? { pendingInteraction: entry.pendingInteraction }
+          : {}),
       })),
     }
   })

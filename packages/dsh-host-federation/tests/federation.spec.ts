@@ -11,7 +11,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { HostFederation } from '../src/federation.ts'
-import { fetchRemoteSessions } from '../src/host-remote-sessions.ts'
+import { fetchRemoteSessions, mergeRemoteSessions } from '../src/host-remote-sessions.ts'
 import type { FederationBus } from '../src/federation.ts'
 import type { HostIdentity } from '../src/identity.ts'
 
@@ -178,12 +178,20 @@ describe('HostFederation renameSelf', () => {
 })
 
 describe('远端会话拉取（host-remote-sessions）', () => {
-  const stubFetch = (handler: (url: string) => { status: number; body?: unknown } | undefined): void => {
-    globalThis.fetch = (async (input: RequestInfo | URL) => {
-      const found = handler(String(input))
+  type Stub = {
+    status: number
+    body?: unknown
+    headers?: Record<string, string>
+  }
+  const stubFetch = (handler: (url: string, request?: RequestInit) => Stub | undefined): void => {
+    globalThis.fetch = (async (input: RequestInfo | URL, request?: RequestInit) => {
+      const found = handler(String(input), request)
       if (found === undefined) return new Response('not found', { status: 404 })
-      if (found.status !== 200) return new Response('err', { status: found.status })
-      return Response.json(found.body)
+      const responseInit = found.headers === undefined
+        ? { status: found.status }
+        : { status: found.status, headers: found.headers }
+      if (found.body === undefined) return new Response('err', responseInit)
+      return Response.json(found.body, responseInit)
     }) as typeof fetch
   }
 
@@ -203,8 +211,55 @@ describe('远端会话拉取（host-remote-sessions）', () => {
     expect(snap.note).toContain('无效')
   })
 
-  it('两个候选端点先 404 后 200：解析出会话与项目名', async () => {
+  it('cookie + session/list：合并 running/updatedAt/标题', async () => {
+    stubFetch((url, request) => {
+      if (url.includes('/?token=tk') && !url.includes('/api/')) {
+        return { status: 303, headers: { 'set-cookie': 'dsh-auth=abc; Path=/; HttpOnly', location: './' } }
+      }
+      if (url.includes('/api/workspace/list') && request?.method === 'POST') {
+        return {
+          status: 200,
+          body: {
+            result: {
+              ok: true,
+              value: {
+                items: [{ workspaceId: 'w1', title: '研究', path: '/r', sessionIds: ['s1', 's2'], createdAt: 't', updatedAt: 't' }],
+                archivedSessionIds: [],
+              },
+            },
+          },
+        }
+      }
+      if (url.includes('/api/session/list') && request?.method === 'POST') {
+        return {
+          status: 200,
+          body: {
+            result: {
+              ok: true,
+              value: {
+                items: [
+                  { sessionId: 's1', updatedAt: 90, running: true, blank: false, projections: { values: { title: '在跑' } } },
+                  { sessionId: 's2', updatedAt: 10, running: false, blank: false },
+                ],
+              },
+            },
+          },
+        }
+      }
+      return undefined
+    })
+    const snap = await fetchRemoteSessions('http://127.0.0.1:4000/?token=tk')
+    expect(snap.sessions.map(s => s.sessionId)).toEqual(['s1', 's2'])
+    expect(snap.sessions.find(s => s.sessionId === 's1')).toMatchObject({
+      title: '在跑', running: true, updatedAt: 90, projectId: 'w1',
+    })
+    expect(snap.sessions.find(s => s.sessionId === 's2')).toMatchObject({ updatedAt: 10 })
+    expect(snap.sessions.find(s => s.sessionId === 's2')).not.toHaveProperty('running')
+  })
+
+  it('无 cookie 时回落 legacy GET workspace：仍解析出会话', async () => {
     stubFetch(url => {
+      if (url.includes('/?token=') && !url.includes('/api/')) return { status: 200 }
       if (url.includes('/api/workspace/list')) return { status: 404 }
       if (url.includes('/api/workspaces')) {
         return { status: 200, body: { workspaces: [{ workspaceId: 'w1', title: '研究', path: '/r', sessionIds: ['s1', 's2'] }] } }
@@ -216,10 +271,26 @@ describe('远端会话拉取（host-remote-sessions）', () => {
     expect(snap.sessions.every(s => s.projectId === 'w1')).toBe(true)
   })
 
-  it('两个端点都失败：空清单 + 原始状态码说明', async () => {
+  it('鉴权与 RPC 都失败：空清单 + 说明', async () => {
     stubFetch(() => ({ status: 500 }))
     const snap = await fetchRemoteSessions('http://127.0.0.1:4000/?token=tk')
     expect(snap.sessions).toEqual([])
-    expect(snap.note).toContain('500')
+    expect(snap.note).toBeTruthy()
+  })
+
+  it('mergeRemoteSessions：跳过 blank，未归组收纳游离会话，归档标记保留', () => {
+    const byId = new Map([
+      ['s1', { updatedAt: 5, running: true as const, title: '甲' }],
+      ['blank', { blank: true as const, updatedAt: 9 }],
+      ['loose', { updatedAt: 1, title: '游离' }],
+    ])
+    const rows = mergeRemoteSessions(
+      [{ projectId: 'w1', projectTitle: '研究', sessionIds: ['s1', 'blank'] }],
+      byId,
+      new Set(['s1']),
+    )
+    expect(rows.map(r => r.sessionId)).toEqual(['s1', 'loose'])
+    expect(rows.find(r => r.sessionId === 's1')).toMatchObject({ archived: true, running: true, updatedAt: 5, title: '甲' })
+    expect(rows.find(r => r.sessionId === 'loose')).toMatchObject({ projectId: 'ungrouped', title: '游离' })
   })
 })
