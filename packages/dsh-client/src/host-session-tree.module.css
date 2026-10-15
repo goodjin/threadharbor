@@ -79,6 +79,7 @@
 }
 
 .projectRow {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -213,10 +214,11 @@
 }
 
 .menu {
-  /* 浮层下拉（2026-10-16 用户反馈）：不占列表排版空间，锚定行尾展开。 */
+  /* 浮层下拉：锚定触发按钮所在的行（projectRow / sessionWrap / searchBar），
+     紧贴行下方、右缘对齐按钮列；贴近视口底部时由布局效果翻到行上方。 */
   position: absolute;
   top: 100%;
-  right: 8px;
+  right: 0;
   z-index: 60;
   display: flex;
   flex-direction: column;

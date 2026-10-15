@@ -12,7 +12,7 @@
  * 展开其余 overflow cap, workspace rename/delete, session rename/archive/
  * pin/fork — each dispatching through the same services the native list uses.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useState } from 'react'
 import type { RollUpView } from '@threadharbor/dsh-host-federation'
 import {
   archiveSession, deleteWorkspace, forkSession, openLocalSession, pinSession,
@@ -197,6 +197,18 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
     setOverflowOpen(current => current.includes(projectId) ? current.filter(id => id !== projectId) : [...current, projectId])
   }, [])
 
+  // 贴底上翻：菜单渲染后量一次，视口里放不下就翻到锚行上方（原生同款）。
+  useLayoutEffect(() => {
+    if (menu === null && !optionsOpen) return
+    const popup = document.querySelector('[data-row-menu], [data-view-options-menu]')
+    if (!(popup instanceof HTMLElement)) return
+    const rect = popup.getBoundingClientRect()
+    if (rect.bottom > window.innerHeight - 8) {
+      popup.style.top = 'auto'
+      popup.style.bottom = '100%'
+    }
+  }, [menu, optionsOpen])
+
   // Floating menus (2026-10-16 用户反馈)：行尾 ⋯ 与 ⚙ 的选择框是浮层下拉，
   // 不占列表的排版空间；点外部或按 Esc 收起，和原生一致。
   useEffect(() => {
@@ -274,16 +286,18 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
         >
           ⚙
         </button>
+        {/* 菜单必须是 searchBar 的子元素：absolute 才锚住这一条（做兄弟时
+            会锚到外层大容器，弹到主区右缘去）。 */}
+        {optionsOpen
+          ? <div className={styles.menu} data-view-options-menu>
+              <button type="button" className={styles.menuItem} data-action="order-manual" data-checked={orderBy === 'manual' ? 'true' : undefined} onClick={() => { setViewOptions({ orderBy: 'manual', filterBy }) }}>{t('panel.tree.orderManual')}</button>
+              <button type="button" className={styles.menuItem} data-action="order-updated" data-checked={orderBy === 'updated' ? 'true' : undefined} onClick={() => { setViewOptions({ orderBy: 'updated', filterBy }) }}>{t('panel.tree.orderUpdated')}</button>
+              <button type="button" className={styles.menuItem} data-action="filter-hide-archived" data-checked={filterBy === 'hide' ? 'true' : undefined} onClick={() => { setViewOptions({ orderBy, filterBy: 'hide' }) }}>{t('panel.tree.filterHideArchived')}</button>
+              <button type="button" className={styles.menuItem} data-action="filter-show-archived" data-checked={filterBy === 'show' ? 'true' : undefined} onClick={() => { setViewOptions({ orderBy, filterBy: 'show' }) }}>{t('panel.tree.filterShowArchived')}</button>
+              <button type="button" className={styles.menuItem} data-action="filter-only-archived" data-checked={filterBy === 'only' ? 'true' : undefined} onClick={() => { setViewOptions({ orderBy, filterBy: 'only' }) }}>{t('panel.tree.filterOnlyArchived')}</button>
+            </div>
+          : null}
       </div>
-      {optionsOpen
-        ? <div className={styles.menu} data-view-options-menu>
-            <button type="button" className={styles.menuItem} data-action="order-manual" data-checked={orderBy === 'manual' ? 'true' : undefined} onClick={() => { setViewOptions({ orderBy: 'manual', filterBy }) }}>{t('panel.tree.orderManual')}</button>
-            <button type="button" className={styles.menuItem} data-action="order-updated" data-checked={orderBy === 'updated' ? 'true' : undefined} onClick={() => { setViewOptions({ orderBy: 'updated', filterBy }) }}>{t('panel.tree.orderUpdated')}</button>
-            <button type="button" className={styles.menuItem} data-action="filter-hide-archived" data-checked={filterBy === 'hide' ? 'true' : undefined} onClick={() => { setViewOptions({ orderBy, filterBy: 'hide' }) }}>{t('panel.tree.filterHideArchived')}</button>
-            <button type="button" className={styles.menuItem} data-action="filter-show-archived" data-checked={filterBy === 'show' ? 'true' : undefined} onClick={() => { setViewOptions({ orderBy, filterBy: 'show' }) }}>{t('panel.tree.filterShowArchived')}</button>
-            <button type="button" className={styles.menuItem} data-action="filter-only-archived" data-checked={filterBy === 'only' ? 'true' : undefined} onClick={() => { setViewOptions({ orderBy, filterBy: 'only' }) }}>{t('panel.tree.filterOnlyArchived')}</button>
-          </div>
-        : null}
       {normalizedQuery !== ''
         ? (
           <div className={styles.searchResults} data-search-results>
@@ -403,16 +417,18 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                     >
                       ⋯
                     </button>
+                    {/* 菜单锚在 projectRow（按钮所在的这一行），不是整个项目块：
+                        锚到块上会落到整组会话的下方，离按钮隔十几行。 */}
+                    {projectMenu
+                      ? <div className={styles.menu} data-row-menu>
+                          <button type="button" data-action="menu-new-session" className={styles.menuItem} onClick={() => { setMenu(null); startSessionInProject(ctx, project.projectId) }}>{t('panel.tree.newSession')}</button>
+                          <button type="button" data-action="menu-rename-workspace" className={styles.menuItem} onClick={() => { setMenu(null); setRenaming({ kind: 'project', key: project.projectId, draft: project.label }) }}>{t('panel.tree.menuRenameWorkspace')}</button>
+                          {confirmingDelete === project.projectId
+                            ? <button type="button" data-action="menu-confirm-delete" className={styles.menuItemDanger} onClick={() => { setConfirmingDelete(null); void run(() => deleteWorkspace(ctx, project.projectId)) }}>{t('panel.tree.menuConfirmDelete')}</button>
+                            : <button type="button" data-action="menu-delete-workspace" className={styles.menuItem} onClick={() => { setConfirmingDelete(project.projectId) }}>{t('panel.tree.menuDeleteWorkspace')}</button>}
+                        </div>
+                      : null}
                   </div>
-                  {projectMenu
-                    ? <div className={styles.menu} data-row-menu>
-                        <button type="button" data-action="menu-new-session" className={styles.menuItem} onClick={() => { setMenu(null); startSessionInProject(ctx, project.projectId) }}>{t('panel.tree.newSession')}</button>
-                        <button type="button" data-action="menu-rename-workspace" className={styles.menuItem} onClick={() => { setMenu(null); setRenaming({ kind: 'project', key: project.projectId, draft: project.label }) }}>{t('panel.tree.menuRenameWorkspace')}</button>
-                        {confirmingDelete === project.projectId
-                          ? <button type="button" data-action="menu-confirm-delete" className={styles.menuItemDanger} onClick={() => { setConfirmingDelete(null); void run(() => deleteWorkspace(ctx, project.projectId)) }}>{t('panel.tree.menuConfirmDelete')}</button>
-                          : <button type="button" data-action="menu-delete-workspace" className={styles.menuItem} onClick={() => { setConfirmingDelete(project.projectId) }}>{t('panel.tree.menuDeleteWorkspace')}</button>}
-                      </div>
-                    : null}
                   {projectOpen ? shown.map(session => {
                     const sessionMenu = menu?.kind === 'session' && menu.key === session.sessionId
                     return (
