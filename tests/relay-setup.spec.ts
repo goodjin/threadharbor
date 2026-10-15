@@ -143,3 +143,35 @@ describe('登记命令产出的行 ssh 真认（形状对≠格式对）', () =>
     for (const line of keyscanLines) expect(line).not.toMatch(/ssh-keyscan[^\n]*\s-H\b/)
   })
 })
+
+describe('脚本给的那段配置，装得上、也开得起来中转模式', () => {
+  /**
+   * 这个脚本的全部意义是「照抄就能用」。所以这里不比对脚本文本，而是把**它输出
+   * 的那段 YAML** 交给真正的 Config 校验：以前缺 logPath（必填），照抄的配置
+   * 装载即拒——而脚本自己还在旁边印着「加进 cordis.patch.yml」。
+   */
+  function snippetFrom(out: string): string {
+    const lines = out.split('\n')
+    const start = lines.findIndex(text => text.trim() === '- id: threadharbor-mobile-relay')
+    expect(start, '脚本输出里没有中转包的组合行').toBeGreaterThan(-1)
+    const end = lines.findIndex((text, index) => index > start && /^机器侧还要做/.test(text))
+    return lines.slice(start, end === -1 ? undefined : end).join('\n')
+  }
+
+  it('输出的中转片段里，每台机器都带必填的 logPath', () => {
+    const out = run(['--host', 'japan01', '--target', '100.96.208.116', '--remote-port', '3080']).stdout
+    const snippet = snippetFrom(out)
+    expect(snippet).toContain('logPath:')
+    // 每台机器都得有：漏一台，那台就是「装载即拒」。
+    const machines = (snippet.match(/- hostId:/g) ?? []).length
+    expect((snippet.match(/logPath:/g) ?? []).length).toBe(machines)
+  })
+
+  it('片段里给了手机页包那一行且带 mode: hub（不加这行手机页停在直连模式）', () => {
+    const out = run(['--host', 'japan01', '--target', '100.96.208.116', '--remote-port', '3080']).stdout
+    expect(out).toContain('- id: threadharbor-mobile-entry')
+    const entryBlock = out.slice(out.indexOf('- id: threadharbor-mobile-entry'), out.indexOf('机器侧还要做'))
+    expect(entryBlock).toContain('mode: hub')
+  })
+})
+
