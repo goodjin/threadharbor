@@ -466,7 +466,8 @@ export async function bootApp(root, deps = {}) {
           if (value?.event !== 'approval/request' || typeof value.eventId !== 'string') return
           // 归属必须在入队前记下：应答要回到**发起它的那台**，而不是正在看的。
           state.approvalHosts.set(value.eventId, hostId)
-          onWaterfall(value)
+          const from = state.machines.find(item => item?.hostId === hostId)
+          onWaterfall(value, from?.name ?? hostId)
           return
         }
         if (type === 'cancel') {
@@ -829,14 +830,21 @@ export async function bootApp(root, deps = {}) {
     })
   }
 
-  /** waterfall 事件：v1 只接 approval/request，进顶部横幅。 */
-  function onWaterfall(value) {
+  /**
+   * waterfall 事件：v1 只接 approval/request，进顶部横幅。
+   *
+   * machineLabel 只有中转模式会传：那边两台机器可能同时有待批事项，不标明来源
+   * 操作者只能靠猜。直连是本机、没有「来自哪台」这回事，不传时 DOM 与改之前
+   * 逐字相同。
+   */
+  function onWaterfall(value, machineLabel) {
     if (value?.event !== 'approval/request' || typeof value.eventId !== 'string') return
     state.approvals.set(value.eventId, {
       eventId: value.eventId,
       toolName: typeof value.request?.toolName === 'string' ? value.request.toolName : '未知工具',
       displayReason: typeof value.request?.displayReason === 'string' ? value.request.displayReason : undefined,
       reason: typeof value.request?.reason === 'string' ? value.request.reason : undefined,
+      ...(typeof machineLabel === 'string' && machineLabel.length > 0 ? { machineLabel } : {}),
     })
     render()
   }

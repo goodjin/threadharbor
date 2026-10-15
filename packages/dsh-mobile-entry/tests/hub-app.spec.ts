@@ -441,7 +441,10 @@ describe('中转模式的端到端：上游原样帧 → 界面', () => {
 
     expect(root.innerHTML).toContain('待批准')
     expect(root.innerHTML).toContain('要执行 ls')
-    expect(root.innerHTML).toContain('MacBook')
+    // 断言**横幅里**那一行，而不是页面上出现过机器名：此刻停在机器清单屏，
+    // 机器名本来就在那儿，写成 toContain('MacBook') 永远通过——那种假绿已经
+    // 害过一次（回归时它没变红）。
+    expect(root.innerHTML).toContain('approval-machine">来自 MacBook')
   })
 
   it('横幅的答复回到**发起它的那台**机器（哪怕操作者正看着另一台）', async () => {
