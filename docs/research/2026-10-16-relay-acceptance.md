@@ -13,7 +13,8 @@
 | 1 | 插件装载成功，组合行与配置生效 | 通过 | `GET /threadharbor/mobile/hello` → `200 {"mobile":true}`（公网入口，带口令）。装载期曾报 `$.machines[0].logPath missing required value`，补上 `logPath` 后装载成功——报错点名了缺哪个字段，正是 Task 7b I4 那条修复要的效果 |
 | 2 | `/threadharbor/relay/hosts` 返回已登记机器 | 通过 | 返回 `{"hosts":[{"hostId":"tencent01","online":true,"running":true,"reachable":true,"credential":"ok"}]}`。四段全真：tailnet 发现、SSH 隧道、对端 hello 200、凭据换取。第二台机器**待加**（`japan01`/`jinmac-mini` 在 tailnet 上在线，待配 SSH、指纹与专用私钥） |
 | 3 | 经隧道取 cookie 并代理一次 `session/list` | 通过 | `GET /threadharbor/relay/hosts/tencent01/sessions` → `{"ok":true,"value":{"items":[]}}`。真隧道、真 RPC、真 cookie；`items` 为空是因为这台实例上还没有会话 |
-| 4 | 事件流 | 待用户 | 手机侧未参与；机器侧只验到 `attachOne` 会建连（C1 修复后有判别力用例） |
+| 4 | 事件流握手 | 通过（机器侧） | 真 WebSocket 客户端连 `ws://127.0.0.1:3080/threadharbor/relay/events`（带配对 cookie）→ 101 → 收到 `{"type":"ready"}`。手机侧待用户 |
+| 4b | 待批事件的往返与手机应答 | 待用户 | 机器侧已具备条件（事件帧 `{type:'item',hostId,value}` 与应答入口均有判别力用例） |
 | 5 | 重启后端口分配不变、cookie 复用、无需人工干预 | 通过 | 改用 systemd 单元后连续重启多次：端口始终是 41100（落盘分配沿用），cookie 复用（`credential: ok`），重启后无人干预 |
 
 | 6 | 停掉某台机器的 DSH 后该机显示离线、其余不受影响 | 待加机器后再验 | 现在只有一台机器可验 |
@@ -50,7 +51,17 @@
 
 修：补上空壳，并加用例钉住参数形状。
 
-### 4. 有界化等于静默（两次都栽在这）
+### 4. 事件面把裸 TCP 当 WebSocket 用（这一面从未连通过）
+
+升级处理器拿升级上来的**裸 socket** 直接 `send(JSON…)`：既没人写 101 握手，也没有帧
+编解码——那不是 WebSocket 帧。手机侧的表现是永远停在「连接中」，而这一面**一个用例都
+没有**，所以它坏了没人知道。真机用 curl 发 Upgrade 请求，连一个应答头都收不到。
+
+修：升级面交给 ws 的 noServer 模式做握手与帧（它本来就是本包已声明的依赖），协议本身
+（ready / item / 应答）仍留在中转层。新加的用例是真的 http 服务 + 真的 ws 客户端走完整握手，
+去掉握手立刻变红。
+
+### 5. 有界化等于静默（两次都栽在这）
 
 `machine-error` 这类内部故障，手机只拿到有界文案是对的——但那之前的注释写着「细节进日志」，
 而**代码里没有任何地方写日志**。结果就是：真机上一句 machine-error，谁也查不下去。
