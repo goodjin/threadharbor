@@ -30,6 +30,9 @@ export const ROUTE_OPERATION = '/api/threadharbor.host-ssh.operation'
 export const ROUTE_PEER = '/api/threadharbor.host-ssh.peer'
 export const ROUTE_REMOTE_SESSIONS = '/api/threadharbor.host-remote.sessions'
 export const ROUTE_CONNECT = '/api/threadharbor.host-ssh.connect'
+export const ROUTE_CHECK = '/api/threadharbor.host-ssh.check'
+export const ROUTE_SERVE = '/api/threadharbor.host-ssh.serve'
+export const ROUTE_SERVICE = '/api/threadharbor.host-ssh.service'
 
 export type Config = {
   knownHostsPath?: string
@@ -162,6 +165,37 @@ export function apply(ctx: unknown, config: Config = {}): void {
     return result
   })
 
+  register(ROUTE_CHECK, async body => {
+    const record = body as Record<string, unknown>
+    const ssh = manager.parseApprovedConfig(record['ssh'])
+    const report = await manager.checkPeer(ssh, portOf(record['remoteWebPort']))
+    log.info('ssh peer check', { target: ssh.target, ready: report.ready, steps: report.steps.map(step => `${step.id}:${step.state}`).join(',') })
+    return report
+  })
+
+  register(ROUTE_SERVE, async body => {
+    const record = body as Record<string, unknown>
+    const ssh = manager.parseApprovedConfig(record['ssh'])
+    const port = portOf(record['remoteWebPort'])
+    const outcome = await manager.configureServe(ssh, port)
+    log.info('tailscale serve', { target: ssh.target, port, ok: outcome.ok })
+    const report = await manager.checkPeer(ssh, port)
+    return outcome.ok
+      ? { report }
+      : { report, failure: { error: outcome.error, ...(outcome.manualCommands === undefined ? {} : { manualCommands: outcome.manualCommands }) } }
+  })
+
+  register(ROUTE_SERVICE, async body => {
+    const record = body as Record<string, unknown>
+    const ssh = manager.parseApprovedConfig(record['ssh'])
+    const verb = record['action']
+    if (verb !== 'start' && verb !== 'restart') throw new Error('action 必须是 start 或 restart')
+    const port = portOf(record['remoteWebPort'])
+    const done = await manager.controlService(ssh, verb, port)
+    log.info('dsh service', { target: ssh.target, verb, scope: done.scope })
+    return { report: await manager.checkPeer(ssh, port) }
+  })
+
   register(ROUTE_INSPECT, async body => {
     const ssh = manager.parseInspectionConfig((body as Record<string, unknown>)['ssh'])
     const keys = await manager.inspectAll(ssh)
@@ -207,6 +241,12 @@ export function apply(ctx: unknown, config: Config = {}): void {
   }
 
   process.stderr.write('[threadharbor] ssh-deploy routes registered\n')
+}
+
+function portOf(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 65_535) throw new Error('remoteWebPort 无效')
+  return value
 }
 
 function parseDeployRequest(record: Record<string, unknown>): SshDeployRequest {

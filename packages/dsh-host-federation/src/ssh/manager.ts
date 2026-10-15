@@ -15,6 +15,18 @@ import { readReleaseVersion, resolveReleaseDirectory } from './release.ts'
 import { DEFAULT_REMOTE_DSH_PLUGINS } from './deploy-plugins.ts'
 import { buildRemoteAgentsPatchYaml } from './remote-agents.ts'
 import { parsePeerStatus, type PeerStatus } from './peer-status.ts'
+import {
+  buildPeerCheckScript,
+  buildServeScript,
+  buildServiceScript,
+  manualServeCommands,
+  type ServiceVerb,
+  derivePeerCheckSteps,
+  launchToken,
+  parsePeerCheckOutput,
+  type PeerCheckReport,
+  type PeerHttpsProbe,
+} from './peer-check.ts'
 
 export type SshManagerOptions = {
   readonly knownHostsPath: string
@@ -28,6 +40,10 @@ export type SshManagerOptions = {
   /** When true, skip tarball upload and install plugins from `remotePlugins` only. */
   readonly installPluginsFromGithub?: boolean
 }
+
+export type ServeOutcome =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly error: string; readonly manualCommands?: readonly string[] }
 
 type ScanResult = SshHostKeyCandidate & { readonly knownHostLine: string }
 
@@ -100,6 +116,84 @@ export class DshSshManager {
     } finally {
       this.cleanupTempKeys()
     }
+  }
+
+  /**
+   * One SSH round trip reading every readiness fact of a peer meant to be
+   * reached through `tailscale serve`, then an HTTPS probe of its ts.net URL
+   * from this machine. Never throws for a missing piece — only for SSH trust
+   * or credential failures, which the UI shows on the `ssh` step.
+   */
+  async checkPeer(config: SshConnectionConfig, remoteWebPort?: number): Promise<PeerCheckReport> {
+    const port = remoteWebPort ?? this.options.defaultRemoteWebPort
+    const materialized = await this.trustAndMaterialize(config)
+    try {
+      const probe = await this.remoteExec(materialized, buildPeerCheckScript(port), this.handshakeBudgetMs())
+      if (probe.code === 255) {
+        throw new Error(`无法使用当前 SSH 凭据连接目标主机：${probe.stderr.trim() || 'ssh 退出码 255'}`)
+      }
+      let facts = parsePeerCheckOutput(probe.stdout, port)
+      // The peer record knows the real port when it differs from the default.
+      if (remoteWebPort === undefined && facts.peer.port !== undefined && facts.peer.port !== port) {
+        const again = await this.remoteExec(materialized, buildPeerCheckScript(facts.peer.port), this.handshakeBudgetMs())
+        if (again.code === 0) facts = parsePeerCheckOutput(again.stdout, facts.peer.port)
+      }
+      const https = facts.serveUrl === undefined ? undefined : await probeServeHttps(facts.serveUrl, launchToken(facts.peer))
+      return derivePeerCheckSteps(facts, https)
+    } finally {
+      this.cleanupTempKeys()
+    }
+  }
+
+  /**
+   * Point `tailscale serve` (HTTPS 443) on the peer at its DSH loopback port,
+   * as the SSH user and then via `sudo -n`. When both are refused the result
+   * carries the exact commands for the operator to run on the peer.
+   */
+  async configureServe(config: SshConnectionConfig, remoteWebPort?: number): Promise<ServeOutcome> {
+    const port = remoteWebPort ?? this.options.defaultRemoteWebPort
+    const materialized = await this.trustAndMaterialize(config)
+    try {
+      const result = await this.remoteExec(materialized, buildServeScript(port), this.handshakeBudgetMs())
+      if (result.code === 0) return { ok: true }
+      if (result.code === 255) throw new Error(`无法使用当前 SSH 凭据连接目标主机：${result.stderr.trim() || 'ssh 退出码 255'}`)
+      return {
+        ok: false,
+        error: `配置 tailscale serve 失败：${result.stderr.trim() || `退出码 ${result.code}`}`,
+        ...(result.code === 3 ? {} : { manualCommands: manualServeCommands(port) }),
+      }
+    } finally {
+      this.cleanupTempKeys()
+    }
+  }
+
+  /**
+   * `systemctl start|restart` of the deployed DSH Web unit (user unit, or
+   * system unit via `sudo -n`), then re-read the launch token into peer.json.
+   */
+  async controlService(config: SshConnectionConfig, verb: ServiceVerb, remoteWebPort?: number): Promise<{ readonly launchUrl: string; readonly scope: string }> {
+    const port = remoteWebPort ?? this.options.defaultRemoteWebPort
+    const materialized = await this.trustAndMaterialize(config)
+    try {
+      const result = await this.remoteExec(materialized, buildServiceScript(verb, this.options.deploymentChannel, port), this.handshakeBudgetMs() + 45_000)
+      if (result.code === 255) throw new Error(`无法使用当前 SSH 凭据连接目标主机：${result.stderr.trim() || 'ssh 退出码 255'}`)
+      if (result.code === 5) throw new Error('对方没有 ThreadHarbor 安装的 systemd 服务；请先「安装/部署 DSH 与插件」')
+      if (result.code !== 0) throw new Error(`${verb === 'start' ? '启动' : '重启'} DSH 失败：${result.stderr.trim() || `退出码 ${result.code}`}`)
+      const markers = parseDeployMarkers(result.stdout)
+      const scope = /SERVICE_SCOPE=(\w+)/.exec(result.stdout)?.[1] ?? 'user'
+      return { launchUrl: markers.launchUrl ?? '', scope }
+    } finally {
+      this.cleanupTempKeys()
+    }
+  }
+
+  private async trustAndMaterialize(config: SshConnectionConfig): Promise<SshConnectionConfig> {
+    if (config.hostKeyFingerprint === 'unapproved') throw new Error('hostKeyFingerprint is required')
+    const scans = await this.scan(config)
+    const scan = scans.find(candidate => candidate.hostKeyFingerprint === config.hostKeyFingerprint)
+    if (scan === undefined) throw new Error('SSH host key changed or does not match the approved fingerprint')
+    this.persistKnownHost(config, scan.knownHostLine)
+    return await this.materializeAuth(config)
   }
 
   async deploy(
@@ -204,6 +298,21 @@ export class DshSshManager {
       }
 
       onProgress({ phase: 'starting', detail: alreadyRunning ? '远端服务已在运行，已读取现有启动 URL。' : '正在启动远端 DSH Web。' })
+
+      if (request.accessMode === 'serve') {
+        // ts.net 接入：对方由 tailscale serve 暴露，安装脚本已在对方本机做过健康检查；
+        // 不建 SSH 隧道。endpoint 记对方回环地址，仅作信息，登记由检测清单用 ts.net 完成。
+        onProgress({ phase: 'succeeded', detail: '部署完成。' })
+        return {
+          endpoint: `http://127.0.0.1:${remotePort}`,
+          launchUrl: remoteLaunch,
+          accessMode,
+          bindHost,
+          remoteWebPort: remotePort,
+          releaseVersion,
+          alreadyRunning,
+        }
+      }
 
       onProgress({ phase: 'opening-tunnel', detail: '正在建立本机到远端 loopback 的 SSH 端口转发。' })
       const endpoint = await this.ensureTunnelWithAuth(materialized, remotePort)
@@ -473,6 +582,34 @@ export class DshSshManager {
     if (outcome.exited === undefined) return
     if (outcome.exited === 0 && await portListening(localPort, 8)) return
     throw new Error(`SSH 隧道建立失败（退出码 ${outcome.exited ?? 1}）：${error.trim()}`)
+  }
+}
+
+/**
+ * Probe the ts.net origin from this machine: plain GET for reachability, then
+ * the tokenized URL (no redirect following) to confirm the token is accepted.
+ */
+export async function probeServeHttps(
+  origin: string,
+  token: string | undefined,
+  fetcher: typeof fetch = fetch,
+  timeoutMs = 8_000,
+): Promise<PeerHttpsProbe> {
+  const get = async (url: string): Promise<Response> =>
+    await fetcher(url, { redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) })
+  let base: Response
+  try {
+    base = await get(`${origin}/`)
+  } catch (error) {
+    return { reachable: false, error: error instanceof Error ? error.message : String(error) }
+  }
+  if (base.status >= 500) return { reachable: false, status: base.status, error: `HTTP ${base.status}` }
+  if (token === undefined) return { reachable: true, status: base.status }
+  try {
+    const authed = await get(`${origin}/?token=${encodeURIComponent(token)}`)
+    return { reachable: true, status: authed.status, authOk: authed.status < 400 }
+  } catch (error) {
+    return { reachable: true, authOk: false, error: error instanceof Error ? error.message : String(error) }
   }
 }
 

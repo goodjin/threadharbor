@@ -38,6 +38,15 @@ export type {
   SshHostKeyCandidate,
 } from './ssh/types.ts'
 export type { PeerListen, PeerStatus } from './ssh/peer-status.ts'
+export type {
+  PeerCheckAction,
+  PeerCheckFacts,
+  PeerCheckReport,
+  PeerCheckState,
+  PeerCheckStep,
+  PeerCheckStepId,
+  PeerHttpsProbe,
+} from './ssh/peer-check.ts'
 export { REMOTE_DEPLOY_AGENT_SPECS } from './ssh/remote-agents.ts'
 export type { HostSession, HostRoll, ProjectGroup, RollUp } from './federation.ts'
 export { rollUpView } from './rollup-view.ts'

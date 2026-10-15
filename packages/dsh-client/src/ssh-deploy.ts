@@ -2,7 +2,7 @@
  * Browser client for ThreadHarbor SSH auto-deploy routes on the serving host.
  */
 
-import type { HostSession, PeerStatus, SshConnectResult, SshConnectionInput, SshDeployOperationView, SshDeployRequest, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
+import type { HostSession, PeerCheckReport, PeerStatus, SshConnectResult, SshConnectionInput, SshDeployOperationView, SshDeployRequest, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
 import type { RuntimeT } from './locales.ts'
 import { fallbackT } from './locales.ts'
 
@@ -11,6 +11,9 @@ export const ROUTE_DEPLOY = '/api/threadharbor.host-ssh.deploy'
 export const ROUTE_OPERATION = '/api/threadharbor.host-ssh.operation'
 export const ROUTE_PEER = '/api/threadharbor.host-ssh.peer'
 export const ROUTE_CONNECT = '/api/threadharbor.host-ssh.connect'
+export const ROUTE_CHECK = '/api/threadharbor.host-ssh.check'
+export const ROUTE_SERVE = '/api/threadharbor.host-ssh.serve'
+export const ROUTE_SERVICE = '/api/threadharbor.host-ssh.service'
 export const ROUTE_REMOTE_SESSIONS = '/api/threadharbor.host-remote.sessions'
 
 type ApiResult<T> =
@@ -57,6 +60,37 @@ export async function connectRemoteHost(
   t: RuntimeT = fallbackT,
 ): Promise<ApiResult<SshConnectResult>> {
   return await postJson(ROUTE_CONNECT, { ssh, ...(remoteWebPort === undefined ? {} : { remoteWebPort }) }, t)
+}
+
+/** Step-by-step readiness check of a peer reached over `tailscale serve`. */
+export async function checkRemotePeer(
+  ssh: SshConnectionInput & { readonly hostKeyFingerprint: string },
+  remoteWebPort?: number,
+  t: RuntimeT = fallbackT,
+): Promise<ApiResult<PeerCheckReport>> {
+  return await postJson(ROUTE_CHECK, { ssh, ...(remoteWebPort === undefined ? {} : { remoteWebPort }) }, t)
+}
+
+/** Why `tailscale serve` could not be configured, with the commands to run by hand. */
+export type ServeFailure = { readonly error: string; readonly manualCommands?: readonly string[] }
+
+/** Configure `tailscale serve` on the peer (user, then `sudo -n`), then re-check. */
+export async function configureRemoteServe(
+  ssh: SshConnectionInput & { readonly hostKeyFingerprint: string },
+  remoteWebPort?: number,
+  t: RuntimeT = fallbackT,
+): Promise<ApiResult<{ readonly report: PeerCheckReport; readonly failure?: ServeFailure }>> {
+  return await postJson(ROUTE_SERVE, { ssh, ...(remoteWebPort === undefined ? {} : { remoteWebPort }) }, t)
+}
+
+/** `systemctl start|restart` the peer's DSH Web unit, refresh its token, then re-check. */
+export async function controlRemoteService(
+  ssh: SshConnectionInput & { readonly hostKeyFingerprint: string },
+  action: 'start' | 'restart',
+  remoteWebPort?: number,
+  t: RuntimeT = fallbackT,
+): Promise<ApiResult<{ readonly report: PeerCheckReport }>> {
+  return await postJson(ROUTE_SERVICE, { ssh, action, ...(remoteWebPort === undefined ? {} : { remoteWebPort }) }, t)
 }
 
 export async function startSshDeploy(request: SshDeployRequest, t: RuntimeT = fallbackT): Promise<ApiResult<{ readonly operationId: string }>> {

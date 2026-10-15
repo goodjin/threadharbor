@@ -41,13 +41,18 @@ import type { HostSnapshot } from '@threadharbor/dsh-host-federation'
 import type { HostStorePosture } from './host-store.ts'
 import {
   connectRemoteHost,
+  checkRemotePeer,
+  configureRemoteServe,
+  controlRemoteService,
   inspectSshHost,
   probeSshDeployApi,
   readRemotePeer,
   startSshDeploy,
   waitSshDeployOperation,
 } from './ssh-deploy.ts'
-import type { SshDeployOperationView, SshDeployProgress } from '@threadharbor/dsh-host-federation'
+import type { ServeFailure } from './ssh-deploy.ts'
+import type { PeerCheckAction, PeerCheckReport, SshDeployOperationView, SshDeployProgress } from '@threadharbor/dsh-host-federation'
+import { PeerCheckList } from './host-check.tsx'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { NAMESPACE } from './locales.ts'
 import styles from './panel.module.css'
@@ -500,6 +505,33 @@ export function applyRegistrationEdit(
 }
 
 /**
+ * Save a peer that passed the status checklist under its `tailscale serve`
+ * URL: the address becomes the ts.net origin and the launch URL carries the
+ * token, so the host is reached over HTTPS on the tailnet — no SSH tunnel.
+ * An existing registration with the same id is updated in place (keeping its
+ * title), otherwise a new one is added.
+ * @param registry - the registry port.
+ * @param hostId - the id to save under.
+ * @param hostTitle - display title for a new entry ('' falls back to the id).
+ * @param launchUrl - `https://<host>.<tailnet>.ts.net/?token=…`.
+ * @param ssh - the non-secret ssh facts, kept for later SSH actions.
+ * @returns the registry's result.
+ */
+export function saveServeRegistration(
+  registry: HostRegistryPort,
+  hostId: string,
+  hostTitle: string,
+  launchUrl: string,
+  ssh: HostSshInfo,
+): RegistrationResult {
+  const address = new URL(launchUrl).origin
+  if (registry.list().some(entry => entry.hostId === hostId)) {
+    return applyRegistrationEdit(registry, hostId, { address, launchUrl, ssh })
+  }
+  return registry.add({ hostId, hostTitle, address, launchUrl, ssh })
+}
+
+/**
  * Drive one probe and report each phase.
  * @param probe - the wired probe, one preset per call.
  * @param presetId - the agent to ask.
@@ -672,6 +704,18 @@ export type SshSeedFacts = {
   readonly remoteWebPort?: number
 }
 
+/**
+ * A host id for a peer found through the checklist when the operator typed none:
+ * the MagicDNS short name (`box` of `box.tail1234.ts.net`), else the SSH target.
+ * @param magicDnsName - the peer's MagicDNS name, if known.
+ * @param target - the SSH target as typed.
+ * @returns a lower-case `[a-z0-9-]` id, or `''` when nothing usable is left.
+ */
+export function derivePeerHostId(magicDnsName: string | undefined, target: string): string {
+  const source = magicDnsName?.split('.')[0] ?? target.trim().replace(/^[^@]*@/, '').split('.')[0] ?? ''
+  return source.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '')
+}
+
 function SshDeploySection(props: {
   readonly hostId: string
   readonly hostTitle: string
@@ -685,6 +729,11 @@ function SshDeploySection(props: {
   readonly lockHost?: boolean | undefined
   /** When provided, a connect-without-redeploy button joins the actions. */
   readonly onConnect?: ((ssh: SshConnectionInput & { readonly hostKeyFingerprint: string }, facts: SshSeedFacts) => void) | undefined
+  /**
+   * When provided, the peer status checklist (tailscale serve flow) is shown
+   * and its save button hands back the ts.net launch URL plus the host id to use.
+   */
+  readonly onServeReady?: ((launchUrl: string, facts: SshSeedFacts, hostId: string) => void) | undefined
   /** The locale seat, threaded from the panel. */
   readonly t: PanelT
 }): ReactNode {
@@ -710,6 +759,10 @@ function SshDeploySection(props: {
     Object.fromEntries(REMOTE_DEPLOY_AGENT_SPECS.map(spec => [spec.key, true])) as RemoteAgentDeploySelection
   ))
 
+  const [checkReport, setCheckReport] = useState<PeerCheckReport | undefined>(undefined)
+  const [checkBusy, setCheckBusy] = useState<'check' | PeerCheckAction | undefined>(undefined)
+  const [serveFailure, setServeFailure] = useState<ServeFailure | undefined>(undefined)
+
   const sshPayload = (): SshConnectionInput => {
     const base: SshConnectionInput = { target: target.trim() }
     const withPort = port.trim() === '' ? base : { ...base, port: Number(port) }
@@ -733,7 +786,11 @@ function SshDeploySection(props: {
       }
       setKeys(result.value.keys)
       const only = result.value.keys[0]
-      if (result.value.keys.length === 1 && only !== undefined) setApprovedFingerprint(only.hostKeyFingerprint)
+      if (result.value.keys.length === 1 && only !== undefined) {
+        setApprovedFingerprint(only.hostKeyFingerprint)
+        // 只有一把主机密钥时直接进入逐项检测，不再多点一步。
+        if (props.onServeReady !== undefined) runCheck(only.hostKeyFingerprint)
+      }
     })
   }
 
@@ -753,29 +810,99 @@ function SshDeploySection(props: {
     })
   }
 
-  const runDeploy = (): void => {
+  const remotePortValue = (): number | undefined => remoteWebPort.trim() === '' ? undefined : Number(remoteWebPort)
+
+  /** 检测清单要用的主机名：填了就用填的，否则取 MagicDNS 短名或 SSH 目标。 */
+  const effectiveHostId = (): string => {
+    const typed = props.hostId.trim()
+    if (typed !== '') return typed
+    return derivePeerHostId(checkReport?.facts.magicDnsName, target)
+  }
+
+  const runCheck = (fingerprint: string = approvedFingerprint): void => {
+    if (fingerprint === '') {
+      props.onError(props.t('panel.ssh.approveFingerprintFirst'))
+      return
+    }
+    setCheckBusy('check')
+    void checkRemotePeer({ ...sshPayload(), hostKeyFingerprint: fingerprint }, remotePortValue(), props.t).then(result => {
+      setCheckBusy(undefined)
+      if (!result.ok) {
+        props.onError(result.error)
+        return
+      }
+      setCheckReport(result.value)
+    })
+  }
+
+  const runCheckAction = (action: PeerCheckAction): void => {
+    if (action === 'retry') {
+      runCheck()
+      return
+    }
+    if (action === 'deploy') {
+      runDeploy({ upgrade: true, fromCheck: true })
+      return
+    }
+    const ssh = { ...sshPayload(), hostKeyFingerprint: approvedFingerprint }
+    setCheckBusy(action)
+    if (action === 'start' || action === 'restart') {
+      // 轻量：systemctl start/restart 已部署的服务，并从日志回读令牌写回 peer.json。
+      void controlRemoteService(ssh, action, remotePortValue(), props.t).then(result => {
+        setCheckBusy(undefined)
+        if (!result.ok) {
+          props.onError(result.error)
+          return
+        }
+        setCheckReport(result.value.report)
+      })
+      return
+    }
+    setServeFailure(undefined)
+    void configureRemoteServe(ssh, remotePortValue(), props.t).then(result => {
+      setCheckBusy(undefined)
+      if (!result.ok) {
+        props.onError(result.error)
+        return
+      }
+      setCheckReport(result.value.report)
+      setServeFailure(result.value.failure)
+    })
+  }
+
+  const runDeploy = (options: { readonly upgrade?: boolean; readonly fromCheck?: boolean } = {}): void => {
     if (approvedFingerprint === '') {
       props.onError(props.t('panel.ssh.approveFingerprintFirst'))
       return
     }
-    if (!props.hostId.trim()) {
+    const fromCheck = options.fromCheck === true
+    const hostId = fromCheck ? effectiveHostId() : props.hostId.trim()
+    if (hostId === '') {
       props.onError(props.t('panel.ssh.hostIdRequired'))
       return
     }
     setBusy('deploy')
+    if (fromCheck) setCheckBusy('deploy')
     setProgressLog([])
     setOpError(undefined)
+    const finishCheck = (): void => {
+      if (!fromCheck) return
+      setCheckBusy(undefined)
+      runCheck()
+    }
     void startSshDeploy({
-      hostId: props.hostId.trim(),
-      hostTitle: props.hostTitle.trim() === '' ? props.hostId.trim() : props.hostTitle.trim(),
+      hostId,
+      hostTitle: props.hostTitle.trim() === '' ? hostId : props.hostTitle.trim(),
       ssh: { ...sshPayload(), hostKeyFingerprint: approvedFingerprint },
       ...(remoteWebPort.trim() === '' ? {} : { remoteWebPort: Number(remoteWebPort) }),
-      upgrade,
-      accessMode: 'tunnel',
+      upgrade: options.upgrade ?? upgrade,
+      // 检测清单里的部署走 ts.net 接入：不建 SSH 隧道。
+      accessMode: fromCheck ? 'serve' : 'tunnel',
       remoteAgents,
     }, props.t).then(started => {
       if (!started.ok) {
         setBusy(undefined)
+        if (fromCheck) setCheckBusy(undefined)
         setOpError(started.error)
         props.onError(started.error)
         return
@@ -790,6 +917,7 @@ function SshDeploySection(props: {
         })
       }, undefined, props.t).then(done => {
         setBusy(undefined)
+        finishCheck()
         if (!done.ok) {
           setOpError(done.error)
           props.onError(done.error)
@@ -799,8 +927,10 @@ function SshDeploySection(props: {
           setOpError(done.value.error ?? props.t('panel.ssh.deployFailed'))
           return
         }
-        setDeployed(done.value.result)
         setOpError(undefined)
+        // 检测清单里触发的部署只是修复一步：登记等清单全部通过后用 ts.net 地址做。
+        if (fromCheck) return
+        setDeployed(done.value.result)
         props.onDeployed(done.value.result, seedFacts())
       })
     })
@@ -921,7 +1051,7 @@ function SshDeploySection(props: {
               >{props.t('panel.ssh.connectOnly')}</button>
             )
           : undefined}
-        <button type="button" className={styles.actionPrimary} data-action="ssh-deploy" disabled={busy !== undefined} onClick={runDeploy}>
+        <button type="button" className={styles.actionPrimary} data-action="ssh-deploy" disabled={busy !== undefined} onClick={() => { runDeploy() }}>
           {busy === 'deploy' ? props.t('panel.ssh.deploying') : props.t('panel.ssh.deploy')}
         </button>
       </div>
@@ -941,6 +1071,20 @@ function SshDeploySection(props: {
                 </label>
               ))}
             </div>
+          )
+        : undefined}
+      {props.onServeReady !== undefined && approvedFingerprint !== ''
+        ? (
+            <PeerCheckList
+              report={checkReport}
+              busy={checkBusy}
+              serveFailure={serveFailure}
+              disabled={busy !== undefined && checkBusy === undefined}
+              onCheck={() => { runCheck() }}
+              onAction={runCheckAction}
+              onSave={launchUrl => { props.onServeReady?.(launchUrl, seedFacts(), effectiveHostId()) }}
+              t={props.t}
+            />
           )
         : undefined}
       {peer !== undefined
@@ -970,7 +1114,7 @@ function SshDeploySection(props: {
               <p className={styles.stateBad}>{props.t('panel.ssh.failedTitle')}</p>
               <code className={styles.launchUrlText}>{opError}</code>
               <div className={styles.formActions}>
-                <button type="button" className={styles.action} data-action="ssh-deploy-retry" disabled={busy !== undefined} onClick={runDeploy}>{props.t('panel.ssh.retry')}</button>
+                <button type="button" className={styles.action} data-action="ssh-deploy-retry" disabled={busy !== undefined} onClick={() => { runDeploy() }}>{props.t('panel.ssh.retry')}</button>
               </div>
             </div>
           )
@@ -1575,6 +1719,15 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                   text: props.t('panel.ssh.registered', { endpoint: deployResult.endpoint }),
                 })
               }}
+              onServeReady={(launchUrl, sshFacts, hostId) => {
+                const saved = saveServeRegistration(props.registry, hostId, addTitleDraft.trim(), launchUrl, sshFacts)
+                if (!saved.ok) {
+                  setFormMessage({ tone: 'bad', text: saved.error.detail })
+                  return
+                }
+                setRegistryRevision(revision => revision + 1)
+                setFormMessage({ tone: 'ok', text: props.t('panel.check.saved', { url: new URL(launchUrl).origin }) })
+              }}
               t={props.t}
             />
           </section>
@@ -1746,6 +1899,16 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                                       setFormMessage(undefined)
                                     }}
                                     onConnect={(ssh, facts) => { runConnect(registration, ssh, facts) }}
+                                    onServeReady={(launchUrl, facts) => {
+                                      const saved = saveServeRegistration(props.registry, row.hostId, '', launchUrl, facts)
+                                      if (!saved.ok) {
+                                        setFormMessage({ tone: 'bad', text: saved.error.detail })
+                                        return
+                                      }
+                                      setRegistryRevision(revision => revision + 1)
+                                      setTunnelChecks(previous => new Map(previous).set(row.hostId, 'online'))
+                                      setFormMessage({ tone: 'ok', text: props.t('panel.check.saved', { url: new URL(launchUrl).origin }) })
+                                    }}
                                     onError={message => { setFormMessage({ tone: 'bad', text: message }) }}
                                     t={props.t}
                                   />

@@ -48,10 +48,11 @@ export function planConnection(
 
 /** Deploy always listens on loopback and is reached through an SSH tunnel. */
 export function parseAccessMode(value: unknown): SshAccessMode {
+  if (value === 'serve') return 'serve'
   if (value === undefined || value === null || value === 'tunnel' || value === 'host-ip' || value === 'tailscale' || value === 'custom') {
     return 'tunnel'
   }
-  throw new Error('accessMode must be tunnel')
+  throw new Error('accessMode must be tunnel or serve')
 }
 
 export function validateBindHost(input: string): string {
