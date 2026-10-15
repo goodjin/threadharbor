@@ -51,8 +51,11 @@ export type SshDeployProgress = {
   readonly total?: number
 }
 
-/** How a peer reaches the remote DSH. Deploys always use `tunnel`. */
-export type SshAccessMode = 'tunnel'
+/**
+ * How a peer reaches the remote DSH: `tunnel` (legacy, local SSH -L) or
+ * `serve` (the peer's `tailscale serve` ts.net URL; deploy opens no tunnel).
+ */
+export type SshAccessMode = 'tunnel' | 'serve'
 
 /** Per-agent enable flags for remote DSH presets (omit or leave true = deploy). */
 export type RemoteAgentDeploySelection = {

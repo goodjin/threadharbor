@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { PeerCheckReport } from '@threadharbor/dsh-host-federation'
-import { peerCheckRows } from '../src/host-check.tsx'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { PeerCheckList, peerCheckRows } from '../src/host-check.tsx'
 import { derivePeerHostId, saveServeRegistration } from '../src/panel.tsx'
 import { en, zh, fallbackT } from '../src/locales.ts'
 import type { ClientLocaleKey, RuntimeT } from '../src/locales.ts'
@@ -77,5 +79,24 @@ describe('saveServeRegistration', () => {
     saveServeRegistration(registry as never, 'box', '', 'https://box.tail1.ts.net/?token=t', ssh)
     expect(registry.entries()).toHaveLength(1)
     expect(registry.entries()[0]).toMatchObject({ address: 'https://box.tail1.ts.net', launchUrl: 'https://box.tail1.ts.net/?token=t', ssh })
+  })
+})
+
+describe('PeerCheckList serve failure', () => {
+  it('shows the manual commands with copy buttons', () => {
+    const html = renderToStaticMarkup(createElement(PeerCheckList, {
+      report,
+      busy: undefined,
+      disabled: false,
+      serveFailure: { error: 'denied', manualCommands: ['sudo tailscale set --operator=$USER', 'tailscale serve --bg --https=443 http://127.0.0.1:3081'] },
+      onCheck: () => undefined,
+      onAction: () => undefined,
+      onSave: () => undefined,
+      t: enT,
+    }))
+    expect(html).toContain('sudo tailscale set --operator=$USER')
+    expect(html).toContain('tailscale serve --bg --https=443 http://127.0.0.1:3081')
+    expect(html.match(/data-action="peer-copy-command"/g)).toHaveLength(2)
+    expect(html).toContain(en['panel.check.manualHint'])
   })
 })

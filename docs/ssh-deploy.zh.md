@@ -54,12 +54,13 @@
 1. **各主机 → 添加新主机 → SSH 自动部署**，填 SSH 目标（可直接填 Tailscale 主机名）与认证，点「扫描主机密钥」。只有一把密钥时自动批准并立即开始检测。
 2. 「对方状态检测」逐项显示（一次 SSH 读完，前序未通过的项显示「待前序完成」）：
    SSH 可连接 → Tailscale 已安装并登录（MagicDNS 名）→ Node.js 22+ → DSH 已安装 → 插件已部署（peer.json）→ DSH Web 正在运行 → `tailscale serve` 已代理 DSH 端口 → ts.net 地址可访问且令牌有效（本机发起 HTTPS 请求）。
-3. 每项带动作按钮：**安装/部署 DSH 与插件**、**启动 DSH**、**重启 DSH**（走部署脚本，重启后刷新 peer.json 里的令牌）、**配置 tailscale serve**（`tailscale serve --bg --https=443 http://127.0.0.1:<端口>`，失败时尝试 `sudo -n`）、**重新检测**。
+3. 每项带动作按钮：**安装/部署 DSH 与插件**、**启动 DSH**、**启动/重启 DSH**（轻量 `systemctl start|restart threadharbor-dsh-web-<channel>.service`：用户单元，或经 `sudo -n` 的系统单元；随后从 journal/日志回读令牌写回 peer.json）、**配置 tailscale serve**（先以普通用户执行 `tailscale serve --bg --https=443 http://127.0.0.1:<端口>`，再试 `sudo -n`；都被拒时界面列出需在对方手动执行的命令并可复制，执行后点「重新检测」）。清单里触发的部署不建 SSH 隧道、**重新检测**。
 4. 全部通过后点 **用 ts.net 地址保存这台主机**：登记的 `address` 为 ts.net origin，`launchUrl` 为 `https://…ts.net/?token=…`，不再依赖 SSH 隧道。详情页的部署区同样提供这份清单，可把旧的隧道登记切换到 ts.net。
 
 | 路径 | 方法 | 作用 |
 |------|------|------|
 | `/api/threadharbor.host-ssh.check` | POST | body: `{ ssh, remoteWebPort? }`，返回逐项检测报告 |
-| `/api/threadharbor.host-ssh.serve` | POST | 在对方配置 `tailscale serve` 后重新检测 |
+| `/api/threadharbor.host-ssh.serve` | POST | 在对方配置 `tailscale serve` 后重新检测；失败时返回 `failure.manualCommands` |
+| `/api/threadharbor.host-ssh.service` | POST | body: `{ ssh, action: start\|restart, remoteWebPort? }`，systemctl 启停并刷新令牌后重新检测 |
 
 Linux 上普通用户执行 `tailscale serve` 需要先在对方执行一次 `sudo tailscale set --operator=$USER`。

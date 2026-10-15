@@ -18,6 +18,9 @@ import { parsePeerStatus, type PeerStatus } from './peer-status.ts'
 import {
   buildPeerCheckScript,
   buildServeScript,
+  buildServiceScript,
+  manualServeCommands,
+  type ServiceVerb,
   derivePeerCheckSteps,
   launchToken,
   parsePeerCheckOutput,
@@ -37,6 +40,10 @@ export type SshManagerOptions = {
   /** When true, skip tarball upload and install plugins from `remotePlugins` only. */
   readonly installPluginsFromGithub?: boolean
 }
+
+export type ServeOutcome =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly error: string; readonly manualCommands?: readonly string[] }
 
 type ScanResult = SshHostKeyCandidate & { readonly knownHostLine: string }
 
@@ -138,15 +145,43 @@ export class DshSshManager {
     }
   }
 
-  /** Point `tailscale serve` (HTTPS 443) on the peer at its DSH loopback port. */
-  async configureServe(config: SshConnectionConfig, remoteWebPort?: number): Promise<void> {
+  /**
+   * Point `tailscale serve` (HTTPS 443) on the peer at its DSH loopback port,
+   * as the SSH user and then via `sudo -n`. When both are refused the result
+   * carries the exact commands for the operator to run on the peer.
+   */
+  async configureServe(config: SshConnectionConfig, remoteWebPort?: number): Promise<ServeOutcome> {
     const port = remoteWebPort ?? this.options.defaultRemoteWebPort
     const materialized = await this.trustAndMaterialize(config)
     try {
       const result = await this.remoteExec(materialized, buildServeScript(port), this.handshakeBudgetMs())
-      if (result.code !== 0) {
-        throw new Error(`配置 tailscale serve 失败：${result.stderr.trim() || `退出码 ${result.code}`}`)
+      if (result.code === 0) return { ok: true }
+      if (result.code === 255) throw new Error(`无法使用当前 SSH 凭据连接目标主机：${result.stderr.trim() || 'ssh 退出码 255'}`)
+      return {
+        ok: false,
+        error: `配置 tailscale serve 失败：${result.stderr.trim() || `退出码 ${result.code}`}`,
+        ...(result.code === 3 ? {} : { manualCommands: manualServeCommands(port) }),
       }
+    } finally {
+      this.cleanupTempKeys()
+    }
+  }
+
+  /**
+   * `systemctl start|restart` of the deployed DSH Web unit (user unit, or
+   * system unit via `sudo -n`), then re-read the launch token into peer.json.
+   */
+  async controlService(config: SshConnectionConfig, verb: ServiceVerb, remoteWebPort?: number): Promise<{ readonly launchUrl: string; readonly scope: string }> {
+    const port = remoteWebPort ?? this.options.defaultRemoteWebPort
+    const materialized = await this.trustAndMaterialize(config)
+    try {
+      const result = await this.remoteExec(materialized, buildServiceScript(verb, this.options.deploymentChannel, port), this.handshakeBudgetMs() + 45_000)
+      if (result.code === 255) throw new Error(`无法使用当前 SSH 凭据连接目标主机：${result.stderr.trim() || 'ssh 退出码 255'}`)
+      if (result.code === 5) throw new Error('对方没有 ThreadHarbor 安装的 systemd 服务；请先「安装/部署 DSH 与插件」')
+      if (result.code !== 0) throw new Error(`${verb === 'start' ? '启动' : '重启'} DSH 失败：${result.stderr.trim() || `退出码 ${result.code}`}`)
+      const markers = parseDeployMarkers(result.stdout)
+      const scope = /SERVICE_SCOPE=(\w+)/.exec(result.stdout)?.[1] ?? 'user'
+      return { launchUrl: markers.launchUrl ?? '', scope }
     } finally {
       this.cleanupTempKeys()
     }
@@ -263,6 +298,21 @@ export class DshSshManager {
       }
 
       onProgress({ phase: 'starting', detail: alreadyRunning ? '远端服务已在运行，已读取现有启动 URL。' : '正在启动远端 DSH Web。' })
+
+      if (request.accessMode === 'serve') {
+        // ts.net 接入：对方由 tailscale serve 暴露，安装脚本已在对方本机做过健康检查；
+        // 不建 SSH 隧道。endpoint 记对方回环地址，仅作信息，登记由检测清单用 ts.net 完成。
+        onProgress({ phase: 'succeeded', detail: '部署完成。' })
+        return {
+          endpoint: `http://127.0.0.1:${remotePort}`,
+          launchUrl: remoteLaunch,
+          accessMode,
+          bindHost,
+          remoteWebPort: remotePort,
+          releaseVersion,
+          alreadyRunning,
+        }
+      }
 
       onProgress({ phase: 'opening-tunnel', detail: '正在建立本机到远端 loopback 的 SSH 端口转发。' })
       const endpoint = await this.ensureTunnelWithAuth(materialized, remotePort)

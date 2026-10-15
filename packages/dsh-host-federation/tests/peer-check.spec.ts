@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   buildPeerCheckScript,
   buildServeScript,
+  buildServiceScript,
+  manualServeCommands,
   derivePeerCheckSteps,
   findServeUrl,
   parsePeerCheckOutput,
@@ -91,6 +93,31 @@ describe('peer check', () => {
     expect(old.steps.find(step => step.id === 'node')).toMatchObject({ state: 'fail', reason: 'node-too-old' })
     const rejected = derivePeerCheckSteps(parsePeerCheckOutput(output(), 3081), { reachable: true, authOk: false, status: 401 })
     expect(rejected.steps.at(-1)).toMatchObject({ id: 'https', state: 'fail', reason: 'auth-failed', actions: ['restart', 'retry'] })
+  })
+})
+
+describe('serve permission and service control scripts', () => {
+  it('serve tries the user first, then sudo -n, and exits 4 when both are refused', () => {
+    const script = buildServeScript(3081)
+    const user = script.indexOf('"$ts" serve --bg')
+    const sudo = script.indexOf('sudo -n "$ts" serve --bg')
+    expect(user).toBeGreaterThan(-1)
+    expect(sudo).toBeGreaterThan(user)
+    expect(script).toContain('exit 4')
+    expect(manualServeCommands(3081)).toEqual(['sudo tailscale set --operator=$USER', 'tailscale serve --bg --https=443 http://127.0.0.1:3081'])
+  })
+
+  it('start/restart use systemctl (user unit, system unit via sudo -n) and re-read the token into peer.json', () => {
+    const restart = buildServiceScript('restart', 'managed', 3081)
+    expect(restart).toContain('systemctl --user restart "$unit"')
+    expect(restart).toContain('sudo -n systemctl restart "$unit"')
+    expect(restart).toContain('threadharbor-dsh-web-managed.service')
+    expect(restart).toContain('LAUNCH_URL=')
+    expect(restart).toContain('peer.json')
+    expect(restart).not.toContain('dsh plugin')
+    expect(buildServiceScript('start', 'managed', 3081)).toContain('systemctl --user start "$unit"')
+    expect(() => buildServiceScript('stop' as never, 'managed', 3081)).toThrow()
+    expect(() => buildServiceScript('start', 'a b', 3081)).toThrow()
   })
 })
 

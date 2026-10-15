@@ -317,6 +317,8 @@ export const zh = {
   'panel.check.action.restart': '重启 DSH',
   'panel.check.action.serve': '配置 tailscale serve',
   'panel.check.action.retry': '重新检测',
+  'panel.check.manualHint': '普通用户和 sudo -n 都无权配置 tailscale serve。请在对方主机上依次手动执行下面的命令，然后点「重新检测」：',
+  'panel.check.copy': '复制',
 } satisfies Record<string, string>
 
 /** 这份文案的全部键，也是命名空间声明进 `LocaleNamespaceMap` 的键域。 */
@@ -604,6 +606,8 @@ export const en = {
   'panel.check.action.restart': 'Restart DSH',
   'panel.check.action.serve': 'Configure tailscale serve',
   'panel.check.action.retry': 'Check again',
+  'panel.check.manualHint': 'Neither the SSH user nor sudo -n may configure tailscale serve. Run these commands on the peer in order, then press “Check again”:',
+  'panel.check.copy': 'Copy',
 } satisfies Record<ClientLocaleKey, string>
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {

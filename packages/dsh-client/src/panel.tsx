@@ -43,12 +43,14 @@ import {
   connectRemoteHost,
   checkRemotePeer,
   configureRemoteServe,
+  controlRemoteService,
   inspectSshHost,
   probeSshDeployApi,
   readRemotePeer,
   startSshDeploy,
   waitSshDeployOperation,
 } from './ssh-deploy.ts'
+import type { ServeFailure } from './ssh-deploy.ts'
 import type { PeerCheckAction, PeerCheckReport, SshDeployOperationView, SshDeployProgress } from '@threadharbor/dsh-host-federation'
 import { PeerCheckList } from './host-check.tsx'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
@@ -759,6 +761,7 @@ function SshDeploySection(props: {
 
   const [checkReport, setCheckReport] = useState<PeerCheckReport | undefined>(undefined)
   const [checkBusy, setCheckBusy] = useState<'check' | PeerCheckAction | undefined>(undefined)
+  const [serveFailure, setServeFailure] = useState<ServeFailure | undefined>(undefined)
 
   const sshPayload = (): SshConnectionInput => {
     const base: SshConnectionInput = { target: target.trim() }
@@ -837,19 +840,33 @@ function SshDeploySection(props: {
       runCheck()
       return
     }
-    if (action === 'deploy' || action === 'start' || action === 'restart') {
-      // 部署脚本本身幂等：start 在已运行时直接读回令牌；restart/deploy 走升级路径重装并重启。
-      runDeploy({ upgrade: action !== 'start', fromCheck: true })
+    if (action === 'deploy') {
+      runDeploy({ upgrade: true, fromCheck: true })
       return
     }
-    setCheckBusy('serve')
-    void configureRemoteServe({ ...sshPayload(), hostKeyFingerprint: approvedFingerprint }, remotePortValue(), props.t).then(result => {
+    const ssh = { ...sshPayload(), hostKeyFingerprint: approvedFingerprint }
+    setCheckBusy(action)
+    if (action === 'start' || action === 'restart') {
+      // 轻量：systemctl start/restart 已部署的服务，并从日志回读令牌写回 peer.json。
+      void controlRemoteService(ssh, action, remotePortValue(), props.t).then(result => {
+        setCheckBusy(undefined)
+        if (!result.ok) {
+          props.onError(result.error)
+          return
+        }
+        setCheckReport(result.value.report)
+      })
+      return
+    }
+    setServeFailure(undefined)
+    void configureRemoteServe(ssh, remotePortValue(), props.t).then(result => {
       setCheckBusy(undefined)
       if (!result.ok) {
         props.onError(result.error)
         return
       }
-      setCheckReport(result.value)
+      setCheckReport(result.value.report)
+      setServeFailure(result.value.failure)
     })
   }
 
@@ -865,7 +882,7 @@ function SshDeploySection(props: {
       return
     }
     setBusy('deploy')
-    if (fromCheck) setCheckBusy(options.upgrade === true ? 'restart' : 'start')
+    if (fromCheck) setCheckBusy('deploy')
     setProgressLog([])
     setOpError(undefined)
     const finishCheck = (): void => {
@@ -879,7 +896,8 @@ function SshDeploySection(props: {
       ssh: { ...sshPayload(), hostKeyFingerprint: approvedFingerprint },
       ...(remoteWebPort.trim() === '' ? {} : { remoteWebPort: Number(remoteWebPort) }),
       upgrade: options.upgrade ?? upgrade,
-      accessMode: 'tunnel',
+      // 检测清单里的部署走 ts.net 接入：不建 SSH 隧道。
+      accessMode: fromCheck ? 'serve' : 'tunnel',
       remoteAgents,
     }, props.t).then(started => {
       if (!started.ok) {
@@ -1060,6 +1078,7 @@ function SshDeploySection(props: {
             <PeerCheckList
               report={checkReport}
               busy={checkBusy}
+              serveFailure={serveFailure}
               disabled={busy !== undefined && checkBusy === undefined}
               onCheck={() => { runCheck() }}
               onAction={runCheckAction}

@@ -283,19 +283,83 @@ export function derivePeerCheckSteps(facts: PeerCheckFacts, https: PeerHttpsProb
   return { steps, facts, ready, ...(url === undefined ? {} : { serveLaunchUrl: url }) }
 }
 
-/** Remote command that points `tailscale serve` (HTTPS 443) at the DSH loopback port. */
+const TS_LOOKUP = [
+  'export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"',
+  'ts="$(command -v tailscale 2>/dev/null || true)"',
+  'if [ -z "$ts" ] && [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]; then ts=/Applications/Tailscale.app/Contents/MacOS/Tailscale; fi',
+]
+
+/** The serve command itself (as the operator would type it on the peer). */
+export function serveCommand(port: number): string {
+  return `tailscale serve --bg --https=443 http://127.0.0.1:${port}`
+}
+
+/**
+ * Commands the operator runs by hand on the peer when neither the SSH user
+ * nor `sudo -n` may configure serve: grant the operator once, then serve.
+ */
+export function manualServeCommands(port: number): readonly string[] {
+  return ['sudo tailscale set --operator=$USER', serveCommand(port)]
+}
+
+/**
+ * Remote command that points `tailscale serve` (HTTPS 443) at the DSH loopback
+ * port: first as the SSH user, then with non-interactive `sudo -n`. Exit 3 =
+ * tailscale missing, 4 = both attempts refused (caller shows manual commands).
+ */
 export function buildServeScript(port: number): string {
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error('port 无效')
   return [
-    'export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"',
-    'ts="$(command -v tailscale 2>/dev/null || true)"',
-    'if [ -z "$ts" ] && [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]; then ts=/Applications/Tailscale.app/Contents/MacOS/Tailscale; fi',
+    ...TS_LOOKUP,
     'if [ -z "$ts" ]; then echo "tailscale not installed" >&2; exit 3; fi',
-    `if "$ts" serve --bg --https=443 http://127.0.0.1:${port} 2>/tmp/threadharbor-serve.err; then exit 0; fi`,
-    // Linux without `tailscale set --operator=$USER` needs root; try non-interactive sudo once.
-    `if command -v sudo >/dev/null 2>&1 && sudo -n "$ts" serve --bg --https=443 http://127.0.0.1:${port}; then exit 0; fi`,
+    `if "$ts" serve --bg --https=443 http://127.0.0.1:${port} 2>/tmp/threadharbor-serve.err; then echo SERVE_AS=user; exit 0; fi`,
+    `if command -v sudo >/dev/null 2>&1 && sudo -n "$ts" serve --bg --https=443 http://127.0.0.1:${port} 2>>/tmp/threadharbor-serve.err; then echo SERVE_AS=sudo; exit 0; fi`,
     'cat /tmp/threadharbor-serve.err >&2',
-    'echo "hint: run \\"sudo tailscale set --operator=$USER\\" on the peer once, then retry" >&2',
-    'exit 1',
+    'exit 4',
+  ].join('\n')
+}
+
+export type ServiceVerb = 'start' | 'restart'
+
+/**
+ * Lightweight start/restart of the DSH Web unit the deploy installed
+ * (`threadharbor-dsh-web-<channel>.service`, user unit; a system unit of the
+ * same name is driven via `sudo -n`), then wait for health and re-read the
+ * launch URL from the log/journal and write it back into peer.json so the
+ * token stays current. Prints `LAUNCH_URL=` and `SERVICE_SCOPE=`.
+ * Exit 5 = no systemd unit found (caller suggests a deploy).
+ */
+export function buildServiceScript(verb: ServiceVerb, channel: string, port: number): string {
+  if (verb !== 'start' && verb !== 'restart') throw new Error('verb 无效')
+  if (!/^[a-zA-Z0-9._-]+$/.test(channel)) throw new Error('channel 无效')
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error('port 无效')
+  return [
+    'export PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"',
+    `unit="threadharbor-dsh-web-${channel}.service"`,
+    `log_file="$HOME/.local/state/threadharbor/${channel}/dsh-web.log"`,
+    'scope=""',
+    'if command -v systemctl >/dev/null 2>&1; then',
+    `  if [ -f "$HOME/.config/systemd/user/$unit" ] && systemctl --user daemon-reload && systemctl --user ${verb} "$unit"; then scope=user`,
+    `  elif [ -f "/etc/systemd/system/$unit" ] || systemctl cat "$unit" >/dev/null 2>&1; then if systemctl ${verb} "$unit" 2>/dev/null || sudo -n systemctl ${verb} "$unit"; then scope=system; fi`,
+    `  elif systemctl --user ${verb} "$unit" 2>/dev/null; then scope=user`,
+    `  elif sudo -n systemctl ${verb} "$unit" 2>/dev/null; then scope=system`,
+    '  fi',
+    'fi',
+    'if [ -z "$scope" ]; then echo "no systemd unit $unit" >&2; exit 5; fi',
+    'echo "SERVICE_SCOPE=$scope"',
+    'ok=0',
+    `for _ in $(seq 1 30); do code="$(curl -sS -o /dev/null -w "%{http_code}" --max-time 2 http://127.0.0.1:${port}/ 2>/dev/null || true)"; case "$code" in 200|401|30*) ok=1; break;; esac; sleep 1; done`,
+    'if [ "$ok" != 1 ]; then echo "DSH Web did not become healthy" >&2; exit 1; fi',
+    'url=""',
+    'for _ in 1 2 3 4 5; do',
+    '  if [ "$scope" = user ]; then url="$(journalctl --user -u "$unit" -n 80 --no-pager 2>/dev/null | grep "dsh web:" | tail -1 | sed "s/.*dsh web: //")"; else url="$(sudo -n journalctl -u "$unit" -n 80 --no-pager 2>/dev/null | grep "dsh web:" | tail -1 | sed "s/.*dsh web: //")"; fi',
+    '  if [ -z "$url" ] && [ -f "$log_file" ]; then url="$(grep -E "^dsh web: " "$log_file" | tail -1 | sed "s/^dsh web: //")"; fi',
+    '  [ -n "$url" ] && break; sleep 1',
+    'done',
+    'if [ -z "$url" ]; then echo "missing launch url in log" >&2; exit 1; fi',
+    'echo "LAUNCH_URL=$url"',
+    'node_path="$(command -v node 2>/dev/null || true)"',
+    `if [ -n "$node_path" ]; then PEER_URL="$url" PEER_PORT=${port} "$node_path" -e 'const fs=require("fs"),os=require("os"),p=require("path");const f=p.join(os.homedir(),".local/state/threadharbor/peer.json");let b={};try{b=JSON.parse(fs.readFileSync(f,"utf8"))}catch{};Object.assign(b,{pluginsInstalled:true,listen:b.listen||"loopback",port:Number(process.env.PEER_PORT),bindHost:b.bindHost||"127.0.0.1",launchUrl:process.env.PEER_URL});fs.mkdirSync(p.dirname(f),{recursive:true});fs.writeFileSync(f,JSON.stringify(b),{mode:384});'; fi`,
+    'exit 0',
   ].join('\n')
 }

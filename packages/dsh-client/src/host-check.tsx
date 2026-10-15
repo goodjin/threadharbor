@@ -10,6 +10,7 @@
 import type { ReactNode } from 'react'
 import type { PeerCheckAction, PeerCheckReport, PeerCheckStep } from '@threadharbor/dsh-host-federation'
 import type { ClientLocaleKey, RuntimeT } from './locales.ts'
+import type { ServeFailure } from './ssh-deploy.ts'
 import styles from './panel.module.css'
 
 /** One rendered row: localized label, state word, reason and the actions. */
@@ -52,6 +53,8 @@ const STATE_MARK: Record<PeerCheckStep['state'], string> = { ok: '●', fail: '�
 export function PeerCheckList(props: {
   readonly report: PeerCheckReport | undefined
   readonly busy: 'check' | PeerCheckAction | undefined
+  /** serve 配置被拒（普通用户与 sudo -n 都不行）：列出需在对方手动执行的命令。 */
+  readonly serveFailure?: ServeFailure | undefined
   readonly disabled: boolean
   readonly onCheck: () => void
   readonly onAction: (action: PeerCheckAction) => void
@@ -81,6 +84,31 @@ export function PeerCheckList(props: {
           ))}
         </div>
       ))}
+      {props.serveFailure !== undefined
+        ? (
+            <div data-peer-serve-failure="" className={styles.launchUrlBox}>
+              <p className={styles.stateBad}>{props.serveFailure.error}</p>
+              {props.serveFailure.manualCommands !== undefined
+                ? (
+                    <>
+                      <p className={styles.stateLine}>{t('panel.check.manualHint')}</p>
+                      {props.serveFailure.manualCommands.map(command => (
+                        <div key={command} className={styles.formActions}>
+                          <code data-peer-manual-command="" className={styles.launchUrlText}>{command}</code>
+                          <button
+                            type="button"
+                            className={styles.action}
+                            data-action="peer-copy-command"
+                            onClick={() => { void navigator.clipboard.writeText(command) }}
+                          >{t('panel.check.copy')}</button>
+                        </div>
+                      ))}
+                    </>
+                  )
+                : undefined}
+            </div>
+          )
+        : undefined}
       <div className={styles.formActions}>
         <button
           type="button"
