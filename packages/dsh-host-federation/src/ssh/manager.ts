@@ -636,7 +636,7 @@ export function buildInstallScript(input: {
     'if [ "$already" = "1" ]; then echo ALREADY_RUNNING=1; fi',
     upgrade ? '' : 'if [ "$already" = "1" ]; then emit_success; fi',
     buildStartBranch({ channel, remotePort }),
-  ].filter(line => line !== '').join('; ')
+  ].filter(line => line !== '').join('\n')
 }
 
 /**
@@ -659,5 +659,5 @@ function peerStartScript(channel: string, nodePath: string, port: number): strin
       hostTitle: '',
       remoteAgentsPatch: buildRemoteAgentsPatchYaml(),
     }),
-  ].join('; ')
+  ].join('\n')
 }

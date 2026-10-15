@@ -312,13 +312,11 @@ describe('DshSshManager', () => {
         // The start branch calls emit_success but the fragments never define
         // it; the start script must supply the no-op definition itself.
         expect(script).toContain('emit_success() { exit 0; }')
-        // Syntax check only — nothing executes. The fragment family (install
-        // and start alike) joins shell lines with "; ", which the POSIX sh on
-        // this machine rejects (`do;` / `{;` / `else;`) but the remote login
-        // shell that executes these scripts in the field — zsh, the macOS
-        // default — accepts. Parse under that shell family.
-        const shell = spawnSync('zsh', ['--version']).status === 0 ? 'zsh' : 'sh'
-        expect(spawnSync(shell, ['-n'], { input: script }).status).toBe(0)
+        // Syntax check only — nothing executes. A peer machine only promises
+        // a POSIX shell, not zsh: an earlier version of this check preferred
+        // zsh and so accepted `{;` / `do;` / `else;` joins that sh rejects.
+        // Parse under sh, the least capable shell that must run these scripts.
+        expect(spawnSync('sh', ['-n'], { input: script }).status).toBe(0)
       } finally {
         manager.close()
       }

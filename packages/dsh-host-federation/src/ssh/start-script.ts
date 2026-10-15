@@ -9,6 +9,10 @@
  * DSH" script, so every shell line here is copied verbatim from the script
  * that shipped first — a single changed byte would break deployment of freshly
  * provisioned machines.
+ *
+ * Fragments join with newlines, never `"; "`: a semicolon glued onto a
+ * block-opening keyword (`{`, `do`, `then`, `else`) is a syntax error under
+ * POSIX sh, which is what a peer machine actually runs these scripts with.
  */
 
 import { shellQuote } from './parse.ts'
@@ -74,7 +78,7 @@ export function buildRemoteEnv(input: {
     '  if [ -z "$url" ] && command -v journalctl >/dev/null 2>&1; then url="$(journalctl --user -u "$service_name" -n 40 --no-pager 2>/dev/null | grep \'dsh web:\' | tail -1 | sed \'s/.*dsh web: //\')"; fi',
     '  printf \'%s\' "$url"',
     '}',
-  ].filter(line => line !== '').join('; ')
+  ].filter(line => line !== '').join('\n')
 }
 
 /**
@@ -101,7 +105,7 @@ export function buildStartBranch(input: {
     'done',
     'echo "DSH Web did not become healthy" >&2',
     'exit 1',
-  ].filter(line => line !== '').join('; ')
+  ].filter(line => line !== '').join('\n')
 }
 
 /** The standalone start script: remote environment followed by the start branch. */
@@ -113,5 +117,5 @@ export function buildStartScript(input: {
   readonly hostTitle: string
   readonly remoteAgentsPatch: string
 }): string {
-  return [buildRemoteEnv(input), buildStartBranch(input)].join('; ')
+  return [buildRemoteEnv(input), buildStartBranch(input)].join('\n')
 }
