@@ -45,6 +45,7 @@ import {
   renderHostList,
   renderLoading,
   renderSessionList,
+  escapeHtml,
   stateFold,
 } from './views.js'
 
@@ -194,6 +195,8 @@ export async function bootApp(root, deps = {}) {
     sessionsError: undefined,
     mux: 'connecting',
     muxDetail: '',
+    /** 最近一次「应答没送出去」的一句话；在横幅那一带显示，任何屏都看得到。 */
+    answerError: undefined,
   }
 
   function shell() {
@@ -247,10 +250,16 @@ export async function bootApp(root, deps = {}) {
     }
     const banners = root.querySelector('#banners')
     if (banners !== null) {
-      banners.innerHTML = renderApprovalBanners(
+      // 应答那一下没送出去要说一句。之前它塞在「事件通道」那一格，而那一格只在
+      // 通道断开时才显示那句话——通道好好的（常见情形）就一个字都不露，横幅
+      // 挂在那里不消失，人只会以为还在转圈。
+      const notice = typeof state.answerError === 'string' && state.answerError.length > 0
+        ? `<p class="notice-error" role="alert">${escapeHtml(state.answerError)}</p>`
+        : ''
+      banners.innerHTML = notice + renderApprovalBanners(
         [...state.approvals.values()].map(item => ({ ...item, pending: state.pendingAnswers.has(item.eventId) })),
       )
-      banners.hidden = state.approvals.size === 0
+      banners.hidden = state.approvals.size === 0 && notice === ''
     }
     const main = root.querySelector('#main')
     const tabbar = root.querySelector('#tabbar')
@@ -892,9 +901,20 @@ export async function bootApp(root, deps = {}) {
       if (outcome.ok === true) {
         state.approvals.delete(eventId)
         state.approvalHosts.delete(eventId)
-      } else {
-        state.muxDetail = outcome.message
+        state.answerError = undefined
+        render()
+        return
       }
+      // 手机与中转站的连接断了：进配对引导。只往顶栏塞一句文案的话，操作者
+      // 看到的只是一次「答不上」，横幅还挂在那里，重试多少次都一样。
+      const guide = guidanceReasonForKind(outcome.kind)
+      if (guide !== null) {
+        state.screen = 'guide'
+        state.guideReason = guide
+        render()
+        return
+      }
+      state.answerError = outcome.message
       render()
       return
     }

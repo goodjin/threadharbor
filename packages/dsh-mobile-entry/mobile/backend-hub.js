@@ -126,7 +126,10 @@ export function createHubBackend(opts = {}) {
     async answer(hostId, eventId, outcome) {
       const body = await postJson(ANSWER_PATH, { hostId, eventId, outcome })
       if (body?.ok === true) return { ok: true }
-      return { ok: false, message: body?.error ?? body?.message ?? '应答没有送到那台机器' }
+      // kind 一并带出去：手机要靠它分「重配对」与「那台机器在重连」。
+      const kind = typeof body?.kind === 'string' ? body.kind : undefined
+      const message = body?.error ?? body?.message ?? '应答没有送到那台机器'
+      return kind === undefined ? { ok: false, message } : { ok: false, kind, message }
     },
 
     /**

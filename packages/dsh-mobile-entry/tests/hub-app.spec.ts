@@ -605,3 +605,67 @@ describe('手机自己与中转站的连接断了 → 走配对引导（与直�
   })
 })
 
+describe('应答那一下断了：进配对引导（横幅挂着、只往顶栏塞一句是没用的）', () => {
+  function hubWithLiveApproval(unpaired: boolean) {
+    let live: { onmessage: ((e: { data: string }) => void) | null } | null = null
+    class FakeSocket {
+      onmessage: ((e: { data: string }) => void) | null = null
+      onopen: (() => void) | null = null
+      onclose: (() => void) | null = null
+      onerror: (() => void) | null = null
+      constructor(_url: string) { live = this as unknown as typeof live }
+      close() {}
+    }
+    return {
+      mode: 'hub' as const,
+      async listHosts() { return { hosts: [{ hostId: HOST_A, name: 'MacBook', running: true, reachable: true, online: true }] } },
+      async listSessions() { return { items: [] } },
+      async pageMessages() { return { conv: { items: [] } } },
+      async prompt() { return { ok: true } },
+      async cancel() { return { ok: true } },
+      async answer() {
+        return unpaired
+          ? { ok: false, kind: 'unpaired', message: '与中转站的连接已过期，需要重新配对' }
+          : { ok: false, message: '那台机器正在重新连接，稍后再试' }
+      },
+      connectEvents(handlers: { onStatus: (s: string, d: string) => void, onEvent: (h: string, t: string, v: unknown) => void }) {
+        return createHubBackend({ WebSocketCtor: FakeSocket as never }).connectEvents(handlers)
+      },
+      push(value: unknown) {
+        if (live === null) throw new Error('socket 没建起来')
+        ;(live as { onmessage: (e: { data: string }) => void }).onmessage({
+          data: JSON.stringify({ type: 'item', hostId: HOST_A, value }),
+        })
+      },
+    }
+  }
+
+  it('应答时手机与中转站的连接断了 → 界面变配对引导', async () => {
+    const backend = hubWithLiveApproval(true)
+    const root = host()
+    await bootApp(root, { backend: backend as never })
+    await settle()
+    backend.push({ type: 'waterfall', event: 'approval/request', eventId: 'evt-91', request: { toolName: 'bash' } })
+    await settle()
+    const button = root.querySelector('[data-action="approve"][data-event-id="evt-91"]') as HTMLElement
+    expect(button).not.toBeNull()
+    button.click()
+    await settle(10)
+    expect(root.innerHTML).toContain('class="guide"')
+  })
+
+  it('那台机器在重连 → 横幅留着，顶栏给一句话（不是让手机去重配对）', async () => {
+    const backend = hubWithLiveApproval(false)
+    const root = host()
+    await bootApp(root, { backend: backend as never })
+    await settle()
+    backend.push({ type: 'waterfall', event: 'approval/request', eventId: 'evt-92', request: { toolName: 'bash' } })
+    await settle()
+    const button = root.querySelector('[data-action="approve"][data-event-id="evt-92"]') as HTMLElement
+    button.click()
+    await settle(10)
+    expect(root.innerHTML).not.toContain('class="guide"')
+    expect(root.innerHTML).toContain('那台机器正在重新连接')
+  })
+})
+

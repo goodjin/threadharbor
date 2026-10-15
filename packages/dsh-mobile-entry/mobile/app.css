@@ -118,6 +118,17 @@ button[data-action='approve'] {
 .boot-loading { color: var(--muted); text-align: center; }
 
 /* 列表（主机 / 会话） */
+/* 应答没送出去时横幅上方那一句：与横幅同一个容器，所以跟着横幅一起排版。 */
+.notice-error {
+  margin: 0 0 6px;
+  padding: 8px 10px;
+  border: 1px solid #d97706;
+  border-radius: 8px;
+  background: #fff7ed;
+  color: #7c2d12;
+  font-size: 13px;
+}
+
 .list-error, .list-loading, .list-empty, .conv-error, .conv-loading {
   color: var(--muted);
   margin: 12px 0;
