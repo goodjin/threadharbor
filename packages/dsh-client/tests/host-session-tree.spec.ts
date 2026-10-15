@@ -322,21 +322,26 @@ describe('HostSessionTree', () => {
     } finally { await unmount(root) }
   })
 
-  it('进行中会话：行首有可见标记（data-session-running），空闲行没有', async () => {
+  it('活跃会话：进行中绿点；等待审批/提问琥珀点（pending 优先于 running）；空闲无标记', async () => {
     localStorage.removeItem('threadharbor.tree.view')
-    const withRunning = { hosts: [{ hostId: 'self', label: '本机', self: true, lastSeen: 1, sessionCount: 2, empty: false, projects: [{ projectId: 'w1', label: '研究', baseLabel: '研究', sharedName: false, sessions: [
+    const withLive = { hosts: [{ hostId: 'self', label: '本机', self: true, lastSeen: 1, sessionCount: 3, empty: false, projects: [{ projectId: 'w1', label: '研究', baseLabel: '研究', sharedName: false, sessions: [
       { sessionId: 'busy', projectId: 'w1', title: '在跑', hostId: 'self', own: true, updatedAt: 9, running: true },
+      { sessionId: 'ask', projectId: 'w1', title: '等你', hostId: 'self', own: true, updatedAt: 8, running: true, pendingInteraction: 'question' as const },
       { sessionId: 'idle', projectId: 'w1', title: '空闲', hostId: 'self', own: true, updatedAt: 1 },
-    ] }] }], totalSessions: 2, empty: false }
-    const { container, root } = await mountTree({ view: withRunning, ctx: { get: () => undefined } })
+    ] }] }], totalSessions: 3, empty: false }
+    const { container, root } = await mountTree({ view: withLive, ctx: { get: () => undefined } })
     try {
       const busy = container.querySelector('[data-session-row="busy"]')
+      const ask = container.querySelector('[data-session-row="ask"]')
       const idle = container.querySelector('[data-session-row="idle"]')
-      expect(busy?.getAttribute('data-running')).toBe('true')
-      expect(busy?.querySelector('[data-session-running]')).not.toBeNull()
-      expect(busy?.querySelector('[data-session-running]')?.getAttribute('title')).toBe(zh['panel.tree.sessionRunning'])
-      expect(idle?.getAttribute('data-running')).toBeNull()
-      expect(idle?.querySelector('[data-session-running]')).toBeNull()
+      expect(busy?.getAttribute('data-live')).toBe('running')
+      expect(busy?.querySelector('[data-session-live="running"]')?.getAttribute('title')).toBe(zh['panel.tree.sessionRunning'])
+      expect(ask?.getAttribute('data-live')).toBe('question')
+      expect(ask?.querySelector('[data-session-live="question"]')?.getAttribute('title')).toBe(zh['panel.tree.sessionWaitingAnswer'])
+      expect(idle?.getAttribute('data-live')).toBeNull()
+      expect(idle?.querySelector('[data-session-live]')).toBeNull()
+      // ⋯ 锚定行尾（DOM 上为 sessionRow 最后一个子元素，CSS margin-left:auto）
+      expect(busy?.lastElementChild?.getAttribute('data-action')).toBe('row-menu')
     } finally { await unmount(root) }
   })
 

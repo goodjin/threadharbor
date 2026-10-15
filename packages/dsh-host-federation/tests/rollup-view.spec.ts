@@ -28,7 +28,7 @@ const session = (sessionId: string, projectId = 'p1', title = sessionId) => ({ p
 describe('视图穿层：归档与最近更新随会话行走', () => {
   it('archived/updatedAt/pinned/running 都到 SessionView，置顶排前', () => {
     const rows = [
-      { projectId: 'p', sessionId: 'sa', title: '普通', updatedAt: 5, running: true },
+      { projectId: 'p', sessionId: 'sa', title: '普通', updatedAt: 5, running: true, pendingInteraction: 'approval' as const },
       { projectId: 'p', sessionId: 'sb', title: '置顶', updatedAt: 1, pinned: true },
       { projectId: 'p', sessionId: 'sc', title: '归档', updatedAt: 9, archived: true },
     ]
@@ -42,7 +42,7 @@ describe('视图穿层：归档与最近更新随会话行走', () => {
     const sessions = view.hosts[0]!.projects[0]!.sessions
     expect(sessions.map(x => x.sessionId)).toEqual(['sb', 'sa', 'sc'])
     expect(sessions.find(x => x.sessionId === 'sb')).toMatchObject({ pinned: true, updatedAt: 1 })
-    expect(sessions.find(x => x.sessionId === 'sa')).toMatchObject({ running: true, updatedAt: 5 })
+    expect(sessions.find(x => x.sessionId === 'sa')).toMatchObject({ running: true, updatedAt: 5, pendingInteraction: 'approval' })
     expect(sessions.find(x => x.sessionId === 'sc')).toMatchObject({ archived: true, updatedAt: 9 })
   })
 })

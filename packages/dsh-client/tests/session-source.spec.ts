@@ -58,7 +58,7 @@ describe('buildHostSessions', () => {
         getSnapshot: () => ({
           ids: ['s1', 's2'],
           byId: {
-            s1: { displayTitle: '置顶的', updatedAt: 100, running: true },
+            s1: { displayTitle: '置顶的', updatedAt: 100, running: true, pendingInteraction: 'approval' },
             s2: { displayTitle: '归档的', updatedAt: 200 },
           },
         }),
@@ -73,7 +73,7 @@ describe('buildHostSessions', () => {
     }
     const read = buildHostSessions(workspaces, readSessionSources({ sessions: service }).sessions)
     const rows = read.ok ? read.sessions : []
-    expect(rows.find(r => r.sessionId === 's1')).toMatchObject({ pinned: true, updatedAt: 100, running: true })
+    expect(rows.find(r => r.sessionId === 's1')).toMatchObject({ pinned: true, updatedAt: 100, running: true, pendingInteraction: 'approval' })
     expect(rows.find(r => r.sessionId === 's2')).toMatchObject({ archived: true, updatedAt: 200 })
     expect(rows.find(r => r.sessionId === 's2')).not.toHaveProperty('running')
   })

@@ -29,6 +29,8 @@ export type SourceSession = {
   readonly updatedAt?: number
   /** True while a turn is in flight (sessions.list byId.running). */
   readonly running?: boolean
+  /** Native amber-dot: approval / plan-review / question. */
+  readonly pendingInteraction?: 'approval' | 'plan-review' | 'question'
 }
 
 /** What one read produced: rows, or the reason there are none. */
@@ -68,6 +70,8 @@ export type SessionListSource = {
     readonly updatedAt?: number
     /** True while a turn is in flight (api-session/status). */
     readonly running?: boolean
+    /** Native amber-dot pending interaction. */
+    readonly pendingInteraction?: 'approval' | 'plan-review' | 'question'
   }>>
   /** Present when the service exposes one; change notifications for republish. */
   readonly subscribe?: (listener: () => void) => () => void
@@ -154,6 +158,7 @@ function sessionSource(value: unknown): SessionListSource | undefined {
     origin?: string
     updatedAt?: number
     running?: boolean
+    pendingInteraction?: 'approval' | 'plan-review' | 'question'
     retainedBy?: { mainView?: number }
   }> = {}
   for (const [id, row] of Object.entries(byId)) {
@@ -164,7 +169,13 @@ function sessionSource(value: unknown): SessionListSource | undefined {
     const origin = row['origin']
     const updatedAt = row['updatedAt']
     const running = row['running']
+    const pendingInteraction = row['pendingInteraction']
     const retainedBy = row['retainedBy']
+    const pending = pendingInteraction === 'approval'
+      || pendingInteraction === 'plan-review'
+      || pendingInteraction === 'question'
+      ? pendingInteraction
+      : undefined
     rows[id] = {
       ...(typeof displayTitle === 'string' ? { displayTitle } : {}),
       ...(typeof title === 'string' ? { title } : {}),
@@ -172,6 +183,7 @@ function sessionSource(value: unknown): SessionListSource | undefined {
       ...(typeof origin === 'string' ? { origin } : {}),
       ...(typeof updatedAt === 'number' ? { updatedAt } : {}),
       ...(running === true ? { running: true } : {}),
+      ...(pending === undefined ? {} : { pendingInteraction: pending }),
       ...(isRecord(retainedBy) ? { retainedBy: { ...(typeof retainedBy['mainView'] === 'number' ? { mainView: retainedBy['mainView'] } : {}) } } : {}),
     }
   }
@@ -296,6 +308,9 @@ export function buildHostSessions(
           ...(workspaces.pinnedSessionIds?.includes(id) ? { pinned: true } : {}),
           ...(typeof sessions.byId[id]?.updatedAt === 'number' ? { updatedAt: sessions.byId[id]!.updatedAt } : {}),
           ...(sessions.byId[id]?.running === true ? { running: true } : {}),
+          ...(sessions.byId[id]?.pendingInteraction !== undefined
+            ? { pendingInteraction: sessions.byId[id]!.pendingInteraction }
+            : {}),
         }))
     : [...new Set(workspaces.items.flatMap(row => [...row.sessionIds]))].map(id => ({
         sessionId: id,
@@ -320,6 +335,7 @@ export function buildHostSessions(
       ...(row.archived === true ? { archived: true } : {}),
       ...(typeof row.updatedAt === 'number' ? { updatedAt: row.updatedAt } : {}),
       ...(row.running === true ? { running: true } : {}),
+      ...(row.pendingInteraction !== undefined ? { pendingInteraction: row.pendingInteraction } : {}),
     })),
   }
 }
