@@ -29,8 +29,29 @@ export function createHubBackend(opts = {}) {
    */
   const outcomeOf = body => {
     if (body?.ok === false) return { ok: false, kind: body.kind, message: body.message ?? '这次请求没有送到那台机器' }
-    if (typeof body?.error === 'string') return { ok: false, message: body.error }
+    if (typeof body?.error === 'string') return { ok: false, message: reasonText(body.error) }
     return { ok: true }
+  }
+
+  /**
+   * 中转的错误代号 → 操作者看得懂的一句话。
+   *
+   * 以前是把代号原样显示，于是机器没接住时手机上写的是「machine-error」——
+   * 那不是给看的人写的。细节（中转不把上游原文与 SSH 报错透给手机）都在
+   * relay.log 里，所以这里只说「出了什么事、下一步找谁」，不猜具体原因。
+   *
+   * 认不出的代号照原样显示、只是加上「不认识的错误码」几个字：把它藏起来
+   * 等于把一个真问题变成「什么都没发生」。
+   */
+  const reasonText = slug => {
+    const known = {
+      'machine-error': '那台机器没接住这次请求，看它上面 DSH 的状态',
+      'not-found': '中转上没有这台机器的登记',
+      'bad-request': '中转没认这次请求，请核对入口域名',
+      'credential-stale': '那台机器正在重新连接，稍后再试',
+    }
+    if (typeof known[slug] === 'string') return known[slug]
+    return `中转回了一个不认识的错误码：${slug}`
   }
 
   const hostOf = hostId => encodeURIComponent(hostId)
@@ -89,7 +110,7 @@ export function createHubBackend(opts = {}) {
       // kind 一起带出去：手机要靠它分「重配对」与「那台机器正在重连」——这两件事
       // 要做的动作完全不同，混成一句「重新配对」会让人白白重来一遍。
       if (body?.ok === false) return { error: body.message ?? '这次请求没有送到那台机器', kind: body.kind }
-      if (body.error !== undefined) return body
+      if (body.error !== undefined) return { error: reasonText(body.error) }
       return { items: Array.isArray(body?.value?.items) ? body.value.items : [] }
     },
 
@@ -106,7 +127,7 @@ export function createHubBackend(opts = {}) {
         return { error: `session page request past cursor ${body.cursor}` }
       }
       if (body?.ok === false) return { error: body.message ?? '这次请求没有送到那台机器', kind: body.kind }
-      if (body.error !== undefined) return body
+      if (body.error !== undefined) return { error: reasonText(body.error) }
       return { conv: body?.value }
     },
 

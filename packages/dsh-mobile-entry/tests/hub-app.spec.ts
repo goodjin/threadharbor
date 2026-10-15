@@ -490,7 +490,8 @@ describe('游标探测在两种后端上必须一致（真实形状：中转只�
   it('探针拿不到游标时报错，不硬猜（与直连的处置一致）', async () => {
     const { backend } = hubWithFetch([{ error: 'machine-error' }])
     const body = await backend.pageMessages('mac-a', 's1', Number.MAX_SAFE_INTEGER, 1)
-    expect(body.error).toBe('machine-error')
+    expect(body.error).not.toContain('machine-error')
+    expect(body.error).toContain('那台机器没接住这次请求')
     expect(body.kind).toBeUndefined()
   })
 
@@ -531,9 +532,21 @@ describe('prompt/cancel 不许假报成功（漏判 ok:false 的后果是草稿�
     expect(sessions.error).toContain('重新配对')
   })
 
-  it('machine-error → prompt 明确失败（不是 ok:true）', async () => {
+  it('machine-error → prompt 明确失败（不是 ok:true），而且不把内部代号甩给操作者', async () => {
     const backend = hubPosting({ error: 'machine-error' })
-    expect(await backend.prompt('mac-a', 's1', '在吗')).toEqual({ ok: false, message: 'machine-error' })
+    const result = await backend.prompt('mac-a', 's1', '在吗')
+    expect(result.ok).toBe(false)
+    // 代号是中转内部的词。手机上写「machine-error」，看的人既不知道出了什么，
+    // 也不知道该找谁——细节在中转那份日志里，这一句得说人话。
+    expect(result.message).not.toContain('machine-error')
+    expect(result.message).toContain('那台机器没接住这次请求')
+  })
+
+  it('认不出的代号不藏起来（藏了就变成「什么都没发生」）', async () => {
+    const backend = hubPosting({ error: 'brand-new-code-42' })
+    const result = await backend.prompt('mac-a', 's1', '在吗')
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain('brand-new-code-42')
   })
 
   it('cancel 同理', async () => {
