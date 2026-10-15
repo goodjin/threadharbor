@@ -416,3 +416,73 @@ describe('上游 RPC 的参数形状（`_request` 壳）', () => {
     expect(fake.calls[0]?.args).toEqual({ _request: {} })
   })
 })
+
+describe('转发参数形状照抄宿主描述符（线上字段名 = 形参名）', () => {
+  function relayFor(fake: { client: unknown }) {
+    return new Relay({
+      knownHostIds: new Set(['host-a']),
+      clients: { clientFor: async () => fake.client as never, invalidate: () => {}, closeAll: () => {} },
+    })
+  }
+
+  it('session/page：用 request 而不是 _request，body 是 address + throughSeq', async () => {
+    const fake = fakeClient()
+    const relay = relayFor(fake)
+    const { res } = recorder()
+    await relay.handleMessages(
+      { method: 'GET', url: '/threadharbor/relay/hosts/host-a/sessions/s1/messages', headers: {} } as never,
+      res as never,
+      new URL('http://x/threadharbor/relay/hosts/host-a/sessions/s1/messages'),
+    )
+    expect(fake.calls[0]?.endpoint).toBe('session/page')
+    expect(fake.calls[0]?.args).toEqual({ request: { address: { kind: 'session', sessionId: 's1' }, throughSeq: -1 } })
+  })
+
+  it('session/cancel：用 request，body 只带 sessionId', async () => {
+    const fake = fakeClient()
+    const relay = relayFor(fake)
+    const { res } = recorder()
+    await relay.handleCancel(
+      { method: 'POST', url: '/threadharbor/relay/hosts/host-a/sessions/s1/cancel', headers: {} } as never,
+      res as never,
+      new URL('http://x/threadharbor/relay/hosts/host-a/sessions/s1/cancel'),
+    )
+    expect(fake.calls[0]?.endpoint).toBe('session/cancel')
+    expect(fake.calls[0]?.args).toEqual({ request: { sessionId: 's1' } })
+  })
+
+  it('session/prompt：四项必填齐（requestId / sessionId / mode / content 分片）', async () => {
+    const fake = fakeClient()
+    const relay = relayFor(fake)
+    const { res } = recorder()
+    await relay.handlePrompt(
+      req('/threadharbor/relay/hosts/host-a/sessions/s1/prompt', 'POST', { text: '发一句' }),
+      res as never,
+      new URL('http://x/threadharbor/relay/hosts/host-a/sessions/s1/prompt'),
+    )
+    const args = fake.calls[0]?.args as { request?: Record<string, unknown> }
+    expect(fake.calls[0]?.endpoint).toBe('session/prompt')
+    expect(Object.keys(args.request ?? {}).sort()).toEqual(['content', 'mode', 'requestId', 'sessionId'])
+    expect(args.request?.['mode']).toBe('queue')
+    expect(args.request?.['content']).toEqual([{ type: 'text', text: '发一句' }])
+    expect(String(args.request?.['requestId'])).toMatch(/^th-[0-9a-f-]{36}$/)
+  })
+
+  it('两笔 prompt 的 requestId 不同（幂等键重了会被当成同一笔）', async () => {
+    const fake = fakeClient()
+    const relay = relayFor(fake)
+    const prompt = async () => {
+      const { res } = recorder()
+      await relay.handlePrompt(
+        req('/threadharbor/relay/hosts/host-a/sessions/s1/prompt', 'POST', { text: '同样一句' }),
+        res as never,
+        new URL('http://x/threadharbor/relay/hosts/host-a/sessions/s1/prompt'),
+      )
+    }
+    await prompt()
+    await prompt()
+    const ids = fake.calls.map(call => (call.args as { request: { requestId: string } }).request.requestId)
+    expect(new Set(ids).size).toBe(2)
+  })
+})
+

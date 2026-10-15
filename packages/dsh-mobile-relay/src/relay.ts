@@ -22,6 +22,7 @@ import {
   SESSION_LIST_ENDPOINT,
   SESSION_PROMPT_ENDPOINT,
 } from './wire.ts'
+import { randomUUID } from 'node:crypto'
 import type { EventOutcome, MachineClient, RpcResult } from './machine-client.ts'
 
 /** 会话类接口的 prefix（hostId 与 sid 都在路径里，故只能 prefix 注册）。 */
@@ -272,7 +273,14 @@ export class Relay {
   async handleMessages(req: IncomingMessageLike, res: ResponseLike, url: URL): Promise<void> {
     const parts = this.parse(url, 'messages')
     if (parts === undefined) return notFound(res)
-    await this.forward(req, res, parts.hostId, SESSION_HISTORY_ENDPOINT, { _request: { sessionId: parts.sid } })
+    // 参数形状照抄宿主描述符，别照感觉写：
+    //   page(request: SessionPageRequest) —— 线上的字段名就是**形参名**，是
+    //   `request`（只有 list 的形参写作 `_request`，那里才用下划线那个名字）；
+    //   SessionPageRequest = { address: {kind:'session',sessionId}, throughSeq }
+    //   throughSeq: -1 表示「不按游标截断」，取整段。
+    await this.forward(req, res, parts.hostId, SESSION_HISTORY_ENDPOINT, {
+      request: { address: { kind: 'session', sessionId: parts.sid }, throughSeq: -1 },
+    })
   }
 
   /** `POST <prefix>/<hostId>/sessions/<sid>/prompt` → 发消息。 */
@@ -283,14 +291,26 @@ export class Relay {
     if (body === undefined) return badRequest(res)
     const text = typeof body['text'] === 'string' ? body['text'] : undefined
     if (text === undefined) return badRequest(res)
-    await this.forward(req, res, parts.hostId, SESSION_PROMPT_ENDPOINT, { request: { sessionId: parts.sid, text } })
+    // prompt(request: SessionPromptRequest)，必填 requestId / sessionId / mode /
+    // content 四项；内容是分片数组而不是一段裸文本。少任何一项，上游要么按描述符
+    // 拒（machine-error），要么拿不到 mode 不知道是排队还是插队。mode 与本仓库
+    // 自己的客户端（packages/dsh-client 的 sendPrompt）一致取 'queue'。
+    await this.forward(req, res, parts.hostId, SESSION_PROMPT_ENDPOINT, {
+      request: {
+        requestId: `th-${randomUUID()}`,
+        sessionId: parts.sid,
+        mode: 'queue',
+        content: [{ type: 'text', text }],
+      },
+    })
   }
 
   /** `POST <prefix>/<hostId>/sessions/<sid>/cancel` → 中断。 */
   async handleCancel(req: IncomingMessageLike, res: ResponseLike, url: URL): Promise<void> {
     const parts = this.parse(url, 'cancel')
     if (parts === undefined) return notFound(res)
-    await this.forward(req, res, parts.hostId, SESSION_CANCEL_ENDPOINT, { _request: { sessionId: parts.sid } })
+    // cancel(request: SessionCancelRequest)，形参名同样是 `request`。
+    await this.forward(req, res, parts.hostId, SESSION_CANCEL_ENDPOINT, { request: { sessionId: parts.sid } })
   }
 
   /**

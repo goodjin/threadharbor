@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -7,6 +7,7 @@ import {
   apply,
   Config,
   inject,
+  makeRelayLogger,
   name,
   RELAY_HOSTS_PATH,
   type MobileRelayConfig,
@@ -311,3 +312,58 @@ describe('/threadharbor/relay/hosts 的准入与方法处置（骨架契约，�
     expect(state.headers['allow']).toBe('GET')
   })
 })
+
+describe('会话前缀的方法门槛（看与发是一组）', () => {
+  /** 真机上栽过：这条前缀只放 GET，于是 prompt / cancel 在真机上是 405，
+   *  而清单与历史都正常——看着像「手机端按钮没反应」。这里逐个方法过一遍。 */
+  function routesFor(config: MobileRelayConfig = VALID_CONFIG) {
+    const { run, routes } = captureAppliedRoutes(config)
+    run()
+    const prefix = routes.find(route => route.kind === 'prefix')
+    if (prefix === undefined) throw new Error('没有会话前缀路由')
+    return prefix
+  }
+
+  it('会话前缀对 GET 与 POST 都放行（发消息与中断是 POST）', () => {
+    const route = routesFor()
+    // 只断言「不因方法被拒」：真正的转发由 relay 自己判，这里验的是方法门槛。
+    for (const method of ['GET', 'POST'] as const) {
+      expect(call(route.handler, { method, url: '/threadharbor/relay/hosts/a/sessions' }).status).not.toBe(405)
+    }
+  })
+
+  it('应答那条仍然只收 POST', () => {
+    const { run, routes } = captureAppliedRoutes(VALID_CONFIG)
+    run()
+    const answer = routes.find(route => route.path === '/threadharbor/relay/answer')
+    if (answer === undefined) throw new Error('没有应答路由')
+    expect(call(answer.handler, { method: 'GET', url: '/threadharbor/relay/answer' }).status).toBe(405)
+    expect(call(answer.handler, { method: 'POST', url: '/threadharbor/relay/answer' }).status).not.toBe(405)
+  })
+})
+
+describe('内部故障的落点（细节不能跟着有界文案一起消失）', () => {
+  it('写进 state.json 旁边那个只追加日志，带时间戳，一行一条', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'relay-log-'))
+    const log = makeRelayLogger({ statePath: join(dir, 'state.json') })
+    log('转发 session/page 到 tencent01 失败（rpc-error）：缺 address')
+    log('第二行')
+    const text = readFileSync(join(dir, 'relay.log'), 'utf8')
+    const lines = text.trim().split('\n')
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).toContain('转发 session/page')
+    expect(lines[0]).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+  })
+
+  it('日志目录还不存在时现建（state.json 之前没写过也不会丢细节）', () => {
+    const dir = join(mkdtempSync(join(tmpdir(), 'relay-log-')), 'not', 'created', 'yet')
+    makeRelayLogger({ statePath: join(dir, 'state.json') })('一条')
+    expect(readFileSync(join(dir, 'relay.log'), 'utf8')).toContain('一条')
+  })
+
+  it('写不出去时静默（处理中的请求已经出错了，不能再抛一层）', () => {
+    const log = makeRelayLogger({ statePath: '/dev/null/impossible/state.json' })
+    expect(() => log('写不进去')).not.toThrow()
+  })
+})
+

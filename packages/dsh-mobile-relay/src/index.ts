@@ -20,6 +20,8 @@ import { CredentialStore, MachineCredentials } from './credentials.ts'
 import type { SshConnectionConfig } from '@threadharbor/dsh-host-federation/ssh/types'
 import { DshSshManager } from '@threadharbor/dsh-host-federation/ssh/manager'
 import { WebSocketServer } from 'ws'
+import { appendFileSync, mkdirSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
 export { RELAY_HOSTS_PATH } from './hosts.ts'
 export { RELAY_ANSWER_PATH, RELAY_EVENTS_PATH, RELAY_SESSIONS_PATH, Relay } from './relay.ts'
@@ -30,6 +32,25 @@ export const name = 'threadharbor-mobile-relay'
  * 事件面共用的 ws 服务端（noServer：握手由插件自己那三道门决定）。
  * 每个进程一个足够——noServer 模式下它不监听端口，只是握手的状态机。
  */
+/**
+ * 中转自己的只追加日志：state.json 旁边那个 relay.log。
+ *
+ * 为什么不走 console / DSH 的 logger：插件跑在 worker 里，那两处的输出**都不进**
+ * 运维在读的那份日志（真机实测：文件里搜不到一个字）。写不进去也不能抛——它是在
+ * 处理一个已经出错的请求，再抛一层只会盖掉真正的错误。
+ */
+export function makeRelayLogger(config: Pick<MobileRelayConfig, 'statePath'>): (message: string) => void {
+  return message => {
+    try {
+      const dir = dirname(config.statePath)
+      mkdirSync(dir, { recursive: true })
+      appendFileSync(join(dir, 'relay.log'), `${new Date().toISOString()} ${message}\n`)
+    } catch {
+      /* 没有落点也不能让请求更糟 */
+    }
+  }
+}
+
 let eventSocketServer: WebSocketServer | undefined
 function getEventSocketServer(): WebSocketServer | undefined {
   if (eventSocketServer === undefined) eventSocketServer = new WebSocketServer({ noServer: true })
@@ -255,10 +276,12 @@ export function apply(ctx: RelayRouteContext, config?: MobileRelayConfig, deps: 
   // （测试替身）就只挂清单——半套转发面比没有更难排查。
   if (runtime !== undefined) {
     // 内部故障的落点。手机侧只拿到有界的 {error:'machine-error'}，细节在这里。
-    // 落点选 console 而非 ctx.logger：DSH 的 logger 输出不进那份运维真正在
-    // 读的追加日志（真机实测：日志文件里搜不到 logger 写的字），而插件的
-    // console 输出就在里面。细节丢了等于没写。
-    const log = (message: string): void => { console.warn(message) }
+    //
+    // 落点是自己那个只追加文件，不是 console 也不是 ctx.logger——两条都试过：
+    // 插件跑在 worker 里，console 的输出与 DSH logger 的输出**都不进**运维在读的
+    // 那份日志（真机实测：文件里搜不到一个字）。细节丢了等于没写。
+    // 写失败也不抛：这是在处理一个已经出错的请求，再抛一层只会盖掉真正的错误。
+    const log = makeRelayLogger(config)
     registerHubRoutes(ctx, buildRelay(config, runtime, log), new URL(mobileOrigin).hostname)
   }
 }
@@ -471,15 +494,15 @@ function registerHubRoutes(ctx: RelayRouteContext, relay: Relay, originHost: str
    * 返回 true 才放行。少一道就是给攻击者留一条绕路的旁门，所以与 hosts 清单
    * 用的是同一套次序与同样的短体。
    */
-  const gate = (req: Req, res: Res, allow: string): boolean => {
+  const gate = (req: Req, res: Res, allow: Methods): boolean => {
     const admission = ctx.connection.admit(req as never)
     if ('rejection' in admission) {
       res.writeHead(admission.rejection)
       res.end(admission.rejection === 401 ? 'unauthorized' : 'forbidden')
       return false
     }
-    if ((req.method ?? 'GET') !== allow) {
-      res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8', allow })
+    if (!methodIncludes(allow, req.method ?? 'GET')) {
+      res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8', allow: methodAllowHeader(allow) })
       res.end('method not allowed')
       return false
     }
@@ -514,7 +537,16 @@ function registerHubRoutes(ctx: RelayRouteContext, relay: Relay, originHost: str
     )
   }
 
-  /** 与 {@link gate} 同序同条件的升级面版本，只是拒绝方式换成 destroy。 */
+  /** 允许的方法集合：单个或一组（看与发共用一条前缀路由）。 */
+type Methods = 'GET' | 'POST' | readonly ('GET' | 'POST')[]
+function methodIncludes(method: Methods, actual: string): boolean {
+  return Array.isArray(method) ? method.includes(actual as 'GET' | 'POST') : method === actual
+}
+function methodAllowHeader(method: Methods): string {
+  return Array.isArray(method) ? (method as readonly string[]).join(',') : String(method)
+}
+
+/** 与 {@link gate} 同序同条件的升级面版本，只是拒绝方式换成 destroy。 */
   const upgradeGate = (req: Req): boolean => {
     const admission = ctx.connection.admit(req as never)
     if ('rejection' in admission) return false
@@ -523,7 +555,7 @@ function registerHubRoutes(ctx: RelayRouteContext, relay: Relay, originHost: str
     return typeof host === 'string' && host.toLowerCase() === expected
   }
 
-  const register = (path: string, method: 'GET' | 'POST', label: string, handler: (req: Req, res: Res, url: URL) => Promise<void>) => {
+  const register = (path: string, method: Methods, label: string, handler: (req: Req, res: Res, url: URL) => Promise<void>) => {
     // 前缀自带尾斜杠会让宿主的 `startsWith(prefix + '/')` 永远不成立（见
     // RELAY_SESSIONS_PATH 的注释）。这条断言把「登记形状对不对」挡在装载期，
     // 而不是等到真机上一次 404 才想起查路由表。
@@ -544,7 +576,10 @@ function registerHubRoutes(ctx: RelayRouteContext, relay: Relay, originHost: str
   }
 
   // 会话类接口共用一个 prefix 登记，形状（哪一段是动作）在 Relay.parse 里判。
-  register(RELAY_SESSIONS_PATH, 'GET', 'sessions', (req, res, url) => {
+  // 两种方法都要放行：看与发是一组（sessions / messages 是 GET，prompt / cancel
+  // 是 POST）。只放 GET 的话，发消息与中断在真机上永远是 405——而清单、能读历史
+  // 都是正常的，看着像「手机端按钮没反应」。
+  register(RELAY_SESSIONS_PATH, ['GET', 'POST'], 'sessions', (req, res, url) => {
     if (url.pathname.endsWith('/prompt')) return relay.handlePrompt(req, res, url)
     if (url.pathname.endsWith('/cancel')) return relay.handleCancel(req, res, url)
     if (url.pathname.endsWith('/messages')) return relay.handleMessages(req, res, url)
