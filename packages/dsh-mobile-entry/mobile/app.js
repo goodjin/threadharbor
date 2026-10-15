@@ -427,6 +427,17 @@ export async function bootApp(root, deps = {}) {
       state.machines = []
       state.hosts = { peers: [], error: messageOf(error), loading: false }
     }
+    // 横幅的机器名是事件**到的那一刻**取的。清单当时是空的（刷新失败期间就是
+    // 空的），横幅只能写机器编号 mac-a，而编号对看的人没意义——两台机器都在
+    // 列表里，得自己猜哪个是哪个。清单回来之后补一次。
+    for (const [eventId, hostId] of state.approvalHosts) {
+      const item = state.approvals.get(eventId)
+      if (item === undefined || item.machineLabel !== hostId) continue
+      const name = state.machines.find(machine => machine?.hostId === hostId)?.name
+      if (typeof name === 'string' && name.length > 0) {
+        state.approvals.set(eventId, { ...item, machineLabel: name })
+      }
+    }
     render()
   }
 

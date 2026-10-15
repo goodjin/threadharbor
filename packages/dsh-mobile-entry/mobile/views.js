@@ -181,6 +181,9 @@ export function renderHostList(state) {
     } else if (loading !== true && error === undefined) {
       parts.push('<p class="list-empty">中转站还没登记任何机器。</p>')
     }
+    // 中转模式原来没有这个按钮（直连那支才有），于是两件事都做不到：拿不到
+    // 清单时只能整个页面退出重来；一台机器刚恢复，得退出再进才知道。
+    parts.push('<button type="button" class="ghost" data-action="refresh-hosts">刷新机器清单</button>')
     return parts.join('')
   }
   const parts = []

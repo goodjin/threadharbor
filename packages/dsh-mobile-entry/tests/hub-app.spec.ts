@@ -428,7 +428,9 @@ describe('中转模式的端到端：上游原样帧 → 界面', () => {
     const { backend, push } = hubBackendWithLiveSocket()
     const root = host()
     await bootApp(root, { backend: backend as never })
-    await settle()
+    // 等机器清单落地再推事件：这条用例要验的是「横幅写着机器名」，而名字来自
+    // 清单。清单没到位就推，验的其实是另一件事（见下面那条）。
+    await settle(10)
 
     push({
       type: 'waterfall',
@@ -735,3 +737,77 @@ describe('机器行上要看得见「为什么进不去」', () => {
   })
 })
 
+
+describe('中转模式下刷新机器清单（原来没有这个按钮，两件事都做不到）', () => {
+  function hubWithToggleableList() {
+    let listShouldFail = false
+    let live: { onmessage: ((e: { data: string }) => void) | null } | null = null
+    class FakeSocket {
+      onmessage: ((e: { data: string }) => void) | null = null
+      onopen: (() => void) | null = null
+      onclose: (() => void) | null = null
+      onerror: (() => void) | null = null
+      constructor(_url: string) { live = this as unknown as typeof live }
+      close() {}
+    }
+    return {
+      listShouldFail,
+      failNextList() { listShouldFail = true },
+      allowList() { listShouldFail = false },
+      backend: {
+        mode: 'hub' as const,
+        async listHosts() {
+          if (listShouldFail) throw new Error('中转站没响应')
+          return { hosts: [{ hostId: HOST_A, name: 'MacBook', running: true, reachable: true, online: true }] }
+        },
+        async listSessions() { return { items: [] } },
+        async pageMessages() { return { conv: { items: [] } } },
+        async prompt() { return { ok: true } },
+        async cancel() { return { ok: true } },
+        async answer() { return { ok: true } },
+        connectEvents(handlers: { onStatus: (s: string, d: string) => void, onEvent: (h: string, t: string, v: unknown) => void }) {
+          return createHubBackend({ WebSocketCtor: FakeSocket as never }).connectEvents(handlers)
+        },
+      },
+      push(value: unknown) {
+        if (live === null) throw new Error('socket 没建起来')
+        ;(live as { onmessage: (e: { data: string }) => void }).onmessage({
+          data: JSON.stringify({ type: 'item', hostId: HOST_A, value }),
+        })
+      },
+    }
+  }
+
+  it('机器清单屏上有个刷新按钮', async () => {
+    const { backend } = hubWithToggleableList()
+    const root = host()
+    await bootApp(root, { backend: backend as never })
+    await settle(8)
+    expect(root.innerHTML).toContain('data-action="refresh-hosts"')
+  })
+
+  it('刷新失败会清掉清单；这期间弹出的横幅先写编号，刷回来再换成机器名', async () => {
+    const harness = hubWithToggleableList()
+    const root = host()
+    await bootApp(root, { backend: harness.backend as never })
+    await settle(8)
+
+    const refresh = (): void => {
+      const button = root.querySelector('[data-action="refresh-hosts"]') as HTMLElement
+      expect(button).not.toBeNull()
+      button.click()
+    }
+    harness.failNextList()
+    refresh()
+    await settle(8)
+    // 刷新失败后清单被清空——这就是横幅只能写编号的真实场景。
+    harness.push({ type: 'waterfall', event: 'approval/request', eventId: 'evt-reload', request: { toolName: 'bash' } })
+    await settle(6)
+    expect(root.innerHTML).toContain('approval-machine">来自 ' + HOST_A)
+
+    harness.allowList()
+    refresh()
+    await settle(10)
+    expect(root.innerHTML).toContain('approval-machine">来自 MacBook')
+  })
+})
