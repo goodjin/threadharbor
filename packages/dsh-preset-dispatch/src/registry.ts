@@ -33,6 +33,15 @@ export type AcpPresetConfig = {
   readonly mode?: string
   readonly cwd?: string
   /**
+   * How long one in-place answer on this preset may run before the gateway
+   * ends the turn as an error, in milliseconds.
+   *
+   * Absent means the gateway's default; `0` disables the deadline for this
+   * preset. A backend wedged in its own retry loop otherwise holds the turn
+   * — and every answer serialized behind it — open forever.
+   */
+  readonly answerTimeoutMs?: number
+  /**
    * The models this agent serves, as offered in the model picker.
    *
    * Declared rather than probed: probing needs the agent to be running, and the

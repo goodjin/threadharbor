@@ -243,6 +243,7 @@ export function applyAcpPlugin(
     // without a real pair the session log records a number that fails to match
     // the open turn when the session is next opened.
     sessionId => stepPositionOfSession(sessionId),
+    presetId => presets.presets[presetId]?.answerTimeoutMs,
   )
   catalogDeps.gateway = gateway
   registerCatalog(ctx, presets, catalogDeps)

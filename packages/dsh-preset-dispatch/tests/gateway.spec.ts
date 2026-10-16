@@ -459,4 +459,55 @@ describe('GatewayConversations — one external conversation per session', () =>
     expect(seen.taken).toContain('第一问')
     expect(seen.taken).toContain('第一答')
   })
+
+  it('回答超过期限按错误收尾：中止信号发出、报告留痕、下一轮不被卡死', { timeout: 3000 }, async () => {
+    const fake = fakeSession()
+    // 外部会话永不返回——挂死的后端重试循环就是这个形状。
+    fake.answerWith(() => new Promise(() => {}))
+    const reports: string[] = []
+    const chunks: GatewayChunk[] = []
+    const gate = new GatewayConversations(
+      async () => fake.session,
+      message => { reports.push(message) },
+      undefined,
+      undefined,
+      40,
+    )
+    await gate.answer('s1', 'acp-codex', { messages: [user('你好')] }, { chunk: c => { chunks.push(c) } })
+
+    expect(chunks.at(-1)?.type).toBe('finish')
+    expect(reports.some(message => message.includes('answer timed out'))).toBe(true)
+    // 中止信号必须已经发出：这是让 runner 把取消传给外部会话的唯一通道。
+    expect(fake.seen[0]?.signal?.aborted).toBe(true)
+    // tail 链必须已结算——下一轮回答照常进行，不能被上一轮的僵尸挂死。
+    fake.answerWith(async () => ({ kind: 'completed' }))
+    const second: GatewayChunk[] = []
+    await gate.answer('s1', 'acp-codex', { messages: [user('你好'), user('再试')] }, { chunk: c => { second.push(c) } })
+    expect(second.at(-1)?.type).toBe('finish')
+  })
+
+  it('回答期限按预设解析：该预设的值生效，0 表示这个预设不设期限', { timeout: 3000 }, async () => {
+    const wedged = fakeSession()
+    wedged.answerWith(() => new Promise(() => {}))
+    const healthy = fakeSession()
+    healthy.answerWith(async () => ({ kind: 'completed' }))
+    const reports: string[] = []
+    const gate = new GatewayConversations(
+      async presetId => (presetId === 'acp-codex' ? wedged.session : healthy.session),
+      message => { reports.push(message) },
+      undefined,
+      undefined,
+      presetId => (presetId === 'acp-codex' ? 40 : 0),
+    )
+    const first: GatewayChunk[] = []
+    await gate.answer('s1', 'acp-codex', { messages: [user('你好')] }, { chunk: c => { first.push(c) } })
+    expect(first.at(-1)?.type).toBe('finish')
+    expect(reports.some(message => message.includes('answer timed out'))).toBe(true)
+
+    // 0 关闭期限：正常回答照旧，不该出现超时报告。
+    const second: GatewayChunk[] = []
+    await gate.answer('s2', 'acp-grok', { messages: [user('你好')] }, { chunk: c => { second.push(c) } })
+    expect(second.map(c => c.type)).toEqual(['finish'])
+    expect(reports.filter(message => message.includes('answer timed out'))).toHaveLength(1)
+  })
 })

@@ -68,6 +68,16 @@ type GatewayFailure = {
 /** The code a failure the runner did not classify reports itself under. */
 const UNCLASSIFIED_CODE = 'ACP_ERROR'
 
+/**
+ * How long one in-place answer may run before the gateway ends the turn as an
+ * error itself. The observed failure (2026-10-16 session 03067bcc) was a
+ * backend wedged in its own retry loop: the turn stayed open for hours with
+ * the UI silent, because nothing but the external agent could end it. The
+ * gateway owns a deadline so a hung answer becomes a bounded one. Zero
+ * disables it.
+ */
+const DEFAULT_ANSWER_TIMEOUT_MS = 600_000
+
 export type GatewaySink = { readonly chunk: (chunk: GatewayChunk) => void }
 
 /**
@@ -251,6 +261,7 @@ export class GatewayConversations {
   private readonly report: (message: string) => void
   private readonly sessionAppend: GatewaySessionAppend | undefined
   private readonly positionOf: ((sessionId: string) => StepPosition | undefined) | undefined
+  private readonly answerTimeoutMs: number | ((presetId: string) => number | undefined) | undefined
 
   // Plain assignments, not parameter properties — same strip-only reason as
   // above; this module is host-loaded without a transpiler.
@@ -259,11 +270,13 @@ export class GatewayConversations {
     report: (message: string) => void = () => {},
     sessionAppend?: GatewaySessionAppend,
     positionOf?: (sessionId: string) => StepPosition | undefined,
+    answerTimeoutMs?: number | ((presetId: string) => number | undefined),
   ) {
     this.open = open
     this.report = report
     this.sessionAppend = sessionAppend
     this.positionOf = positionOf
+    this.answerTimeoutMs = answerTimeoutMs
   }
 
   /** Answer one request in place; chunks reach the sink as the agent works. */
@@ -332,19 +345,53 @@ export class GatewayConversations {
     if (position === undefined) {
       this.report(`acp gateway: session ${sessionId} answered with no open turn/step known — tool events skipped, transcript keeps the answer`)
     }
+    // The gateway owns this answer's cancellation: the deadline below ends
+    // the turn through this controller, and an external abort (the loop
+    // stopping the session) is forwarded into it, so the runner watches one
+    // signal either way.
+    const controller = new AbortController()
+    request.signal?.addEventListener('abort', () => controller.abort())
+    const configured = typeof this.answerTimeoutMs === 'function' ? this.answerTimeoutMs(presetId) : this.answerTimeoutMs
+    const timeoutMs = configured ?? DEFAULT_ANSWER_TIMEOUT_MS
     const turn = {
       sessionId,
       position,
       produce: () => [],
       write: append === undefined || position === undefined ? () => 1 : makeToolOnlyWriter(append),
       openStream: () => stream.port(),
+      abort: () => controller.signal,
       ...(request.modelId === undefined ? {} : { modelId: request.modelId }),
       ...(request.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }),
-      ...(request.signal === undefined ? {} : { abort: () => request.signal }),
     } as unknown as TurnContext
     // The runner reports a whole step result; its `end` is the part that
-    // maps onto a finish chunk.
-    const result = await entry.session.run(decision, turn) as unknown as { end: GatewayStepEnd }
+    // maps onto a finish chunk. The deadline races it: a backend wedged in
+    // its own retry loop never returns, and without this race the turn — and
+    // every later answer serialized behind it — would wait forever.
+    const run = entry.session.run(decision, turn) as Promise<unknown>
+    run.catch(() => {}) // a late rejection from an already-ended turn must not crash the host
+    const result = await new Promise<{ end: GatewayStepEnd }>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const done = (value: { end: GatewayStepEnd }): void => {
+        if (timer !== undefined) clearTimeout(timer)
+        resolve(value)
+      }
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          this.report(`acp gateway: session ${sessionId} answer timed out after ${timeoutMs}ms — ending the turn as error`)
+          controller.abort()
+          done({
+            end: {
+              kind: 'error',
+              error: { message: `answer timed out after ${timeoutMs}ms`, code: 'ACP_TIMEOUT' },
+            },
+          })
+        }, timeoutMs)
+      }
+      run.then(
+        value => done(value as { end: GatewayStepEnd }),
+        reject,
+      )
+    })
     const end = result.end
     stream.finish(end)
     if (end.kind === 'completed' || end.kind === 'max-tokens') {
