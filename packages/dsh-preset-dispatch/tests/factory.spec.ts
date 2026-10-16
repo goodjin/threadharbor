@@ -288,3 +288,35 @@ describe('把 agent 的提问接到 host 的提问服务', () => {
     expect(reply.result.outcome.outcome).toBe('skipped')
   })
 })
+
+/** A transport whose beacon stamps the test moves by hand. */
+function beaconTransport() {
+  let stamps = { frameAt: 0, diagnosticAt: 0, tail: [] as string[] }
+  const base = recordingTransport()
+  return {
+    ...base,
+    lastFrameAt: () => stamps.frameAt,
+    lastDiagnosticAt: () => stamps.diagnosticAt,
+    stderrTail: () => stamps.tail,
+    advance(next: { frameAt: number; diagnosticAt: number; tail: string[] }): void {
+      stamps = next
+    },
+  }
+}
+
+describe('makeSessionFactory 诊断信标', () => {
+  it('打开的会话透传传输层活动信标', async () => {
+    const transport = beaconTransport()
+    const factory = makeSessionFactory(
+      { presets: { 'acp-grok': { agent: 'grok', url: 'ws://127.0.0.1:2419' } } },
+      { ...deps, transport: () => transport },
+    )
+    const session = await factory.open('acp-grok', { cwd: '/tmp' })
+    expect(session.diagnostics().stderrTail).toEqual([])
+    transport.advance({ frameAt: 111, diagnosticAt: 222, tail: ['tls handshake eof'] })
+    const diagnostics = session.diagnostics()
+    expect(diagnostics.lastFrameAt).toBe(111)
+    expect(diagnostics.lastDiagnosticAt).toBe(222)
+    expect(diagnostics.stderrTail).toEqual(['tls handshake eof'])
+  })
+})

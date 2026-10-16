@@ -116,6 +116,12 @@ class DeathFanoutTransport implements AcpTransport {
   }
 
   close(): void { this.inner.close() }
+
+  lastFrameAt(): number { return this.inner.lastFrameAt() }
+
+  lastDiagnosticAt(): number { return this.inner.lastDiagnosticAt() }
+
+  stderrTail(): readonly string[] { return this.inner.stderrTail() }
 }
 
 export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): AcpSessionFactory {
@@ -192,6 +198,11 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
         // same conversation.
         close: () => { client.close() },
         onDead: handler => { transport.onDeath(handler) },
+        diagnostics: () => ({
+          lastFrameAt: transport.lastFrameAt(),
+          lastDiagnosticAt: transport.lastDiagnosticAt(),
+          stderrTail: transport.stderrTail(),
+        }),
       }
     },
   }

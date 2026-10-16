@@ -33,17 +33,23 @@ export type AcpPresetConfig = {
   readonly mode?: string
   readonly cwd?: string
   /**
-   * How long one in-place answer on this preset may stay SILENT before the
-   * gateway ends the turn as an error, in milliseconds. Every streamed chunk
-   * and every tool event re-arms the deadline, so a turn that keeps producing
-   * may run for hours; this watches the wedged backend that never sends
-   * another frame.
+   * Watchdog limits for an in-place answer on this preset, in milliseconds.
    *
-   * Absent means the gateway's default; `0` disables the deadline for this
-   * preset. A backend wedged in its own retry loop otherwise holds the turn
-   * — and every answer serialized behind it — open forever.
+   * `stallMs` ends a turn whose agent sent no FRAME for that long — stderr
+   * warnings do not count, because a backend wedged in its own retry loop
+   * keeps printing them (2026-10-16 codex: "tls handshake eof" for ten
+   * minutes while every stop press vanished into it). `totalMs` ends any
+   * answer that runs past it however chatty it is. `warnMs` writes one
+   * status note when frame silence crosses it. `graceMs` is how long a user
+   * stop waits for the agent to settle before the process is killed.
+   *
+   * Absent fields fall back to the gateway's defaults; `0` disables that one
+   * behavior (`totalMs` 0 = unlimited).
    */
-  readonly answerTimeoutMs?: number
+  readonly stallMs?: number
+  readonly totalMs?: number
+  readonly warnMs?: number
+  readonly graceMs?: number
   /**
    * The models this agent serves, as offered in the model picker.
    *
@@ -102,6 +108,22 @@ export type AcpSession = {
    * browser — a command that could never be delivered.
    */
   onDead(handler: (reason: string) => void): void
+  /**
+   * The agent's liveness signals, read live: frame progress apart from stderr
+   * diagnostics. A stall watchdog resets on frames only — a retry loop that
+   * keeps logging warnings is silent by this measure, and that is the point.
+   */
+  diagnostics(): AcpSessionDiagnostics
+}
+
+/** What `AcpSession.diagnostics()` returns, straight from the transport. */
+export type AcpSessionDiagnostics = {
+  /** Epoch ms of the last frame the agent sent — the progress stamp. */
+  readonly lastFrameAt: number
+  /** Epoch ms of the last stderr line — diagnostics, never progress. */
+  readonly lastDiagnosticAt: number
+  /** The agent's last stderr lines, oldest first. */
+  readonly stderrTail: readonly string[]
 }
 
 /** How an agent is reached; separate so tests can stand in for spawning. */

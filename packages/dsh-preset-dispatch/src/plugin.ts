@@ -268,7 +268,10 @@ export function applyAcpPlugin(
       // row's scoped context never sees foreign sessions' notices.
       return stepPositionOfSession(sessionId) ?? deps.sessionPositionOf?.(sessionId)
     },
-    presetId => presets.presets[presetId]?.answerTimeoutMs,
+    // The old answerTimeoutMs config became totalMs (the 600 s deadline was
+    // always a total cap, whatever its doc claimed); the stall/warn/grace
+    // fields join here once the gateway grows their parameters.
+    presetId => presets.presets[presetId]?.totalMs,
   )
   catalogDeps.gateway = gateway
   // The exit cleaner is registered the moment the gateway exists — the row is
