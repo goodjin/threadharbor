@@ -1,6 +1,6 @@
 export { AcpClient } from './client.ts'
 export type { PermissionRequest, PermissionDecision, AskQuestionRequest, AskQuestionItem, AskQuestionAnswer, AskQuestionOutcome } from './client.ts'
-export { StdioAcpTransport, WebSocketAcpTransport, GrokServeTransport } from './transport.ts'
+export { ActivityBeacon, StdioAcpTransport, WebSocketAcpTransport, GrokServeTransport } from './transport.ts'
 export type { AcpTransport, StdioTransportOptions, GrokServeOptions, GrokServeChild, GrokServeSpawn } from './transport.ts'
 export { projectTurn, projectUserMessage, projectStepContent, projectTurnIncremental, projectToolCallFrame, projectToolCallAnnouncement, mapToolName } from './projection.ts'
 export type { ProjectionEvent, StreamRecord } from './projection.ts'

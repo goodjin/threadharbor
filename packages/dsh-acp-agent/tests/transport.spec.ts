@@ -8,8 +8,8 @@
  * rejection, so the URL is pinned here rather than rediscovered later.
  */
 
-import { describe, expect, it } from 'vitest'
-import { GrokServeTransport, grokWebSocketUrl, WebSocketAcpTransport } from '../src/transport.ts'
+import { describe, expect, it, vi } from 'vitest'
+import { ActivityBeacon, GrokServeTransport, grokWebSocketUrl, StdioAcpTransport, WebSocketAcpTransport } from '../src/transport.ts'
 import type { GrokServeChild } from '../src/transport.ts'
 
 /** A socket stand-in with just the surface the transport touches. */
@@ -232,5 +232,106 @@ describe('GrokServeTransport', () => {
     })
     serve.emitStderr('listening on 2419\n')
     expect(diagnostics).toContain('listening on 2419')
+  })
+})
+describe('ActivityBeacon', () => {
+  it('帧与诊断分开计时，stderr 进环形缓冲且上限 20 行', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(1_000_000)
+      const beacon = new ActivityBeacon()
+      expect(beacon.lastFrameAt()).toBe(1_000_000)
+      expect(beacon.lastDiagnosticAt()).toBe(1_000_000)
+      vi.setSystemTime(1_000_100)
+      beacon.frame()
+      expect(beacon.lastFrameAt()).toBe(1_000_100)
+      expect(beacon.lastDiagnosticAt()).toBe(1_000_000)
+      vi.setSystemTime(1_000_200)
+      beacon.diagnostic('first warning')
+      expect(beacon.lastDiagnosticAt()).toBe(1_000_200)
+      expect(beacon.lastFrameAt()).toBe(1_000_100)
+      for (let index = 0; index < 25; index++) beacon.diagnostic(`line-${index}`)
+      const tail = beacon.stderrTail()
+      expect(tail).toHaveLength(20)
+      expect(tail[0]).toBe('line-5')
+      expect(tail[19]).toBe('line-24')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('WebSocketAcpTransport 信标', () => {
+  it('socket 收到帧后 lastFrameAt 前移，lastDiagnosticAt 不动且无 stderr', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(2_000_000)
+      const socket = fakeSocket()
+      const transport = new WebSocketAcpTransport({ url: 'ws://x/ws?server-key=y', createSocket: () => socket })
+      transport.onLine(() => {})
+      vi.setSystemTime(2_000_500)
+      socket.deliver('{"jsonrpc":"2.0"}')
+      expect(transport.lastFrameAt()).toBe(2_000_500)
+      expect(transport.lastDiagnosticAt()).toBe(2_000_000)
+      expect(transport.stderrTail()).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('StdioAcpTransport 信标', () => {
+  it('stdout 行计帧、stderr 行计诊断，两者时间戳互不覆盖', async () => {
+    const before = Date.now()
+    const lines: string[] = []
+    const transport = new StdioAcpTransport({
+      command: process.execPath,
+      args: ['-e', [
+        'console.log(JSON.stringify({ a: 1 }))',
+        "setTimeout(() => process.stderr.write('warn-one\\n'), 40)",
+        'setTimeout(() => console.log(JSON.stringify({ b: 2 })), 90)',
+        "setTimeout(() => process.stderr.write('warn-two\\n'), 140)",
+        'setTimeout(() => {}, 400)',
+      ].join(';')],
+    })
+    transport.onLine(line => lines.push(line))
+    try {
+      await new Promise(resolve => setTimeout(resolve, 500))
+      expect(lines).toHaveLength(2)
+      expect(transport.stderrTail()).toEqual(['warn-one', 'warn-two'])
+      expect(transport.lastFrameAt()).toBeGreaterThan(before)
+      expect(transport.lastDiagnosticAt()).toBeGreaterThan(transport.lastFrameAt())
+    } finally {
+      transport.close()
+    }
+  }, 10_000)
+})
+
+describe('GrokServeTransport 信标', () => {
+  it('子进程 stderr 计诊断，帧经内层 WebSocket 计帧', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(3_000_000)
+      const socket = fakeSocket()
+      const serve = fakeServeChild()
+      const transport = await GrokServeTransport.create({
+        command: 'grok',
+        pickPort: () => Promise.resolve(1),
+        waitUntilReady: () => Promise.resolve(),
+        createSocket: () => socket,
+        spawn: () => serve.child,
+      })
+      transport.onLine(() => {})
+      vi.setSystemTime(3_000_100)
+      socket.deliver('{"jsonrpc":"2.0"}')
+      vi.setSystemTime(3_000_200)
+      serve.emitStderr('grok retrying\n')
+      expect(transport.lastFrameAt()).toBe(3_000_100)
+      expect(transport.lastDiagnosticAt()).toBe(3_000_200)
+      expect(transport.stderrTail()).toEqual(['grok retrying'])
+      transport.close()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

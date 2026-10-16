@@ -24,7 +24,63 @@ export interface AcpTransport {
    * frame stream, which is silent in every one of those cases.
    */
   onDeath(handler: (reason: string) => void): void
+  /**
+   * Epoch ms of the last frame the agent sent. Frames are the smallest proof
+   * of progress, so this is the timestamp a stall watchdog resets on.
+   */
+  lastFrameAt(): number
+  /**
+   * Epoch ms of the last stderr line. Deliberately NOT part of stall
+   * detection: a backend wedged in its own retry loop keeps printing warnings
+   * (2026-10-16 codex: "tls handshake eof" every so often for ten minutes),
+   * and counting those as progress would make a dead turn look alive.
+   */
+  lastDiagnosticAt(): number
+  /** The last stderr lines, oldest first, for error messages and status notes. */
+  stderrTail(): readonly string[]
   close(): void
+}
+
+/**
+ * One transport's activity record: frame progress and stderr diagnostics,
+ * counted separately so a chatty-but-wedged agent is still recognizable as
+ * silent (see `lastDiagnosticAt` for why the split exists).
+ */
+export class ActivityBeacon {
+  private frameAt: number
+  private diagnosticAt: number
+  private readonly tail: string[] = []
+
+  constructor() {
+    const now = Date.now()
+    this.frameAt = now
+    this.diagnosticAt = now
+  }
+
+  /** A frame arrived from the agent: progress. */
+  frame(): void {
+    this.frameAt = Date.now()
+  }
+
+  /** A stderr line arrived: diagnostics, not progress. */
+  diagnostic(line: string): void {
+    this.diagnosticAt = Date.now()
+    this.tail.push(line)
+    // Bounded: a chatty agent must not turn a crash into a memory leak.
+    if (this.tail.length > 20) this.tail.shift()
+  }
+
+  lastFrameAt(): number {
+    return this.frameAt
+  }
+
+  lastDiagnosticAt(): number {
+    return this.diagnosticAt
+  }
+
+  stderrTail(): readonly string[] {
+    return [...this.tail]
+  }
 }
 
 /**
@@ -58,15 +114,10 @@ export type StdioTransportOptions = {
 /** ACP over a child process's stdin/stdout, as codex and claude both speak it. */
 export class StdioAcpTransport implements AcpTransport {
   private readonly child: ReturnType<typeof nodeSpawn>
+  /** Frames and stderr lines, counted apart (see ActivityBeacon for why). */
+  private readonly beacon = new ActivityBeacon()
   private handler: (line: string) => void = () => {}
   private death: (reason: string) => void = () => {}
-  /**
-   * The agent's last words, kept so a death can say something useful.
-   *
-   * Diagnostics are otherwise only forwarded when a caller asked for them, and
-   * the caller that most needs them is the one that gets no answer at all.
-   */
-  private readonly stderrTail: string[] = []
 
   private readonly options: StdioTransportOptions
 
@@ -89,15 +140,16 @@ export class StdioAcpTransport implements AcpTransport {
       throw new Error(`acp agent ${this.options.command} did not start with pipes`)
     }
     stdout.setEncoding('utf8')
-    stdout.on('data', lineSplitter(line => this.handler(line)))
+    stdout.on('data', lineSplitter(line => {
+      this.beacon.frame()
+      this.handler(line)
+    }))
     stderr.setEncoding('utf8')
     stderr.on('data', chunk => {
       for (const line of chunk.split('\n')) {
         const trimmed = line.trim()
         if (trimmed.length === 0) continue
-        this.stderrTail.push(trimmed)
-        // Bounded: a chatty agent must not turn a crash into a memory leak.
-        if (this.stderrTail.length > 20) this.stderrTail.shift()
+        this.beacon.diagnostic(trimmed)
         this.options.onDiagnostic?.(trimmed)
       }
     })
@@ -105,10 +157,22 @@ export class StdioAcpTransport implements AcpTransport {
       this.death(`acp agent ${this.options.command} could not run: ${error.message}`)
     })
     this.child.on('exit', (code, signal) => {
-      const said = this.stderrTail.slice(-3).join(' / ')
+      const said = this.beacon.stderrTail().slice(-3).join(' / ')
       this.death(`acp agent ${this.options.command} exited (code=${code ?? 'none'} signal=${signal ?? 'none'})`
         + (said.length === 0 ? '' : `: ${said}`))
     })
+  }
+
+  lastFrameAt(): number {
+    return this.beacon.lastFrameAt()
+  }
+
+  lastDiagnosticAt(): number {
+    return this.beacon.lastDiagnosticAt()
+  }
+
+  stderrTail(): readonly string[] {
+    return this.beacon.stderrTail()
   }
 
   onDeath(handler: (reason: string) => void): void {
@@ -162,6 +226,7 @@ export function grokWebSocketUrl(bind: string, secret: string): string {
 export class WebSocketAcpTransport implements AcpTransport {
   private handler: (line: string) => void = () => {}
   private death: (reason: string) => void = () => {}
+  private readonly beacon = new ActivityBeacon()
   private readonly socket: SocketLike
   private ready = false
   private readonly pending: string[] = []
@@ -187,12 +252,28 @@ export class WebSocketAcpTransport implements AcpTransport {
 
   onLine(handler: (line: string) => void): void {
     this.handler = handler
-    this.socket.onMessage(line => this.handler(line))
+    this.socket.onMessage(line => {
+      this.beacon.frame()
+      this.handler(line)
+    })
   }
 
   onDeath(handler: (reason: string) => void): void {
     this.death = handler
     this.socket.onDeath(reason => this.death(reason))
+  }
+
+  lastFrameAt(): number {
+    return this.beacon.lastFrameAt()
+  }
+
+  /** A socket carries no stderr channel; the constructor stamp stands. */
+  lastDiagnosticAt(): number {
+    return this.beacon.lastDiagnosticAt()
+  }
+
+  stderrTail(): readonly string[] {
+    return []
   }
 
   close(): void {
@@ -324,16 +405,20 @@ function waitForPort(bind: string, port: number, timeoutMs: number): Promise<voi
 export class GrokServeTransport implements AcpTransport {
   private readonly child: GrokServeChild
   private readonly inner: WebSocketAcpTransport
+  /** The serve process's stderr: diagnostics, never frames. */
+  private readonly beacon: ActivityBeacon
   private handler: (line: string) => void = () => {}
   private death: (reason: string) => void = () => {}
   private closed = false
 
-  private constructor(child: GrokServeChild, inner: WebSocketAcpTransport) {
+  private constructor(child: GrokServeChild, inner: WebSocketAcpTransport, beacon: ActivityBeacon) {
     this.child = child
     this.inner = inner
+    this.beacon = beacon
     child.on('error', error => this.die(`acp agent grok could not run: ${error.message}`))
     child.on('exit', (code, signal) => this.die(
-      `acp agent grok exited (code=${code ?? 'none'} signal=${signal ?? 'none'})`,
+      `acp agent grok exited (code=${code ?? 'none'} signal=${signal ?? 'none'})`
+      + (this.beacon.stderrTail().length === 0 ? '' : `: ${this.beacon.stderrTail().slice(-3).join(' / ')}`),
     ))
     inner.onDeath(reason => this.die(reason))
   }
@@ -350,12 +435,17 @@ export class GrokServeTransport implements AcpTransport {
       ...(options.env === undefined ? {} : { env: options.env }),
     })
     const onDiagnostic = options.onDiagnostic
-    if (onDiagnostic !== undefined && child.stderr !== null) {
+    // Always read stderr — the beacon keeps the tail even when nobody asked for
+    // the live lines, so a stall that ends the turn can still quote them.
+    const beacon = new ActivityBeacon()
+    if (child.stderr !== null) {
       child.stderr.setEncoding('utf8')
       child.stderr.on('data', chunk => {
         for (const line of chunk.split('\n')) {
           const trimmed = line.trim()
-          if (trimmed.length > 0) onDiagnostic(trimmed)
+          if (trimmed.length === 0) continue
+          beacon.diagnostic(trimmed)
+          onDiagnostic?.(trimmed)
         }
       })
     }
@@ -365,7 +455,7 @@ export class GrokServeTransport implements AcpTransport {
       url,
       ...(options.createSocket === undefined ? {} : { createSocket: options.createSocket }),
     })
-    return new GrokServeTransport(child, inner)
+    return new GrokServeTransport(child, inner, beacon)
   }
 
   /** A death already reported (our own close) must not reach the session. */
@@ -384,6 +474,19 @@ export class GrokServeTransport implements AcpTransport {
 
   onDeath(handler: (reason: string) => void): void {
     this.death = handler
+  }
+
+  /** Frames ride the inner WebSocket, so its stamp is the truthful one. */
+  lastFrameAt(): number {
+    return this.inner.lastFrameAt()
+  }
+
+  lastDiagnosticAt(): number {
+    return this.beacon.lastDiagnosticAt()
+  }
+
+  stderrTail(): readonly string[] {
+    return this.beacon.stderrTail()
   }
 
   close(): void {
