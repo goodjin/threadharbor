@@ -70,6 +70,19 @@ describe('applyAcpPlugin', () => {
     expect(patched).toHaveLength(1)
   })
 
+  it('挂载即注册退出清理：进程退出时收掉全部外部会话', () => {
+    // 硬重启会留下孤儿子进程在外空转（2026-10-16 17:31 的重启遗留了一个
+    // grok 空转到 17:43）。进程正常退出（含默认信号处理）时必须关掉所有
+    // 外部会话；注册入口可注入，便于测试与宿主接管。
+    const context = ctx()
+    const cleaners: (() => void)[] = []
+    applyAcpPlugin(context, 'acp-grok', CONFIG, {
+      install: () => {},
+      onExit: clean => { cleaners.push(clean) },
+    })
+    expect(cleaners).toHaveLength(1)
+  })
+
   it('falls back to the session header before the projection is written', () => {
     // The projection is the truth about which preset a session is on now, but it
     // is only written once the preset has been selected — and `agent/created`

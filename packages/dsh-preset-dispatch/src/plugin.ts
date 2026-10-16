@@ -98,6 +98,17 @@ export type AcpPluginDeps = {
    */
   report?(message: string): void
   /**
+   * Register the exit cleaner that closes every external conversation when
+   * this process ends.
+   *
+   * Optional seam: the default hooks Node's `exit` event. A normal shutdown —
+   * including a default-handled SIGTERM — then kills the spawned children
+   * instead of leaking them (2026-10-16: a restart left a grok child retrying
+   * on its own for 12 minutes). SIGKILL outruns any in-process hook; that
+   * case belongs to the supervisor, not this row.
+   */
+  onExit?(clean: () => void): void
+  /**
    * Which preset a session is on right now.
    *
    * The header records the preset a session was *created* with, so reading it
@@ -246,6 +257,10 @@ export function applyAcpPlugin(
     presetId => presets.presets[presetId]?.answerTimeoutMs,
   )
   catalogDeps.gateway = gateway
+  // The exit cleaner is registered the moment the gateway exists — the row is
+  // mounted once per process, so exactly one cleaner owns every conversation.
+  const registerExit = deps.onExit ?? ((clean: () => void) => { process.once('exit', clean) })
+  registerExit(() => gateway.closeAll())
   registerCatalog(ctx, presets, catalogDeps)
   // A session whose work was stopped — archived with its turn running, most
   // visibly — must not leave its external connection open behind it. The stop

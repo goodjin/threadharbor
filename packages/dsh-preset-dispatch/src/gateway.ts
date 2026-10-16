@@ -426,4 +426,17 @@ export class GatewayConversations {
     this.entries.delete(sessionId)
     if (entry.session !== undefined) entry.session.close()
   }
+
+  /**
+   * Drop every conversation at once.
+   *
+   * The process-exit hook: close() kills each external child, so a normal
+   * shutdown — including a default-handled SIGTERM — leaves no orphan retrying
+   * in the background (2026-10-16 17:31's restart leaked a grok child that
+   * kept cycling for 12 minutes). A SIGKILL beats any in-process hook; that
+   * case belongs to whoever supervises the process.
+   */
+  closeAll(): void {
+    for (const sessionId of [...this.entries.keys()]) this.close(sessionId)
+  }
 }

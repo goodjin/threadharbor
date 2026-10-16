@@ -424,6 +424,24 @@ describe('GatewayConversations — one external conversation per session', () =>
     expect(retried.map(c => c.type)).toEqual(['block-start', 'text-delta', 'block-end', 'finish'])
   })
 
+  it('closeAll 逐个关闭外部会话：下一次回答重新开场', async () => {
+    // 进程退出时的收尾入口：close 连带杀掉子进程，不留孤儿在外空转。
+    const fake = fakeSession()
+    let closes = 0
+    fake.session.close = () => { closes += 1 }
+    const opened: AcpSession[] = []
+    const gate = new GatewayConversations(async () => {
+      opened.push(fake.session)
+      return fake.session
+    })
+    fake.answerWith(async () => ({ kind: 'completed' }))
+    await gate.answer('s1', 'acp-codex', { messages: [user('第一问')], position }, { chunk: () => {} })
+    gate.closeAll()
+    expect(closes).toBe(1)
+    await gate.answer('s1', 'acp-codex', { messages: [user('第一问'), user('第二问')], position }, { chunk: () => {} })
+    expect(opened).toHaveLength(2)
+  })
+
   it('非连接类失败保留外部会话：agent 自己报的错重试时继续同一场对话', async () => {
     // ACP_ERROR 是 agent 应答里的错误（模型过载之类）——进程和会话都还活着，
     // 重试继续原对话才是对的；只有连接断了才值得付重新 prime 全部历史的代价。
