@@ -86,6 +86,13 @@ const DEFAULT_ANSWER_TIMEOUT_MS = 600_000
  */
 const DEFAULT_GRACE_MS = 3_000
 
+/**
+ * Default frame-silence threshold for the one status note written mid-turn
+ * ("still waiting — last output was …"). Disabled when `0`, and moot when it
+ * is not strictly below the stall deadline.
+ */
+const DEFAULT_WARN_MS = 30_000
+
 /** Watchdog limits one preset may override; absent fields use the defaults. */
 export type GatewayLimits = {
   /** Frame-silence deadline — see `stallMs` on the preset config. */
@@ -367,27 +374,46 @@ export class GatewayConversations {
     // watch the turn — and every later answer serialized behind it — would
     // wait forever.
     let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+    let pollTimer: ReturnType<typeof setInterval> | undefined
     let settled = false
+    let warned = false
+    let lastActivityWall = Date.now()
+    let lastSeenFrameAt = entry.session?.diagnostics().lastFrameAt ?? Date.now()
     let settle!: (value: { end: GatewayStepEnd }) => void
-    const fireDeadline = (): void => {
-      this.report(`acp gateway: session ${sessionId} answer timed out after ${timeoutMs}ms — ending the turn as error`)
+    const stderrTailNow = (): readonly string[] => entry.session?.diagnostics().stderrTail ?? []
+    /** The diagnostics block every forced ending carries, so「为什么停」self-explains. */
+    const stallMessage = (silentForMs: number): string => {
+      const lines = stderrTailNow().slice(-5).map(line => (line.length > 200 ? `${line.slice(0, 200)}…` : line))
+      return `外部 agent 静默 ${String(Math.round(silentForMs / 1000))}s 无进展，已自动停止并重开新会话。`
+        + `进程处置：已终止；agent 输出尾部：\n${lines.length === 0 ? '（无）' : lines.join('\n')}`
+    }
+    const fireStall = (): void => {
+      const silentForMs = Date.now() - lastActivityWall
+      this.report(`acp gateway: session ${sessionId} answer stalled — no agent activity for ${String(silentForMs)}ms (limit ${String(timeoutMs)}ms) — ending the turn as error`)
       controller.abort()
+      // Stalled this long means the process is not worth keeping: drop it now
+      // so the next request reopens instead of reusing the wedged one
+      // (2026-10-16 session 423817a9: ACP_TIMEOUT kept the entry, and every
+      // retry inherited the same dead codex for another full timeout round).
+      this.close(sessionId)
       settle({
         end: {
           kind: 'error',
-          error: { message: `answer timed out after ${timeoutMs}ms`, code: 'ACP_TIMEOUT' },
+          error: { message: stallMessage(silentForMs), code: 'ACP_STALLED' },
         },
       })
     }
     const done = (value: { end: GatewayStepEnd }): void => {
       settled = true
       if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
+      if (pollTimer !== undefined) clearInterval(pollTimer)
       settle(value)
     }
     const noteActivity = (): void => {
       if (settled || timeoutMs <= 0) return
+      lastActivityWall = Date.now()
       if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
-      deadlineTimer = setTimeout(fireDeadline, timeoutMs)
+      deadlineTimer = setTimeout(fireStall, timeoutMs)
     }
     const tappingSink: GatewaySink = { chunk: chunk => { noteActivity(); sink.chunk(chunk) } }
     const stream = new GatewayChunkStream(tappingSink)
@@ -438,6 +464,37 @@ export class GatewayConversations {
     entry.cursor = plan.cursor
     const run = entry.session.run(decision, turn) as Promise<unknown>
     run.catch(() => {}) // a late rejection from an already-ended turn must not crash the host
+    // The frame beacon watches the one signal neither the chunk tap nor the
+    // tool writes can see: an agent whose process stays alive but answers
+    // nothing (2026-10-16 codex — "tls handshake eof" on stderr, zero frames,
+    // every stop press swallowed for ten minutes). stderr deliberately does
+    // NOT count as activity here; it only feeds the note and the package.
+    if (timeoutMs > 0) {
+      const warnMs = limits.warnMs ?? DEFAULT_WARN_MS
+      const pollMs = Math.min(1_000, Math.max(200, Math.floor(timeoutMs / 4)))
+      pollTimer = setInterval(() => {
+        if (settled) return
+        const diagnostics = entry.session?.diagnostics()
+        if (diagnostics !== undefined && diagnostics.lastFrameAt > lastSeenFrameAt) {
+          lastSeenFrameAt = diagnostics.lastFrameAt
+          noteActivity()
+        }
+        if (warned || warnMs <= 0 || warnMs >= timeoutMs) return
+        const silentForMs = Date.now() - lastActivityWall
+        if (silentForMs < warnMs) return
+        warned = true
+        const tail = stderrTailNow()
+        const rawLast = tail.length === 0 ? '（无输出）' : tail.at(-1) ?? '（无输出）'
+        const last = rawLast.length > 160 ? `${rawLast.slice(0, 160)}…` : rawLast
+        try {
+          append?.('system/message', {
+            message: { role: 'system', content: [{ type: 'text', text: `等待外部 agent——已静默 ${String(Math.round(silentForMs / 1000))}s；agent 最近输出：${last}` }] },
+          }, { surfaceOp: 'append' })
+        } catch {
+          // A failed note must not kill the answer it was trying to explain.
+        }
+      }, pollMs)
+    }
     const result = await new Promise<{ end: GatewayStepEnd }>((resolve, reject) => {
       settle = resolve
       // A user stop ends the answer HERE, not whenever the agent gets around

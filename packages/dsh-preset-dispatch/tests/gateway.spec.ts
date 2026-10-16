@@ -62,6 +62,8 @@ function fakeSession() {
   }
   let reply: (turn: Turnish) => Promise<GatewayStepEnd> = async () => ({ kind: 'completed' })
   const closes = { count: 0 }
+  // 默认「帧一直新鲜」：旧的活轮次用例靠流口/工具写重置期限，不被帧轮询干扰。
+  const diagnosticsState = { lastFrameAt: Date.now(), lastDiagnosticAt: Date.now(), stderrTail: [] as string[] }
   const endResult = (end: GatewayStepEnd) => ({ frames: [], end })
   const session: AcpSession = {
     run: async (decision: { messages?: unknown }, turn: unknown) => {
@@ -81,12 +83,17 @@ function fakeSession() {
     },
     close: () => { closes.count += 1 },
     onDead: () => {},
-    diagnostics: () => ({ lastFrameAt: Date.now(), lastDiagnosticAt: Date.now(), stderrTail: [] }),
+    diagnostics: () => ({
+      lastFrameAt: diagnosticsState.lastFrameAt,
+      lastDiagnosticAt: diagnosticsState.lastDiagnosticAt,
+      stderrTail: [...diagnosticsState.stderrTail],
+    }),
   } as unknown as AcpSession
   return {
     session,
     seen,
     closes,
+    diagnosticsState,
     answerWith(next: (turn: Turnish) => Promise<GatewayStepEnd>) { reply = next },
   }
 }
@@ -547,7 +554,7 @@ describe('GatewayConversations — one external conversation per session', () =>
     await gate.answer('s1', 'acp-codex', { messages: [user('你好')] }, { chunk: c => { chunks.push(c) } })
 
     expect(chunks.at(-1)?.type).toBe('finish')
-    expect(reports.some(message => message.includes('answer timed out'))).toBe(true)
+    expect(reports.some(message => message.includes('answer stalled'))).toBe(true)
     // 中止信号必须已经发出：这是让 runner 把取消传给外部会话的唯一通道。
     expect(fake.seen[0]?.signal?.aborted).toBe(true)
     // tail 链必须已结算——下一轮回答照常进行，不能被上一轮的僵尸挂死。
@@ -573,13 +580,13 @@ describe('GatewayConversations — one external conversation per session', () =>
     const first: GatewayChunk[] = []
     await gate.answer('s1', 'acp-codex', { messages: [user('你好')] }, { chunk: c => { first.push(c) } })
     expect(first.at(-1)?.type).toBe('finish')
-    expect(reports.some(message => message.includes('answer timed out'))).toBe(true)
+    expect(reports.some(message => message.includes('answer stalled'))).toBe(true)
 
     // 0 关闭期限：正常回答照旧，不该出现超时报告。
     const second: GatewayChunk[] = []
     await gate.answer('s2', 'acp-grok', { messages: [user('你好')] }, { chunk: c => { second.push(c) } })
     expect(second.map(c => c.type)).toEqual(['finish'])
-    expect(reports.filter(message => message.includes('answer timed out'))).toHaveLength(1)
+    expect(reports.filter(message => message.includes('answer stalled'))).toHaveLength(1)
   })
 
   it('期限是「无活动」期限：持续输出思考的活轮次跑过期限也不死', { timeout: 3000 }, async () => {
@@ -602,7 +609,7 @@ describe('GatewayConversations — one external conversation per session', () =>
     const gate = new GatewayConversations(async () => slow.session, message => { reports.push(message) }, () => ({ stallMs: 40 }))
     await gate.answer('s1', 'acp-grok', { messages: [user('慢慢想')], position }, { chunk: c => { chunks.push(c) } })
     expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
-    expect(reports.some(message => message.includes('answer timed out'))).toBe(false)
+    expect(reports.some(message => message.includes('answer stalled'))).toBe(false)
   })
 
   it('工具事件同样算活动：只有工具卡片在动、没有文字流的轮次也不死', { timeout: 3000 }, async () => {
@@ -619,7 +626,7 @@ describe('GatewayConversations — one external conversation per session', () =>
     const chunks: GatewayChunk[] = []
     await gate.answer('s1', 'acp-grok', { messages: [user('跑工具')], position }, { chunk: c => { chunks.push(c) } })
     expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
-    expect(reports.some(message => message.includes('answer timed out'))).toBe(false)
+    expect(reports.some(message => message.includes('answer stalled'))).toBe(false)
   })
 })
 
@@ -704,6 +711,144 @@ describe('GatewayConversations — 用户停止立即收场与宽限杀', () => 
       ])
       expect(outcome).toBe('resolved')
       expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'aborted' } })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('GatewayConversations — 帧静默超时、提示与诊断包', () => {
+  const wedgedSetup = (stallMs: number, warnMs: number) => {
+    const fake = fakeSession()
+    fake.answerWith(() => new Promise<GatewayStepEnd>(() => {}))
+    fake.diagnosticsState.lastFrameAt = Date.now()
+    fake.diagnosticsState.stderrTail = ['tls handshake eof']
+    const append = recordingAppend()
+    const reports: string[] = []
+    const gate = new GatewayConversations(
+      async () => fake.session,
+      message => { reports.push(message) },
+      sessionId => (sessionId === 's1' ? append : undefined),
+      undefined,
+      () => ({ stallMs, warnMs, graceMs: 1_000 }),
+    )
+    return { fake, append, reports, gate }
+  }
+
+  it('帧静默达 stallMs：ACP_STALLED 收场，消息带尾部与会话处置，会话被杀', async () => {
+    vi.useFakeTimers()
+    try {
+      const { fake, append, gate } = wedgedSetup(3_000, 0)
+      const chunks: GatewayChunk[] = []
+      const outcome = await Promise.race([
+        gate.answer('s1', 'acp-codex', { messages: [user('卡住')], position }, { chunk: c => { chunks.push(c) } }).then(() => 'resolved'),
+        vi.advanceTimersByTimeAsync(10_000).then(() => 'still-hanging'),
+      ])
+      expect(outcome).toBe('resolved')
+      const finish = chunks.at(-1) as { reason: { kind: string; failure?: { code?: string; message?: string } } }
+      expect(finish.reason.kind).toBe('error')
+      expect(finish.reason.failure?.code).toBe('ACP_STALLED')
+      expect(finish.reason.failure?.message).toContain('tls handshake eof')
+      expect(finish.reason.failure?.message).toContain('已终止')
+      expect(fake.closes.count).toBe(1)
+      expect(append.written.filter(w => w.type === 'system/message')).toHaveLength(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stderr 行不算进展：诊断时间戳持续前移，静默照常触发', async () => {
+    vi.useFakeTimers()
+    try {
+      const fake = fakeSession()
+      fake.answerWith(() => new Promise<GatewayStepEnd>(() => {}))
+      const start = Date.now()
+      fake.diagnosticsState.lastFrameAt = start
+      fake.diagnosticsState.stderrTail = ['retrying']
+      const gate = new GatewayConversations(async () => fake.session, undefined, undefined, undefined, () => ({ stallMs: 3_000 }))
+      const answering = gate.answer('s1', 'acp-codex', { messages: [user('只打日志不给帧')], position }, { chunk: () => {} })
+      // 每个轮询拍点把 lastDiagnosticAt 拨到当下——像极了重试循环的周期警告。
+      const diagnosticTicker = setInterval(() => { fake.diagnosticsState.lastDiagnosticAt = Date.now() }, 200)
+      const outcome = await Promise.race([
+        answering.then(() => 'resolved'),
+        vi.advanceTimersByTimeAsync(10_000).then(() => 'still-hanging'),
+      ])
+      clearInterval(diagnosticTicker)
+      expect(outcome).toBe('resolved')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('帧到达重置静默：中途来帧，收场相应后移', async () => {
+    vi.useFakeTimers()
+    try {
+      const fake = fakeSession()
+      fake.answerWith(() => new Promise<GatewayStepEnd>(() => {}))
+      const start = Date.now()
+      fake.diagnosticsState.lastFrameAt = start
+      const gate = new GatewayConversations(async () => fake.session, undefined, undefined, undefined, () => ({ stallMs: 3_000 }))
+      const chunks: GatewayChunk[] = []
+      const answering = gate.answer('s1', 'acp-codex', { messages: [user('慢但活着')], position }, { chunk: c => { chunks.push(c) } })
+      // 1.5s 时来了一帧（诊断打点前移），本该 3s 死的轮次要活到 4.5s 之后。
+      setTimeout(() => { fake.diagnosticsState.lastFrameAt = Date.now() }, 1_500)
+      const outcome = await Promise.race([
+        answering.then(() => 'resolved'),
+        vi.advanceTimersByTimeAsync(4_000).then(() => 'survived-4s'),
+      ])
+      expect(outcome).toBe('survived-4s')
+      const finish = chunks.at(-1)
+      expect(finish).toBeUndefined()
+      const after = await Promise.race([
+        answering.then(() => 'resolved'),
+        vi.advanceTimersByTimeAsync(2_000).then(() => 'still-hanging'),
+      ])
+      expect(after).toBe('resolved')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('静默过 warnMs 写一条 system/message 提示，且只写一条', async () => {
+    vi.useFakeTimers()
+    try {
+      const { append, gate } = wedgedSetup(5_000, 1_000)
+      const answering = gate.answer('s1', 'acp-codex', { messages: [user('等等')], position }, { chunk: () => {} })
+      await Promise.race([answering.then(() => 'done'), vi.advanceTimersByTimeAsync(900).then(() => 't900')])
+      expect(append.written.filter(w => w.type === 'system/message')).toHaveLength(0)
+      await Promise.race([answering.then(() => 'done'), vi.advanceTimersByTimeAsync(200).then(() => 't1100')])
+      const notes = append.written.filter(w => w.type === 'system/message')
+      expect(notes).toHaveLength(1)
+      const text = JSON.stringify(notes[0]?.payload)
+      expect(text).toContain('已静默')
+      expect(text).toContain('tls handshake eof')
+      await Promise.race([answering.then(() => 'done'), vi.advanceTimersByTimeAsync(2_000).then(() => 't3100')])
+      expect(append.written.filter(w => w.type === 'system/message')).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(10_000)
+      await answering
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('warnMs ≥ stallMs 不写提示；stallMs=0 不做静默收场', async () => {
+    vi.useFakeTimers()
+    try {
+      const inverted = wedgedSetup(1_000, 5_000)
+      const invertedOutcome = await Promise.race([
+        inverted.gate.answer('s1', 'acp-codex', { messages: [user('倒挂')], position }, { chunk: () => {} }).then(() => 'resolved'),
+        vi.advanceTimersByTimeAsync(10_000).then(() => 'still-hanging'),
+      ])
+      expect(invertedOutcome).toBe('resolved')
+      expect(inverted.append.written.filter(w => w.type === 'system/message')).toHaveLength(0)
+
+      const disabled = wedgedSetup(0, 1_000)
+      const outcome = await Promise.race([
+        disabled.gate.answer('s1', 'acp-codex', { messages: [user('不限')], position }, { chunk: () => {} }).then(() => 'resolved'),
+        vi.advanceTimersByTimeAsync(30_000).then(() => 'still-hanging'),
+      ])
+      expect(outcome).toBe('still-hanging')
+      expect(disabled.fake.closes.count).toBe(0)
     } finally {
       vi.useRealTimers()
     }

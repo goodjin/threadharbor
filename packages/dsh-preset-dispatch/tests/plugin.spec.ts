@@ -341,7 +341,7 @@ function transportCounter(): { transport: () => AcpTransport & { die(reason: str
       onDeath: handler => { death = handler },
       close: () => { closes += 1 },
       die: reason => { death(reason) },
-      receive: (frame: string) => { line(frame) },
+      receive: (frame: string) => { lastFrameAt = Date.now(); line(frame) },
     }
   }
   return { transport: make, count: () => made, closes: () => closes }
@@ -459,15 +459,21 @@ describe('加载路径的模型报告真的进目录（applyAcpPlugin 端到端�
   /** A scripted transport: records what was sent, replays what is received. */
   function scriptedTransport(): AcpTransport & { sent: string[]; receive(frame: string): void } {
     let line: (frame: string) => void = () => {}
+    let lastFrameAt = Date.now()
     const sent: string[] = []
     return {
       send: frame => { sent.push(frame) },
       close: () => {},
       onLine: handler => { line = handler },
       onDeath: () => {},
+      // The beacon surface every transport now carries; frames land via
+      // receive(), so the frame stamp moves when the script answers.
+      lastFrameAt: () => lastFrameAt,
+      lastDiagnosticAt: () => 0,
+      stderrTail: () => [],
       sent,
       /** Exposed so the test can answer requests the way a live agent would. */
-      receive: (frame: string) => { line(frame) },
+      receive: (frame: string) => { lastFrameAt = Date.now(); line(frame) },
     } as AcpTransport & { sent: string[]; receive(frame: string): void }
   }
 
