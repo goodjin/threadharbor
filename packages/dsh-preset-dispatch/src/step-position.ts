@@ -39,6 +39,41 @@ export function rememberStepPosition(agent: object, sessionId: string | undefine
 }
 
 /**
+ * Resolve the session a core-shaped loop agent belongs to.
+ *
+ * Core's own code reads `agent.session.header.id` (see `underArchivedSession`
+ * in dsh-api-session-controller) and never trusts `agent.id` for session
+ * identity — that is the loop's own handle. The flat `session.id` and a
+ * string `agent.id` stay as fallbacks for tests and older hosts.
+ */
+function sessionKeyOf(agent: object): string | undefined {
+  const session = (agent as { session?: { header?: { id?: unknown }; id?: unknown } }).session
+  if (typeof session?.header?.id === 'string') return session.header.id
+  if (typeof session?.id === 'string') return session.id
+  const id = (agent as { id?: unknown }).id
+  return typeof id === 'string' ? id : undefined
+}
+
+/**
+ * Remember a whole `agent/pre-step` waterfall payload.
+ *
+ * The bus fuses the agent into the payload; the turn and step ride as plain
+ * numbers. Anything that does not resolve to a session and a numeric pair is
+ * ignored whole — a wrong key here answers `undefined` forever, and every
+ * in-place answer silently drops its tool events.
+ *
+ * @param payload - The payload as the listener received it.
+ */
+export function rememberPreStepPayload(payload: { agent?: unknown; turn?: unknown; step?: unknown }): void {
+  const agent = payload.agent
+  if (typeof agent !== 'object' || agent === null) return
+  if (typeof payload.turn !== 'number' || typeof payload.step !== 'number') return
+  const sessionId = sessionKeyOf(agent)
+  if (sessionId === undefined) return
+  rememberStepPosition(agent, sessionId, { turn: payload.turn, step: payload.step })
+}
+
+/**
  * The position the loop last announced for this agent.
  *
  * @param agent - The agent to read for.

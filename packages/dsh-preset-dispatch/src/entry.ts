@@ -27,7 +27,7 @@ import { hostname } from 'node:os'
 import { applyAcpPlugin } from './plugin.ts'
 import { installAcpDispatch, presetOfState } from './dispatch.ts'
 import type { AgentLike, AcpPresetBinding, ContentEvent, StepPosition, TurnModelDecision, TurnStreamHandle } from './dispatch.ts'
-import { rememberStepPosition as rememberPosition } from './step-position.ts'
+import { rememberPreStepPayload, stepPositionOf } from './step-position.ts'
 import { makeApprovalBridge } from './approval-bridge.ts'
 import { makeQuestionBridge } from './question-bridge.ts'
 import { presetsForHost } from './host-filter.ts'
@@ -231,13 +231,7 @@ export function apply(ctx: unknown, config: Config): void {
   // for the same reason the takeover is announced at mount — a listener that
   // only exists after some agent has already stepped misses every earlier turn.
   host.on('agent/pre-step', (payload, next) => {
-    // TODO(probe, remove me): one-shot dump of the real pre-step payload shape.
-    probeCount += 1
-    if (probeCount <= 5) {
-      const agent = (payload as { agent?: unknown }).agent as { id?: unknown; session?: { id?: unknown } } | undefined
-      process.stderr.write(`[threadharbor][probe] pre-step #${probeCount}: agent=${typeof agent} agent.id=${JSON.stringify(agent?.id)} agent.session.id=${JSON.stringify(agent?.session?.id)} turn=${JSON.stringify((payload as { turn?: unknown }).turn)} step=${JSON.stringify((payload as { step?: unknown }).step)} keys=${JSON.stringify(Object.keys(payload ?? {}))}\n`)
-    }
-    rememberStepPosition(payload)
+    rememberPreStepPayload(payload as { agent?: unknown; turn?: unknown; step?: unknown })
     return next()
   })
 
@@ -372,7 +366,7 @@ export function apply(ctx: unknown, config: Config): void {
         // The loop announces the real turn and step on its pre-step waterfall
         // (captured at mount); the conversation view groups content under the
         // step that declared it, so anything numbered differently is dropped.
-        positionOf: candidate => stepPositions.get(candidate as unknown as object),
+        positionOf: candidate => stepPositionOf(candidate),
         produce: (result, position) =>
           projectStepContent(result.frames, {
             turn: position.turn,
@@ -541,18 +535,7 @@ function openAssistantStream(
  *
  * The loop states it on its `agent/pre-step` waterfall — the official notice of
  * "this turn, this step, about to run", carrying the same numbers it appends the
- * boundaries with. Held per agent because two sessions on one preset step
- * independently: the numbers are read at the start of each turn, and a
- * concurrent step elsewhere must not be able to shift them.
+ * boundaries with. The store lives in step-position.ts (fed by the same
+ * listener this file registers); both readers — the gateway by session id,
+ * the replaced step by agent — resolve against that one store.
  */
-const stepPositions = new WeakMap<object, StepPosition>()
-
-// TODO(probe, remove me): counts pre-step payload dumps.
-let probeCount = 0
-
-function rememberStepPosition(payload: { agent: unknown; turn: unknown; step: unknown }): void {
-  const agent = payload.agent
-  if (typeof agent !== 'object' || agent === null) return
-  if (typeof payload.turn !== 'number' || typeof payload.step !== 'number') return
-  rememberPosition(agent, sessionIdOf(agent), { turn: payload.turn, step: payload.step })
-}
