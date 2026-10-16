@@ -94,6 +94,9 @@ function killableTransport(): AcpTransport & { die(reason: string): void } {
     send: () => {},
     onLine: handler => { line = handler },
     onDeath: handler => { death = handler },
+    lastFrameAt: () => 0,
+    lastDiagnosticAt: () => 0,
+    stderrTail: () => [],
     close: () => {},
     die: reason => { death(reason) },
     /** Exposed so a test can drive frames the way a live agent would. */
@@ -154,6 +157,9 @@ function recordingTransport(): AcpTransport & { readonly sent: string[]; receive
     send: (frame: string) => { sent.push(frame) },
     onLine: (handler: (frame: string) => void) => { line = handler },
     onDeath: () => {},
+    lastFrameAt: () => 0,
+    lastDiagnosticAt: () => 0,
+    stderrTail: () => [],
     close: () => {},
     receive: (frame: string) => { line(frame) },
   } as AcpTransport & { readonly sent: string[]; receive: (frame: string) => void }

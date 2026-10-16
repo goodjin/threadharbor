@@ -146,6 +146,9 @@ describe.skipIf(!LIVE)('dispatch stack against real agents', () => {
       send: line => { sent.push(line); inner.send(line) },
       onLine: handler => inner.onLine(handler),
       onDeath: handler => inner.onDeath(handler),
+      lastFrameAt: () => inner.lastFrameAt(),
+      lastDiagnosticAt: () => inner.lastDiagnosticAt(),
+      stderrTail: () => inner.stderrTail(),
       close: () => inner.close(),
     }
     const client = new AcpClient(transport, claudeDialect)

@@ -153,6 +153,7 @@ describe('stop wiring — dispatch to runner', () => {
         return {
           run: async (decision, turn) => await runner.run(decision, turn),
           close: () => {},
+          diagnostics: () => ({ lastFrameAt: Date.now(), lastDiagnosticAt: Date.now(), stderrTail: [] }),
           onDead: () => {},
         }
       },

@@ -68,3 +68,45 @@ describe.skipIf(!LIVE)('gateway against real codex', () => {
     }
   }, 240_000)
 })
+
+describe.skipIf(!LIVE)('gateway against an unreachable backend', () => {
+  it('stall ends the turn with a diagnostics package quoting the agent', async () => {
+    // 复现 2026-10-16 会话 423817a9 的形态：到后端的 TLS 握手被掐，codex
+    // 在自己的重试循环里打转——进程活着、一帧不来、停止按了没反应。把代理
+    // 指到 discard 端口制造同样的「连不上」，静默期限应自动收场并带诊断。
+    process.env['HTTPS_PROXY'] = 'http://127.0.0.1:9'
+    process.env['HTTP_PROXY'] = 'http://127.0.0.1:9'
+    process.env['ALL_PROXY'] = ''
+    try {
+      const factory = makeSessionFactory(CONFIG, { answerPermission: async () => ({ outcome: 'allow' }) })
+      const reports: string[] = []
+      const gate = new GatewayConversations(
+        async (presetId, options) => await factory.open(presetId, {
+          cwd: process.cwd(),
+          dshSessionId: options.dshSessionId,
+          primer: options.primer,
+        }),
+        message => { reports.push(message) },
+        undefined, undefined,
+        () => ({ stallMs: 8_000, warnMs: 2_000, totalMs: 60_000, graceMs: 1_000 }),
+      )
+      const chunks: GatewayChunk[] = []
+      await gate.answer('live-dead', 'acp-codex', {
+        messages: [user('这题不需要真的回答')],
+        position: { turn: 1, step: 1 },
+        modelId: 'gpt-6-astra',
+      }, { chunk: c => { chunks.push(c) } })
+      const finish = chunks.find(c => c.type === 'finish') as
+        | { reason: { kind: string; failure?: { code?: string; message?: string } } }
+        | undefined
+      expect(finish?.reason.kind).toBe('error')
+      expect(finish?.reason.failure?.code).toBe('ACP_STALLED')
+      expect(finish?.reason.failure?.message ?? '').toMatch(/tls|proxy|handshake|connect|refused|静默/i)
+      expect(reports.some(message => message.includes('answer stalled'))).toBe(true)
+    } finally {
+      delete process.env['HTTPS_PROXY']
+      delete process.env['HTTP_PROXY']
+      delete process.env['ALL_PROXY']
+    }
+  }, 120_000)
+})

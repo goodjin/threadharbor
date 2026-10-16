@@ -18,6 +18,9 @@ function fakeTransport(): AcpTransport & { push(frame: unknown): void } {
     onLine: (handler: (line: string) => void) => { deliver = handler },
     onDeath: () => {},
     send: () => {},
+    lastFrameAt: () => 0,
+    lastDiagnosticAt: () => 0,
+    stderrTail: () => [],
     close: () => {},
     push: (frame: unknown) => { deliver(JSON.stringify(frame)) },
   }

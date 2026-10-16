@@ -27,6 +27,9 @@ function fakeTransport(): AcpTransport & { readonly sent: string[]; deliver: (li
     send: (line: string) => { sent.push(line) },
     onLine: (next: (line: string) => void) => { handler = next },
     onDeath: () => {},
+    lastFrameAt: () => 0,
+    lastDiagnosticAt: () => 0,
+    stderrTail: () => [],
     close: () => {},
     deliver: (line: string) => { handler(line) },
   }

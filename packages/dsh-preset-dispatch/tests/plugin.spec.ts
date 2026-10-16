@@ -334,11 +334,15 @@ function transportCounter(): { transport: () => AcpTransport & { die(reason: str
   const make = (): AcpTransport & { die(reason: string): void; receive(frame: string): void } => {
     let line: (frame: string) => void = () => {}
     let death: (reason: string) => void = () => {}
+    let lastFrameAt = Date.now()
     made += 1
     return {
       send: () => {},
       onLine: handler => { line = handler },
       onDeath: handler => { death = handler },
+      lastFrameAt: () => lastFrameAt,
+      lastDiagnosticAt: () => 0,
+      stderrTail: () => [],
       close: () => { closes += 1 },
       die: reason => { death(reason) },
       receive: (frame: string) => { lastFrameAt = Date.now(); line(frame) },

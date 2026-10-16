@@ -606,7 +606,7 @@ describe('GatewayConversations — one external conversation per session', () =>
     })
     const reports: string[] = []
     const chunks: GatewayChunk[] = []
-    const gate = new GatewayConversations(async () => slow.session, message => { reports.push(message) }, () => ({ stallMs: 40 }))
+    const gate = new GatewayConversations(async () => slow.session, message => { reports.push(message) }, undefined, undefined, () => ({ stallMs: 40 }))
     await gate.answer('s1', 'acp-grok', { messages: [user('慢慢想')], position }, { chunk: c => { chunks.push(c) } })
     expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
     expect(reports.some(message => message.includes('answer stalled'))).toBe(false)

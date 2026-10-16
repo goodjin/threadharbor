@@ -30,6 +30,7 @@ type KillableSession = {
   run: () => Promise<{ frames: never[]; end: { kind: 'completed' } }>
   close: () => void
   onDead: (handler: (reason: string) => void) => void
+  diagnostics: () => { lastFrameAt: number; lastDiagnosticAt: number; stderrTail: readonly string[] }
   die: (reason: string) => void
 }
 
@@ -39,6 +40,7 @@ function killableSession(): KillableSession {
     run: async () => ({ frames: [], end: { kind: 'completed' } }),
     close: () => { closed += 1 },
     onDead: handler => { death = handler },
+    diagnostics: () => ({ lastFrameAt: Date.now(), lastDiagnosticAt: Date.now(), stderrTail: [] }),
     die: reason => { death(reason) },
   }
 }
