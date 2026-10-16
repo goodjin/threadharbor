@@ -201,6 +201,38 @@ function key(turn: number, callId: string): PairKey {
   return `${turn}:${callId}`
 }
 
+/**
+ * A writer that keeps the log-only tool events and drops the assistant message.
+ *
+ * The in-place answer path hands the native loop's own answer to the loop: the
+ * loop assembles the message from the chunk stream and appends it. So a writer
+ * that appended the message here too would leave two messages for one step, and
+ * the conversation view keeps only the last of them — erasing the one the user
+ * just watched arrive.
+ *
+ * The tool events are the other way round. They are log-only and are not part
+ * of the chunk vocabulary the loop assembles from, so nothing upstream of this
+ * path can see them: without a writer they reach the session as nothing at all,
+ * and a turn that ran three commands leaves a transcript with no trace of them.
+ *
+ * Returns nothing for the message sequence, which is the honest answer — this
+ * writer did not write the message, so it must not claim a sequence for it.
+ * @param append - the session's append, as `makeContentWriter` takes it.
+ * @returns a writer for the events this path is responsible for.
+ */
+export function makeToolOnlyWriter(append: SessionAppend): ContentWriter {
+  const inner = makeContentWriter(append)
+  return (events): number | undefined => {
+    for (const event of events) {
+      // One event at a time so the dropped message cannot affect how the
+      // call/result pairing is resolved for the ones that remain.
+      if (event.type === MESSAGE) continue
+      inner([event])
+    }
+    return undefined
+  }
+}
+
 function parts(payload: unknown): { turn: number; callId: string | undefined } {
   const record = (typeof payload === 'object' && payload !== null ? payload : {}) as Record<string, unknown>
   const turn = typeof record['turn'] === 'number' ? record['turn'] : 0

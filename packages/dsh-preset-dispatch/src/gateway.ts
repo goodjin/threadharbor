@@ -18,6 +18,8 @@
 
 import { planFeed } from './gateway-feed.ts'
 import type { FeedCursor } from './gateway-feed.ts'
+import { makeToolOnlyWriter } from './content-writer.ts'
+import type { SessionAppend } from './content-writer.ts'
 import type { AcpSession } from './registry.ts'
 import type { TurnContext, StepDecisionLike, TurnStreamHandle } from './dispatch.ts'
 
@@ -207,6 +209,16 @@ export type GatewayOpen = (presetId: string, options: {
   }
 }) => Promise<AcpSession>
 
+/**
+ * The session's log writer, resolved per DSH session.
+ *
+ * Absent when the host composes no session store; the answer still goes out,
+ * only the tool events have nowhere to land.
+ * @param sessionId - the DSH session the in-place answer belongs to.
+ * @returns the session's append, or undefined when no live session has that id.
+ */
+export type GatewaySessionAppend = (sessionId: string) => SessionAppend | undefined
+
 export type GatewayAnswerRequest = {
   /** The loop's derived history for this step, exactly as the adapter got it. */
   readonly messages: readonly unknown[]
@@ -231,12 +243,18 @@ export class GatewayConversations {
   private readonly entries = new Map<string, Entry>()
   private readonly open: GatewayOpen
   private readonly report: (message: string) => void
+  private readonly sessionAppend: GatewaySessionAppend | undefined
 
   // Plain assignments, not parameter properties — same strip-only reason as
   // above; this module is host-loaded without a transpiler.
-  constructor(open: GatewayOpen, report: (message: string) => void = () => {}) {
+  constructor(
+    open: GatewayOpen,
+    report: (message: string) => void = () => {},
+    sessionAppend?: GatewaySessionAppend,
+  ) {
     this.open = open
     this.report = report
+    this.sessionAppend = sessionAppend
   }
 
   /** Answer one request in place; chunks reach the sink as the agent works. */
@@ -286,19 +304,24 @@ export class GatewayConversations {
     const stream = new GatewayChunkStream(sink)
     // The catalog adapter has no step numbers of its own (GenerateOptions
     // carries none), so position degrades to a zero placeholder rather than
-    // crashing the runner's card bookkeeping — the gateway writes nothing
-    // durable anyway, the native loop owns placement.
+    // crashing the runner's card bookkeeping. Placement does not depend on it:
+    // the conversation view reads a card's turn and step from where the event
+    // sits between the loop's own turn/step boundaries, not from the numbers
+    // the card carries.
     const position = request.position ?? { turn: 0, step: 0 }
     const decision: StepDecisionLike = {
       kind: 'enter',
       messages: [{ role: 'user', content: [{ type: 'text', text: plan.prompt }] }],
     }
+    // The loop writes the assistant message from the chunks it assembles. The
+    // runner's tool events are the ones nothing up there can see, so this is
+    // where they are written — through a writer that leaves the message alone.
+    const append = this.sessionAppend?.(sessionId)
     const turn = {
       sessionId,
       position,
-      // The native loop owns the durable write; the gateway writes nothing.
       produce: () => [],
-      write: () => 1,
+      write: append === undefined ? () => 1 : makeToolOnlyWriter(append),
       openStream: () => stream.port(),
       ...(request.modelId === undefined ? {} : { modelId: request.modelId }),
       ...(request.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }),

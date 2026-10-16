@@ -32,6 +32,8 @@ import { makeQuestionBridge } from './question-bridge.ts'
 import { presetsForHost } from './host-filter.ts'
 import { markRosterHidden } from './roster-marks.ts'
 import { makeContentWriter } from './content-writer.ts'
+import type { SessionAppend } from './content-writer.ts'
+import type { GatewaySessionAppend } from './gateway.ts'
 import { decideSelection, pendingSelectionOf, selectionOf } from './selection.ts'
 import type { SelectionSource } from './selection.ts'
 import { switchDrivenSession } from './switch-mount.ts'
@@ -327,9 +329,13 @@ export function apply(ctx: unknown, config: Config): void {
     request => questions.ask(request),
     sessionId => sessionId === undefined ? undefined : agents.get(sessionId),
   )
+  // The writer the in-place answer path records tool cards through; a host with
+  // no session store leaves the cards unwritten rather than the answer lost.
+  const sessionAppend = readSessionAppend(host)
 
   applyAcpPlugin(host, config.presetId, preset, {
     ...(readProjection(host) === undefined ? {} : { presetOf: readProjection(host) }),
+    ...(sessionAppend === undefined ? {} : { sessionAppend }),
     ...(ask === undefined ? {} : { answerPermission: ask }),
     ...(questionBridge === undefined ? {} : { answerAskQuestion: questionBridge }),
     report: message => {
@@ -391,6 +397,36 @@ function appendOf(agent: { readonly session?: unknown }): ((type: string, payloa
   const session = agent.session as { append?: unknown } | undefined
   if (typeof session?.append !== 'function') return undefined
   return session.append.bind(session)
+}
+
+/**
+ * The session log writer for a DSH session, from the host's session store.
+ *
+ * The in-place answer path has no agent of its own to take a writer from — the
+ * session it answers for is a native one that never installed this row — so it
+ * resolves the session by id. Opportunistic like the approval and question
+ * bridges: a host that composes no session store still gets answers, only
+ * without tool cards.
+ *
+ * @param host - the plugin context, to read the store from.
+ * @returns a resolver, or undefined when the host has no session store.
+ */
+function readSessionAppend(host: { get?(key: string): unknown }): GatewaySessionAppend | undefined {
+  const found = host.get?.('sessions')
+  if (found === undefined || found === null || typeof found !== 'object') return undefined
+  const store = found as { get(id: string): unknown }
+  return sessionId => {
+    if (typeof sessionId !== 'string' || sessionId === '') return undefined
+    let session: unknown
+    try {
+      session = store.get(sessionId)
+    } catch {
+      // A store that refuses the lookup is a store with no such live session.
+      return undefined
+    }
+    const append = (session as { append?: unknown } | undefined)?.append
+    return typeof append === 'function' ? (append.bind(session) as SessionAppend) : undefined
+  }
 }
 
 function sessionIdOf(agent: { readonly id?: unknown; readonly session?: unknown }): string | undefined {

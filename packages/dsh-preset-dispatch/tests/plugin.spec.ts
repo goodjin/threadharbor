@@ -460,6 +460,72 @@ describe('加载路径的模型报告真的进目录（applyAcpPlugin 端到端�
   /** Yield long enough for the runner's awaited request to be on the wire. */
   const settle = (): Promise<void> => new Promise(resolve => { setTimeout(resolve, 0) })
 
+  it('hands the session writer down to the in-place path, so tool cards are recorded', async () => {
+    // 装载期这一段是整条链的最后一节：entry 从会话服务取出写入器，经 deps 传到
+    // 网关。断了它，网关里的写入器就永远拿不到东西，工具卡片依旧无处可去——
+    // 而这一节没有任何报错，正是当初漏掉的那一节。
+    const written: string[] = []
+    let adapter: { stream?(options: Record<string, unknown>): AsyncIterable<unknown> } | undefined
+    const context = {
+      ...ctx(),
+      get: (key: string) => key === 'llm'
+        ? { registerAdapter: (_routes: string[], registered: { stream?: (o: Record<string, unknown>) => AsyncIterable<unknown> }) => { adapter = registered } }
+        : undefined,
+    }
+    const scripted = scriptedTransport()
+    applyAcpPlugin(context, 'acp-codex', { agent: 'codex', command: 'codex-acp' }, {
+      install: () => {},
+      sessionAppend: (sessionId: string) => (sessionId === 's1'
+        ? ((type: string) => { written.push(type); return { seq: written.length } }) as never
+        : undefined),
+      transport: () => scripted,
+    })
+
+    // A foreign session's own step asks this model to stream an answer.
+    const chunks = adapter?.stream?.({
+      provider: 'acp:acp-codex',
+      model: 'gpt-6-astra',
+      sessionId: 's1',
+      messages: [{ role: 'user', content: [{ type: 'text', text: '看看项目里有什么' }] }],
+    })
+    void (async () => { for await (const chunk of chunks ?? []) { void chunk } })()
+    // Answer each request as it goes out: the prompt only leaves after the
+    // handshake it follows has been answered, so one pass over what has been
+    // sent is not enough.
+    const answered = new Set<string>()
+    let prompted = false
+    for (let pass = 0; pass < 8 && !prompted; pass++) {
+      await settle()
+      for (const frame of scripted.sent) {
+        const request = JSON.parse(frame) as { id?: number; method?: string }
+        if (request.id === undefined || answered.has(frame)) continue
+        answered.add(frame)
+        if (request.method === 'initialize') {
+          scripted.receive(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: {} }))
+        }
+        if (request.method === 'session/new') {
+          scripted.receive(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { sessionId: 'x1' } }))
+        }
+        if (request.method === 'session/prompt') {
+          prompted = true
+          scripted.receive(JSON.stringify({
+            jsonrpc: '2.0', method: 'session/update',
+            params: { sessionId: 'x1', update: { sessionUpdate: 'tool_call', toolCallId: 'c1', kind: 'execute', rawInput: { command: 'ls' } } },
+          }))
+          scripted.receive(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { stopReason: 'end_turn' } }))
+        }
+      }
+    }
+    expect(prompted).toBe(true)
+    await settle()
+    await settle()
+
+    expect(written).toContain('tool/call')
+    // The loop assembles the answer from the chunks; the gateway must not
+    // append a second message for the same step.
+    expect(written).not.toContain('assistant/message')
+  })
+
   it('一个回合的 session/new 报告经 applyAcpPlugin 到达 listModels', async () => {
     // The loaded entry mounts the row through applyAcpPlugin; if the factory's
     // runtime report had nowhere to land on this path, the picker would

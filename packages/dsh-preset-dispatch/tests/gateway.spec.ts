@@ -24,6 +24,19 @@ const user = (text: string) => ({ role: 'user', content: [{ type: 'text', text }
 const assistant = (text: string) => ({ role: 'assistant', content: [{ type: 'text', text }], id: `a-${text}` })
 const position = { turn: 1, step: 1 }
 
+/** A session-log append, recording what the gateway asked the session to record. */
+function recordingAppend(): {
+  readonly written: { type: string; payload: unknown; intent: unknown }[]
+  (type: string, payload: unknown, intent?: unknown): { seq: number }
+} {
+  const written: { type: string; payload: unknown; intent: unknown }[] = []
+  const append = (type: string, payload: unknown, intent?: unknown) => {
+    written.push({ type, payload, intent })
+    return { seq: written.length }
+  }
+  return Object.assign(append, { written })
+}
+
 /**
  * A session stand-in: records each run's turn context, and answers through
  * whatever the turn's openStream handed back — the same handle production
@@ -43,6 +56,7 @@ function fakeSession() {
     modelId?: string
     reasoningEffort?: string
     abort?: () => AbortSignal | undefined
+    write?: (events: readonly { type: string; payload: unknown }[]) => number | undefined
   }
   let reply: (turn: Turnish) => Promise<GatewayStepEnd> = async () => ({ kind: 'completed' })
   const endResult = (end: GatewayStepEnd) => ({ frames: [], end })
@@ -171,6 +185,50 @@ describe('GatewayConversations — one external conversation per session', () =>
     expect(fake.seen.length).toBe(1)
     expect(fake.seen[0]?.prompt).toContain('第二问')
     expect(chunks.map(c => c.type)).toEqual(['block-start', 'text-delta', 'block-end', 'finish'])
+  })
+
+  it('把外部 agent 的工具卡片写进会话，助手消息仍留给原生循环写', async () => {
+    // 这条路的写入端曾经是空实现，于是外部 agent 跑过的命令在会话里一点痕迹
+    // 都没有——回答在，过程不在。工具事件是 log-only，不在原生循环拼消息用的
+    // 那套流词汇里，所以没有别人会替它写。而助手消息恰恰是循环的：再写一份
+    // 同一步的消息，界面上只会留下最后一份，把循环刚写的抹掉。
+    const append = recordingAppend()
+    const written = append.written
+    const fake = fakeSession()
+    fake.answerWith(async turn => {
+      // 首帧到达即写调用（runner 的实时卡片），回合末再写结果与正文。
+      turn.write?.([{ type: 'tool/call', payload: { turn: 0, step: 0, callId: 'c1', name: 'bash', arguments: '{}' } }])
+      turn.write?.([
+        { type: 'tool/result', payload: { turn: 0, step: 0, message: { role: 'tool', content: [{ type: 'text', text: 'ok' }], toolCallId: 'c1' } } },
+        { type: 'assistant/message', payload: { turn: 0, step: 0, message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] } } },
+      ])
+      return { kind: 'completed' }
+    })
+    const gate = new GatewayConversations(
+      async () => fake.session,
+      () => {},
+      sessionId => (sessionId === 's1' ? append : undefined),
+    )
+    await gate.answer('s1', 'acp-codex', { messages: [user('跑个命令')], position }, { chunk: () => {} })
+
+    expect(written.map(entry => entry.type)).toEqual(['tool/call', 'tool/result'])
+    // 结果必须指回它回答的那次调用，否则它在会话里是个无主的孤儿。
+    const result = written[1]
+    expect(result?.intent).toEqual({ surfaceOp: 'append', sourceEventSeqs: [1] })
+  })
+
+  it('会话写入端拿不到时照常作答，只是卡片无处可去', async () => {
+    // 没有会话服务的主机上这一路必须照走——把「看不到卡片」变成「整个回合崩掉」
+    // 是拿可见性换可用性。
+    const fake = fakeSession()
+    fake.answerWith(async turn => {
+      turn.write?.([{ type: 'tool/call', payload: { turn: 0, step: 0, callId: 'c1', name: 'bash', arguments: '{}' } }])
+      return { kind: 'completed' }
+    })
+    const chunks: GatewayChunk[] = []
+    const gate = new GatewayConversations(async () => fake.session)
+    await gate.answer('s1', 'acp-codex', { messages: [user('跑个命令')], position }, { chunk: c => { chunks.push(c) } })
+    expect(chunks.map(c => c.type)).toEqual(['finish'])
   })
 
   it('reuses the open conversation and feeds only the increment', async () => {

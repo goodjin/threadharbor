@@ -30,6 +30,7 @@ import { makeSessionFactory } from './factory.ts'
 import { modelsOfPreset, registerCatalog, runtimeModels } from './catalog-registration.ts'
 import { servicesOf } from './switch-mount.ts'
 import { GatewayConversations } from './gateway.ts'
+import type { GatewaySessionAppend } from './gateway.ts'
 import { followModelSelection, followPresetSelection } from './follow.ts'
 import { switchShared } from './switch-shared.ts'
 import { selectionOf } from './selection.ts'
@@ -104,6 +105,15 @@ export type AcpPluginDeps = {
    * available and the header only as a fallback.
    */
   presetOf?: PresetResolver | undefined
+  /**
+   * The session log writer for a DSH session, for the in-place answer path.
+   *
+   * An external agent's tool events are log-only and carry no chunk the native
+   * loop could assemble from, so on the in-place path this is the only thing
+   * that can record them. Optional: a host without a session store still gets
+   * answers, just with no tool cards.
+   */
+  sessionAppend?: GatewaySessionAppend | undefined
   /**
    * Build the transport a preset connects over.
    *
@@ -226,6 +236,7 @@ export function applyAcpPlugin(
       ...(presets.presets[presetId]?.mode === undefined ? {} : { modeId: presets.presets[presetId]?.mode }),
     }),
     message => { deps.report?.(message) },
+    deps.sessionAppend,
   )
   catalogDeps.gateway = gateway
   registerCatalog(ctx, presets, catalogDeps)
