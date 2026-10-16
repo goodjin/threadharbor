@@ -578,4 +578,44 @@ describe('GatewayConversations — one external conversation per session', () =>
     expect(second.map(c => c.type)).toEqual(['finish'])
     expect(reports.filter(message => message.includes('answer timed out'))).toHaveLength(1)
   })
+
+  it('期限是「无活动」期限：持续输出思考的活轮次跑过期限也不死', { timeout: 3000 }, async () => {
+    // 2026-10-16 会话 03067bcc：grok 的第 8/11/12 轮全部精确死在 600 秒——
+    // 期限曾是「自发问起算的总时长」，活着的长思考轮次被整轮杀掉，用户只好
+    // 换 agent。期限的本意是看住挂死后端（一条帧都不再来的那种），所以改为
+    // 每收到一段输出就重置：这里 40ms 期限、每 15ms 吐一段、总时长远超 40ms，
+    // 轮次应当正常完成且没有任何超时报告。
+    const slow = fakeSession()
+    slow.answerWith(async turn => {
+      const handle = turn.openStream?.()
+      for (let index = 0; index < 8; index++) {
+        handle?.textDelta(`段${index}`)
+        await new Promise(resolve => { setTimeout(resolve, 15) })
+      }
+      return { kind: 'completed' }
+    })
+    const reports: string[] = []
+    const chunks: GatewayChunk[] = []
+    const gate = new GatewayConversations(async () => slow.session, message => { reports.push(message) }, undefined, undefined, 40)
+    await gate.answer('s1', 'acp-grok', { messages: [user('慢慢想')], position }, { chunk: c => { chunks.push(c) } })
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+    expect(reports.some(message => message.includes('answer timed out'))).toBe(false)
+  })
+
+  it('工具事件同样算活动：只有工具卡片在动、没有文字流的轮次也不死', { timeout: 3000 }, async () => {
+    const busy = fakeSession()
+    busy.answerWith(async turn => {
+      for (let index = 0; index < 8; index++) {
+        turn.write?.([{ type: 'tool/call', payload: { callId: `c${index}`, name: 'bash', arguments: '{}' } }])
+        await new Promise(resolve => { setTimeout(resolve, 15) })
+      }
+      return { kind: 'completed' }
+    })
+    const reports: string[] = []
+    const gate = new GatewayConversations(async () => busy.session, message => { reports.push(message) }, undefined, undefined, 40)
+    const chunks: GatewayChunk[] = []
+    await gate.answer('s1', 'acp-grok', { messages: [user('跑工具')], position }, { chunk: c => { chunks.push(c) } })
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+    expect(reports.some(message => message.includes('answer timed out'))).toBe(false)
+  })
 })

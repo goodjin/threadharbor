@@ -324,7 +324,47 @@ export class GatewayConversations {
         },
       })
     }
-    const stream = new GatewayChunkStream(sink)
+    // The gateway owns this answer's cancellation: the deadline below ends
+    // the turn through this controller, and an external abort (the loop
+    // stopping the session) is forwarded into it, so the runner watches one
+    // signal either way.
+    const controller = new AbortController()
+    request.signal?.addEventListener('abort', () => controller.abort())
+    const configured = typeof this.answerTimeoutMs === 'function' ? this.answerTimeoutMs(presetId) : this.answerTimeoutMs
+    const timeoutMs = configured ?? DEFAULT_ANSWER_TIMEOUT_MS
+    // The deadline is an IDLE deadline, not a total-duration cap: every
+    // streamed chunk and every tool write re-arms it. A turn may legitimately
+    // run for hours while it keeps producing (2026-10-16 session 03067bcc:
+    // grok turns 8/11/12 died at exactly 600s mid-thought under the old cap,
+    // and the user had to switch agents); what it may not do is go silent —
+    // a backend wedged in its own retry loop never returns, and without this
+    // watch the turn — and every later answer serialized behind it — would
+    // wait forever.
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+    let settled = false
+    let settle!: (value: { end: GatewayStepEnd }) => void
+    const fireDeadline = (): void => {
+      this.report(`acp gateway: session ${sessionId} answer timed out after ${timeoutMs}ms — ending the turn as error`)
+      controller.abort()
+      settle({
+        end: {
+          kind: 'error',
+          error: { message: `answer timed out after ${timeoutMs}ms`, code: 'ACP_TIMEOUT' },
+        },
+      })
+    }
+    const done = (value: { end: GatewayStepEnd }): void => {
+      settled = true
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
+      settle(value)
+    }
+    const noteActivity = (): void => {
+      if (settled || timeoutMs <= 0) return
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
+      deadlineTimer = setTimeout(fireDeadline, timeoutMs)
+    }
+    const tappingSink: GatewaySink = { chunk: chunk => { noteActivity(); sink.chunk(chunk) } }
+    const stream = new GatewayChunkStream(tappingSink)
     // The catalog adapter carries no step numbers (GenerateOptions has no such
     // field), so the open turn and step come from what the loop announced for
     // this session. That number is not decoration: the session log checks a
@@ -335,39 +375,34 @@ export class GatewayConversations {
     // permanently unloadable. With no position there is nothing honest to
     // write, so this answers without tool events and says so.
     const position = this.positionOf?.(sessionId) ?? request.position
+    const append = this.sessionAppend?.(sessionId)
+    // Tool writes are activity too: a turn can be mid-tool for a long stretch
+    // with no text stream at all, and those cards prove the agent is alive.
+    const toolWriter = append === undefined || position === undefined ? undefined : makeToolOnlyWriter(append)
+    // Any write call is activity, even the no-op path (no session append, no
+    // position): it means the runner just handled a frame, which is liveness
+    // even when the card itself has nowhere to go.
+    const writingTools = (events: readonly { type: string; payload: unknown }[]): number | undefined => {
+      noteActivity()
+      return toolWriter === undefined ? 1 : toolWriter(events)
+    }
+    if (position === undefined) {
+      this.report(`acp gateway: session ${sessionId} answered with no open turn/step known — tool events skipped, transcript keeps the answer`)
+    }
     const decision: StepDecisionLike = {
       kind: 'enter',
       messages: [{ role: 'user', content: [{ type: 'text', text: plan.prompt }] }],
     }
-    // The loop writes the assistant message from the chunks it assembles. The
-    // runner's tool events are the ones nothing up there can see, so this is
-    // where they are written — through a writer that leaves the message alone.
-    const append = this.sessionAppend?.(sessionId)
-    if (position === undefined) {
-      this.report(`acp gateway: session ${sessionId} answered with no open turn/step known — tool events skipped, transcript keeps the answer`)
-    }
-    // The gateway owns this answer's cancellation: the deadline below ends
-    // the turn through this controller, and an external abort (the loop
-    // stopping the session) is forwarded into it, so the runner watches one
-    // signal either way.
-    const controller = new AbortController()
-    request.signal?.addEventListener('abort', () => controller.abort())
-    const configured = typeof this.answerTimeoutMs === 'function' ? this.answerTimeoutMs(presetId) : this.answerTimeoutMs
-    const timeoutMs = configured ?? DEFAULT_ANSWER_TIMEOUT_MS
     const turn = {
       sessionId,
       position,
       produce: () => [],
-      write: append === undefined || position === undefined ? () => 1 : makeToolOnlyWriter(append),
+      write: writingTools,
       openStream: () => stream.port(),
       abort: () => controller.signal,
       ...(request.modelId === undefined ? {} : { modelId: request.modelId }),
       ...(request.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }),
     } as unknown as TurnContext
-    // The runner reports a whole step result; its `end` is the part that
-    // maps onto a finish chunk. The deadline races it: a backend wedged in
-    // its own retry loop never returns, and without this race the turn — and
-    // every later answer serialized behind it — would wait forever.
     // Delivery anchors the cursor: once run() hands the prompt to the
     // external conversation, those user texts live in its history for good —
     // a turn that later errors must not re-feed them (2026-10-16 session
@@ -378,23 +413,8 @@ export class GatewayConversations {
     const run = entry.session.run(decision, turn) as Promise<unknown>
     run.catch(() => {}) // a late rejection from an already-ended turn must not crash the host
     const result = await new Promise<{ end: GatewayStepEnd }>((resolve, reject) => {
-      let timer: ReturnType<typeof setTimeout> | undefined
-      const done = (value: { end: GatewayStepEnd }): void => {
-        if (timer !== undefined) clearTimeout(timer)
-        resolve(value)
-      }
-      if (timeoutMs > 0) {
-        timer = setTimeout(() => {
-          this.report(`acp gateway: session ${sessionId} answer timed out after ${timeoutMs}ms — ending the turn as error`)
-          controller.abort()
-          done({
-            end: {
-              kind: 'error',
-              error: { message: `answer timed out after ${timeoutMs}ms`, code: 'ACP_TIMEOUT' },
-            },
-          })
-        }, timeoutMs)
-      }
+      settle = resolve
+      noteActivity()
       run.then(
         value => done(value as { end: GatewayStepEnd }),
         reject,

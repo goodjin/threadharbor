@@ -11,7 +11,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { forgetSession, rememberPreStepPayload, stepPositionOfSession } from '../src/step-position.ts'
+import { forgetSession, positionOfSessionEvents, rememberPreStepPayload, stepPositionOfSession } from '../src/step-position.ts'
 
 const coreShapedAgent = (sessionId: string): object => ({
   id: 'agent-scope-handle',
@@ -47,5 +47,41 @@ describe('rememberPreStepPayload', () => {
     expect(stepPositionOfSession('session-stop')).toEqual({ turn: 1, step: 1 })
     forgetSession('session-stop')
     expect(stepPositionOfSession('session-stop')).toBeUndefined()
+  })
+})
+
+describe('positionOfSessionEvents', () => {
+  const ev = (type: string, data: unknown): { type: string; data: unknown } => ({ type, data })
+
+  it('尾部是打开的步骤：给出该回合与步骤号', () => {
+    const events = [
+      ev('turn/start', { turn: 8 }),
+      ev('step/start', { turn: 8, step: 1 }),
+      ev('user/message', { content: [] }),
+      ev('request/header', { header: {} }),
+    ]
+    expect(positionOfSessionEvents(events)).toEqual({ turn: 8, step: 1 })
+  })
+
+  it('尾部已见步骤或回合的收尾：没有打开的位置', () => {
+    expect(positionOfSessionEvents([
+      ev('turn/start', { turn: 8 }),
+      ev('step/start', { turn: 8, step: 1 }),
+      ev('step/end', { turn: 8, step: 1 }),
+    ])).toBeUndefined()
+    expect(positionOfSessionEvents([
+      ev('turn/start', { turn: 8 }),
+      ev('turn/end', { turn: 8, reason: { kind: 'completed' } }),
+    ])).toBeUndefined()
+  })
+
+  it('回合打开但还没有步骤：没有可写工具事件的位置', () => {
+    expect(positionOfSessionEvents([ev('turn/start', { turn: 9 })])).toBeUndefined()
+  })
+
+  it('空记录或形状不对：返回 undefined 而不是报错', () => {
+    expect(positionOfSessionEvents([])).toBeUndefined()
+    expect(positionOfSessionEvents([ev('step/start', null), ev('user/message', {})])).toBeUndefined()
+    expect(positionOfSessionEvents([ev('step/start', 'not-an-object')])).toBeUndefined()
   })
 })

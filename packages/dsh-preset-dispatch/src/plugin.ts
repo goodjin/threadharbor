@@ -17,7 +17,7 @@
  */
 
 import { holdsAcpDispatch, presetIdOf } from './dispatch.ts'
-import type { AgentLike, PresetResolver } from './dispatch.ts'
+import type { AgentLike, PresetResolver, StepPosition } from './dispatch.ts'
 import type {
   AskQuestionAnswer,
   AskQuestionRequest,
@@ -97,6 +97,15 @@ export type AcpPluginDeps = {
    * over — but a row that cannot report is a row that fails quietly.
    */
   report?(message: string): void
+  /**
+   * Read a DSH session's open turn and step straight from its session log.
+   *
+   * The row's context is scoped to the agents mounted with it, so sessions the
+   * in-place gateway answers for never deliver their `agent/pre-step` notice
+   * here; this seam reads the boundaries from the store instead. Optional: a
+   * host with no session store keeps answering, only without tool cards.
+   */
+  sessionPositionOf?(sessionId: string): StepPosition | undefined
   /**
    * Register the exit cleaner that closes every external conversation when
    * this process ends.
@@ -253,7 +262,12 @@ export function applyAcpPlugin(
     // tool events outside a replaced step, so it has nowhere else to learn them:
     // without a real pair the session log records a number that fails to match
     // the open turn when the session is next opened.
-    sessionId => stepPositionOfSession(sessionId),
+    sessionId => {
+      // The announced position first (takeover sessions deliver their
+      // pre-step notice); the session log answers for everyone else — the
+      // row's scoped context never sees foreign sessions' notices.
+      return stepPositionOfSession(sessionId) ?? deps.sessionPositionOf?.(sessionId)
+    },
     presetId => presets.presets[presetId]?.answerTimeoutMs,
   )
   catalogDeps.gateway = gateway

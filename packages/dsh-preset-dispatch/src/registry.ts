@@ -33,8 +33,11 @@ export type AcpPresetConfig = {
   readonly mode?: string
   readonly cwd?: string
   /**
-   * How long one in-place answer on this preset may run before the gateway
-   * ends the turn as an error, in milliseconds.
+   * How long one in-place answer on this preset may stay SILENT before the
+   * gateway ends the turn as an error, in milliseconds. Every streamed chunk
+   * and every tool event re-arms the deadline, so a turn that keeps producing
+   * may run for hours; this watches the wedged backend that never sends
+   * another frame.
    *
    * Absent means the gateway's default; `0` disables the deadline for this
    * preset. A backend wedged in its own retry loop otherwise holds the turn

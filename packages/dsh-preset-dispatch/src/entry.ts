@@ -27,7 +27,7 @@ import { hostname } from 'node:os'
 import { applyAcpPlugin } from './plugin.ts'
 import { installAcpDispatch, presetOfState } from './dispatch.ts'
 import type { AgentLike, AcpPresetBinding, ContentEvent, StepPosition, TurnModelDecision, TurnStreamHandle } from './dispatch.ts'
-import { rememberPreStepPayload, stepPositionOf } from './step-position.ts'
+import { positionOfSessionEvents, rememberPreStepPayload, stepPositionOf } from './step-position.ts'
 import { makeApprovalBridge } from './approval-bridge.ts'
 import { makeQuestionBridge } from './question-bridge.ts'
 import { presetsForHost } from './host-filter.ts'
@@ -333,10 +333,15 @@ export function apply(ctx: unknown, config: Config): void {
   // The writer the in-place answer path records tool cards through; a host with
   // no session store leaves the cards unwritten rather than the answer lost.
   const sessionAppend = readSessionAppend(host)
+  // The open turn and step read straight from the session log: the row's
+  // scoped context never sees the pre-step notices of sessions it answers
+  // in place for, and the gateway needs a position to write tool cards.
+  const sessionPositionOf = readSessionPosition(host)
 
   applyAcpPlugin(host, config.presetId, preset, {
     ...(readProjection(host) === undefined ? {} : { presetOf: readProjection(host) }),
     ...(sessionAppend === undefined ? {} : { sessionAppend }),
+    ...(sessionPositionOf === undefined ? {} : { sessionPositionOf }),
     ...(ask === undefined ? {} : { answerPermission: ask }),
     ...(questionBridge === undefined ? {} : { answerAskQuestion: questionBridge }),
     report: message => {
@@ -413,20 +418,51 @@ function appendOf(agent: { readonly session?: unknown }): ((type: string, payloa
  * @returns a resolver, or undefined when the host has no session store.
  */
 function readSessionAppend(host: { get?(key: string): unknown }): GatewaySessionAppend | undefined {
+  const store = sessionStoreOf(host)
+  if (store === undefined) return undefined
+  return sessionId => {
+    const session = sessionOf(store, sessionId)
+    const append = session?.append
+    return typeof append === 'function' ? (append.bind(session) as SessionAppend) : undefined
+  }
+}
+
+/** The host's session store, when it composes one. */
+function sessionStoreOf(host: { get?(key: string): unknown }): { get(id: string): unknown } | undefined {
   const found = host.get?.('sessions')
   if (found === undefined || found === null || typeof found !== 'object') return undefined
-  const store = found as { get(id: string): unknown }
+  return found as { get(id: string): unknown }
+}
+
+/** One live session from the store; a refusing store reads as "no such session". */
+function sessionOf(store: { get(id: string): unknown }, sessionId: string): { append?: unknown; ownEvents?: unknown } | undefined {
+  if (typeof sessionId !== 'string' || sessionId === '') return undefined
+  try {
+    return store.get(sessionId) as { append?: unknown; ownEvents?: unknown } | undefined
+  } catch {
+    // A store that refuses the lookup is a store with no such live session.
+    return undefined
+  }
+}
+
+/**
+ * The open turn and step of a DSH session, derived from its own event log.
+ *
+ * The in-place gateway answers for sessions this row never mounted, and a
+ * row's context only sees the agents mounted with it — so those sessions'
+ * `agent/pre-step` notices never arrive here (verified live 2026-10-16: five
+ * gateway position asks, zero event feeds). The session log's tail carries
+ * the same boundaries the loop announced, so the position is read from the
+ * store instead.
+ */
+function readSessionPosition(host: { get?(key: string): unknown }): ((sessionId: string) => StepPosition | undefined) | undefined {
+  const store = sessionStoreOf(host)
+  if (store === undefined) return undefined
   return sessionId => {
-    if (typeof sessionId !== 'string' || sessionId === '') return undefined
-    let session: unknown
-    try {
-      session = store.get(sessionId)
-    } catch {
-      // A store that refuses the lookup is a store with no such live session.
-      return undefined
-    }
-    const append = (session as { append?: unknown } | undefined)?.append
-    return typeof append === 'function' ? (append.bind(session) as SessionAppend) : undefined
+    const session = sessionOf(store, sessionId)
+    const ownEvents = session?.ownEvents
+    if (typeof ownEvents !== 'function') return undefined
+    return positionOfSessionEvents(ownEvents.call(session) as readonly unknown[])
   }
 }
 

@@ -96,6 +96,40 @@ export function stepPositionOfSession(sessionId: string): StepPosition | undefin
 }
 
 /**
+ * Derive the open turn and step from a session's own event log.
+ *
+ * The row's context is scoped to the agents mounted with it, so a session the
+ * in-place gateway answers for never delivers its `agent/pre-step` notice to
+ * this row (verified live 2026-10-16: five gateway asks, zero event feeds).
+ * The session log is the unscoped source of truth — its tail records the open
+ * boundaries the same way the loop announced them — so the gateway reads the
+ * position from there instead of replaying events.
+ *
+ * The scan walks backward and lets the first boundary record decide: an open
+ * `step/start` answers with its numbers, while any end record (or a turn with
+ * no step yet, or nothing boundary-shaped at all) means there is nothing open
+ * to write tool events against.
+ *
+ * @param events - The session's events, oldest first.
+ * @returns The open position, or `undefined` when no step is open.
+ */
+export function positionOfSessionEvents(events: readonly unknown[]): StepPosition | undefined {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i] as { type?: unknown; data?: unknown } | null
+    if (typeof event !== 'object' || event === null) continue
+    if (event.type === 'step/start') {
+      const data = event.data as { turn?: unknown; step?: unknown } | null
+      if (typeof data !== 'object' || data === null) return undefined
+      return typeof data.turn === 'number' && typeof data.step === 'number'
+        ? { turn: data.turn, step: data.step }
+        : undefined
+    }
+    if (event.type === 'step/end' || event.type === 'turn/end' || event.type === 'turn/start') return undefined
+  }
+  return undefined
+}
+
+/**
  * Drop a session's index entry when its work is stopped.
  *
  * @param sessionId - The session that stopped.
