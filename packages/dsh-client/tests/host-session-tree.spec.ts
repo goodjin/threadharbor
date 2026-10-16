@@ -350,20 +350,37 @@ describe('HostSessionTree', () => {
     } finally { await unmount(root) }
   })
 
-  it('活跃会话自动排到项目前（默认最近更新）：pending > running > updatedAt，且置顶仍领先', async () => {
+  it('最近更新是纯 recency 排序（参考原生）：不因在跑而提前，但置顶仍领先', async () => {
     localStorage.removeItem('threadharbor.tree.view')
-    // working 的末次发送时间很旧（updatedAt 1），idleNew 的反而新（100）：纯 recency
-    // 会把 working 埋到 idleNew 后面。活跃档要把它顶上来；ask 等待确认，压过在跑的
-    // working（琥珀 > 绿）。pinnedIdle 虽空闲且最旧，但置顶仍领先一切。
+    // 原生方案：updatedAt（末次提问或创建时间）排序，在跑不加分。working 末次发送
+    // 时间很旧（updatedAt 1）就排在 idleNew（100）后面；pinnedIdle 置顶仍领先一切。
     const view = { hosts: [{ hostId: 'self', label: '本机', self: true, lastSeen: 1, sessionCount: 4, empty: false, projects: [{ projectId: 'w1', label: '研究', baseLabel: '研究', sharedName: false, sessions: [
       { sessionId: 'pinnedIdle', projectId: 'w1', title: '置顶的空闲', hostId: 'self', own: true, updatedAt: 1, pinned: true },
       { sessionId: 'idleNew', projectId: 'w1', title: '刚发过', hostId: 'self', own: true, updatedAt: 100 },
-      { sessionId: 'working', projectId: 'w1', title: '在跑', hostId: 'self', own: true, updatedAt: 1, running: true },
       { sessionId: 'ask', projectId: 'w1', title: '等你', hostId: 'self', own: true, updatedAt: 2, running: true, pendingInteraction: 'question' as const },
+      { sessionId: 'working', projectId: 'w1', title: '在跑', hostId: 'self', own: true, updatedAt: 1, running: true },
     ] }] }], totalSessions: 4, empty: false }
     const { container, root } = await mountTree({ view, ctx: { get: () => undefined } })
     try {
-      expect([...container.querySelectorAll('[data-session-row]')].map(r => r.getAttribute('data-session-row'))).toEqual(['pinnedIdle', 'ask', 'working', 'idleNew'])
+      expect([...container.querySelectorAll('[data-session-row]')].map(r => r.getAttribute('data-session-row'))).toEqual(['pinnedIdle', 'idleNew', 'ask', 'working'])
+    } finally { await unmount(root) }
+  })
+
+  it('在跑会话豁免折叠配额（原生 idle 上限外的活动行不被隐藏）', async () => {
+    localStorage.removeItem('threadharbor.tree.view')
+    // 项目有 7 个会话，折叠只显示 5 个 idle 名额。running 的旧会话虽 recency 最旧，
+    // 但按原生方案豁免配额，仍出现在折叠视图里（紧跟 recency 顺序的可见行之后）。
+    const sessions = Array.from({ length: 7 }, (_, i) => ({ sessionId: `idle${i}`, projectId: 'w1', title: `空闲${i}`, hostId: 'self', own: true, updatedAt: 100 - i }))
+    sessions.push({ sessionId: 'working', projectId: 'w1', title: '在跑', hostId: 'self', own: true, updatedAt: 0, running: true })
+    const project = { projectId: 'w1', label: '研究', baseLabel: '研究', sharedName: false, sessions }
+    const view = { hosts: [{ hostId: 'self', label: '本机', self: true, lastSeen: 1, sessionCount: 8, empty: false, projects: [project] }], totalSessions: 8, empty: false }
+    const { container, root } = await mountTree({ view, ctx: { get: () => undefined } })
+    try {
+      const rows = [...container.querySelectorAll('[data-session-row]')].map(r => r.getAttribute('data-session-row'))
+      // 5 个 idle 名额（idle0..idle4）+ 豁免的 working；idle5/idle6 被配额折叠。
+      expect(rows).toContain('working')
+      expect(rows).not.toContain('idle5')
+      expect(rows).not.toContain('idle6')
     } finally { await unmount(root) }
   })
 

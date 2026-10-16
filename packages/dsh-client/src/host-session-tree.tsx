@@ -41,25 +41,39 @@ type SessionsSearchHost = {
 }
 
 /**
- * Order per the tree's view option.
+ * Order per the tree's view option, the native list's own.
  *
- * Pinned rows lead (native seating). In 最近更新 mode, active rows then lead
- * the rest — a turn in flight (`running`) or a pending interaction
- * (`pendingInteraction`) — so a session that is working or waiting on you stays
- * at the top of its project regardless of its last prompt time. The recency
- * sort alone would bury it under any session you messaged more recently, and
- * `updatedAt` only advances on a user prompt (the host stamps
- * `api-session/activity` on `user/message`, never on streaming tokens), so a
- * long-running turn does not keep bumping itself. Pending interaction outranks
- * a running turn, the amber-over-green precedence the row marker already uses.
- * 手动 mode keeps the saved order and only lets pinned lead, so an explicit
- * manual order is never re-sorted under the cursor.
+ * 最近更新 is a pure recency sort (`updatedAt` — last user prompt or createdAt);
+ * no running/pending boost. The native sidebar's "active leads" feel comes from
+ * a different mechanism entirely (see {@link visibleSessions}): a running turn's
+ * `updatedAt` is frozen at its last prompt, so recency alone would let it sink
+ * under a session messaged more recently. The native list keeps such rows on
+ * screen not by reordering them but by exempting them from the collapsed
+ * idle-session quota — so they stay visible wherever recency places them.
+ * 手动 mode keeps the saved order and only lets pinned lead.
  */
-function orderSessions<T extends { pinned?: boolean; updatedAt?: number; running?: boolean; pendingInteraction?: 'approval' | 'plan-review' | 'question' }>(sessions: readonly T[], orderBy: OrderBy): T[] {
+function orderSessions<T extends { pinned?: boolean; updatedAt?: number }>(sessions: readonly T[], orderBy: OrderBy): T[] {
   const pinnedFirst = (a: T, b: T): number => Number(b.pinned === true) - Number(a.pinned === true)
-  const activeRank = (session: T): number => session.pendingInteraction !== undefined ? 2 : session.running === true ? 1 : 0
   if (orderBy !== 'updated') return [...sessions].sort((a, b) => pinnedFirst(a, b))
-  return [...sessions].sort((a, b) => pinnedFirst(a, b) || activeRank(b) - activeRank(a) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+  return [...sessions].sort((a, b) => pinnedFirst(a, b) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+}
+
+/**
+ * The native list's collapsed idle-session cap, with the same exemption: a
+ * blank (provisional) session, a running turn, or a session with running
+ * subagents stays outside the quota so an active session is never hidden just
+ * because its recency is older than five idle neighbors. Within the kept rows
+ * the recency order from {@link orderSessions} is preserved.
+ */
+function visibleSessions<T extends { blank?: boolean; running?: boolean }>(sessions: readonly T[], limit: number): { shown: readonly T[]; hiddenCount: number } {
+  let idleCount = 0
+  const shown = sessions.filter(session => {
+    if (session.blank === true || session.running === true) return true
+    if (idleCount >= limit) return false
+    idleCount += 1
+    return true
+  })
+  return { shown, hiddenCount: sessions.length - shown.length }
 }
 
 
@@ -440,10 +454,10 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
               : null}
             {open ? host.projects.map(project => {
               const projectOpen = !collapsedProjects.includes(project.projectId)
-              const visible = orderSessions(project.sessions.filter(session => passesFilter(session, filterBy)), orderBy)
+              const ordered = orderSessions(project.sessions.filter(session => passesFilter(session, filterBy)), orderBy)
               const overflow = overflowOpen.includes(project.projectId)
-              const hiddenCount = visible.length - IDLE_SESSION_LIMIT
-              const shown = overflow ? visible : visible.slice(0, IDLE_SESSION_LIMIT)
+              const { shown, hiddenCount } = visibleSessions(ordered, IDLE_SESSION_LIMIT)
+              const rendered = overflow ? ordered : shown
               const projectMenu = menu?.kind === 'project' && menu.key === project.projectId
               return (
                 <div key={project.projectId} className={styles.project} data-project-group={project.projectId}>
@@ -514,7 +528,7 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                         </div>
                       : null}
                   </div>
-                  {projectOpen ? shown.map(session => {
+                  {projectOpen ? rendered.map(session => {
                     const sessionMenu = menu?.kind === 'session' && menu.key === session.sessionId
                     const kind = liveKind(session)
                     const liveLabel = kind === undefined ? undefined : t(liveLabelKey(kind))
@@ -583,8 +597,7 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                     ? overflow
                       ? <button type="button" className={styles.overflowToggle} data-action="tree-collapse-sessions" onClick={() => { toggleOverflow(project.projectId) }}>{t('panel.tree.collapseSessions')}</button>
                       : <button type="button" className={styles.overflowToggle} data-action="tree-expand-more" onClick={() => { toggleOverflow(project.projectId) }}>{t('panel.tree.expandMore', { n: hiddenCount })}</button>
-                    : null}
-                </div>
+                    : null}                </div>
               )
             }) : null}
           </section>
