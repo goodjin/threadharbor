@@ -62,6 +62,10 @@ const PANEL_KEYS: readonly string[] = [
   'panel.status.reachable',
   'panel.status.checking',
   'panel.status.reachableUnsynced',
+  'panel.status.undeployed',
+  'panel.status.stopped',
+  'panel.status.unknown',
+  'panel.status.unchecked',
   // Probe states and the advice fold.
   'panel.probe.idle',
   'panel.probe.running',
@@ -215,6 +219,11 @@ describe('panel 的 locale 键', () => {
     expect(zh['panel.status.reachable']).toBe('可达')
     expect(zh['panel.status.checking']).toBe('检测中')
     expect(zh['panel.status.reachableUnsynced']).toBe('可达未同步')
+    // hostStatus 九词里新增的四个：zh 文案逐词钉死，en 由 PANEL_KEYS 循环兜底。
+    expect(zh['panel.status.undeployed']).toBe('未部署')
+    expect(zh['panel.status.stopped']).toBe('未启动')
+    expect(zh['panel.status.unknown']).toBe('未知')
+    expect(zh['panel.status.unchecked']).toBe('未验证')
     expect(en['panel.status.connected']).toBeDefined()
     expect(en['panel.status.reachableUnsynced']).toBeDefined()
   })
