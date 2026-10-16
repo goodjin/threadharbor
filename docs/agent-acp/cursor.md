@@ -59,6 +59,8 @@ agent --auth-token "$CURSOR_AUTH_TOKEN" acp
   "authMethods": [ { "id": "cursor_login", "name": "Cursor Login", ... } ] }
 ```
 
+没有 `subagents`：Cursor 不实现子代理草案。客户端握手里的 `clientCapabilities.subagents` 是它不认识的字段，按协议应忽略；**对 Cursor 的实际影响未实测**（跑 `live.spec.ts` 的 Cursor 用例即可验证，握手已带该字段）。委派类活动如果 Cursor 内部发生，ACP 上不可见。
+
 ### session/new 返回（实测）
 
 ```

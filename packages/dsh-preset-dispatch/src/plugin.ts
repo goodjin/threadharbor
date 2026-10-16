@@ -27,6 +27,7 @@ import type {
 import { buildPresetTable, openSessionsOf, sessionsRegistry } from './registry.ts'
 import type { AcpPresetConfig, PresetConfig } from './registry.ts'
 import { makeSessionFactory } from './factory.ts'
+import { forgetSession, stepPositionOfSession } from './step-position.ts'
 import { modelsOfPreset, registerCatalog, runtimeModels } from './catalog-registration.ts'
 import { servicesOf } from './switch-mount.ts'
 import { GatewayConversations } from './gateway.ts'
@@ -237,6 +238,11 @@ export function applyAcpPlugin(
     }),
     message => { deps.report?.(message) },
     deps.sessionAppend,
+    // The open turn and step, as the loop announced them. The gateway writes
+    // tool events outside a replaced step, so it has nowhere else to learn them:
+    // without a real pair the session log records a number that fails to match
+    // the open turn when the session is next opened.
+    sessionId => stepPositionOfSession(sessionId),
   )
   catalogDeps.gateway = gateway
   registerCatalog(ctx, presets, catalogDeps)
@@ -251,6 +257,10 @@ export function applyAcpPlugin(
     const sessionId = payload.sessionId
     if (typeof sessionId !== 'string') return
     gateway.close(sessionId)
+    // The open turn/step of a session that stopped is stale by definition, and
+    // keeping it would let a later answer write content under numbers that no
+    // longer match anything the log has open.
+    forgetSession(sessionId)
     const opened = sessions.get(presetId)
     const entry = openSessionsOf(sessions, presetId).get(sessionId)
     if (opened === undefined || entry === undefined) return

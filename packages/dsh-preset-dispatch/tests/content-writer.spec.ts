@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { makeContentWriter } from '../src/content-writer.ts'
+import { makeContentWriter, makeToolOnlyWriter } from '../src/content-writer.ts'
 
 interface Call {
   type: string
@@ -121,5 +121,53 @@ describe('makeContentWriter', () => {
     write([{ type: 'tool/call', payload: { ...call, callId: 'c1', turn: 1 } }])
     write([{ type: 'tool/result', payload: { ...result, message: { ...result.message, toolCallId: 'c1' }, turn: 2 } }])
     expect(target.calls.find(c => c.type === 'tool/result')!.intent?.sourceEventSeqs).toBeUndefined()
+  })
+})
+
+/**
+ * The in-place answer path's writer.
+ *
+ * It exists so the gateway can file a tool card without also filing the answer
+ * message — the loop assembles that itself, and a second message per step is
+ * erased by the view's fold. But the message the projection now carries also
+ * holds the `tool-call` blocks the log requires to admit the `tool/call` that
+ * follows. Dropping the whole message drops the announcement with it, which is
+ * exactly the orphan that made these sessions unopenable. So the split is by
+ * content, not by type: a message with nothing but the answer is still dropped,
+ * a message carrying an announcement is kept.
+ */
+describe('makeToolOnlyWriter', () => {
+  const announcement = {
+    turn: 1,
+    step: 1,
+    message: { role: 'assistant', content: [{ type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' }] },
+  }
+
+  it('drops a text-only answer message, leaving the tool events', () => {
+    const target = session()
+    makeToolOnlyWriter(target.append)([
+      { type: 'assistant/message', payload: message },
+      { type: 'tool/call', payload: call },
+    ])
+    expect(target.calls.map(c => c.type)).toEqual(['tool/call'])
+  })
+
+  it('keeps a message that announces a tool call, so the log can admit the call', () => {
+    const target = session()
+    makeToolOnlyWriter(target.append)([
+      { type: 'assistant/message', payload: announcement },
+      { type: 'tool/call', payload: call },
+    ])
+    expect(target.calls.map(c => c.type)).toEqual(['assistant/message', 'tool/call'])
+  })
+
+  it('keeps the announcement and the tool events in one pass, in order', () => {
+    const target = session()
+    makeToolOnlyWriter(target.append)([
+      { type: 'assistant/message', payload: announcement },
+      { type: 'tool/call', payload: call },
+      { type: 'tool/result', payload: result },
+    ])
+    expect(target.calls.map(c => c.type)).toEqual(['assistant/message', 'tool/call', 'tool/result'])
   })
 })

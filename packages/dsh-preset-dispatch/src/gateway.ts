@@ -21,14 +21,14 @@ import type { FeedCursor } from './gateway-feed.ts'
 import { makeToolOnlyWriter } from './content-writer.ts'
 import type { SessionAppend } from './content-writer.ts'
 import type { AcpSession } from './registry.ts'
-import type { TurnContext, StepDecisionLike, TurnStreamHandle } from './dispatch.ts'
+import type { TurnContext, StepDecisionLike, StepPosition, TurnStreamHandle } from './dispatch.ts'
 
 /** The step endings that reach the gateway, as the runner reports them. */
 export type GatewayStepEnd =
   | { readonly kind: 'completed' }
   | { readonly kind: 'max-tokens' }
   | { readonly kind: 'aborted'; readonly reason?: unknown }
-  | { readonly kind: 'error'; readonly error?: { readonly message?: string } }
+  | { readonly kind: 'error'; readonly error?: { readonly message?: string; readonly code?: string } }
   | { readonly kind: string; readonly [extra: string]: unknown }
 
 /** The chunk vocabulary the native loop assembles a message from. */
@@ -225,7 +225,13 @@ export type GatewayAnswerRequest = {
   readonly modelId?: string
   readonly reasoningEffort?: string
   readonly signal?: AbortSignal
-  readonly position: { readonly turn: number; readonly step: number }
+  /**
+   * The open turn and step, for a caller that already knows them. The gateway
+   * resolves this from the loop's own announcement by default (see the
+   * `positionOf` dependency); a number supplied here is a last resort and is
+   * only written when it is a real position, never invented.
+   */
+  readonly position?: { readonly turn: number; readonly step: number }
 }
 
 type Entry = {
@@ -244,6 +250,7 @@ export class GatewayConversations {
   private readonly open: GatewayOpen
   private readonly report: (message: string) => void
   private readonly sessionAppend: GatewaySessionAppend | undefined
+  private readonly positionOf: ((sessionId: string) => StepPosition | undefined) | undefined
 
   // Plain assignments, not parameter properties — same strip-only reason as
   // above; this module is host-loaded without a transpiler.
@@ -251,10 +258,12 @@ export class GatewayConversations {
     open: GatewayOpen,
     report: (message: string) => void = () => {},
     sessionAppend?: GatewaySessionAppend,
+    positionOf?: (sessionId: string) => StepPosition | undefined,
   ) {
     this.open = open
     this.report = report
     this.sessionAppend = sessionAppend
+    this.positionOf = positionOf
   }
 
   /** Answer one request in place; chunks reach the sink as the agent works. */
@@ -302,13 +311,16 @@ export class GatewayConversations {
       })
     }
     const stream = new GatewayChunkStream(sink)
-    // The catalog adapter has no step numbers of its own (GenerateOptions
-    // carries none), so position degrades to a zero placeholder rather than
-    // crashing the runner's card bookkeeping. Placement does not depend on it:
-    // the conversation view reads a card's turn and step from where the event
-    // sits between the loop's own turn/step boundaries, not from the numbers
-    // the card carries.
-    const position = request.position ?? { turn: 0, step: 0 }
+    // The catalog adapter carries no step numbers (GenerateOptions has no such
+    // field), so the open turn and step come from what the loop announced for
+    // this session. That number is not decoration: the session log checks a
+    // tool/call against the turn and step open when it was written, and the
+    // check runs when the session is OPENED. A zero placeholder used to pass
+    // unnoticed because the live view places a card by where the event sits
+    // between the loop's own boundaries — and then made the whole log
+    // permanently unloadable. With no position there is nothing honest to
+    // write, so this answers without tool events and says so.
+    const position = this.positionOf?.(sessionId) ?? request.position
     const decision: StepDecisionLike = {
       kind: 'enter',
       messages: [{ role: 'user', content: [{ type: 'text', text: plan.prompt }] }],
@@ -317,11 +329,14 @@ export class GatewayConversations {
     // runner's tool events are the ones nothing up there can see, so this is
     // where they are written — through a writer that leaves the message alone.
     const append = this.sessionAppend?.(sessionId)
+    if (position === undefined) {
+      this.report(`acp gateway: session ${sessionId} answered with no open turn/step known — tool events skipped, transcript keeps the answer`)
+    }
     const turn = {
       sessionId,
       position,
       produce: () => [],
-      write: append === undefined ? () => 1 : makeToolOnlyWriter(append),
+      write: append === undefined || position === undefined ? () => 1 : makeToolOnlyWriter(append),
       openStream: () => stream.port(),
       ...(request.modelId === undefined ? {} : { modelId: request.modelId }),
       ...(request.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }),
@@ -336,6 +351,18 @@ export class GatewayConversations {
       entry.cursor = plan.cursor
     } else if (end.kind !== 'aborted') {
       this.report(`acp gateway: session ${sessionId}'s in-place answer ended as ${end.kind}`)
+    }
+    // ACP_CONNECTION's message promises the next request opens a fresh external
+    // conversation. Keeping the entry would break that promise twice over: the
+    // retry reuses a transport whose process is wedged or dead (2026-10-16
+    // session f60dcf2b: three identical 60s handshake timeouts in a row), and
+    // the wedged child itself leaks until dsh restarts. Drop the whole entry —
+    // close() also kills the child — so the next request reopens and re-primes.
+    // Other error codes keep the conversation: an agent-side failure leaves a
+    // live session, and continuing it spares the full-history primer.
+    if (end.kind === 'error' && (end.error as { code?: string } | undefined)?.code === 'ACP_CONNECTION') {
+      this.close(sessionId)
+      this.report(`acp gateway: session ${sessionId}'s connection-class failure dropped the external conversation — the next request opens a fresh one`)
     }
   }
 

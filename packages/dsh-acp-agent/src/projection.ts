@@ -25,15 +25,36 @@ export type StreamRecord =
 /** The DSH event names this projection writes. */
 export type ProjectionEvent = { readonly type: string; readonly payload: unknown }
 
+/**
+ * A delegated run the agent reported through the ACP subagent draft
+ * (#1992): a spawned subagent session or an async background task. Both are
+ * synthetic tool cards — `subagent` and `async_task` are names the reference
+ * DSH client renders (a dedicated view, the generic row), so the run is
+ * visible in the transcript without pretending to be a DSH session.
+ */
+type SpawnedRun = {
+  readonly call: ToolCall
+  readonly kind: 'subagent' | 'task'
+  /** True once the agent sent a terminal state for this run. */
+  settled: boolean
+}
+
 type Accumulator = {
   thought: readonly string[]
   text: readonly string[]
   readonly tools: Map<string, ToolCall>
+  /** Subagent and async-task runs, keyed like the cards that render them. */
+  readonly spawned: Map<string, SpawnedRun>
+  /** Session ids whose frames belong to a spawned subagent, not the parent. */
+  readonly childSessions: ReadonlySet<string>
   /** The turn's usage, when the agent reported one complete enough to write. */
   usage?: TurnUsage | undefined
   /** The compacted live stream, filled in when the turn ran with streaming on. */
   stream?: readonly StreamRecord[]
 }
+
+/** Prefix that names a run the agent never reported a terminal state for. */
+const STILL_RUNNING = '[still running]'
 
 function recordOf(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {}
@@ -44,10 +65,26 @@ function textOf(content: unknown): string {
   return typeof entry['text'] === 'string' ? (entry['text'] as string) : ''
 }
 
+/**
+ * A content block of the durable assistant message.
+ *
+ * The log validates a tool lifecycle by reading `tool-call` blocks out of this
+ * message: a `tool/call` is only admissible once its id, name and arguments
+ * have appeared here, and the step may not close with one still open. The ACP
+ * projection used to write the `tool/call`/`tool/result` pair without the
+ * announcement, so every card it persisted was an orphan the log refused at
+ * open time. The native loop carries all three in one message; this is that
+ * shape.
+ */
+type ContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'reasoning'; text: string }
+  | { type: 'tool-call'; id: string; name: string; arguments: string }
+
 function assistantEvent(
   dialect: AcpDialect,
   acc: Accumulator,
-  content: readonly { type: 'text' | 'reasoning'; text: string }[],
+  content: readonly ContentBlock[],
   turn: number,
   step: number,
 ): ProjectionEvent {
@@ -331,15 +368,71 @@ export function projectToolCallFrame(
 ): ProjectionEvent | undefined {
   const update = recordOf(recordOf(frame.params)['update'])
   const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
-  if (kind !== 'tool_call' && kind !== 'tool_call_update') return undefined
+  if (kind !== 'tool_call' && kind !== 'tool_call_update') {
+    // A spawned run opens its card the same way — the live writer calls this
+    // the moment the frame arrives, and the shared construction keeps the
+    // mid-turn card identical to the turn-end one.
+    const spawned = spawnedCallOf(update)
+    return spawned === undefined ? undefined : toolCallEvent(options.dialect, spawned, options.turn, options.step)
+  }
   const call = options.dialect.foldTool(undefined, update)
   return toolCallEvent(options.dialect, call, options.turn, options.step)
+}
+
+/**
+ * The announcement message that must precede a `tool/call`, for the live path.
+ *
+ * The end-of-turn projection folds every call's block into the step's one
+ * message, which is written after the cards — too late to admit them. So the
+ * runner files this single-block message the moment a card opens, and the
+ * turn-end message keeps only the answer text. The block carries exactly what
+ * the `tool/call` payload carries (same name mapping, same serialized
+ * arguments), or the log's "does not match one advertised tool call" fires on
+ * open.
+ */
+export function projectToolCallAnnouncement(
+  frame: AcpFrame,
+  options: { readonly turn: number; readonly step: number; readonly dialect: AcpDialect },
+): ProjectionEvent | undefined {
+  const update = recordOf(recordOf(frame.params)['update'])
+  const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
+  if (kind !== 'tool_call' && kind !== 'tool_call_update') {
+    const spawned = spawnedCallOf(update)
+    return spawned === undefined ? undefined : announcementEvent(options.dialect, spawned, options.turn, options.step)
+  }
+  const call = options.dialect.foldTool(undefined, update)
+  return announcementEvent(options.dialect, call, options.turn, options.step)
+}
+
+/** The one-block announcement message that admits a call's card. */
+function announcementEvent(dialect: AcpDialect, call: ToolCall, turn: number, step: number): ProjectionEvent {
+  return {
+    type: 'assistant/message',
+    payload: withoutNonFinite({
+      turn,
+      step,
+      message: {
+        id: randomUUID(),
+        role: 'assistant',
+        content: [{
+          type: 'tool-call',
+          id: call.callId,
+          name: mapToolName(dialect, call.name),
+          arguments: JSON.stringify(call.arguments),
+        }],
+        source: { kind: 'model', provider: `acp-${dialect.id}`, model: dialect.id },
+      },
+      stream: [],
+    }),
+  }
 }
 
 function accumulate(frames: readonly AcpFrame[], dialect: AcpDialect): Accumulator {
   const thought: string[] = []
   const text: string[] = []
   const tools = new Map<string, ToolCall>()
+  const spawned = new Map<string, SpawnedRun>()
+  const childSessions = new Set<string>()
   let usage: TurnUsage | undefined
 
   for (const frame of frames) {
@@ -352,20 +445,99 @@ function accumulate(frames: readonly AcpFrame[], dialect: AcpDialect): Accumulat
       continue
     }
     if (frame.method !== 'session/update') continue
-    const update = recordOf(recordOf(frame.params)['update'])
+    const params = recordOf(frame.params)
+    const update = recordOf(params['update'])
     const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
+    // A frame tagged with a spawned subagent's session id belongs to that
+    // child's own trace: its message chunks become the child card's reply,
+    // and everything else it did stays out of the parent transcript.
+    const childId = typeof params['sessionId'] === 'string' ? params['sessionId'] : undefined
+    if (childId !== undefined && childSessions.has(childId)) {
+      const run = spawned.get(childId)
+      if (run !== undefined && kind === 'agent_message_chunk') {
+        const chunk = textOf(update['content'])
+        if (chunk.length > 0) run.call.output += chunk
+      }
+      continue
+    }
     if (kind === 'agent_thought_chunk') thought.push(textOf(update['content']))
     else if (kind === 'agent_message_chunk') text.push(textOf(update['content']))
     else if (kind === 'tool_call' || kind === 'tool_call_update') {
       const carried = typeof update['toolCallId'] === 'string' ? tools.get(update['toolCallId']) : undefined
       const call = dialect.foldTool(carried, update)
       tools.set(call.callId, call)
+    } else if (kind === 'subagent_spawned' || kind === 'async_task_spawned') {
+      const call = spawnedCallOf(update)
+      if (call !== undefined && !spawned.has(call.callId)) {
+        spawned.set(call.callId, { kind: kind === 'subagent_spawned' ? 'subagent' : 'task', settled: false, call })
+        if (kind === 'subagent_spawned') childSessions.add(call.callId)
+      }
+    } else if (kind === 'subagent_state_update') {
+      const run = spawned.get(typeof update['subagentSessionId'] === 'string' ? update['subagentSessionId'] : '')
+      if (run !== undefined && !run.settled) {
+        run.settled = true
+        run.call.status = update['state'] === 'completed' ? 'completed' : 'failed'
+      }
+    } else if (kind === 'async_task_progress') {
+      const run = spawned.get(taskCallId(update))
+      if (run !== undefined) {
+        const summary = typeof update['summary'] === 'string' ? update['summary']
+          : typeof update['description'] === 'string' ? update['description'] : undefined
+        // The latest report is the task's visible state; an earlier one is
+        // overwritten, exactly the way later tool frames overwrite a title.
+        if (summary !== undefined) run.call.output = summary
+      }
+    } else if (kind === 'async_task_state_update') {
+      const run = spawned.get(taskCallId(update))
+      if (run !== undefined) {
+        const summary = typeof update['summary'] === 'string' ? update['summary'] : undefined
+        if (summary !== undefined) run.call.output = summary
+        if (update['state'] === 'completed' || update['state'] === 'failed' || update['state'] === 'stopped') {
+          run.settled = true
+          run.call.status = update['state'] === 'completed' ? 'completed' : 'failed'
+        }
+      }
     } else if (!dialect.isContent(update)) {
       // chatter — setup phases, command lists, context-window updates
     }
   }
 
-  return { thought, text, tools, usage }
+  return { thought, text, tools, spawned, childSessions, usage }
+}
+
+/** The card key one async-task frame addresses, or '' when it names none. */
+function taskCallId(update: Record<string, unknown>): string {
+  return typeof update['asyncTaskId'] === 'string' ? `task-${update['asyncTaskId']}` : ''
+}
+
+/**
+ * The synthetic card one spawned-run update opens, or undefined for any other
+ * update.
+ *
+ * Shared by the turn-end fold and the frame-scoped live projectors, so the
+ * card a frame opens mid-turn is byte-identical to the one the turn-end write
+ * would have produced — the writer pairs results to cards by that payload.
+ */
+function spawnedCallOf(update: Record<string, unknown>): ToolCall | undefined {
+  const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
+  if (kind === 'subagent_spawned') {
+    const id = typeof update['subagentSessionId'] === 'string' ? update['subagentSessionId'] : undefined
+    if (id === undefined) return undefined
+    const name = typeof update['name'] === 'string' ? update['name'] : id
+    const task = typeof update['task'] === 'string' ? update['task'] : ''
+    return { callId: id, name: 'subagent', title: name, arguments: { prompt: task, agent: name }, output: '' }
+  }
+  if (kind === 'async_task_spawned') {
+    const callId = taskCallId(update)
+    if (callId === '') return undefined
+    const name = typeof update['name'] === 'string' ? update['name'] : callId
+    const args: Record<string, unknown> = { name }
+    if (typeof update['taskType'] === 'string') args['taskType'] = update['taskType']
+    if (typeof update['description'] === 'string' && update['description'] !== '') args['description'] = update['description']
+    if (typeof update['outputFilePath'] === 'string') args['outputFilePath'] = update['outputFilePath']
+    return { callId, name: 'async_task', title: name, arguments: args, output: '' }
+  }
+  return undefined
 }
 
 function contentEvents(
@@ -379,24 +551,50 @@ function contentEvents(
 ): ProjectionEvent[] {
   const { dialect, turn, step } = options
   if (options.stream !== undefined) acc.stream = options.stream
-  const { thought, text, tools } = acc
+  const { thought, text, tools, spawned } = acc
   const events: ProjectionEvent[] = []
   // One message per step, in the canonical native shape: the ordered blocks
-  // carry the reasoning first, then the answer. Two separate messages would
-  // survive in the log, but the conversation view folds each step's message
-  // into one node by keeping the LAST assistant/message — a second message
-  // would erase the first on screen.
-  const content = [
+  // carry the reasoning first, then the answer, then the tool-call blocks the
+  // `tool/call` events below must have been announced by. Two separate messages
+  // would survive in the log, but the conversation view folds each step's
+  // message into one node by keeping the LAST assistant/message — a second
+  // message would erase the first on screen.
+  const runs = [...tools.values(), ...[...spawned.values()].map(run => run.call)]
+  // Each block mirrors its `tool/call` exactly (same name mapping, same
+  // serialization) — the validator compares the two, and a divergence is the
+  // "does not match one advertised tool call" rejection.
+  const content: ContentBlock[] = [
     ...(thought.length > 0 ? [{ type: 'reasoning' as const, text: thought.join('') }] : []),
     ...(text.length > 0 ? [{ type: 'text' as const, text: text.join('') }] : []),
+    ...runs.map(tool => ({
+      type: 'tool-call' as const,
+      id: tool.callId,
+      name: mapToolName(dialect, tool.name),
+      arguments: JSON.stringify(tool.arguments),
+    })),
   ]
   if (content.length > 0) events.push(assistantEvent(dialect, acc, content, turn, step))
   for (const tool of tools.values()) {
     events.push(toolCallEvent(dialect, tool, turn, step))
     events.push(toolResultEvent(tool, turn, step))
   }
+  // A spawned run settles the same way a tool call does, with one addition:
+  // the agent may still be running it when the turn ends, and the step cannot
+  // close on an open card — that case says so in the result text instead of
+  // posing as a silent success.
+  for (const run of spawned.values()) {
+    events.push(toolCallEvent(dialect, run.call, turn, step))
+    events.push(toolResultEvent(run.settled ? run.call : { ...run.call, output: stillRunningText(run.call.output) }, turn, step))
+  }
   return events
 }
+
+/** The honest result for a run with no terminal state: name the state, keep any visible progress. */
+function stillRunningText(output: string): string {
+  return output === '' ? STILL_RUNNING : `${STILL_RUNNING} ${output}`
+}
+
+
 
 /** The user turn's own event, appended before the agent starts work. */
 export function projectUserMessage(text: string, turn: number): ProjectionEvent[] {

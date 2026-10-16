@@ -14,6 +14,10 @@
       "types": "./src/roster-filter.ts",
       "default": "./src/roster-filter.ts"
     },
+    "./zcode-quota": {
+      "types": "./src/zcode-quota.ts",
+      "default": "./src/zcode-quota.ts"
+    },
     "./package.json": "./package.json"
   },
   "dependencies": {

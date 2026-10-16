@@ -27,6 +27,7 @@ import { hostname } from 'node:os'
 import { applyAcpPlugin } from './plugin.ts'
 import { installAcpDispatch, presetOfState } from './dispatch.ts'
 import type { AgentLike, AcpPresetBinding, ContentEvent, StepPosition, TurnModelDecision, TurnStreamHandle } from './dispatch.ts'
+import { rememberStepPosition as rememberPosition } from './step-position.ts'
 import { makeApprovalBridge } from './approval-bridge.ts'
 import { makeQuestionBridge } from './question-bridge.ts'
 import { presetsForHost } from './host-filter.ts'
@@ -544,5 +545,5 @@ function rememberStepPosition(payload: { agent: unknown; turn: unknown; step: un
   const agent = payload.agent
   if (typeof agent !== 'object' || agent === null) return
   if (typeof payload.turn !== 'number' || typeof payload.step !== 'number') return
-  stepPositions.set(agent, { turn: payload.turn, step: payload.step })
+  rememberPosition(agent, sessionIdOf(agent), { turn: payload.turn, step: payload.step })
 }

@@ -192,8 +192,9 @@ export type CatalogDeps = {
       readonly modelId?: string
       readonly reasoningEffort?: string
       readonly signal?: AbortSignal
-      /** Placeholder step placement — GenerateOptions carries none. */
-      readonly position: { readonly turn: number; readonly step: number }
+      /** The open turn and step when the caller knows them; the gateway
+       *  otherwise resolves them from the loop's own announcement. */
+      readonly position?: { readonly turn: number; readonly step: number }
     }, sink: GatewaySink): Promise<void>
   }
   /**
@@ -402,9 +403,10 @@ export function catalogAdapter(config: PresetConfig, deps: CatalogDeps): Catalog
             ? { reasoningEffort: options.reasoningEffort }
             : {}),
           ...(options.signal instanceof AbortSignal ? { signal: options.signal } : {}),
-          // GenerateOptions carries no step numbers; the placeholder keeps the
-          // runner's card bookkeeping from reading undefined (turn-1 crash).
-          position: { turn: 0, step: 0 },
+          // 不传 position。GenerateOptions 本就没有轮次步数，硬塞一个 0/0 占位
+          // 会让会话日志收下一组永远对不上的编号：界面按事件落在哪两个边界之间
+          // 定位，看不出来；而 session-format 的 requireStep 是打开会话时才查的，
+          // 那时整份日志已经打不开。网关会自己去问循环报出的那一对。
         }, { chunk: chunk => { queue.push(chunk) } })
         void answering.then(
           () => { queue.close() },

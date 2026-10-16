@@ -39,6 +39,11 @@
     # 新增 agent 只要打标记，不必改过滤器配置。内部 list() 仍不过滤。
     - id: threadharbor-roster-filter
       name: '@threadharbor/dsh-preset-dispatch/roster-filter'
+    # GLM 套餐限额接口：宿主解密本机 ZCode 登录密钥后问一次 Coding Plan 的
+    # monitor 地址，把 5 小时/周两个窗口的数字发回；浏览器侧输入框下方的
+    # 配额胶囊从这里读（密钥不出宿主进程，成功应答带 30 秒缓存）。
+    - id: threadharbor-zcode-quota
+      name: '@threadharbor/dsh-preset-dispatch/zcode-quota'
     - id: acp-codex
       name: '@deepseek-ai/dsh-agent-preset'
       config:

@@ -26,6 +26,13 @@ export type GlmRequest = PromptInput & {
   readonly fetchImpl?: typeof fetch
 }
 
+/** The key/endpoint override face `streamGlm` and the quota call share. */
+export type GlmKeyedRequest = {
+  readonly apiKey?: string
+  readonly credentialsFile?: string
+  readonly endpoint?: string
+}
+
 const CREDENTIALS_ENV = 'ZCODE_ACP_CREDENTIALS_FILE'
 const ENDPOINT_ENV = 'ZCODE_GLM_BASE_URL'
 
@@ -68,7 +75,8 @@ export async function* streamGlm(request: GlmRequest): AsyncGenerator<GlmStreamC
   }
 }
 
-async function resolveApiKey(request: GlmRequest): Promise<string> {
+/** The decrypted coding-plan key of a request's overrides (exported for the quota call). */
+export async function resolveApiKey(request: GlmKeyedRequest): Promise<string> {
   if (request.apiKey !== undefined && request.apiKey !== '') return request.apiKey
   const configured = request.credentialsFile ?? process.env[CREDENTIALS_ENV]
   const file = configured !== undefined && configured !== ''
@@ -77,7 +85,8 @@ async function resolveApiKey(request: GlmRequest): Promise<string> {
   return loadApiKey(file)
 }
 
-function resolveEndpoint(override: string | undefined): string {
+/** The messages URL of a request's endpoint override, or the configured default. */
+export function resolveEndpoint(override: string | undefined): string {
   const configured = override ?? process.env[ENDPOINT_ENV]
   const base = configured !== undefined && configured.trim() !== ''
     ? configured.trim()

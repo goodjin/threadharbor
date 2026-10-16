@@ -157,15 +157,17 @@ describe('catalogAdapter', () => {
       provider: providerRoute('acp-grok'), model: 'grok-4.7', sessionId: 's1', messages,
     }))
     expect(chunks.map(c => c.type)).toEqual(['block-start', 'text-delta', 'block-end', 'finish'])
+    // GenerateOptions carries no step numbers, and this adapter must not invent
+    // any: a 0/0 placeholder is what the gateway used to write into the session
+    // log, and the log checks a tool/call against the turn and step open when it
+    // was written — so the whole session became unopenable. Leaving the field off
+    // says "this adapter does not know"; the gateway resolves the real pair from
+    // the loop's own announcement, and skips tool events when even that is absent.
     expect(seen).toEqual([{
       sessionId: 's1',
       presetId: 'acp-grok',
       modelId: 'grok-4.7',
       messages,
-      // GenerateOptions has no step numbers; a placeholder must still arrive —
-      // the runner's card bookkeeping reads position.turn and crashed on
-      // undefined the first time this wire shipped without it.
-      position: { turn: 0, step: 0 },
     }])
   })
 

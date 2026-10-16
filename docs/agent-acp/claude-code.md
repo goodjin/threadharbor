@@ -85,6 +85,8 @@ _meta.claudeCode.toolName = "Bash"                    ← 真正的工具名
 
 私有扩展：`_meta.claudeCode.promptQueueing: true`（表示支持提示队列）。
 
+**`subagents` 已接**（2026-10-20）：claude-agent-acp 0.76.0 实现了[草案 #1992](https://github.com/agentclientprotocol/agent-client-protocol/pull/1992)外加**异步任务扩展**——Task 委派走 `subagent_spawned` / `subagent_state_update`，后台任务走 `async_task_spawned` / `async_task_progress` / `async_task_state_update`（带进度摘要、token 数、时长、输出文件路径）。投影规则见 [README.md](./README.md) 的帧表；后台任务可能跨回合活着，回合结束仍 running 的结果文本带 `[still running]` 前缀。真机验收帧存 `tests/fixtures/captured-subagent-frames.json`。
+
 ## 权限请求
 
 标准阻塞式，必须用 JSON-RPC 响应回同一个 id。用通知回会静默挂住（同 grok 那条实测）。

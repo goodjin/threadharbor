@@ -206,7 +206,10 @@ async function openLiveAgentOver(
 
   await bounded(`${dialect.id}: initialize`, client.request('initialize', {
     protocolVersion: 1,
-    clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: true },
+    // Mirrors the runner's handshake, including the subagent-draft capability:
+    // the live suite must exercise what production actually sends, or a field
+    // the real agents reject would pass here and break every real session.
+    clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: true, subagents: {} },
   }))
   client.notify('initialized', {})
   // Cursor must authenticate (after an interactive `agent login`) before
@@ -815,4 +818,104 @@ describe.skipIf(!LIVE)('live acceptance: cancel, image, tool frames, replay (fou
     const opener = openStdio(CURSOR_ACP, cursorDialect)
     await replayCase(cursorDialect, opener, opener)
   }, 240_000)
+})
+/* ----------------------------------------------------------------------- */
+/* Native subagent / async-task frames (ACP draft #1992).                    */
+/* ----------------------------------------------------------------------- */
+
+/** Where the raw delegation captures land, for fixtures and documentation. */
+const SUBAGENT_CAPTURE = new URL('./fixtures/captured-subagent-frames.json', import.meta.url)
+
+/** One delegation turn's raw frames, recorded for the fixtures file. */
+async function recordCapture(agent: string, frames: readonly AcpFrame[]): Promise<void> {
+  const { writeFile } = await import('node:fs/promises')
+  let existing: Record<string, unknown> = {}
+  try {
+    existing = JSON.parse(await (await import('node:fs/promises')).readFile(SUBAGENT_CAPTURE, 'utf8')) as Record<string, unknown>
+  } catch {
+    // First capture on this machine.
+  }
+  existing[agent] = { capturedAt: new Date().toISOString(), frames }
+  await writeFile(SUBAGENT_CAPTURE, `${JSON.stringify(existing, null, 2)}\n`)
+}
+
+/** The update payload of one session/update frame. */
+const updateOf = (frame: AcpFrame): Record<string, unknown> =>
+  ((frame.params as { update?: Record<string, unknown> } | undefined)?.update) ?? {}
+
+describe.skipIf(!LIVE)('live acceptance: native subagent and async-task frames', () => {
+  it('codex: a delegated run arrives as subagent_spawned and projects onto the subagent card', async () => {
+    const live = await openLiveAgent(CODEX_ACP, codexDialect)
+    try {
+      const reply = live.prompt(
+        'Delegate a tiny job to a subagent using your spawn/collab tool: have it compute 6*7 and report just the answer. '
+        + 'Wait for the subagent to finish, then reply with its answer.',
+      )
+      const spawned = await live.waitFor(
+        frame => frame.method === 'session/update' && updateOf(frame)['sessionUpdate'] === 'subagent_spawned',
+        180_000,
+        'subagent_spawned frame',
+      )
+      await reply
+
+      const childId = updateOf(spawned)['subagentSessionId']
+      expect(typeof childId).toBe('string')
+      const events = projectTurn(live.plainFrames(), { turn: 1, dialect: codexDialect })
+      const card = events.find(event => event.type === 'tool/call'
+        && (event.payload as { name: string; callId: string }).name === 'subagent')
+      expect(card, 'the spawned run must project onto the subagent card').toBeDefined()
+      expect((card!.payload as { callId: string }).callId).toBe(childId)
+      await recordCapture('codex', live.plainFrames())
+    } finally {
+      live.close()
+    }
+  }, 300_000)
+
+  it('claude: a Task delegation arrives as subagent_spawned and projects onto the subagent card', async () => {
+    const live = await openLiveAgent(CLAUDE_ACP, claudeDialect, { modeId: 'default' })
+    try {
+      const reply = live.prompt(
+        'Use the Task tool to delegate a tiny job: the subagent computes 6*7 and returns just the number. '
+        + 'Wait for it to finish, then reply with its answer.',
+      )
+      const spawned = await live.waitFor(
+        frame => frame.method === 'session/update' && updateOf(frame)['sessionUpdate'] === 'subagent_spawned',
+        180_000,
+        'subagent_spawned frame',
+      )
+      await reply
+
+      const childId = updateOf(spawned)['subagentSessionId']
+      expect(typeof childId).toBe('string')
+      const events = projectTurn(live.plainFrames(), { turn: 1, dialect: claudeDialect })
+      const card = events.find(event => event.type === 'tool/call'
+        && (event.payload as { name: string; callId: string }).name === 'subagent')
+      expect(card, 'the spawned run must project onto the subagent card').toBeDefined()
+      expect((card!.payload as { callId: string }).callId).toBe(childId)
+      await recordCapture('claude', live.plainFrames())
+    } finally {
+      live.close()
+    }
+  }, 300_000)
+
+  it('grok: the subagents handshake is tolerated and a delegation turn stays projectable', async () => {
+    // grok declares no subagents capability (docs/agent-acp/grok.md); what this
+    // case pins is that the extra handshake field neither breaks the handshake
+    // nor the turn, and that whatever frames a delegation DOES produce still
+    // project — the capture records which kinds actually arrived.
+    await withGrokServe(async transport => {
+      const live = await openLiveAgentOver(transport, grokDialect)
+      try {
+        await live.prompt(
+          'If you have a tool that delegates work to a subagent, use it once for a trivial job and report what it returned. '
+          + 'If you have no such tool, reply with the single word READY.',
+        )
+        const events = projectTurn(live.plainFrames(), { turn: 1, dialect: grokDialect })
+        expect(events.some(event => event.type === 'assistant/message' || event.type === 'tool/call')).toBe(true)
+        await recordCapture('grok', live.plainFrames())
+      } finally {
+        live.close()
+      }
+    })
+  }, 300_000)
 })

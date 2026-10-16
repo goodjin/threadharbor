@@ -89,7 +89,9 @@ session/prompt { sessionId, prompt: [...], modelId: '<选中的模型>' }
 
 codex 的 `initialize` 声明了 `sessionCapabilities` 的**全部七项**：`resume` / `list` / `close` / `delete` / `fork` / `subagents` / `additionalDirectories`。
 
-对本项目直接相关的两个：**`fork`**（分叉会话）和 **`list`/`resume`**（枚举与恢复）。目前都没接。
+对本项目直接相关的：**`fork`**（分叉会话）和 **`list`/`resume`**（枚举与恢复）目前没接。
+
+**`subagents` 已接**（2026-10-20）：客户端握手声明 `clientCapabilities.subagents` 后，codex-acp 1.10.0 按[草案 #1992](https://github.com/agentclientprotocol/agent-client-protocol/pull/1992)发送 `subagent_spawned` / `subagent_state_update`，子会话帧带子会话编号；投影规则见 [README.md](./README.md) 的帧表。真机验收：委派一次乘法小任务，`subagent_spawned` 到达并投成 `subagent` 卡片（`live.spec.ts` 的 native subagent 组，原始帧在 `tests/fixtures/captured-subagent-frames.json`）。
 
 ## 私有扩展
 
@@ -113,4 +115,4 @@ codex 的 `session/new` 里那五个 `configOptions`（含 `reasoning_effort`、
 
 **本轮新增实测**：`initialize` 的完整能力声明（见上）、`session/set_model` 报错、`session/set_mode` 的校验、**未观察到 `terminal/*` 调用**。
 
-**仍未验证**：`configOptions` 里的 `reasoning_effort` / `fast-mode` 能否设置；collab 模式的行为；工具失败时的 `status` 取值。
+**仍未验证**：`configOptions` 里的 `reasoning_effort` / `fast-mode` 能否设置；工具失败时的 `status` 取值。collab 模式的委派行为已随 `subagents` 接入验证了单层委派；多层委派（子代理再开子代理）未测。

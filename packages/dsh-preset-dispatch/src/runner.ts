@@ -10,8 +10,8 @@
 import type { AcpStepResult, StepDecisionLike, StepEndReason, TurnContext } from './dispatch.ts'
 import { UNDELIVERED } from './content-writer.ts'
 import type { UndeliveredAttachment } from './content-writer.ts'
-import { projectToolCallFrame } from '@threadharbor/dsh-acp-agent'
-import type { AcpDialect, AcpFrame } from '@threadharbor/dsh-acp-agent'
+import { projectToolCallAnnouncement, projectToolCallFrame } from '@threadharbor/dsh-acp-agent'
+import type { AcpDialect, AcpFrame, ProjectionEvent } from '@threadharbor/dsh-acp-agent'
 
 /** The JSON-RPC surface this runner needs, kept narrow so it can be stood in for. */
 export type AcpClientPort = {
@@ -411,8 +411,13 @@ export class AcpTurnRunner {
     if (event === undefined) return
     const callId = recordOf(event.payload)['callId']
     if (typeof callId !== 'string' || live.written.has(callId)) return
+    // Announce the call before its card: the log admits a `tool/call` only
+    // after an `assistant/message` carried a matching `tool-call` block, and
+    // the end-of-turn message is written after this card. The declaration is
+    // filed live with the card, so the validator finds it in order.
+    const announcement = projectToolCallAnnouncement(frame, { turn: live.turn, step: live.step, dialect })
     try {
-      live.write([event])
+      live.write(announcement === undefined ? [event] : [announcement, event])
     } catch {
       return
     }
@@ -470,7 +475,14 @@ export class AcpTurnRunner {
     // race with it. Held in a local too — the field is cleared the moment the
     // prompt settles, and the turn-end write below still needs the written
     // record to know which cards not to write a second time.
-    const liveCards = this.options.dialect === undefined ? undefined : {
+    //
+    // A turn context with no position (the in-place gateway answers with one
+    // when it knows the open turn, and without one when it does not) gets no
+    // live-card binding. These cards are live-stream bookkeeping only — the
+    // turn-end write below is what reaches the session log — so skipping them
+    // costs visibility, not the answer, and a fabricated 0/0 here is exactly
+    // what used to make the log unloadable.
+    const liveCards = this.options.dialect === undefined || turn.position === undefined ? undefined : {
       turn: turn.position.turn,
       step: turn.position.step,
       write: turn.write,
@@ -591,7 +603,10 @@ export class AcpTurnRunner {
     // the drop happened when the prompt was built, and the writer expands the
     // marker into a call/result pair that never touches the message sequence
     // the stream settles on.
-    const notice = undelivered.length === 0
+    // Same rule as the live-card binding above: no position means nothing may be
+    // written, and this notice is content like any other — the writer expands it
+    // into a tool call/result pair, which the log validates against the open turn.
+    const notice = undelivered.length === 0 || turn.position === undefined
       ? []
       : [{
         type: UNDELIVERED,
@@ -605,11 +620,12 @@ export class AcpTurnRunner {
       ...notice,
       ...(liveCards === undefined
         ? produced
-        : produced.filter(event => {
-          if (event.type !== 'tool/call') return true
-          const callId = recordOf(event.payload)['callId']
-          return !(typeof callId === 'string' && liveCards.written.has(callId))
-        })),
+        : produced.flatMap(event => {
+            if (event.type === 'assistant/message') return withoutAnnouncedToolBlocks(event, liveCards.written)
+            if (event.type !== 'tool/call') return [event]
+            const callId = recordOf(event.payload)['callId']
+            return typeof callId === 'string' && liveCards.written.has(callId) ? [] : [event]
+          })),
     ]
     const seq = turn.write(events)
     if (stream === undefined) return result
@@ -687,7 +703,12 @@ export class AcpTurnRunner {
   private async doOpen(): Promise<string> {
     await this.client.request('initialize', {
       protocolVersion: 1,
-      clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: true },
+      // `subagents` opts into the ACP subagent draft (#1992): adapters that
+      // implement it (codex-acp, claude-agent-acp) then report subagent and
+      // async-task lifecycle as native frames instead of folding the whole
+      // run into one opaque tool call. Agents without the draft ignore the
+      // field, so grok and cursor are unaffected.
+      clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: true, subagents: {} },
     })
     this.client.notify('initialized', {})
     // Cursor authenticates here; the other agents have no such step.
@@ -726,4 +747,31 @@ function withDeadline<T>(work: Promise<T>, ms: number, message: string): Promise
       error => { clearTimeout(timer); reject(error) },
     )
   })
+}
+
+/**
+ * The end-of-turn message with the calls already announced live removed.
+ *
+ * The live path files a one-block announcement before each card, so those
+ * `tool-call` blocks are already in the log; leaving them in the step's message
+ * too would register the same call twice, which the log rejects. Only the
+ * blocks for calls written live are dropped — a call whose live write failed
+ * keeps its block here, so its card (filed at turn end) still has an
+ * announcement ahead of it. A message left with nothing but dropped blocks is
+ * removed entirely; the answer text, if any, is kept.
+ */
+function withoutAnnouncedToolBlocks(event: ProjectionEvent, written: ReadonlySet<string>): ProjectionEvent[] {
+  if (event.type !== 'assistant/message') return [event]
+  const payload = event.payload as Record<string, unknown>
+  const message = payload['message'] as Record<string, unknown> | undefined
+  const content = message?.['content']
+  if (!Array.isArray(content)) return [event]
+  const kept = content.filter(block => {
+    const b = block as { type?: unknown; id?: unknown }
+    if (b?.type !== 'tool-call') return true
+    return !(typeof b.id === 'string' && written.has(b.id))
+  })
+  if (kept.length === content.length) return [event]
+  if (kept.length === 0) return []
+  return [{ ...event, payload: { ...payload, message: { ...(message as Record<string, unknown>), content: kept } } }]
 }

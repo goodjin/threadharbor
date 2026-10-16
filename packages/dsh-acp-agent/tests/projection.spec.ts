@@ -144,6 +144,57 @@ describe('writing the turn usage into the durable message', () => {
   })
 })
 
+/**
+ * The session log validates a tool lifecycle: a `tool/call` must follow an
+ * `assistant/message` whose content carries a matching `tool-call` block, and
+ * the step may not end with the call still open. The native loop writes both
+ * halves — the message with the blocks, then the `tool/call`/`tool/result`
+ * pair. The ACP projection used to write only the pair, so every tool card it
+ * persisted was an orphan the log refused at open time. These tests pin the
+ * announcement half.
+ */
+describe('announcing tool calls in the assistant message', () => {
+  it('writes a tool-call block into the message content, before the tool/call event', () => {
+    const events = projectStepContent(codexTool, { turn: 2, step: 1, dialect: codexDialect })
+    const message = events.find(event => event.type === 'assistant/message')!
+    const payload = message.payload as { message: { content: { type: string; id?: string; name?: string; arguments?: string }[] } }
+    const blocks = payload.message.content.filter(block => block.type === 'tool-call')
+    expect(blocks.length).toBeGreaterThan(0)
+    // The block must carry exactly what the tool/call event carries, or the
+    // validator's "does not match one advertised tool call" fires on open.
+    const call = events.find(event => event.type === 'tool/call')!
+    const callPayload = call.payload as { callId: string; name: string; arguments: string }
+    expect(blocks[0]).toMatchObject({
+      type: 'tool-call',
+      id: callPayload.callId,
+      name: callPayload.name,
+      arguments: callPayload.arguments,
+    })
+  })
+
+  it('emits the message even when the step ran tools but produced no text', () => {
+    // A tool-only step still has to announce its calls, or the log rejects the
+    // step's closing `tool/call` with no advertised lifecycle.
+    const events = projectStepContent(codexTool, { turn: 3, step: 1, dialect: codexDialect })
+    expect(events.some(event => event.type === 'assistant/message')).toBe(true)
+  })
+
+  it('keeps the text answer in the same message as the tool-call blocks', () => {
+    // One message per step: the view folds a step's messages by keeping the
+    // last, so a second message would erase the answer on screen.
+    const frames: AcpFrame[] = [
+      { jsonrpc: '2.0', method: 'session/update', params: { sessionId: 's', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'the answer' } } } },
+      ...codexTool,
+    ]
+    const events = projectStepContent(frames, { turn: 4, step: 1, dialect: codexDialect })
+    const messages = events.filter(event => event.type === 'assistant/message')
+    expect(messages).toHaveLength(1)
+    const content = (messages[0]!.payload as { message: { content: { type: string }[] } }).message.content
+    expect(content.map(block => block.type)).toContain('text')
+    expect(content.map(block => block.type)).toContain('tool-call')
+  })
+})
+
 describe('withoutNonFinite, the projection exit gate', () => {
   it('drops a number that is not finite, at any depth', () => {
     expect(withoutNonFinite({ a: Number.NaN })).toEqual({})

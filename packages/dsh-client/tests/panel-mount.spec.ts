@@ -23,7 +23,7 @@ vi.mock('@deepseek-ai/dsh-client-ui-primitives', async () => await import('./stu
 
 import { SlotCore } from '@deepseek-ai/dsh-client-ui-slots'
 import { createElement } from 'react'
-import { apply, type ClientPanelContext, type PanelSlotHost } from '../src/client/index.ts'
+import { apply, inject, type ClientPanelContext, type PanelSlotHost } from '../src/client/index.ts'
 import type { AgentPanelProps } from '../src/panel.tsx'
 
 /**
@@ -47,6 +47,9 @@ function shellWith(core: SlotCore): void {
         // ui-conversation declares this seat too; the model entry registers
         // into it, so a shell that omits it stops modeling the real host.
         'conversation.input.model': { kind: 'single', scope: 'session' },
+        // The composer dock under the input box: the zcode quota pills land
+        // beside the official stats pills (ui-chat's registration).
+        'conversation.composer.dock': { kind: 'list', scope: 'session' },
       },
       inject: () => null,
     },
@@ -81,7 +84,17 @@ function slotHost(core: SlotCore): PanelSlotHost {
 
 type Namespaces = Record<string, unknown>
 
-/** The context apply() runs in, with whatever services the test provides. */
+/**
+ * The context apply() runs in, with whatever services the test provides.
+ *
+ * Service reads go through a proxy that keeps cordis's one rule: a property
+ * the entry never declared is an error, not a silent `undefined`. A plain
+ * object cannot hold that line — it answers `undefined` for anything — which
+ * is how a caller could reach for a service it never asked for and stay green
+ * here while the real page refused the read and killed the entry. Declared but
+ * not provided stays lenient (the real context reports that as its own state,
+ * and several specs run without the optional surfaces).
+ */
 function fakeCtx(options: { services?: Namespaces; slots?: PanelSlotHost } = {}): ClientPanelContext & {
   core: SlotCore
   warnings: string[]
@@ -89,6 +102,7 @@ function fakeCtx(options: { services?: Namespaces; slots?: PanelSlotHost } = {})
   const core = new SlotCore()
   shellWith(core)
   const warnings: string[] = []
+  const services = options.services ?? {}
   const ctx: ClientPanelContext = {
     logger: () => ({
       info: () => {},
@@ -99,13 +113,21 @@ function fakeCtx(options: { services?: Namespaces; slots?: PanelSlotHost } = {})
       return () => {}
     },
     get: name => {
-      const services = options.services ?? {}
-      if (name in services) return services[name]
-      throw new Error(`property "${name}" does not exist`)
+      // 与真实上下文一致：服务缺席时给 undefined，不抛。抛错会让「可选服务
+      // 缺席」在测试里变成必须显式处理，而 cordis 从来不这样。
+      return services[name]
     },
     slots: options.slots ?? slotHost(core),
   }
-  return { ...ctx, core, warnings }
+  const declared = new Set<string>(inject)
+  const target = { ...ctx, core, warnings }
+  return new Proxy(target, {
+    get: (host, prop, receiver) => {
+      if (typeof prop !== 'string' || prop in host) return Reflect.get(host, prop, receiver)
+      if (declared.has(prop)) return services[prop]
+      throw new Error(`cannot get property "${prop}" without inject`)
+    },
+  })
 }
 
 /** The remote namespaces, present and well-shaped, as a real page sees them. */
@@ -132,6 +154,43 @@ describe('面板挂载', () => {
     expect(sections.some(entry => entry.options.id === 'threadharbor-rollup')).toBe(true)
     expect(ctx.core.entriesOfSlot('main').some(entry => entry.options.key === 'threadharbor-rollup')).toBe(false)
     expect(ctx.core.entriesOfSlot('sidebar.panellist').some(entry => entry.options.id === 'threadharbor-rollup')).toBe(false)
+  })
+
+  it('输入框的模型入口在主机给出目录服务时接管那个座位', () => {
+    // 这条用例盯的是「读服务必须先声明」这条规矩。模型入口要读的模型目录服务
+    // 不在本入口的声明里：真实上下文会当场拒绝（cordis 抛 cannot get property
+    // "modelDirectories" without inject），整个入口变成 failed，页面停在
+    // 「Failed to load plugins」，而模型入口自己本该在没有服务时安静不注册。
+    // 假上下文只有跟真实上下文一致地拒绝，才拦得住这一类回归。
+    const ctx = fakeCtx({
+      services: {
+        ...remoteNamespaces(),
+        modelDirectories: { directoryFor: () => ({}) },
+        sessions: { subagentAddress: () => undefined },
+      },
+    })
+    const registered: string[] = []
+    const inner = ctx.core.register.bind(ctx.core)
+    ;(ctx.core.register as unknown as (...args: never[]) => unknown) = (...args: never[]) => {
+      const options = args[0] as { name?: string } | undefined
+      if (typeof options?.name === 'string') registered.push(options.name)
+      return (inner as unknown as (...a: never[]) => unknown)(...args)
+    }
+
+    expect(() => { apply(ctx) }).not.toThrow()
+
+    expect(registered).toContain('conversation.input.model')
+  })
+
+  it('入口声明了模型座位那条路要读的服务', () => {
+    // 座位占用者在渲染时调 models.directoryFor()。cordis 把服务内部用的上下文
+    // 换成调用方这份，于是那些读算在本入口头上：ModelDirectoryResolver 自己
+    // 声明 inject = ['sessions','remote','remote.session']，本入口少声明一个，
+    // 真实页面就在占用者里炸（cannot get property "remote.session" without
+    // inject），官方那几处用到它的入口也全都声明了它。
+    // modelDirectories 本身不在这里：它对本面板是可选的，按「没有就不注册」
+    // 处理，所以经 ctx.get 取，不进 inject。
+    expect(inject).toEqual(expect.arrayContaining(['sessions', 'remote.session']))
   })
 
   it('主机服务缺席时照样挂载：面板说明缺什么，而不是空白', () => {

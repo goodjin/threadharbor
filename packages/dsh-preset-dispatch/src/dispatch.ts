@@ -162,7 +162,13 @@ export type TurnContext = {
    * them, so content numbered differently from the boundaries is dropped on the
    * floor.
    */
-  readonly position: StepPosition
+  /**
+   * Where this turn sits, when the caller knows it. The replaced-step path
+   * always has it — it refuses to run without one (see `positionOf`). A turn
+   * built outside that path (the in-place gateway) may not, and then the runner
+   * writes nothing rather than writing a number that cannot match the log.
+   */
+  readonly position: StepPosition | undefined
   readonly produce: (result: AcpStepResult) => readonly ContentEvent[]
   /** Append the events; returns the message's sequence number. */
   readonly write: ContentWriter

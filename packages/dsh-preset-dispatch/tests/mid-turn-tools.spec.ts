@@ -158,9 +158,12 @@ describe('mid-turn tool-card writing', () => {
     await turn1.run()
 
     // The turn end brings the message and the result, and never a second card.
-    expect(turn1.appends.map(append => append.type)).toEqual(['tool/call', 'assistant/message', 'tool/result'])
-    // The result is paired to the mid-turn card, not orphaned.
-    expect(turn1.appends[2]!.intent?.sourceEventSeqs).toEqual([1])
+    // Each live card is preceded by its one-block announcement message; the
+    // turn-end message keeps only the answer text, its blocks already filed.
+    expect(turn1.appends.map(append => append.type)).toEqual(['assistant/message', 'tool/call', 'assistant/message', 'tool/result'])
+    // The result is paired to the mid-turn card, not orphaned. The card is the
+    // second append (the announcement took seq 1), so its sequence is 2.
+    expect(turn1.appends[3]!.intent?.sourceEventSeqs).toEqual([2])
   })
 
   it('writes each call exactly once, however many updates follow it', async () => {
@@ -173,7 +176,9 @@ describe('mid-turn tool-card writing', () => {
     const calls = turn1.appends.filter(append => append.type === 'tool/call')
     expect(calls.map(append => append.payload['callId'])).toEqual(['t1', 't2'])
     const results = turn1.appends.filter(append => append.type === 'tool/result')
-    expect(results.map(append => append.intent?.sourceEventSeqs)).toEqual([[1], [2]])
+    // Each result pairs to its own card by sequence number: the first card is
+    // seq 2 (its announcement took seq 1), the second seq 4.
+    expect(results.map(append => append.intent?.sourceEventSeqs)).toEqual([[2], [4]])
   })
 
   it('keeps pre-abort cards and writes nothing for frames that arrive after the stop', async () => {
@@ -181,7 +186,8 @@ describe('mid-turn tool-card writing', () => {
     const turn1 = harness({ dialect: claudeDialect, abort: () => abort.signal })
     await turn1.started()
     turn1.push([openFrame])
-    expect(turn1.appends.map(append => append.type)).toEqual(['tool/call'])
+    // The announcement and the card land together, before the reply resolves.
+    expect(turn1.appends.map(append => append.type)).toEqual(['assistant/message', 'tool/call'])
 
     // The user stops: the still-running call stays (it was real), the late
     // completion and the next call never reach the log.
@@ -191,13 +197,15 @@ describe('mid-turn tool-card writing', () => {
     const result = await turn1.run()
 
     expect(result.end.kind).toBe('aborted')
-    // The card stayed (mid-turn, before the stop); the turn end adds only the
-    // result the end-of-turn projection has always written for a kept call —
-    // empty, since the completion frame arrived after the stop and was
-    // dropped. The post-abort call and the completion itself reached nothing.
-    expect(turn1.appends.map(append => append.type)).toEqual(['tool/call', 'tool/result'])
-    expect(turn1.appends.map(append => append.payload['callId'] ?? (append.payload as { message?: { toolCallId?: string } }).message?.toolCallId))
-      .toEqual(['t1', 't1'])
+    // The announcement and card stayed (mid-turn, before the stop); the turn
+    // end adds only the result the end-of-turn projection has always written
+    // for a kept call — empty, since the completion frame arrived after the
+    // stop and was dropped. The post-abort call and the completion itself
+    // reached nothing.
+    expect(turn1.appends.map(append => append.type)).toEqual(['assistant/message', 'tool/call', 'tool/result'])
+    // The announcement carries neither id key; the card and its paired result do.
+    const ids = turn1.appends.map(append => append.payload['callId'] ?? (append.payload as { message?: { toolCallId?: string } }).message?.toolCallId)
+    expect(ids.filter((id): id is string => id !== undefined)).toEqual(['t1', 't1'])
     expect(turn1.appends.some(append => append.payload['callId'] === 't2')).toBe(false)
   })
 
@@ -209,9 +217,10 @@ describe('mid-turn tool-card writing', () => {
     turn1.push([openFrame, answerFrame])
     turn1.release()
     await turn1.run()
+    // The announcement takes appends[0]; the card it precedes is appends[1].
     // The card name goes through toolNameMap ("Bash" → DSH "bash"), same as
     // the end-of-turn projection writes it.
-    expect(turn1.appends[0]!.payload).toMatchObject({ turn: 4, step: 2, callId: 't1', name: 'bash' })
+    expect(turn1.appends[1]!.payload).toMatchObject({ turn: 4, step: 2, callId: 't1', name: 'bash' })
   })
 
   it('mid-turn card payload is identical to the end-of-turn projection’s own card', async () => {
@@ -227,8 +236,9 @@ describe('mid-turn tool-card writing', () => {
     turn1.push([openFrame, answerFrame])
     turn1.release()
     await turn1.run()
-    expect(turn1.appends[0]!.type).toBe('tool/call')
-    expect(turn1.appends[0]!.payload).toEqual(oldPath.payload)
+    // The announcement takes appends[0]; the mid-turn card is appends[1].
+    expect(turn1.appends[1]!.type).toBe('tool/call')
+    expect(turn1.appends[1]!.payload).toEqual(oldPath.payload)
   })
 
   it('writes a cursor call whose id carries a newline exactly once', async () => {
@@ -262,8 +272,49 @@ describe('mid-turn tool-card writing', () => {
     expect(calls).toHaveLength(1)
     expect(calls[0]!.payload['callId']).toBe(foldedId)
     expect(calls[0]!.payload['callId']).not.toContain('\n')
-    // Everything else arrives once: the message and the paired result.
-    expect(turn1.appends.map(append => append.type)).toEqual(['tool/call', 'assistant/message', 'tool/result'])
+    // Everything else arrives once: the announcement, the card, the answer
+    // message, and the paired result.
+    expect(turn1.appends.map(append => append.type)).toEqual(['assistant/message', 'tool/call', 'assistant/message', 'tool/result'])
+  })
+
+  it('produces a log the session validator admits: every call announced before it, none left open', async () => {
+    // The bug this whole change exists for: the projection wrote `tool/call`
+    // events with no `assistant/message` carrying a matching `tool-call`
+    // block, so the log refused the session at open time ("does not match an
+    // open turn and step"). Rebuild the ordered event stream the validator sees
+    // and assert the two rules it enforces: a call is announced (by id, name
+    // and arguments) before it appears, and the step closes with nothing open.
+    const turn1 = harness({ dialect: claudeDialect })
+    await turn1.started()
+    turn1.push([openFrame, secondFrame, doneFrame, secondDoneFrame, answerFrame])
+    turn1.release()
+    await turn1.run()
+
+    const announced = new Map<string, { name: string; arguments: string }>()
+    const open = new Set<string>()
+    for (const append of turn1.appends) {
+      if (append.type === 'assistant/message') {
+        const content = (append.payload as { message?: { content?: unknown } }).message?.content
+        if (!Array.isArray(content)) continue
+        for (const block of content) {
+          const b = block as { type?: string; id?: string; name?: string; arguments?: string }
+          if (b?.type === 'tool-call' && typeof b.id === 'string') {
+            announced.set(b.id, { name: b.name ?? '', arguments: b.arguments ?? '' })
+          }
+        }
+      } else if (append.type === 'tool/call') {
+        const p = append.payload as { callId: string; name: string; arguments: string }
+        const a = announced.get(p.callId)
+        expect(a, `call ${p.callId} must be announced before it`).toBeDefined()
+        expect(a!.name).toBe(p.name)
+        expect(a!.arguments).toBe(p.arguments)
+        open.add(p.callId)
+      } else if (append.type === 'tool/result') {
+        const toolCallId = (append.payload as { message?: { toolCallId?: string } }).message?.toolCallId
+        if (typeof toolCallId === 'string') open.delete(toolCallId)
+      }
+    }
+    expect(open.size, 'no call left open at the end of the step').toBe(0)
   })
 
   it('without a dialect the runner writes only at turn end, exactly as before', async () => {
@@ -277,5 +328,69 @@ describe('mid-turn tool-card writing', () => {
     // The old full shape: message, then call+result pairs, all at the end.
     expect(turn1.appends.map(append => append.type)).toEqual(['assistant/message', 'tool/call', 'tool/result'])
     expect(turn1.order.indexOf('append:tool/call')).toBeGreaterThan(turn1.order.indexOf('reply-resolved'))
+  })
+
+  it('opens the subagent card the moment the spawn frame arrives, and pairs the child’s reply at turn end', async () => {
+    // ACP subagent draft (#1992): the spawn frame is the card's opening
+    // moment — the parent is still working — and the child's frames arrive
+    // tagged with the child session id. The card must exist while the child
+    // runs (that is the whole point of native subagent visibility), and the
+    // turn end pairs the result to the live card, never a second one.
+    const spawnedFrame: AcpFrame = {
+      jsonrpc: '2.0', method: 'session/update',
+      params: { sessionId: 'ext', update: { sessionUpdate: 'subagent_spawned', subagentSessionId: 'child-1', name: 'Researcher', task: 'find docs', capabilities: {} } },
+    }
+    const childReplyFrame: AcpFrame = {
+      jsonrpc: '2.0', method: 'session/update',
+      params: { sessionId: 'child-1', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'child reply' } } },
+    }
+    const settledFrame: AcpFrame = {
+      jsonrpc: '2.0', method: 'session/update',
+      params: { sessionId: 'ext', update: { sessionUpdate: 'subagent_state_update', subagentSessionId: 'child-1', state: 'completed' } },
+    }
+    const turn1 = harness({ dialect: claudeDialect })
+    await turn1.started()
+    turn1.push([spawnedFrame])
+
+    // The card exists in the log while the child is still working.
+    expect(turn1.order).toContain('append:tool/call')
+    expect(turn1.order).not.toContain('reply-resolved')
+
+    turn1.push([childReplyFrame, settledFrame, answerFrame])
+    turn1.release()
+    await turn1.run()
+
+    expect(turn1.appends.map(append => append.type)).toEqual(['assistant/message', 'tool/call', 'assistant/message', 'tool/result'])
+    expect(turn1.appends[1]!.payload).toMatchObject({ name: 'subagent', callId: 'child-1' })
+    // The parent's own message keeps only the parent's words; the child's
+    // reply rides the paired result, keyed to the live card's sequence.
+    const message = turn1.appends[2]!.payload as { message: { content: { type: string; text: string }[] } }
+    expect(message.message.content).toEqual([{ type: 'text', text: 'done' }])
+    const result = turn1.appends[3]!.payload as { message: { content: { text: string }[] } }
+    expect(result.message.content.map(part => part.text).join('')).toBe('child reply')
+    expect(turn1.appends[3]!.intent?.sourceEventSeqs).toEqual([2])
+  })
+
+  it('opens an async task card live, the same way', async () => {
+    const spawnedFrame: AcpFrame = {
+      jsonrpc: '2.0', method: 'session/update',
+      params: { sessionId: 'ext', update: { sessionUpdate: 'async_task_spawned', asyncTaskId: 'bg-1', name: 'watch', taskType: 'background_bash', description: 'pnpm watch', showInTranscript: true, canStop: true } },
+    }
+    const settledFrame: AcpFrame = {
+      jsonrpc: '2.0', method: 'session/update',
+      params: { sessionId: 'ext', update: { sessionUpdate: 'async_task_state_update', asyncTaskId: 'bg-1', state: 'completed', summary: 'watch exited 0' } },
+    }
+    const turn1 = harness({ dialect: claudeDialect })
+    await turn1.started()
+    turn1.push([spawnedFrame])
+    expect(turn1.order).toContain('append:tool/call')
+
+    turn1.push([settledFrame, answerFrame])
+    turn1.release()
+    await turn1.run()
+
+    expect(turn1.appends[1]!.payload).toMatchObject({ name: 'async_task', callId: 'task-bg-1' })
+    const result = turn1.appends[3]!.payload as { message: { content: { text: string }[] } }
+    expect(result.message.content.map(part => part.text).join('')).toBe('watch exited 0')
   })
 })

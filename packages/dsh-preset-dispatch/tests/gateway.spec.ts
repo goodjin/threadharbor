@@ -57,6 +57,7 @@ function fakeSession() {
     reasoningEffort?: string
     abort?: () => AbortSignal | undefined
     write?: (events: readonly { type: string; payload: unknown }[]) => number | undefined
+    position?: { turn: number; step: number }
   }
   let reply: (turn: Turnish) => Promise<GatewayStepEnd> = async () => ({ kind: 'completed' })
   const endResult = (end: GatewayStepEnd) => ({ frames: [], end })
@@ -217,6 +218,57 @@ describe('GatewayConversations — one external conversation per session', () =>
     expect(result?.intent).toEqual({ surfaceOp: 'append', sourceEventSeqs: [1] })
   })
 
+  it('工具事件按会话真实开着的轮次步数写，不拿 0/0 占位', async () => {
+    // 会话日志会按编号校验：tool/call 的 turn/step 必须对上当时开着的那个
+    // （session-format 的 requireStep）。0/0 在实时界面上看不出来——界面靠事件
+    // 落在哪两个边界之间定位，不看事件自带的编号——但打开会话时才校验，那时
+    // 整份日志已经打不开了。所以编号必须是会话真实开着的那一对。
+    const append = recordingAppend()
+    const fake = fakeSession()
+    fake.answerWith(async turn => {
+      turn.write?.([{
+        type: 'tool/call',
+        payload: { turn: turn.position?.turn, step: turn.position?.step, callId: 'c1', name: 'bash', arguments: '{}' },
+      }])
+      return { kind: 'completed' }
+    })
+    const gate = new GatewayConversations(
+      async () => fake.session,
+      () => {},
+      sessionId => (sessionId === 's1' ? append : undefined),
+      sessionId => (sessionId === 's1' ? { turn: 11, step: 1 } : undefined),
+    )
+    await gate.answer('s1', 'acp-codex', { messages: [user('跑个命令')], position }, { chunk: () => {} })
+
+    expect((append.written[0]?.payload as { turn: number; step: number }).turn).toBe(11)
+    expect((append.written[0]?.payload as { turn: number; step: number }).step).toBe(1)
+  })
+
+  it('拿不到会话当前位置时宁可不写工具事件，也不写占位编号', async () => {
+    // 这是那份日志变砖的直接原因：占位 0/0 看着无害，落盘之后整个会话再也
+    // 打不开。回答本身不依赖编号——那是循环的活——所以这里牺牲卡片可见性
+    // 换日志可用性，并把这件事说出口，而不是静默写坏。
+    const append = recordingAppend()
+    const fake = fakeSession()
+    fake.answerWith(async turn => {
+      turn.write?.([{ type: 'tool/call', payload: { turn: 0, step: 0, callId: 'c1', name: 'bash', arguments: '{}' } }])
+      return { kind: 'completed' }
+    })
+    const reports: string[] = []
+    const chunks: GatewayChunk[] = []
+    const gate = new GatewayConversations(
+      async () => fake.session,
+      message => { reports.push(message) },
+      sessionId => (sessionId === 's1' ? append : undefined),
+    )
+    await gate.answer('s1', 'acp-codex', { messages: [user('跑个命令')] }, { chunk: c => { chunks.push(c) } })
+
+    expect(append.written).toEqual([])
+    expect(reports.some(message => message.includes('no open turn/step'))).toBe(true)
+    // 回答照常送达：外部 agent 干完活，结果还是回到会话里。
+    expect(chunks.map(c => c.type)).toEqual(['finish'])
+  })
+
   it('会话写入端拿不到时照常作答，只是卡片无处可去', async () => {
     // 没有会话服务的主机上这一路必须照走——把「看不到卡片」变成「整个回合崩掉」
     // 是拿可见性换可用性。
@@ -263,15 +315,17 @@ describe('GatewayConversations — one external conversation per session', () =>
   it('answers without a position instead of crashing the runner on undefined', async () => {
     // Regression: the runner reads position.turn for its card bookkeeping, and
     // the first shipped wire omitted position entirely — the turn died as
-    // "Cannot read properties of undefined (reading 'turn')". A missing
-    // position must degrade to the zero placeholder.
+    // "Cannot read properties of undefined (reading 'turn')". It still must not
+    // die. What it may not do is invent a number: the zero placeholder this
+    // test used to pin is exactly what wrote a session log that never opens
+    // again. No position means no tool events and an answer that still lands.
     const fake = fakeSession()
     const gate = new GatewayConversations(async () => fake.session)
     const chunks: GatewayChunk[] = []
     await gate.answer('s1', 'acp-codex', {
       messages: [user('问')],
     } as unknown as Parameters<GatewayConversations['answer']>[2], { chunk: c => { chunks.push(c) } })
-    expect(fake.seen[0]?.positionTurn).toBe(0)
+    expect(fake.seen[0]?.positionTurn).toBeUndefined()
     expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
   })
 
@@ -332,6 +386,59 @@ describe('GatewayConversations — one external conversation per session', () =>
     // The second open is a first request again: the cursor reset with the handle.
     expect(fake.seen.length).toBe(2)
     expect(fake.seen[1]?.prompt).toContain('新的一问')
+  })
+
+  it('连接类失败自动丢弃会话：下一问开新的外部会话，不再复用卡死的连接', async () => {
+    // ACP_CONNECTION 的错误文案向用户承诺「下一次会自动连接新的外部会话」。
+    // 握手 60 秒超时（2026-10-16 会话 f60dcf2b，三轮同错）或进程中途死亡都
+    // 报这一类。网关曾把 entry 留在表里——重试复用同一个卡死的子进程，每次
+    // 都再等满 60 秒，直到重启 dsh 才解脱。这里把承诺兑现：连接类失败即丢
+    // 弃 entry（close 连带杀子进程），下一问重新 open、重新握手。
+    const first = fakeSession()
+    let firstClosed = 0
+    first.session.close = () => { firstClosed += 1 }
+    const second = fakeSession()
+    const opened: AcpSession[] = []
+    const gate = new GatewayConversations(async () => {
+      const session = opened.length === 0 ? first.session : second.session
+      opened.push(session)
+      return session
+    })
+    first.answerWith(async () => ({
+      kind: 'error',
+      error: { code: 'ACP_CONNECTION', message: '外部 agent 连接已断开：acp agent did not answer within 60000ms' },
+    }))
+    second.answerWith(async turn => {
+      turn.openStream?.()?.textDelta('好了')
+      return { kind: 'completed' }
+    })
+    const failed: GatewayChunk[] = []
+    await gate.answer('s1', 'acp-cursor', { messages: [user('hello')], position }, { chunk: c => { failed.push(c) } })
+    expect(failed.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'error' } })
+    expect(opened).toHaveLength(1)
+    const retried: GatewayChunk[] = []
+    await gate.answer('s1', 'acp-cursor', { messages: [user('hello')], position }, { chunk: c => { retried.push(c) } })
+    expect(opened).toHaveLength(2)
+    expect(firstClosed).toBe(1)
+    expect(retried.map(c => c.type)).toEqual(['block-start', 'text-delta', 'block-end', 'finish'])
+  })
+
+  it('非连接类失败保留外部会话：agent 自己报的错重试时继续同一场对话', async () => {
+    // ACP_ERROR 是 agent 应答里的错误（模型过载之类）——进程和会话都还活着，
+    // 重试继续原对话才是对的；只有连接断了才值得付重新 prime 全部历史的代价。
+    const fake = fakeSession()
+    const opened: AcpSession[] = []
+    const gate = new GatewayConversations(async () => {
+      opened.push(fake.session)
+      return fake.session
+    })
+    fake.answerWith(async () => ({ kind: 'error', error: { code: 'ACP_ERROR', message: 'model overloaded' } }))
+    await gate.answer('s1', 'acp-codex', { messages: [user('第一问')], position }, { chunk: () => {} })
+    expect(opened).toHaveLength(1)
+    fake.answerWith(async () => ({ kind: 'completed' }))
+    await gate.answer('s1', 'acp-codex', { messages: [user('第一问'), user('再试')], position }, { chunk: () => {} })
+    expect(opened).toHaveLength(1)
+    expect(fake.seen.at(-1)?.prompt).toContain('再试')
   })
 
   it('rides the primer through the runner seam once per conversation', async () => {

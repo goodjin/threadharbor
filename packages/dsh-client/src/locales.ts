@@ -276,6 +276,12 @@ export const zh = {
   'panel.sessionBar.copy': '复制',
   'panel.sessionBar.copied': '已复制',
   'panel.sessionBar.copyFailed': '复制失败：',
+  /** GLM 套餐配额胶囊（输入框下方，与 token 用量同一排）。 */
+  'quota.fiveHour.label': '5小时 {percent}%',
+  'quota.weekly.label': '周 {percent}%',
+  'quota.fiveHour.title': 'GLM 套餐 5 小时窗口：已用 {used} / {total}',
+  'quota.weekly.title': 'GLM 套餐周窗口：已用 {used} / {total}',
+  'quota.resetAt': '，{reset} 重置',
   'panel.tree.openFailed': '打开会话失败：本机界面服务未就绪或拒绝了这次调用。',
   /** 详情页「远程部署与插件」折叠区。 */
   'panel.deploy.expand': '远程部署与插件（展开）',
@@ -572,6 +578,12 @@ export const en = {
   'panel.sessionBar.copy': 'Copy',
   'panel.sessionBar.copied': 'Copied',
   'panel.sessionBar.copyFailed': 'Copy failed: ',
+  /** GLM plan quota pills (below the composer, in the token-usage row). */
+  'quota.fiveHour.label': '5h {percent}%',
+  'quota.weekly.label': 'wk {percent}%',
+  'quota.fiveHour.title': 'GLM plan five-hour window: {used} / {total} used',
+  'quota.weekly.title': 'GLM plan weekly window: {used} / {total} used',
+  'quota.resetAt': ', resets {reset}',
   'panel.tree.openFailed': 'Could not open the session: the local UI service is not ready or refused the call.',
   'panel.deploy.expand': 'Remote deploy and plugins (expand)',
   'panel.deploy.collapse': 'Collapse deploy area',

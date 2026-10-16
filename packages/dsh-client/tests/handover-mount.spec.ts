@@ -36,6 +36,9 @@ function shellWith(core: SlotCore): void {
         // ui-conversation declares this seat too; the model entry registers
         // into it, so a shell that omits it stops modeling the real host.
         'conversation.input.model': { kind: 'single', scope: 'session' },
+        // The composer dock under the input box: the zcode quota pills land
+        // beside the official stats pills (ui-chat's registration).
+        'conversation.composer.dock': { kind: 'list', scope: 'session' },
         // The frame's floating layer, where the switch's progress lives: a bar
         // that dies with the session it belongs to shows nothing at all.
         'shell.overlay': { kind: 'list', scope: 'root' },
@@ -98,8 +101,9 @@ describe('客户端入口在完整槽位下的 apply', () => {
           uiConversation: { events: registry },
           remote: { $on: () => () => {} },
         }
-        if (name in services) return services[name]
-        throw new Error(`property "${name}" does not exist`)
+        // 服务缺席给 undefined，与 cordis 一致：可选服务（模型目录那类）缺席时
+        // 入口该安静不注册，而不是在这里被测试专有的抛错打死。
+        return services[name]
       },
       slots: slotHost(core),
     }
@@ -118,8 +122,8 @@ describe('客户端入口在完整槽位下的 apply', () => {
       logger: () => ({ info: () => {}, warn: message => { errors.push(message) } }),
       effect: (callback: () => unknown) => { callback(); return () => {} },
       get: (name: string) => {
-        if (name === 'remote') return { $on: () => () => {} }
-        throw new Error(`property "${name}" does not exist`)
+        // 同上：缺席即 undefined，cordis 不因缺服务抛错。
+        return name === 'remote' ? { $on: () => () => {} } : undefined
       },
       slots: slotHost(core),
     }

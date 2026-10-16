@@ -122,7 +122,7 @@
   gap: 6px;
   width: 100%;
   height: 32px;
-  padding: 0 8px 0 24px;
+  padding: 0 8px 0 17px;
   border: none;
   border-radius: 6px;
   background: transparent;
@@ -271,24 +271,115 @@
   font-size: 10px;
 }
 
-/* Leading live marker: running (green) or pending interaction (amber). */
+/* Leading live marker. Both kinds hold one 14px slot so the row's indent
+   never shifts; the running turn paints a native-style ongoing spinner, the
+   pending interaction a breathing amber dot. */
 .sessionLive {
   flex: none;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.sessionLive[data-kind='running'] {
-  background: #3fb950;
-  box-shadow: 0 0 0 2px rgba(63, 185, 80, 0.25);
+/* Idle rows reserve the same 14px slot (empty) so every title sits at one
+   fixed x whether or not a marker is present. */
+.sessionLive:empty::before {
+  content: '';
+  width: 9px;
+  height: 9px;
+  flex: none;
 }
 
+/* Pending interaction: a breathing amber dot — attention, not activity, so it
+   pulses gently and never spins. */
 .sessionLive[data-kind='approval'],
 .sessionLive[data-kind='plan-review'],
 .sessionLive[data-kind='question'] {
+  width: 9px;
+  height: 9px;
   background: #d29922;
+  border-radius: 50%;
   box-shadow: 0 0 0 2px rgba(210, 153, 34, 0.25);
+  animation: session-live-breathe 1.8s ease-in-out infinite;
+}
+
+/* Running turn: the ongoing spinner — a quiet full ring behind a centered
+   breathing arc that sweeps continuously. The rotation and the arc breathe on
+   one 1.5s period so their start times stay locked together. */
+.sessionSpinner {
+  display: block;
+  color: #3fb950;
+}
+
+.sessionSpinnerMotion {
+  transform-origin: center;
+  animation: session-live-spin 1.5s linear infinite;
+}
+
+.sessionSpinnerTrack,
+.sessionSpinnerArc {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 3.5;
+  stroke-linecap: round;
+}
+
+.sessionSpinnerTrack {
+  opacity: 0.3;
+}
+
+.sessionSpinnerArc {
+  stroke-dasharray: 14 150;
+  animation: session-live-dash 1.5s ease-in-out infinite;
+}
+
+@keyframes session-live-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes session-live-dash {
+  0% {
+    stroke-dasharray: 14 150;
+    stroke-dashoffset: 0;
+  }
+  50% {
+    stroke-dasharray: 28 150;
+    stroke-dashoffset: -7;
+  }
+  100% {
+    stroke-dasharray: 14 150;
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes session-live-breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.78); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sessionSpinnerMotion,
+  .sessionSpinnerArc,
+  .sessionLive[data-kind='approval'],
+  .sessionLive[data-kind='plan-review'],
+  .sessionLive[data-kind='question'] {
+    animation: none;
+  }
+
+  /* A resting arc still reads as "in progress" once motion is removed. */
+  .sessionSpinnerArc {
+    stroke-dasharray: 20 150;
+    stroke-dashoffset: -4;
+  }
+
+  .sessionLive[data-kind='approval'],
+  .sessionLive[data-kind='plan-review'],
+  .sessionLive[data-kind='question'] {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 /* Kebab stays on the trailing edge of the row, not after the title width. */

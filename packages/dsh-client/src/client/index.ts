@@ -18,7 +18,9 @@
  * the hosts panel sits a second sidebar section of the same registration face:
  * 手机配对 (pairing-panel.ts), which fetches the mobile pair-url over the
  * same origin and draws its QR — or the configuration guidance when the host
- * has no mobileOrigin.
+ * has no mobileOrigin. Under the composer rides one more row (quota-pill.ts):
+ * GLM 套餐的两枚配额胶囊，读宿主侧 /threadharbor/zcode/quota，只在
+ * 当前会话选的模型是 GLM 时出现（2026-10-16 用户拍板）。
  *
  * There is no restart control here, and that is not an omission: a restart
  * ordered from this page must travel through the channel that is hung. The
@@ -55,6 +57,7 @@ import { layeredIdentitySettings, IDENTITY_STORAGE_KEY } from '../settings-sourc
 import { maybeRegisterSidebarTree } from '../sidebar-tree.ts'
 import { registerModelSeat } from '../model-seat.ts'
 import { registerSessionIdBar } from '../session-id-bar.ts'
+import { createQuotaPoller, registerQuotaDockPills, routeQuotaFetcher } from '../quota-pill.ts'
 import { HOST_REGISTRY_KEY, HOST_STORE_ENTRY_ID, TAILSCALE_ERROR_KEY, TAILSCALE_PEERS_KEY, TAILSCALE_REFRESHED_KEY, TAILSCALE_REFRESH_KEY, hostRegistry } from '@threadharbor/dsh-host-federation'
 import type { TailscalePeer } from '@threadharbor/dsh-host-federation'
 import { startHostStore } from '../host-store.ts'
@@ -85,7 +88,15 @@ import { createElement } from 'react'
  *  dictionary registry: this entry registers its namespaces there and the
  *  slot registrations hand the framework-synthesized `t` seat to the
  *  surfaces whose copy they carry. */
-export const inject = ['slots', 'remote', 'remote.settings', 'uiConversation', 'uiWorkspace', 'sessions', 'locale']
+/**
+ * `remote.session` 的来由不是本面板自己要用它：输入框模型入口的占用者在渲染
+ * 时调 `models.directoryFor(sessionId)`，而 cordis 把服务内部用的上下文换成
+ * 调用方这份（traceable：side effects bind to caller）。ModelDirectoryResolver
+ * 声明的 inject 是 ['sessions','remote','remote.session']，那些读因此落在本入口
+ * 头上——少声明一个，真实页面会在占用者里炸（cannot get property
+ * "remote.session" without inject），而官方那几处用到它的入口全都声明了它。
+ */
+export const inject = ['slots', 'remote', 'remote.settings', 'remote.session', 'uiConversation', 'uiWorkspace', 'sessions', 'locale']
 
 // The panel's pieces are one published surface: the verify-build step reads
 // every export under src/client and requires it in the built artifact, and a
@@ -403,11 +414,43 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // `ctx.slots` 的 register 是按座位种类分派的一组泛型重载，本地那套手写的结构
   // 接口表达不了它（种类条件类型在泛型下摊不开），所以这里按调用方给的最小接
   // 口投影一次——和下面 registerSessionIdBar 同一处境，不是这一行特有的将就。
+  //
+  // 服务经 ctx.get 取，不经 ctx.模型目录：模型目录不在本入口的 inject 声明里，
+  // cordis 会拒绝直接读（cannot get property "modelDirectories" without inject），
+  // 抛错把整个入口打成 failed，页面停在「Failed to load plugins」。ctx.get 不要求
+  // 声明、缺席时给 undefined，而 registerModelSeat 本就按「没有就不注册」处理，
+  // 所以这个座位对模型选择服务是可选的，就该这么取。
   const seatHost = ctx.slots as never
-  ctx.effect(() => registerModelSeat(seatHost, ctx as never), 'threadharbor: composer model seat')
+  ctx.effect(() => registerModelSeat(seatHost, {
+    modelDirectories: ctx.get('modelDirectories') as never,
+    sessions: ctx.get('sessions') as never,
+  }), 'threadharbor: composer model seat')
 
   // 会话头工具行：会话编号 + 复制按钮（会话作用域槽位，inject 首参即编号）。
   registerSessionIdBar(seatHost)
+
+  // GLM 套餐配额胶囊：输入框下方 dock 里、token 用量同一排。配额是账号级
+  // 数字，轮询器全浏览器一份（5 分钟一拍，回到页面再补一拍）；数据走宿主侧
+  // 的 /threadharbor/zcode/quota（密钥不出宿主进程）。只在当前会话选的模型
+  // 是 GLM 时渲染；取不到配额整行不渲染，原因去重后留一条日志。
+  const quotaPoller = createQuotaPoller({
+    fetchQuota: routeQuotaFetcher(),
+    report: message => { log.warn(message) },
+  })
+  quotaPoller.start()
+  ctx.effect(() => () => { quotaPoller.dispose() }, 'threadharbor: zcode quota poller')
+  const refreshQuotaOnVisible = (): void => {
+    if (document.visibilityState === 'visible') void quotaPoller.refresh()
+  }
+  window.addEventListener('visibilitychange', refreshQuotaOnVisible)
+  ctx.effect(
+    () => () => { window.removeEventListener('visibilitychange', refreshQuotaOnVisible) },
+    'threadharbor: zcode quota visibility refresh',
+  )
+  ctx.effect(() => registerQuotaDockPills(seatHost, quotaPoller, {
+    modelDirectories: ctx.get('modelDirectories') as never,
+    sessions: ctx.get('sessions') as never,
+  }), 'threadharbor: zcode quota pills')
 
   // 手机配对 section：和主机面板同一套侧栏注册面（sidebar.panellist + main），
   // 数据只有一条同源 GET（pair-url）。带令牌的网址只进面板状态、只画在这台

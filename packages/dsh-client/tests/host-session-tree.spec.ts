@@ -322,7 +322,7 @@ describe('HostSessionTree', () => {
     } finally { await unmount(root) }
   })
 
-  it('活跃会话：进行中绿点；等待审批/提问琥珀点（pending 优先于 running）；空闲无标记', async () => {
+  it('活跃会话：进行中旋转 spinner；等待审批/提问呼吸琥珀点（pending 优先于 running）；空闲无标记', async () => {
     localStorage.removeItem('threadharbor.tree.view')
     const withLive = { hosts: [{ hostId: 'self', label: '本机', self: true, lastSeen: 1, sessionCount: 3, empty: false, projects: [{ projectId: 'w1', label: '研究', baseLabel: '研究', sharedName: false, sessions: [
       { sessionId: 'busy', projectId: 'w1', title: '在跑', hostId: 'self', own: true, updatedAt: 9, running: true },
@@ -335,13 +335,51 @@ describe('HostSessionTree', () => {
       const ask = container.querySelector('[data-session-row="ask"]')
       const idle = container.querySelector('[data-session-row="idle"]')
       expect(busy?.getAttribute('data-live')).toBe('running')
+      // 进行中：原生 ongoing spinner（旋转的呼吸弧），标题落在承载 span 上
       expect(busy?.querySelector('[data-session-live="running"]')?.getAttribute('title')).toBe(zh['panel.tree.sessionRunning'])
+      expect(busy?.querySelector('[data-live-spinner="true"]')).not.toBeNull()
+      expect(busy?.querySelector('[data-session-live="running"] [data-live-spinner="true"]')).not.toBeNull()
       expect(ask?.getAttribute('data-live')).toBe('question')
+      // 等待确认：不转的呼吸琥珀点，同样是 span 上的标题
       expect(ask?.querySelector('[data-session-live="question"]')?.getAttribute('title')).toBe(zh['panel.tree.sessionWaitingAnswer'])
+      expect(ask?.querySelector('[data-live-spinner="true"]')).toBeNull()
       expect(idle?.getAttribute('data-live')).toBeNull()
       expect(idle?.querySelector('[data-session-live]')).toBeNull()
       // ⋯ 锚定行尾（DOM 上为 sessionRow 最后一个子元素，CSS margin-left:auto）
       expect(busy?.lastElementChild?.getAttribute('data-action')).toBe('row-menu')
+    } finally { await unmount(root) }
+  })
+
+  it('活跃会话自动排到项目前（默认最近更新）：pending > running > updatedAt，且置顶仍领先', async () => {
+    localStorage.removeItem('threadharbor.tree.view')
+    // working 的末次发送时间很旧（updatedAt 1），idleNew 的反而新（100）：纯 recency
+    // 会把 working 埋到 idleNew 后面。活跃档要把它顶上来；ask 等待确认，压过在跑的
+    // working（琥珀 > 绿）。pinnedIdle 虽空闲且最旧，但置顶仍领先一切。
+    const view = { hosts: [{ hostId: 'self', label: '本机', self: true, lastSeen: 1, sessionCount: 4, empty: false, projects: [{ projectId: 'w1', label: '研究', baseLabel: '研究', sharedName: false, sessions: [
+      { sessionId: 'pinnedIdle', projectId: 'w1', title: '置顶的空闲', hostId: 'self', own: true, updatedAt: 1, pinned: true },
+      { sessionId: 'idleNew', projectId: 'w1', title: '刚发过', hostId: 'self', own: true, updatedAt: 100 },
+      { sessionId: 'working', projectId: 'w1', title: '在跑', hostId: 'self', own: true, updatedAt: 1, running: true },
+      { sessionId: 'ask', projectId: 'w1', title: '等你', hostId: 'self', own: true, updatedAt: 2, running: true, pendingInteraction: 'question' as const },
+    ] }] }], totalSessions: 4, empty: false }
+    const { container, root } = await mountTree({ view, ctx: { get: () => undefined } })
+    try {
+      expect([...container.querySelectorAll('[data-session-row]')].map(r => r.getAttribute('data-session-row'))).toEqual(['pinnedIdle', 'ask', 'working', 'idleNew'])
+    } finally { await unmount(root) }
+  })
+
+  it('手动排序不自动重排：发布顺序原样保留（仅置顶领先），活跃档不插手', async () => {
+    localStorage.removeItem('threadharbor.tree.view')
+    // 发布顺序里 working 在中间、ask 在末尾：手动模式应保持这个顺序，不因活跃而提前。
+    const view = { hosts: [{ hostId: 'self', label: '本机', self: true, lastSeen: 1, sessionCount: 3, empty: false, projects: [{ projectId: 'w1', label: '研究', baseLabel: '研究', sharedName: false, sessions: [
+      { sessionId: 'idleNew', projectId: 'w1', title: '刚发过', hostId: 'self', own: true, updatedAt: 100 },
+      { sessionId: 'working', projectId: 'w1', title: '在跑', hostId: 'self', own: true, updatedAt: 1, running: true },
+      { sessionId: 'ask', projectId: 'w1', title: '等你', hostId: 'self', own: true, updatedAt: 2, running: true, pendingInteraction: 'question' as const },
+    ] }] }], totalSessions: 3, empty: false }
+    const { container, root } = await mountTree({ view, ctx: { get: () => undefined } })
+    try {
+      click(container, '[data-action="view-options"]')
+      click(container, '[data-action="order-manual"]')
+      expect([...container.querySelectorAll('[data-session-row]')].map(r => r.getAttribute('data-session-row'))).toEqual(['idleNew', 'working', 'ask'])
     } finally { await unmount(root) }
   })
 

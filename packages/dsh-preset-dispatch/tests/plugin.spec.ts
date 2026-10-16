@@ -13,6 +13,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { applyAcpPlugin, type AcpPluginContext } from '../src/plugin.ts'
+import { forgetSession, rememberStepPosition } from '../src/step-position.ts'
 import type { AcpTransport } from '@threadharbor/dsh-acp-agent'
 import { installAcpDispatch } from '../src/dispatch.ts'
 import type { AcpPresetBinding } from '../src/dispatch.ts'
@@ -464,7 +465,7 @@ describe('加载路径的模型报告真的进目录（applyAcpPlugin 端到端�
     // 装载期这一段是整条链的最后一节：entry 从会话服务取出写入器，经 deps 传到
     // 网关。断了它，网关里的写入器就永远拿不到东西，工具卡片依旧无处可去——
     // 而这一节没有任何报错，正是当初漏掉的那一节。
-    const written: string[] = []
+    const written: { type: string; payload: unknown }[] = []
     let adapter: { stream?(options: Record<string, unknown>): AsyncIterable<unknown> } | undefined
     const context = {
       ...ctx(),
@@ -476,11 +477,15 @@ describe('加载路径的模型报告真的进目录（applyAcpPlugin 端到端�
     applyAcpPlugin(context, 'acp-codex', { agent: 'codex', command: 'codex-acp' }, {
       install: () => {},
       sessionAppend: (sessionId: string) => (sessionId === 's1'
-        ? ((type: string) => { written.push(type); return { seq: written.length } }) as never
+        ? ((type: string, payload: unknown) => { written.push({ type, payload }); return { seq: written.length } }) as never
         : undefined),
       transport: () => scripted,
     })
 
+    // 循环自己报出的那一对：网关写工具事件只能用真编号，会话日志是在「打开」
+    // 这一刻才按它校验的（session-format 的 requireStep）。没有这一步，网关
+    // 只能不写工具事件——那条降级由别的用例钉着。
+    rememberStepPosition({}, 's1', { turn: 11, step: 1 })
     // A foreign session's own step asks this model to stream an answer.
     const chunks = adapter?.stream?.({
       provider: 'acp:acp-codex',
@@ -520,10 +525,20 @@ describe('加载路径的模型报告真的进目录（applyAcpPlugin 端到端�
     await settle()
     await settle()
 
-    expect(written).toContain('tool/call')
+    expect(written.some(entry => entry.type === 'tool/call')).toBe(true)
     // The loop assembles the answer from the chunks; the gateway must not
-    // append a second message for the same step.
-    expect(written).not.toContain('assistant/message')
+    // append a second *answer* message for the same step. The one message it
+    // does file is the tool-call announcement the log needs to admit the card
+    // — a `tool-call` block and no answer text — not a duplicate of the answer.
+    const messages = written.filter(entry => entry.type === 'assistant/message')
+    for (const entry of messages) {
+      const content = (entry.payload as { message?: { content?: unknown } }).message?.content
+      expect(Array.isArray(content)).toBe(true)
+      const blocks = content as { type?: string }[]
+      expect(blocks.some(block => block.type === 'tool-call')).toBe(true)
+      expect(blocks.some(block => block.type === 'text' || block.type === 'reasoning')).toBe(false)
+    }
+    forgetSession('s1')
   })
 
   it('一个回合的 session/new 报告经 applyAcpPlugin 到达 listModels', async () => {

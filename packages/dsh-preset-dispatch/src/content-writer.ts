@@ -215,6 +215,14 @@ function key(turn: number, callId: string): PairKey {
  * path can see them: without a writer they reach the session as nothing at all,
  * and a turn that ran three commands leaves a transcript with no trace of them.
  *
+ * The message is not dropped wholesale, though. The projection folds the step's
+ * `tool-call` blocks into it — the announcement the log requires before it will
+ * admit the `tool/call` that follows, and the same declaration the native loop
+ * writes. Dropping the message dropped that announcement with it, which turned
+ * every ACP tool card into an orphan these sessions could not open with. So the
+ * split is by content: a message carrying an announcement is kept; a text-only
+ * answer message still is not — the loop writes that one.
+ *
  * Returns nothing for the message sequence, which is the honest answer — this
  * writer did not write the message, so it must not claim a sequence for it.
  * @param append - the session's append, as `makeContentWriter` takes it.
@@ -226,11 +234,26 @@ export function makeToolOnlyWriter(append: SessionAppend): ContentWriter {
     for (const event of events) {
       // One event at a time so the dropped message cannot affect how the
       // call/result pairing is resolved for the ones that remain.
-      if (event.type === MESSAGE) continue
+      if (event.type === MESSAGE && !carriesToolCallAnnouncement(event)) continue
       inner([event])
     }
     return undefined
   }
+}
+
+/**
+ * Whether an assistant message carries at least one `tool-call` block.
+ *
+ * The log admits a `tool/call` only after such a block has announced it, so a
+ * message holding one is not the loop's answer — it is the declaration this
+ * path is the only one positioned to write.
+ */
+function carriesToolCallAnnouncement(event: ContentEvent): boolean {
+  if (event.type !== MESSAGE) return false
+  const payload = event.payload as { message?: { content?: unknown } }
+  const content = payload?.message?.content
+  if (!Array.isArray(content)) return false
+  return content.some(block => (block as { type?: unknown })?.type === 'tool-call')
 }
 
 function parts(payload: unknown): { turn: number; callId: string | undefined } {

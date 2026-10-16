@@ -40,15 +40,44 @@ type SessionsSearchHost = {
   readonly search?: (query: string, signal?: AbortSignal) => Promise<{ ok: boolean; value?: { items: { sessionId: string; title?: string }[]; hasMore?: boolean }; error?: { message?: string } }>
 }
 
-/** Order per the tree's view option: pinned lead, then manual or 最近更新. */
-function orderSessions<T extends { pinned?: boolean; updatedAt?: number }>(sessions: readonly T[], orderBy: OrderBy): T[] {
+/**
+ * Order per the tree's view option.
+ *
+ * Pinned rows lead (native seating). In 最近更新 mode, active rows then lead
+ * the rest — a turn in flight (`running`) or a pending interaction
+ * (`pendingInteraction`) — so a session that is working or waiting on you stays
+ * at the top of its project regardless of its last prompt time. The recency
+ * sort alone would bury it under any session you messaged more recently, and
+ * `updatedAt` only advances on a user prompt (the host stamps
+ * `api-session/activity` on `user/message`, never on streaming tokens), so a
+ * long-running turn does not keep bumping itself. Pending interaction outranks
+ * a running turn, the amber-over-green precedence the row marker already uses.
+ * 手动 mode keeps the saved order and only lets pinned lead, so an explicit
+ * manual order is never re-sorted under the cursor.
+ */
+function orderSessions<T extends { pinned?: boolean; updatedAt?: number; running?: boolean; pendingInteraction?: 'approval' | 'plan-review' | 'question' }>(sessions: readonly T[], orderBy: OrderBy): T[] {
   const pinnedFirst = (a: T, b: T): number => Number(b.pinned === true) - Number(a.pinned === true)
-  return [...sessions].sort((a, b) => pinnedFirst(a, b) || (orderBy === 'updated' ? (b.updatedAt ?? 0) - (a.updatedAt ?? 0) : 0))
+  const activeRank = (session: T): number => session.pendingInteraction !== undefined ? 2 : session.running === true ? 1 : 0
+  if (orderBy !== 'updated') return [...sessions].sort((a, b) => pinnedFirst(a, b))
+  return [...sessions].sort((a, b) => pinnedFirst(a, b) || activeRank(b) - activeRank(a) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
 }
 
 
 /** Native live marker: pending interaction outranks a running turn (sidebar amber > green). */
 type LiveKind = 'running' | 'approval' | 'plan-review' | 'question'
+
+/**
+ * Pin the running spinner's CSS animations to document time zero, the way
+ * native's StateDot does: a CSS animation starts when its element is inserted,
+ * so running sessions that begin at different moments would otherwise rotate
+ * out of phase. One shared start keeps every visible spinner in step. jsdom (the
+ * unit lane) implements no Web Animations, so the optional call leaves it alone.
+ */
+function syncLiveMotion(element: SVGSVGElement | null): void {
+  if (element === null) return
+  const svg = element as { getAnimations?: () => { startTime: number }[] }
+  for (const animation of svg.getAnimations?.() ?? []) animation.startTime = 0
+}
 
 function liveKind(session: {
   readonly running?: boolean
@@ -65,6 +94,41 @@ function liveLabelKey(kind: LiveKind): 'panel.tree.sessionRunning' | 'panel.tree
   if (kind === 'plan-review') return 'panel.tree.sessionPlanReview'
   if (kind === 'question') return 'panel.tree.sessionWaitingAnswer'
   return 'panel.tree.sessionRunning'
+}
+
+/**
+ * The leading live marker. A running turn shows the native ongoing spinner — a
+ * quiet ring behind a breathing arc that sweeps — so the row reads as alive;
+ * a pending interaction shows a breathing amber dot, the "waiting on you"
+ * counterpart that deliberately does not spin. Both are aria-hidden: the
+ * title/aria-label carries the text for assistive tech.
+ */
+function SessionLive({ kind, label, t }: {
+  readonly kind: LiveKind
+  readonly label: string
+  readonly t: RuntimeT
+}) {
+  if (kind === 'running') {
+    return (
+      <span className={styles.sessionLive} data-session-live={kind} data-kind={kind} title={label}>
+        <svg
+          ref={syncLiveMotion}
+          className={styles.sessionSpinner}
+          data-live-spinner="true"
+          width={14}
+          height={14}
+          viewBox="0 0 24 24"
+          aria-hidden="true"
+        >
+          <g className={styles.sessionSpinnerMotion}>
+            <circle className={styles.sessionSpinnerTrack} cx="12" cy="12" r="9.5" />
+            <circle className={styles.sessionSpinnerArc} cx="12" cy="12" r="9.5" />
+          </g>
+        </svg>
+      </span>
+    )
+  }
+  return <span className={styles.sessionLive} data-session-live={kind} data-kind={kind} title={label} aria-label={label} />
 }
 /** The tree's archived filter: the native list's three sight modes. */
 function passesFilter(session: { archived?: boolean }, filterBy: FilterBy): boolean {
@@ -470,14 +534,7 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                           }}
                         >
                           {kind !== undefined && liveLabel !== undefined
-                            ? <span
-                                className={styles.sessionLive}
-                                data-session-live={kind}
-                                data-session-running={kind === 'running' ? 'true' : undefined}
-                                data-kind={kind}
-                                title={liveLabel}
-                                aria-label={liveLabel}
-                              />
+                            ? <SessionLive kind={kind} label={liveLabel} t={t} />
                             : null}
                           {session.pinned === true ? <span className={styles.sessionPin} data-session-pinned>📌</span> : null}
                           <span className={styles.sessionTitle}>

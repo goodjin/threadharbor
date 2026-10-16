@@ -114,6 +114,20 @@ describe('AcpTurnRunner', () => {
     expect(order.indexOf('authenticate')).toBeLessThan(order.indexOf('session/new'))
   })
 
+  it('declares the subagents client capability in the handshake', async () => {
+    // The ACP subagent draft (#1992) is bilateral: without
+    // `clientCapabilities.subagents` the adapter keeps subagent lifecycle as
+    // an ordinary tool call and never sends subagent_spawned frames. Both
+    // codex-acp 1.10.0 and claude-agent-acp 0.76.0 on this machine implement
+    // the draft, so asking for it turns the native frames on.
+    const client = fakeClient()
+    await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
+
+    const init = client.calls.find(call => call.method === 'initialize')!
+    expect((init.params as { clientCapabilities: Record<string, unknown> }).clientCapabilities['subagents'])
+      .toEqual({})
+  })
+
   it('sends the user’s text as the prompt', async () => {
     const client = fakeClient()
     await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })

@@ -66,10 +66,25 @@ agent  → client:  session/prompt 响应 { stopReason, usage? }
 ### `clientCapabilities` 声明什么
 
 ```json
-{ "fs": { "readTextFile": true, "writeTextFile": true }, "terminal": true }
+{ "fs": { "readTextFile": true, "writeTextFile": true }, "terminal": true, "subagents": {} }
 ```
 
-实测各家都接受这一组。声明了 `fs`/`terminal` 意味着客户端**愿意**服务对应的 `fs/*`、`terminal/*` 调用——不声明就不该期待 agent 发起。
+`fs`/`terminal` 的含义同上。`subagents` 是 [ACP 子代理草案（PR #1992）](https://github.com/agentclientprotocol/agent-client-protocol/pull/1992)的客户端开关：声明了它，实现了草案的适配器（codex-acp 1.10.0+、claude-agent-acp 0.76.0+，均按本机安装实测）就改用**原生子代理帧**报告委派，而不是把整段委派折叠成一个普通工具调用；未实现的 agent（grok、cursor）忽略该字段，握手与回合不受影响（grok 已真机验证，见 grok.md）。帧的形状与投影见下节。
+
+### 子代理与异步任务帧（草案 #1992，2026-10-20 接入）
+
+协商成功后，回合里会多出五类 update，投影层（`packages/dsh-acp-agent/src/projection.ts`）统一处理，与方言无关：
+
+| update | 携带 | 投影为 |
+|---|---|---|
+| `subagent_spawned` | `subagentSessionId` / `name` / `task` | DSH 的 `subagent` 卡片（参数 `{prompt: task, agent: name}`），帧到达即实时开卡 |
+| `subagent_state_update` | `state`: completed / failed / cancelled / disconnected | 该卡片的结果；failed 等非 completed 记为错误 |
+| 子会话帧（`params.sessionId` = 子会话编号） | 子代理自己的消息/思考/工具帧 | 消息块折进卡片的回复文本；其余不进父转录 |
+| `async_task_spawned` / `async_task_progress` / `async_task_state_update`（claude 的后台任务） | 任务名、描述、进度摘要、状态 | `async_task` 卡片；最新 summary 作结果文本 |
+
+两条刻意的设计：**子会话帧绝不漏进父回答**（按 `params.sessionId` 归属路由）；**回合结束时仍未报终态的运行**（claude 的后台任务可能跨回合活着）结果文本带 `[still running]` 前缀，不冒充成功——会话日志不允许步骤在开着的工具调用上收尾，诚实只能写在文本里。
+
+真机抓的原始帧存 `tests/fixtures/captured-subagent-frames.json`（活测 `live.spec.ts` 的 native subagent 组写入）。
 
 ### `initialize` 的能力声明（实测，差异很大）
 
@@ -96,7 +111,7 @@ agent  → client:  session/prompt 响应 { stopReason, usage? }
 **两条要紧的结论：**
 
 - **「声明了 authMethods」不等于「必须先鉴权」。** codex 声明了 `api-key`/`chat-gpt`，但 `initialize` 后直接 `session/new` 照样成功（实测）。**只有 Cursor 是硬门槛**——不 `authenticate` 直接 `-32000`。
-- **`sessionCapabilities` 里的 `resume` / `list` / `fork` 是四家共同支持的一组会话操作**，和本项目「中途换 agent 要带历史」「恢复会话」的需求直接相关。目前**一个都没接**。
+- **`sessionCapabilities` 里的 `resume` / `list` / `fork` 是四家共同支持的一组会话操作**，和本项目「中途换 agent 要带历史」「恢复会话」的需求直接相关。目前一个都没接。`subagents` 已接（2026-10-20）：客户端握手声明该能力，codex/claude 的委派与后台任务即按上节的原生帧到达并投影。
 
 ### 私有扩展方法
 
