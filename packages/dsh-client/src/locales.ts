@@ -196,7 +196,7 @@ export const zh = {
   /** 启动失败的留痕：启动的失败用自己的话说，不借「没读到」冒充读取失败。 */
   'panel.notes.startFailed': '这次没能启动：{reason}',
   'panel.notes.lastRead': '上次读到的是：{summary}（{at}）',
-  'panel.notes.passwordAuth': '这台主机用密码认证，凭据不保存，读不了对方状态',
+  'panel.notes.passwordAuth': '这台主机的凭据（密码或粘贴的私钥）不保存，读不了对方状态',
   /** 列表页的空态。 */
   'panel.list.empty': '还没有主机。点「添加新主机」登记第一台。',
   /**
@@ -481,7 +481,7 @@ export const en = {
   /** Start-failure trail: a failed start speaks for itself, never dressed up as a failed read. */
   'panel.notes.startFailed': "Didn't start this time: {reason}",
   'panel.notes.lastRead': 'Last read said: {summary} ({at})',
-  'panel.notes.passwordAuth': 'This host authenticates with a password; the credential is never stored, so the peer status cannot be read',
+  'panel.notes.passwordAuth': "This host's credentials (password or pasted key) are not stored, so the peer status cannot be read",
   'panel.list.empty': 'No hosts yet. Press "Add a new host" to register the first one.',
   // The ssh-deploy section. The intro is two keys because one sentence mixes
   // a <strong> and a <code> segment and richSegments wraps one kind per call;

@@ -831,6 +831,11 @@ function SshDeploySection(props: {
    * 落进 target；已存的登记凭据（initial.target）优先于它，不被草稿盖掉。
    */
   readonly initialTarget?: string | undefined
+  /**
+   * 详情页显式选点的一次性覆盖：只在该次重挂里当 target 初值，压过已存的
+   * initial.target。没有它时优先级不变——已存凭据仍优先于草稿初值。
+   */
+  readonly pickedTarget?: string | undefined
   /** Detail page locks the host identity: no hostId/hostTitle inputs. */
   readonly lockHost?: boolean | undefined
   /** When provided, a connect-without-redeploy button joins the actions. */
@@ -845,7 +850,7 @@ function SshDeploySection(props: {
   /** The locale seat, threaded from the panel. */
   readonly t: PanelT
 }): ReactNode {
-  const [target, setTarget] = useState(props.initial?.target ?? props.initialTarget ?? '')
+  const [target, setTarget] = useState(props.pickedTarget ?? props.initial?.target ?? props.initialTarget ?? '')
   const [port, setPort] = useState(props.initial?.port === undefined ? '22' : String(props.initial.port))
   const [user, setUser] = useState(props.initial?.user ?? '')
   const [proxyJump, setProxyJump] = useState(props.initial?.proxyJump ?? '')
@@ -1193,7 +1198,11 @@ function HostUseSection(props: {
   readonly t: PanelT
 }): ReactNode {
   const { sshInfo, launchUrl } = props
-  const canAutoConnect = sshInfo !== undefined && sshInfo.authMode === 'identityFile' && sshInfo.hostKeyFingerprint !== undefined
+  // 连接一族要已批准的指纹：未批准时不给连接按钮（裁定 5，与按钮表同一道
+  // 闸），说明行也不拿「没存凭据」搪塞——真实原因是密钥还没认。
+  const keyUnapproved = sshInfo?.hostKeyFingerprint === 'unapproved'
+  const canAutoConnect = sshInfo !== undefined && sshInfo.authMode === 'identityFile'
+    && sshInfo.hostKeyFingerprint !== undefined && !keyUnapproved
   const tunnelWord = props.t(`panel.use.tunnel.${props.tunnel}`)
   return (
     <section data-use-section="" className={styles.sshSection}>
@@ -1222,7 +1231,7 @@ function HostUseSection(props: {
                         {props.connecting ? props.t('panel.use.connecting') : props.t(props.tunnel === 'online' ? 'panel.use.reconnect' : 'panel.use.connect')}
                       </button>
                     )
-                  : <p className={styles.stateLine}>{props.t('panel.use.secretHint')}</p>}
+                  : <p className={styles.stateLine}>{props.t(keyUnapproved ? 'panel.button.keyNotApproved' : 'panel.use.secretHint')}</p>}
               </div>
             </>
           )}
@@ -1683,6 +1692,12 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   const [connectBusyId, setConnectBusyId] = useState<string | undefined>(undefined)
   const [connectError, setConnectError] = useState<{ readonly hostId: string; readonly text: string } | undefined>(undefined)
   const [deployOpenId, setDeployOpenId] = useState<string | undefined>(undefined)
+  // 详情页选点的一次性覆盖：详情页换目标部署是受支持的动作（目标栏可编辑、
+  // 部署成功就改写登记），显式选点必须赢过已存目标。只记「哪台主机、第几次
+  // 选点、选了什么」：序号进部署区的 key 推动重挂，目标作为该次挂载的初值
+  // 压过已存凭据。它与 sshTargetDraft（面板级草稿）刻意分开——草稿不翻转
+  // 优先级，添加页留下的旧草稿盖不掉已存的好凭据；部署区一关覆盖即作废。
+  const [deployPick, setDeployPick] = useState<{ readonly hostId: string; readonly serial: number; readonly target: string } | undefined>(undefined)
 
   const storedSshInput = (info: HostSshInfo): (SshConnectionInput & { readonly hostKeyFingerprint: string }) | undefined => {
     // 可读性与事实装配同一把尺子（storedSshUsable）：密码/粘贴私钥不落盘。
@@ -1804,12 +1819,22 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
     if (registration !== undefined) readPeer(registration)
   }, [view])
 
+  // 选点覆盖只用这一程：部署区收起或离开详情页就作废，下次展开仍是已存优先。
+  useEffect(() => {
+    if (deployPick === undefined) return
+    if (view.page !== 'detail' || deployOpenId !== deployPick.hostId) setDeployPick(undefined)
+  }, [view, deployOpenId, deployPick])
+
   const runConnect = (
     registration: HostRegistration,
     sshInput?: SshConnectionInput & { readonly hostKeyFingerprint: string },
     facts?: SshSeedFacts | undefined,
   ): void => {
     const stored = registration.ssh
+    // 入口闸与 readPeer/startPeer 同一把尺子（裁定 5）：指纹没批准的已存凭据
+    // 不发——连过去只会撞回主机端口的一条生英文错误，正路是「批准并读取」。
+    // 部署区现填的凭据（sshInput 在场）刚走过区块自己的批准交互，不受这道闸。
+    if (sshInput === undefined && stored?.hostKeyFingerprint === 'unapproved') return
     const ssh = sshInput ?? (stored === undefined ? undefined : storedSshInput(stored))
     if (ssh === undefined) {
       // 没有可直接复用的凭据（未存方式，或密码/私钥）：如实说明并指去部署区块。
@@ -1962,18 +1987,22 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
       // 详情页按钮表：状态词查表得动作（主按钮在前），两处按事实裁决——
       // 指纹未批准（裁定 5）与已部署但存活读不出（裁定 2 的唯一例外）。
       // 未批准时 retry-read 与 start-peer 都不出：读取和启动都要已批准的
-      // 凭据，入口只有批准并读取。都返回新数组：hostActions 的表是共享
-      // 实例，只渲染、不改动（裁定 3）。
+      // 凭据；open-page 与 connect-open 同理不出——连接一族走的是同一条
+      // 已存凭据的路，入口只有批准并读取。都返回新数组：hostActions 的表
+      // 是共享实例，只渲染、不改动（裁定 3）。
       const statusActions = hostActions(row.connection)
       const detailActions: readonly (HostAction | 'approve-and-read')[] =
         registration !== undefined && registration.ssh?.hostKeyFingerprint === 'unapproved'
-          ? ['approve-and-read', ...statusActions.filter(action => action !== 'retry-read' && action !== 'start-peer')]
+          ? ['approve-and-read', ...statusActions.filter(action => action !== 'retry-read' && action !== 'start-peer' && action !== 'open-page' && action !== 'connect-open')]
           : row.connection === 'unknown' && storedSshUsable(registration?.ssh) && registration?.remote?.deployment === 'deployed'
             ? ['retry-read', ...statusActions.filter(action => action !== 'retry-read')]
             : statusActions
       const readFailure = readFailures.get(row.hostId)
       const startFailure = startFailures.get(row.hostId)
       const storedRead = registration?.remote
+      // 本机详情页在场的选点覆盖（deployPick 只服务这一台）：不是本机的选点
+      // 一律不带，重挂与初值都轮不到别人家的。
+      const pickedDeploy = deployPick !== undefined && deployPick.hostId === row.hostId ? deployPick : undefined
       return (
         <div data-threadharbor-panel="" className={styles.root}>
           {/* Key on the row's id only: a background identity re-read (the
@@ -1994,9 +2023,16 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
             onCancel={openList}
             tailscale={props.tailscale}
             onPickedPeer={peer => {
-              // 详情页选中：IP 只落进草稿（部署区打开时的初值），登记的地址
-              // 与名称都不动——这里不切模式。
+              // 详情页选中：IP 只落进草稿，登记的地址与名称都不动——这里不切
+              // 模式。选点是显式意图：展开部署区并重挂一次（序号进 key），让
+              // 选中的地址成为这次挂载的目标初值，已存凭据的旧目标不压它。
               setSshTargetDraft(peer.ip)
+              setDeployOpenId(row.hostId)
+              setDeployPick(previous => ({
+                hostId: row.hostId,
+                serial: (previous?.serial ?? 0) + 1,
+                target: peer.ip,
+              }))
             }}
             t={props.t}
             footer={registration !== undefined
@@ -2119,12 +2155,15 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                                   <SshDeploySection
                                     // key 带上 approve-and-read 标记：从「批准并读取」
                                     // 打开时重挂一次，自动检查密钥的 effect 才会跑。
-                                    key={`deploy-${row.hostId}-${approveAndReadId === row.hostId}`}
+                                    // 末段是选点序号：只由详情页选点推动，选点重挂
+                                    // 一次带上新目标；不挂草稿值，免得输入被冲掉。
+                                    key={`deploy-${row.hostId}-${approveAndReadId === row.hostId}-${pickedDeploy === undefined ? 0 : pickedDeploy.serial}`}
                                     hostId={row.hostId}
                                     hostTitle={row.name}
                                     lockHost
                                     initial={registration.ssh}
                                     initialTarget={sshTargetDraft}
+                                    pickedTarget={pickedDeploy?.target}
                                     autoInspect={approveAndReadId === row.hostId}
                                     onApproved={approveAndReadId === row.hostId
                                       ? ssh => {

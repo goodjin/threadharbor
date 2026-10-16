@@ -938,6 +938,54 @@ describe('主机详情：使用这台主机 + 远程部署（状态机如实呈�
       delete (globalThis as { fetch?: unknown }).fetch
     }
   })
+
+  /** 把 async 链上的微任务与重渲染冲干净（先例见按钮表那组用例的 flush）。 */
+  async function flush(times = 1): Promise<void> {
+    for (let i = 0; i < times; i += 1) {
+      await act(async () => { await Promise.resolve() })
+    }
+  }
+
+  /** 带已存 SSH 凭据的登记：详情页选点与目标初值的用例都从它出发。 */
+  function registryWithSsh(): HostRegistryPort {
+    const registry = makeRegistry([])
+    ;(registry as unknown as { add: (i: Record<string, unknown>) => unknown }).add({ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081', ssh: SSH_SEED })
+    return registry
+  }
+
+  it('没有选点时已存凭据的目标照旧优先：展开部署区，目标栏是登记里的地址', async () => {
+    stubFetch({})
+    const { container, root } = await mountPanel(registryWithSsh())
+    try {
+      click(container, '[data-host-open="bench"]')
+      click(container, '[data-action="open-deploy"]')
+      const target = q(container, '[data-ssh-deploy] [data-ssh-target]')
+      if (!(target instanceof HTMLInputElement)) throw new Error('ssh target input missing')
+      expect(target.value).toBe(SSH_SEED.target)
+    } finally {
+      await unmount(root)
+      delete (globalThis as { fetch?: unknown }).fetch
+    }
+  })
+
+  it('详情页选点生效：部署区展开并重挂，目标栏是选中的地址而不是已存的旧目标', async () => {
+    stubFetch({})
+    const { container, root } = await mountPanel(registryWithSsh(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
+    try {
+      click(container, '[data-host-open="bench"]')
+      click(container, '[data-action="tailscale-pick"]')
+      await flush(2)
+      click(container, '[data-tailscale-peer="bench.tail-scale.ts.net"]')
+      // 选点本身把部署区打开；目标栏带上这次选中的地址，已存目标不压它。
+      expect(container.querySelector('[data-ssh-deploy]')).not.toBeNull()
+      const target = q(container, '[data-ssh-deploy] [data-ssh-target]')
+      if (!(target instanceof HTMLInputElement)) throw new Error('ssh target input missing')
+      expect(target.value).toBe('100.101.1.7')
+    } finally {
+      await unmount(root)
+      delete (globalThis as { fetch?: unknown }).fetch
+    }
+  })
 })
 
 describe('主机行状态词由 hostStatus 推导（事实进、一个词出）', () => {
@@ -1267,7 +1315,24 @@ describe('详情页按钮表与对方状态读取（hostActions 出按钮，remo
     try {
       click(container, '[data-host-open="bench"]')
       await flush(2)
-      expect(q(container, '[data-note-password-auth]').textContent).toContain('凭据不保存')
+      expect(q(container, '[data-note-password-auth]').textContent).toContain('凭据（密码或粘贴的私钥）不保存')
+      expect(remote.calls).toEqual([])
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('粘贴私钥的主机同样明说读不了：提示不把话说成只有密码', async () => {
+    const registry = seedHost({ ssh: { target: 'mini.tailb6790d.ts.net', authMode: 'identityPem' } })
+    const remote = new FakeRemote({ ok: false, error: '不应被调用' })
+    const { container, root } = await mountPanel(registry, undefined, undefined, undefined, remote)
+    try {
+      click(container, '[data-host-open="bench"]')
+      await flush(2)
+      const note = q(container, '[data-note-password-auth]').textContent
+      expect(note).toContain('凭据')
+      expect(note).toContain('粘贴')
+      expect(note).not.toContain('用密码认证')
       expect(remote.calls).toEqual([])
     } finally {
       await unmount(root)
@@ -1323,6 +1388,39 @@ describe('详情页按钮表与对方状态读取（hostActions 出按钮，remo
       expect(remote.calls).toEqual([])
     } finally {
       await unmount(root)
+    }
+  })
+
+  it('指纹没批准时连接路径同样拦下：不给打开页面/连接并打开，原始主机错误到不了失败面（裁定5）', async () => {
+    const registry = seedHost({ ssh: { ...SSH, hostKeyFingerprint: 'unapproved' } })
+    recordRemoteRaw(registry, { deployment: 'deployed', liveness: 'running', readAt: 1_000 })
+    // 没批准也照常进入未检查态：按钮表本来会给出连接并打开（健全性前提靠
+    // 断言反向确认），fetch 全部记名，连接一发就现形。
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (input: unknown) => {
+      calls.push(String(input))
+      return { status: 200, json: async () => ({ ok: true, value: {} }) }
+    }))
+    const remote = new FakeRemote({ ok: false, error: '不应被调用' })
+    try {
+      const { container, root } = await mountPanel(registry, undefined, undefined, undefined, remote)
+      try {
+        click(container, '[data-host-open="bench"]')
+        await flush(2)
+        // 健全性前提：按钮表没被整个清空，使用区块也照常在。
+        expect(q(container, '[data-host-actions] [data-action="check-reach"]')).toBeTruthy()
+        expect(q(container, '[data-use-section]')).toBeTruthy()
+        // 连接一族的按钮一个都不给：点了只会撞回主机端口的原始英文错误。
+        expect(container.querySelector('[data-action="connect-open"]')).toBeNull()
+        expect(container.querySelector('[data-action="open-page"]')).toBeNull()
+        expect(container.querySelector('[data-use-error]')).toBeNull()
+        expect(calls.some(url => url.includes('host-ssh.connect'))).toBe(false)
+        expect(remote.calls).toEqual([])
+      } finally {
+        await unmount(root)
+      }
+    } finally {
+      vi.unstubAllGlobals()
     }
   })
 
