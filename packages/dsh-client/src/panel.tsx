@@ -861,7 +861,12 @@ function SshDeploySection(props: {
   const [remoteWebPort, setRemoteWebPort] = useState(props.initial?.remoteWebPort === undefined ? '3081' : String(props.initial.remoteWebPort))
   const [upgrade, setUpgrade] = useState(false)
   const [keys, setKeys] = useState<readonly SshHostKeyCandidate[]>([])
-  const [approvedFingerprint, setApprovedFingerprint] = useState(props.initial?.hostKeyFingerprint ?? '')
+  // 已存的「未批准」标记不是批准：照原样种进来，读取/只连接/部署三个按钮
+  // 都靠「指纹非空」放行，操作者没认过指纹就撞上主机端口的生英文错误。
+  // 未批准按没批准处理，入口只有检查主机密钥那套审批交互。
+  const [approvedFingerprint, setApprovedFingerprint] = useState(
+    props.initial?.hostKeyFingerprint === 'unapproved' ? '' : props.initial?.hostKeyFingerprint ?? '',
+  )
   const [busy, setBusy] = useState<'inspect' | 'peer' | 'deploy' | undefined>(undefined)
   // 部署过程逐行留痕：不是只显示最后一行，每一阶段的原话都留在面上。
   const [progressLog, setProgressLog] = useState<readonly SshDeployProgress[]>([])

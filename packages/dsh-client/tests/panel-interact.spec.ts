@@ -986,6 +986,36 @@ describe('主机详情：使用这台主机 + 远程部署（状态机如实呈�
       delete (globalThis as { fetch?: unknown }).fetch
     }
   })
+
+  it('已存指纹未批准：部署区不把标记当已批准，「只连接」进不去，审批流才是入口', async () => {
+    // 种下未批准标记的凭据，从「填写连接方式」打开部署区：区块过去把标记
+    // 原样种成已批准状态，只连接按钮免检可点，点了照样撞回生英文错误。
+    const { calls } = stubFetch({
+      'host-ssh.connect': { ok: false, error: 'ssh: connect to host mini.tailb6790d.ts.net port 22: Connection refused' },
+    })
+    const withUnapproved = makeRegistry([])
+    ;(withUnapproved as unknown as { add: (i: Record<string, unknown>) => unknown }).add({
+      hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081',
+      ssh: { ...SSH_SEED, hostKeyFingerprint: 'unapproved' },
+    })
+    const { container, root } = await mountPanel(withUnapproved)
+    try {
+      click(container, '[data-host-open="bench"]')
+      click(container, '[data-action="open-deploy"]')
+      const connect = q(container, '[data-action="ssh-connect"]')
+      if (!(connect instanceof HTMLButtonElement)) throw new Error('connect-only button missing')
+      // 标记不算批准：按钮进不去，点了也不发连接。
+      expect(connect.disabled).toBe(true)
+      click(container, '[data-action="ssh-connect"]')
+      expect(container.querySelector('[data-use-error]')).toBeNull()
+      expect(calls.some(call => call.url.includes('host-ssh.connect'))).toBe(false)
+      // 审批流才是入口：检查主机密钥的按钮在场。
+      expect(q(container, '[data-action="ssh-inspect"]')).toBeTruthy()
+    } finally {
+      await unmount(root)
+      delete (globalThis as { fetch?: unknown }).fetch
+    }
+  })
 })
 
 describe('主机行状态词由 hostStatus 推导（事实进、一个词出）', () => {
