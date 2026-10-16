@@ -708,7 +708,20 @@ export class AcpTurnRunner {
       // async-task lifecycle as native frames instead of folding the whole
       // run into one opaque tool call. Agents without the draft ignore the
       // field, so grok and cursor are unaffected.
-      clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: true, subagents: {} },
+      //
+      // The released @agentclientprotocol/sdk STRIPS the draft field off
+      // clientCapabilities at initialize (measured 2026-10-20: with only this
+      // spelling, both adapters still surfaced delegations as ordinary tool
+      // calls). The adapters' documented fallback is the `_meta.jetbrains.air`
+      // extension — version 1 plus a capability list — which the schema
+      // passes through, so both spellings ride the handshake: the meta one
+      // works today, the canonical one wins once the SDK ships it.
+      clientCapabilities: {
+        fs: { readTextFile: true, writeTextFile: true },
+        terminal: true,
+        subagents: {},
+        _meta: { jetbrains: { air: { version: 1, capabilities: ['nativeSubagentSessions', 'asyncTasks'] } } },
+      },
     })
     this.client.notify('initialized', {})
     // Cursor authenticates here; the other agents have no such step.

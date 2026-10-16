@@ -123,4 +123,29 @@ export interface AcpDialect {
 
   /** True when this update frame is conversation content rather than chatter. */
   isContent(update: Record<string, unknown>): boolean
+
+  /**
+   * The session-update payload this vendor's update-carrying frame holds, or
+   * undefined when the frame carries none.
+   *
+   * The default (no hook) reads `session/update` — every draft-conforming
+   * agent. grok ALSO wraps lifecycle updates in a private `_x.ai/session_notification`
+   * method (measured 2026-10-20: its whole subagent vocabulary arrives only
+   * there), so its dialect claims both methods; the chain still ignores the
+   * kinds it does not understand.
+   */
+  frameUpdate?(frame: { readonly method?: string; readonly params?: unknown }): Record<string, unknown> | undefined
+
+  /**
+   * Normalize this vendor's private subagent vocabulary onto the draft-#1992
+   * update shape, or return undefined when the update is not one of theirs.
+   *
+   * grok is the measured case (2026-10-20 capture): it sends the same
+   * lifecycle under its own kinds and snake_case fields (`subagent_spawned`
+   * with `child_session_id`, `subagent_finished` with `status` and `output`,
+   * a metrics-only `subagent_progress`), all on the parent session id. Field
+   * reading is a dialect decision by this file's own rule; the normalized
+   * update then flows through the shared projection's draft branches.
+   */
+  normalizeSubagentUpdate?(update: Record<string, unknown>): Record<string, unknown> | undefined
 }

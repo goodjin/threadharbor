@@ -108,4 +108,53 @@ export const grokDialect: AcpDialect = {
   isContent(update) {
     return typeof update['sessionUpdate'] === 'string' && !CHATTER.has(update['sessionUpdate'] as string)
   },
+
+  /**
+   * grok wraps part of its lifecycle in a private `_x.ai/session_notification`
+   * method beside the standard `session/update` (measured 2026-10-20): the
+   * whole subagent vocabulary, plus vendor-only kinds the projection chain
+   * ignores. Claiming the method here is what lets those frames through the
+   * shared gate at all.
+   */
+  frameUpdate(frame) {
+    if (frame.method !== 'session/update' && frame.method !== '_x.ai/session_notification') return undefined
+    return record(record(frame.params)['update'])
+  },
+
+  /**
+   * grok's private subagent lifecycle (real capture 2026-10-20, grok 1.0.60)
+   * onto the draft-#1992 shape the shared projection speaks:
+   *
+   *   subagent_spawned  { child_session_id, subagent_type, description } →
+   *       spawned { subagentSessionId, name: subagent_type, task: description }
+   *   subagent_finished { child_session_id, status, output } →
+   *       state_update { subagentSessionId, state: status, output }
+   *   subagent_progress → dropped: pure metrics (tokens, duration, context
+   *       usage) with no text; inventing a line from them would fabricate a
+   *       progress string the agent never wrote.
+   */
+  normalizeSubagentUpdate(update) {
+    const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
+    const childId = typeof update['child_session_id'] === 'string' ? update['child_session_id'] : undefined
+    if (kind === 'subagent_spawned') {
+      if (childId === undefined) return undefined
+      return {
+        sessionUpdate: 'subagent_spawned',
+        subagentSessionId: childId,
+        name: typeof update['subagent_type'] === 'string' ? update['subagent_type'] : childId,
+        task: typeof update['description'] === 'string' ? update['description'] : '',
+      }
+    }
+    if (kind === 'subagent_finished') {
+      if (childId === undefined) return undefined
+      const normalized: Record<string, unknown> = {
+        sessionUpdate: 'subagent_state_update',
+        subagentSessionId: childId,
+        state: typeof update['status'] === 'string' ? update['status'] : 'failed',
+      }
+      if (typeof update['output'] === 'string') normalized['output'] = update['output']
+      return normalized
+    }
+    return undefined
+  },
 }

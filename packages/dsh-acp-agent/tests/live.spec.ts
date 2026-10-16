@@ -206,10 +206,17 @@ async function openLiveAgentOver(
 
   await bounded(`${dialect.id}: initialize`, client.request('initialize', {
     protocolVersion: 1,
-    // Mirrors the runner's handshake, including the subagent-draft capability:
-    // the live suite must exercise what production actually sends, or a field
-    // the real agents reject would pass here and break every real session.
-    clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: true, subagents: {} },
+    // Mirrors the runner's handshake, including both subagent-capability
+    // spellings (the draft field and the _meta.jetbrains.air fallback the
+    // released SDK keeps): the live suite must exercise what production
+    // actually sends, or a field the real agents reject would pass here and
+    // break every real session.
+    clientCapabilities: {
+      fs: { readTextFile: true, writeTextFile: true },
+      terminal: true,
+      subagents: {},
+      _meta: { jetbrains: { air: { version: 1, capabilities: ['nativeSubagentSessions', 'asyncTasks'] } } },
+    },
   }))
   client.notify('initialized', {})
   // Cursor must authenticate (after an interactive `agent login`) before
@@ -851,21 +858,36 @@ describe.skipIf(!LIVE)('live acceptance: native subagent and async-task frames',
         'Delegate a tiny job to a subagent using your spawn/collab tool: have it compute 6*7 and report just the answer. '
         + 'Wait for the subagent to finish, then reply with its answer.',
       )
-      const spawned = await live.waitFor(
-        frame => frame.method === 'session/update' && updateOf(frame)['sessionUpdate'] === 'subagent_spawned',
-        180_000,
-        'subagent_spawned frame',
-      )
-      await reply
+      try {
+        const spawned = await live.waitFor(
+          frame => frame.method === 'session/update' && updateOf(frame)['sessionUpdate'] === 'subagent_spawned',
+          140_000,
+          'subagent_spawned frame',
+        )
+        // A collab turn that spawned but never settles would otherwise eat the
+        // whole test budget as a bare timeout; name it and keep the evidence.
+        await Promise.race([
+          reply,
+          new Promise<never>((_, reject) => {
+            setTimeout(() => { reject(new Error('turn did not settle within 80s after subagent_spawned')) }, 80_000)
+          }),
+        ])
 
-      const childId = updateOf(spawned)['subagentSessionId']
-      expect(typeof childId).toBe('string')
-      const events = projectTurn(live.plainFrames(), { turn: 1, dialect: codexDialect })
-      const card = events.find(event => event.type === 'tool/call'
-        && (event.payload as { name: string; callId: string }).name === 'subagent')
-      expect(card, 'the spawned run must project onto the subagent card').toBeDefined()
-      expect((card!.payload as { callId: string }).callId).toBe(childId)
-      await recordCapture('codex', live.plainFrames())
+        const childId = updateOf(spawned)['subagentSessionId']
+        expect(typeof childId).toBe('string')
+        const events = projectTurn(live.plainFrames(), { turn: 1, dialect: codexDialect })
+        const card = events.find(event => event.type === 'tool/call'
+          && (event.payload as { name: string; callId: string }).name === 'subagent')
+        expect(card, 'the spawned run must project onto the subagent card').toBeDefined()
+        expect((card!.payload as { callId: string }).callId).toBe(childId)
+        await recordCapture('codex', live.plainFrames())
+      } catch (error) {
+        // The failure capture is the diagnosis: what the turn actually did —
+        // refused, answered directly, or hung mid-collab — is in the frames.
+        await reply.catch(() => {})
+        await recordCapture('codex-failed', live.plainFrames()).catch(() => {})
+        throw error
+      }
     } finally {
       live.close()
     }
@@ -878,40 +900,68 @@ describe.skipIf(!LIVE)('live acceptance: native subagent and async-task frames',
         'Use the Task tool to delegate a tiny job: the subagent computes 6*7 and returns just the number. '
         + 'Wait for it to finish, then reply with its answer.',
       )
-      const spawned = await live.waitFor(
-        frame => frame.method === 'session/update' && updateOf(frame)['sessionUpdate'] === 'subagent_spawned',
-        180_000,
-        'subagent_spawned frame',
-      )
-      await reply
+      try {
+        const spawned = await live.waitFor(
+          frame => frame.method === 'session/update' && updateOf(frame)['sessionUpdate'] === 'subagent_spawned',
+          180_000,
+          'subagent_spawned frame',
+        )
+        await reply
 
-      const childId = updateOf(spawned)['subagentSessionId']
-      expect(typeof childId).toBe('string')
-      const events = projectTurn(live.plainFrames(), { turn: 1, dialect: claudeDialect })
-      const card = events.find(event => event.type === 'tool/call'
-        && (event.payload as { name: string; callId: string }).name === 'subagent')
-      expect(card, 'the spawned run must project onto the subagent card').toBeDefined()
-      expect((card!.payload as { callId: string }).callId).toBe(childId)
-      await recordCapture('claude', live.plainFrames())
+        const childId = updateOf(spawned)['subagentSessionId']
+        expect(typeof childId).toBe('string')
+        const events = projectTurn(live.plainFrames(), { turn: 1, dialect: claudeDialect })
+        const card = events.find(event => event.type === 'tool/call'
+          && (event.payload as { name: string; callId: string }).name === 'subagent')
+        expect(card, 'the spawned run must project onto the subagent card').toBeDefined()
+        expect((card!.payload as { callId: string }).callId).toBe(childId)
+        await recordCapture('claude', live.plainFrames())
+      } catch (error) {
+        // Same evidence rule as codex: whether Task ran as a legacy tool call,
+        // was refused, or never happened — the frames say so.
+        await reply.catch(() => {})
+        await recordCapture('claude-failed', live.plainFrames()).catch(() => {})
+        throw error
+      }
     } finally {
       live.close()
     }
   }, 300_000)
 
-  it('grok: the subagents handshake is tolerated and a delegation turn stays projectable', async () => {
-    // grok declares no subagents capability (docs/agent-acp/grok.md); what this
-    // case pins is that the extra handshake field neither breaks the handshake
-    // nor the turn, and that whatever frames a delegation DOES produce still
-    // project — the capture records which kinds actually arrived.
+  it('grok: a delegated run arrives in grok’s private vocabulary and projects onto the subagent card', async () => {
+    // grok declares no draft capability, but it DOES report subagents — in its
+    // own vocabulary (`subagent_spawned`/`subagent_finished` with snake_case
+    // fields, riding the private `_x.ai/session_notification` method), first
+    // captured 2026-10-20. The dialect normalizes it; this case holds the
+    // whole chain to the real wire behavior.
     await withGrokServe(async transport => {
       const live = await openLiveAgentOver(transport, grokDialect)
       try {
-        await live.prompt(
+        const reply = live.prompt(
           'If you have a tool that delegates work to a subagent, use it once for a trivial job and report what it returned. '
           + 'If you have no such tool, reply with the single word READY.',
         )
+        let spawned: AcpFrame
+        try {
+          spawned = await live.waitFor(
+            frame => frame.method === '_x.ai/session_notification'
+              && updateOf(frame)['sessionUpdate'] === 'subagent_spawned',
+            180_000,
+            'grok subagent_spawned frame',
+          )
+        } catch (error) {
+          await reply.catch(() => {})
+          throw error
+        }
+        await reply
+
+        const childId = updateOf(spawned)['child_session_id']
+        expect(typeof childId).toBe('string')
         const events = projectTurn(live.plainFrames(), { turn: 1, dialect: grokDialect })
-        expect(events.some(event => event.type === 'assistant/message' || event.type === 'tool/call')).toBe(true)
+        const card = events.find(event => event.type === 'tool/call'
+          && (event.payload as { name: string }).name === 'subagent')
+        expect(card, 'grok 的私有帧必须经方言归一化投成 subagent 卡片').toBeDefined()
+        expect((card!.payload as { callId: string }).callId).toBe(childId)
         await recordCapture('grok', live.plainFrames())
       } finally {
         live.close()

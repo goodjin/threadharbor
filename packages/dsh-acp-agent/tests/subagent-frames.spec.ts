@@ -20,9 +20,13 @@
  *     close a step on an open tool call, so honesty has to live in the text.
  */
 
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { projectStepContent } from '../src/projection.ts'
 import { codexDialect } from '../src/dialects/codex.ts'
+import { grokDialect } from '../src/dialects/grok.ts'
+import { claudeDialect } from '../src/dialects/claude.ts'
 import type { AcpFrame } from '../src/acp-client.ts'
 
 const ROOT = 'root-session'
@@ -210,5 +214,95 @@ describe('async task frames', () => {
     const text = resultOf(events).message.content.map(part => part.text).join('')
     expect(text).toContain('[still running]')
     expect(text).toContain('compiling…')
+  })
+})
+
+/**
+ * grok's private subagent vocabulary, pinned to a REAL capture
+ * (2026-10-20, grok 1.0.60 over its own serve): grok does not implement the
+ * draft's kinds or field spellings — it sends `subagent_spawned` with
+ * `child_session_id` / `subagent_type` / `description` (no `task`), a
+ * metrics-only `subagent_progress`, and `subagent_finished` carrying the
+ * child's final `output` and `status`. All three ride the PARENT session id;
+ * no child-tagged content frames exist. The dialect normalizes them onto the
+ * draft shape the shared projection already speaks.
+ */
+describe('grok private subagent vocabulary (real capture)', () => {
+  const captured = JSON.parse(
+    readFileSync(fileURLToPath(new URL('./fixtures/captured-subagent-frames.json', import.meta.url)), 'utf8'),
+  ) as { grok: { frames: AcpFrame[] } }
+  const frames = captured.grok.frames
+
+  it('maps the spawned/finished pair onto the subagent card with the child’s output', () => {
+    const events = projectStepContent(frames, { turn: 1, step: 1, dialect: grokDialect })
+
+    const card = events.find(event => event.type === 'tool/call'
+      && (event.payload as { name: string }).name === 'subagent')
+    expect(card, 'grok 的子代理帧必须投成 subagent 卡片').toBeDefined()
+    const payload = card!.payload as { callId: string; arguments: string }
+    expect(payload.callId).toBe('01a144de-463c-7940-8014-aa00e9ab009f')
+    expect(JSON.parse(payload.arguments)).toMatchObject({
+      prompt: 'Trivial arithmetic check',
+      agent: 'general-purpose',
+    })
+    const results = events.filter(event => event.type === 'tool/result')
+    const sub = results.find(event => (event.payload as { message: { toolCallId?: string } }).message?.toolCallId === payload.callId)
+    expect(sub, 'the subagent card must settle with a result').toBeDefined()
+    const text = ((sub!.payload as { message: { content: { text: string }[] } }).message.content ?? []).map(p => p.text).join('')
+    expect(text).toContain('4')
+  })
+
+  it('keeps the spawn tool call its own card beside the subagent card', () => {
+    // grok reports the delegation BOTH ways: the ordinary `spawn_subagent`
+    // tool call and the subagent lifecycle frames. The tool card stays (the
+    // call is real, with its arguments), the lifecycle adds the run view.
+    const events = projectStepContent(frames, { turn: 1, step: 1, dialect: grokDialect })
+    const names = events.filter(event => event.type === 'tool/call')
+      .map(event => (event.payload as { name: string }).name)
+    expect(names).toContain('spawn_subagent')
+    expect(names).toContain('subagent')
+  })
+
+  it('keeps the parent’s own answer in the parent message', () => {
+    const events = projectStepContent(frames, { turn: 1, step: 1, dialect: grokDialect })
+    const message = events.find(event => event.type === 'assistant/message')!.payload as {
+      message: { content: { type: string; text: string }[] }
+    }
+    const text = message.message.content.filter(b => b.type === 'text').map(b => b.text).join('')
+    expect(text).toContain('The subagent returned `4`.')
+  })
+})
+
+/**
+ * The draft path pinned to REAL captures (2026-10-20, after the client began
+ * advertising the subagent capability through both the draft field and the
+ * `_meta.jetbrains.air` fallback): codex and claude send exactly the draft
+ * shapes the synthetic tests above encode. These hold the projection to the
+ * live wire, the way the grok capture below does for its private vocabulary.
+ */
+describe('draft subagent frames against real captures', () => {
+  const captured = JSON.parse(
+    readFileSync(fileURLToPath(new URL('./fixtures/captured-subagent-frames.json', import.meta.url)), 'utf8'),
+  ) as Record<string, { frames: AcpFrame[] }>
+
+  it('codex: a real collab delegation projects onto the subagent card', () => {
+    const events = projectStepContent(captured['codex']!.frames, { turn: 1, step: 1, dialect: codexDialect })
+    const card = events.find(event => event.type === 'tool/call'
+      && (event.payload as { name: string }).name === 'subagent')
+    expect(card).toBeDefined()
+    expect(JSON.parse((card!.payload as { arguments: string }).arguments)).toMatchObject({ agent: 'Calculate' })
+    const sub = events.find(event => event.type === 'tool/result'
+      && (event.payload as { message: { toolCallId?: string } }).message?.toolCallId === (card!.payload as { callId: string }).callId)
+    expect(sub).toBeDefined()
+    expect((sub!.payload as { message: { isError?: boolean } }).message.isError).toBe(false)
+  })
+
+  it('claude: a real Task delegation projects onto the subagent card with the verbatim task', () => {
+    const events = projectStepContent(captured['claude']!.frames, { turn: 1, step: 1, dialect: claudeDialect })
+    const card = events.find(event => event.type === 'tool/call'
+      && (event.payload as { name: string }).name === 'subagent')
+    expect(card).toBeDefined()
+    expect(JSON.parse((card!.payload as { arguments: string }).arguments))
+      .toMatchObject({ prompt: 'Compute 6*7. Reply with just the number, nothing else.' })
   })
 })

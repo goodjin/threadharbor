@@ -128,6 +128,26 @@ describe('AcpTurnRunner', () => {
       .toEqual({})
   })
 
+  it('also advertises subagents through the jetbrains.air meta the released SDKs keep', async () => {
+    // Measured 2026-10-20: with only the draft field, both adapters still
+    // projected delegations as ordinary tool calls ("Start subagent …" cards
+    // on codex, an Agent tool card on claude — failure captures in
+    // dsh-acp-agent/tests/fixtures/captured-subagent-frames.json). The
+    // released @agentclientprotocol/sdk strips the draft field off
+    // clientCapabilities at initialize; the adapters' documented fallback is
+    // the `_meta.jetbrains.air` extension (version 1, capability list), which
+    // the schema passes through. Advertise BOTH spellings: the meta one works
+    // today, the canonical one wins once the SDK ships it.
+    const client = fakeClient()
+    await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
+
+    const init = client.calls.find(call => call.method === 'initialize')!
+    const capabilities = (init.params as { clientCapabilities: { _meta?: unknown } }).clientCapabilities
+    const jetbrains = (capabilities._meta as Record<string, unknown>)['jetbrains'] as Record<string, unknown> | undefined
+    const air = jetbrains?.['air'] as { version?: unknown; capabilities?: unknown } | undefined
+    expect(air).toEqual({ version: 1, capabilities: ['nativeSubagentSessions', 'asyncTasks'] })
+  })
+
   it('sends the user’s text as the prompt', async () => {
     const client = fakeClient()
     await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })

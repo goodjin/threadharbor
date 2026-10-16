@@ -444,14 +444,18 @@ function accumulate(frames: readonly AcpFrame[], dialect: AcpDialect): Accumulat
       if (frame.result !== undefined) usage = dialect.readReplyUsage(frame.result)
       continue
     }
-    if (frame.method !== 'session/update') continue
-    const params = recordOf(frame.params)
-    const update = recordOf(params['update'])
+    // The update gate is the dialect's: standard agents speak `session/update`,
+    // grok also wraps lifecycle in a private method of its own.
+    const update = dialect.frameUpdate === undefined
+      ? (frame.method === 'session/update' ? recordOf(recordOf(frame.params)['update']) : undefined)
+      : dialect.frameUpdate(frame)
+    if (update === undefined) continue
     const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
     // A frame tagged with a spawned subagent's session id belongs to that
     // child's own trace: its message chunks become the child card's reply,
     // and everything else it did stays out of the parent transcript.
-    const childId = typeof params['sessionId'] === 'string' ? params['sessionId'] : undefined
+    const frameSessionId = recordOf(frame.params)['sessionId']
+    const childId = typeof frameSessionId === 'string' ? frameSessionId : undefined
     if (childId !== undefined && childSessions.has(childId)) {
       const run = spawned.get(childId)
       if (run !== undefined && kind === 'agent_message_chunk') {
@@ -466,43 +470,87 @@ function accumulate(frames: readonly AcpFrame[], dialect: AcpDialect): Accumulat
       const carried = typeof update['toolCallId'] === 'string' ? tools.get(update['toolCallId']) : undefined
       const call = dialect.foldTool(carried, update)
       tools.set(call.callId, call)
-    } else if (kind === 'subagent_spawned' || kind === 'async_task_spawned') {
-      const call = spawnedCallOf(update)
-      if (call !== undefined && !spawned.has(call.callId)) {
-        spawned.set(call.callId, { kind: kind === 'subagent_spawned' ? 'subagent' : 'task', settled: false, call })
-        if (kind === 'subagent_spawned') childSessions.add(call.callId)
-      }
-    } else if (kind === 'subagent_state_update') {
-      const run = spawned.get(typeof update['subagentSessionId'] === 'string' ? update['subagentSessionId'] : '')
-      if (run !== undefined && !run.settled) {
-        run.settled = true
-        run.call.status = update['state'] === 'completed' ? 'completed' : 'failed'
-      }
-    } else if (kind === 'async_task_progress') {
-      const run = spawned.get(taskCallId(update))
-      if (run !== undefined) {
-        const summary = typeof update['summary'] === 'string' ? update['summary']
-          : typeof update['description'] === 'string' ? update['description'] : undefined
-        // The latest report is the task's visible state; an earlier one is
-        // overwritten, exactly the way later tool frames overwrite a title.
-        if (summary !== undefined) run.call.output = summary
-      }
-    } else if (kind === 'async_task_state_update') {
-      const run = spawned.get(taskCallId(update))
-      if (run !== undefined) {
-        const summary = typeof update['summary'] === 'string' ? update['summary'] : undefined
-        if (summary !== undefined) run.call.output = summary
-        if (update['state'] === 'completed' || update['state'] === 'failed' || update['state'] === 'stopped') {
-          run.settled = true
-          run.call.status = update['state'] === 'completed' ? 'completed' : 'failed'
-        }
-      }
+    } else if (subagentUpdateOf(dialect, update) !== undefined) {
+      // A spawned-run lifecycle update: one of the draft's own kinds, or a
+      // vendor vocabulary the dialect normalized onto them (grok's).
+      foldSubagentUpdate(subagentUpdateOf(dialect, update)!, spawned, childSessions)
     } else if (!dialect.isContent(update)) {
       // chatter — setup phases, command lists, context-window updates
     }
   }
 
   return { thought, text, tools, spawned, childSessions, usage }
+}
+
+/**
+ * The draft-shaped subagent update this frame carries, or undefined.
+ *
+ * A dialect with a private subagent vocabulary (grok) normalizes FIRST — its
+ * `subagent_spawned` shares the draft's kind name while carrying different
+ * fields, so a kind-name shortcut would skip the normalization. The draft's
+ * own kinds then pass through unchanged for dialects without a hook.
+ */
+function subagentUpdateOf(
+  dialect: AcpDialect,
+  update: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const normalized = dialect.normalizeSubagentUpdate?.(update)
+  if (normalized !== undefined) return normalized
+  const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
+  if (kind === 'subagent_spawned' || kind === 'subagent_state_update'
+    || kind === 'async_task_spawned' || kind === 'async_task_progress' || kind === 'async_task_state_update') return update
+  return undefined
+}
+
+/** Fold one draft-shaped subagent lifecycle update into the spawned runs. */
+function foldSubagentUpdate(
+  update: Record<string, unknown>,
+  spawned: Map<string, SpawnedRun>,
+  childSessions: Set<string>,
+): void {
+  const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
+  if (kind === 'subagent_spawned' || kind === 'async_task_spawned') {
+    const call = spawnedCallOf(update)
+    if (call !== undefined && !spawned.has(call.callId)) {
+      spawned.set(call.callId, { kind: kind === 'subagent_spawned' ? 'subagent' : 'task', settled: false, call })
+      if (kind === 'subagent_spawned') childSessions.add(call.callId)
+    }
+    return
+  }
+  if (kind === 'subagent_state_update') {
+    const run = spawned.get(typeof update['subagentSessionId'] === 'string' ? update['subagentSessionId'] : '')
+    if (run !== undefined && !run.settled) {
+      // A vendor may deliver the child's whole reply on the terminal frame
+      // (grok does); the draft's child-content routing already appended
+      // whatever streamed earlier, so this only fills an empty output.
+      if (typeof update['output'] === 'string' && run.call.output === '') run.call.output = update['output']
+      run.settled = true
+      run.call.status = update['state'] === 'completed' ? 'completed' : 'failed'
+    }
+    return
+  }
+  if (kind === 'async_task_progress') {
+    const run = spawned.get(taskCallId(update))
+    if (run !== undefined) {
+      const summary = typeof update['summary'] === 'string' ? update['summary']
+        : typeof update['description'] === 'string' ? update['description'] : undefined
+      // The latest report is the task's visible state; an earlier one is
+      // overwritten, exactly the way later tool frames overwrite a title.
+      if (summary !== undefined) run.call.output = summary
+    }
+    return
+  }
+  if (kind === 'async_task_state_update') {
+    const run = spawned.get(taskCallId(update))
+    if (run !== undefined) {
+      const summary = typeof update['summary'] === 'string' ? update['summary'] : undefined
+      if (summary !== undefined) run.call.output = summary
+      if (update['state'] === 'completed' || update['state'] === 'failed' || update['state'] === 'stopped') {
+        run.settled = true
+        run.call.status = update['state'] === 'completed' ? 'completed' : 'failed'
+      }
+    }
+  }
 }
 
 /** The card key one async-task frame addresses, or '' when it names none. */
