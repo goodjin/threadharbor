@@ -282,6 +282,16 @@ type Entry = {
   cursor: FeedCursor | undefined
   primerText: string | undefined
   tail: Promise<unknown>
+  /**
+   * Set while a user stop's grace window is open and the stopped run has not
+   * settled: the conversation that run still floats on. A request arriving
+   * inside the window must NOT reuse it — two runs in one runner reset each
+   * other's abort/drop state, and the floating run's late frames would land
+   * in the new turn (final review 2026-10-16: cross-turn content bleed).
+   * Cleared when the run settles (the conversation is healthy again) or when
+   * the grace kills it.
+   */
+  stopping: AcpSession | undefined
 }
 
 /**
@@ -322,7 +332,7 @@ export class GatewayConversations {
   answer(sessionId: string, presetId: string, request: GatewayAnswerRequest, sink: GatewaySink): Promise<void> {
     let entry = this.entries.get(sessionId)
     if (entry === undefined) {
-      entry = { session: undefined, cursor: undefined, primerText: undefined, tail: Promise.resolve() }
+      entry = { session: undefined, cursor: undefined, primerText: undefined, tail: Promise.resolve(), stopping: undefined }
       this.entries.set(sessionId, entry)
     }
     const run = entry.tail.catch(() => {}).then(async () => {
@@ -348,6 +358,18 @@ export class GatewayConversations {
     // conversation is never silently continued without the history it was
     // promised.
     if (plan.kind === 'first' && plan.primer !== '') entry.primerText = plan.primer
+    // A stop's grace window is still open: the conversation below still has a
+    // run floating on it. Reusing it would run two turns in one runner — the
+    // floating run's late frames would write into this new turn. Drop the old
+    // conversation now (its runner's abort state already discards late frames)
+    // and open fresh below.
+    if (entry.stopping !== undefined) {
+      const stale = entry.stopping
+      entry.stopping = undefined
+      entry.session = undefined
+      stale.close()
+      this.report(`acp gateway: session ${sessionId} reopened inside a stop's grace — the floating conversation was dropped`)
+    }
     if (entry.session === undefined) {
       entry.session = await this.open(presetId, {
         dshSessionId: sessionId,
@@ -531,10 +553,23 @@ export class GatewayConversations {
       let runSettled = false
       const stopped = (): void => {
         controller.abort()
+        entry.stopping = entry.session ?? undefined
         done({ end: { kind: 'aborted', reason: 'stopped by user' } })
         const kill = (): void => {
-          if (runSettled) return
-          this.close(sessionId)
+          if (runSettled) { entry.stopping = undefined; return }
+          const stale = entry.stopping
+          entry.stopping = undefined
+          if (stale === undefined) return
+          // Kill the conversation the stop was aimed at — and only it. If a
+          // newer request already swapped in its own, the entry below still
+          // names that newer one and must survive (final review 2026-10-16:
+          // the grace once closed whatever was current and killed the new
+          // turn's conversation by mistake).
+          if (this.entries.get(sessionId) === entry && entry.session === stale) {
+            entry.session = undefined
+            this.entries.delete(sessionId)
+          }
+          stale.close()
           this.report(`acp gateway: session ${sessionId} did not settle within ${String(graceMs)}ms of stop — external conversation dropped`)
         }
         if (graceMs <= 0) { kill(); return }
@@ -546,11 +581,13 @@ export class GatewayConversations {
       run.then(
         value => {
           runSettled = true
+          entry.stopping = undefined
           if (graceTimer !== undefined) clearTimeout(graceTimer)
           done(value as { end: GatewayStepEnd })
         },
         error => {
           runSettled = true
+          entry.stopping = undefined
           if (graceTimer !== undefined) clearTimeout(graceTimer)
           reject(error)
         },

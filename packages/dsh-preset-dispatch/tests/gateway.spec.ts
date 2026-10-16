@@ -725,20 +725,21 @@ describe('GatewayConversations — 帧静默超时、提示与诊断包', () => 
     fake.diagnosticsState.stderrTail = ['tls handshake eof']
     const append = recordingAppend()
     const reports: string[] = []
+    const opens: string[] = []
     const gate = new GatewayConversations(
-      async () => fake.session,
+      async presetId => { opens.push(presetId); return fake.session },
       message => { reports.push(message) },
       sessionId => (sessionId === 's1' ? append : undefined),
       undefined,
       () => ({ stallMs, warnMs, graceMs: 1_000 }),
     )
-    return { fake, append, reports, gate }
+    return { fake, append, reports, gate, opens }
   }
 
   it('帧静默达 stallMs：ACP_STALLED 收场，消息带尾部与会话处置，会话被杀', async () => {
     vi.useFakeTimers()
     try {
-      const { fake, append, gate } = wedgedSetup(3_000, 0)
+      const { fake, append, gate, opens } = wedgedSetup(3_000, 0)
       const chunks: GatewayChunk[] = []
       const outcome = await Promise.race([
         gate.answer('s1', 'acp-codex', { messages: [user('卡住')], position }, { chunk: c => { chunks.push(c) } }).then(() => 'resolved'),
@@ -752,6 +753,10 @@ describe('GatewayConversations — 帧静默超时、提示与诊断包', () => 
       expect(finish.reason.failure?.message).toContain('已终止')
       expect(fake.closes.count).toBe(1)
       expect(append.written.filter(w => w.type === 'system/message')).toHaveLength(0)
+      // Review Focus 5：丢弃后同会话的下一请求必须重开新外部会话。
+      fake.answerWith(async () => ({ kind: 'completed' }))
+      await gate.answer('s1', 'acp-codex', { messages: [user('卡住'), user('重试')], position }, { chunk: () => {} })
+      expect(opens).toHaveLength(2)
     } finally {
       vi.useRealTimers()
     }
@@ -892,6 +897,10 @@ describe('GatewayConversations — 总上限与统一丢弃', () => {
       expect(finish.reason.failure?.message).toContain('总上限')
       expect(finish.reason.failure?.message).toContain('working')
       expect(fake.closes.count).toBe(1)
+      // Review Focus 5：总上限丢弃后，下一请求同样重开。
+      fake.answerWith(async () => ({ kind: 'completed' }))
+      await gate.answer('s1', 'acp-codex', { messages: [user('跑长任务'), user('再跑')], position }, { chunk: () => {} })
+      expect(opens).toHaveLength(2)
     } finally {
       vi.useRealTimers()
     }
@@ -920,14 +929,59 @@ describe('GatewayConversations — 总上限与统一丢弃', () => {
     }
   })
 
-  it('ACP_CONNECTION 仍丢弃（回归），ACP_STALLED 同样丢弃', async () => {
-    const connection = fakeSession()
-    connection.answerWith(async () => ({
-      kind: 'error',
-      error: { code: 'ACP_CONNECTION', message: '外部 agent 连接已断开：acp agent exited' },
-    }))
-    const gate = new GatewayConversations(async () => connection.session)
-    await gate.answer('s1', 'acp-codex', { messages: [user('死了')], position }, { chunk: () => {} })
-    expect(connection.closes.count).toBe(1)
+  it('三类强制收场错误码统一丢弃会话（ACP_CONNECTION / ACP_STALLED / ACP_TIMEOUT）', async () => {
+    for (const code of ['ACP_CONNECTION', 'ACP_STALLED', 'ACP_TIMEOUT']) {
+      const failing = fakeSession()
+      failing.answerWith(async () => ({
+        kind: 'error',
+        error: { code, message: `外部 agent 错误（${code}）` },
+      }))
+      const gate = new GatewayConversations(async () => failing.session)
+      await gate.answer('s1', 'acp-codex', { messages: [user(`死于 ${code}`)], position }, { chunk: () => {} })
+      expect(failing.closes.count, code).toBe(1)
+    }
+  })
+})
+
+describe('GatewayConversations — 停止宽限窗口内的新请求', () => {
+  it('不复用漂浮旧 run 的会话：旧对话被弃，新回合不被宽限杀误伤', async () => {
+    vi.useFakeTimers()
+    try {
+      // 每次 open 一个新桩：旧 run 永不结算（停止后漂浮），新 run 正常完成。
+      const generations: ReturnType<typeof fakeSession>[] = []
+      const opens: string[] = []
+      const gate = new GatewayConversations(async presetId => {
+        opens.push(presetId)
+        const fake = fakeSession()
+        generations.push(fake)
+        fake.answerWith(generations.length === 1
+          ? () => new Promise<GatewayStepEnd>(() => {})
+          : async () => ({ kind: 'completed' }))
+        return fake.session
+      })
+      const controller = new AbortController()
+      const first = gate.answer('s1', 'acp-codex', {
+        messages: [user('第一问')],
+        position,
+        signal: controller.signal,
+      }, { chunk: () => {} })
+      await vi.advanceTimersByTimeAsync(1)
+      controller.abort()
+      await first // 立即收场（Task 3 行为）
+      // 停止后 1 秒重问：不得复用还挂着漂浮 run 的旧会话。
+      const second = gate.answer('s1', 'acp-codex', {
+        messages: [user('第一问'), user('改问这个')],
+        position,
+      }, { chunk: () => {} })
+      await vi.advanceTimersByTimeAsync(1)
+      expect(opens).toHaveLength(2)
+      expect(generations[0]?.closes.count).toBe(1)
+      // 宽限到点（停止后 3 秒）：杀的只能是旧对话，新回合照常完成。
+      await vi.advanceTimersByTimeAsync(3_000)
+      expect(generations[1]?.closes.count).toBe(0)
+      await second
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
