@@ -185,6 +185,8 @@ export const zh = {
   'panel.notes.otherSource': '另一台机器（另一个源）的页面不在这个频道里；它的行以「未连接」出现，靠的是登记。',
   /** 详情页读取失败的留痕：失败原因与上一次读到的话同时在场，不留空白。 */
   'panel.notes.readFailed': '这次没读到：{reason}',
+  /** 启动失败的留痕：启动的失败用自己的话说，不借「没读到」冒充读取失败。 */
+  'panel.notes.startFailed': '这次没能启动：{reason}',
   'panel.notes.lastRead': '上次读到的是：{summary}（{at}）',
   'panel.notes.passwordAuth': '这台主机用密码认证，凭据不保存，读不了对方状态',
   /** 列表页的空态。 */
@@ -464,6 +466,8 @@ export const en = {
   'panel.notes.otherSource': "Another machine's page (another origin) is not on this channel; its row shows up as \"Not connected\", carried by the registration.",
   /** Detail-page read-failure trail: the reason and the last good read stay on screen together. */
   'panel.notes.readFailed': 'Nothing read this time: {reason}',
+  /** Start-failure trail: a failed start speaks for itself, never dressed up as a failed read. */
+  'panel.notes.startFailed': "Didn't start this time: {reason}",
   'panel.notes.lastRead': 'Last read said: {summary} ({at})',
   'panel.notes.passwordAuth': 'This host authenticates with a password; the credential is never stored, so the peer status cannot be read',
   'panel.list.empty': 'No hosts yet. Press "Add a new host" to register the first one.',

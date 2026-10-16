@@ -149,6 +149,7 @@ const PANEL_KEYS: readonly string[] = [
   'panel.notes.otherSource',
   // The read-failure trail and the password-auth gate on the detail page.
   'panel.notes.readFailed',
+  'panel.notes.startFailed',
   'panel.notes.lastRead',
   'panel.notes.passwordAuth',
   // The list page's empty state.
@@ -222,6 +223,7 @@ const PARAMETERIZED: readonly (readonly [string, readonly string[]])[] = [
   ['panel.ssh.progressFailed', ['error']],
   ['panel.ssh.registered', ['endpoint']],
   ['panel.notes.readFailed', ['reason']],
+  ['panel.notes.startFailed', ['reason']],
   ['panel.notes.lastRead', ['summary', 'at']],
 ]
 

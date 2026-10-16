@@ -1530,6 +1530,8 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   // 该主机上、上次读到的话留在页面上（评审裁定 6）。
   const [readingId, setReadingId] = useState<string | undefined>(undefined)
   const [readFailures, setReadFailures] = useState<ReadonlyMap<string, string>>(new Map())
+  // 启动失败单记一处：启动的失败用自己的话说，不借读取失败的留痕冒充。
+  const [startFailures, setStartFailures] = useState<ReadonlyMap<string, string>>(new Map())
   // approve-and-read 进行中的那台主机：部署区为此打开并自动检查密钥。
   const [approveAndReadId, setApproveAndReadId] = useState<string | undefined>(undefined)
   // The host list lives in the section, not in React state; this tick is what
@@ -1695,17 +1697,27 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
     readPeerWith(registration, ssh)
   }
 
-  /** 启动对方 DSH：成功后立即重读，屏幕上摆的是读回来的存活，不是假设。 */
+  /**
+   * 启动对方 DSH：入口闸与 readPeer 同一把尺子（凭据没存、指纹没批准都不发，
+   * 裁定 4/5），成功后立即重读，屏幕上摆的是读回来的存活，不是假设。
+   * 启动的失败记在启动自己名下（startFailures），不与读取失败的留痕混写。
+   */
   const startPeer = (registration: HostRegistration): void => {
     const stored = registration.ssh
-    if (stored === undefined) return
+    if (stored === undefined || stored.hostKeyFingerprint === 'unapproved') return
     const ssh = storedSshInput(stored)
     if (ssh === undefined || props.remote === undefined) return
     void props.remote.start(ssh, stored.remoteWebPort ?? 3081).then(result => {
       if (!result.ok) {
-        setReadFailures(previous => new Map(previous).set(registration.hostId, result.error))
+        setStartFailures(previous => new Map(previous).set(registration.hostId, result.error))
         return
       }
+      // 这次启动成了，上次启动失败的留痕随之作废。
+      setStartFailures(previous => {
+        const next = new Map(previous)
+        next.delete(registration.hostId)
+        return next
+      })
       readPeer(registration)
     })
   }
@@ -1903,15 +1915,18 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
       const reach = reaches.get(row.hostId)
       // 详情页按钮表：状态词查表得动作（主按钮在前），两处按事实裁决——
       // 指纹未批准（裁定 5）与已部署但存活读不出（裁定 2 的唯一例外）。
-      // 都返回新数组：hostActions 的表是共享实例，只渲染、不改动（裁定 3）。
+      // 未批准时 retry-read 与 start-peer 都不出：读取和启动都要已批准的
+      // 凭据，入口只有批准并读取。都返回新数组：hostActions 的表是共享
+      // 实例，只渲染、不改动（裁定 3）。
       const statusActions = hostActions(row.connection)
       const detailActions: readonly (HostAction | 'approve-and-read')[] =
         registration !== undefined && registration.ssh?.hostKeyFingerprint === 'unapproved'
-          ? ['approve-and-read', ...statusActions.filter(action => action !== 'retry-read')]
+          ? ['approve-and-read', ...statusActions.filter(action => action !== 'retry-read' && action !== 'start-peer')]
           : row.connection === 'unknown' && storedSshUsable(registration?.ssh) && registration?.remote?.deployment === 'deployed'
             ? ['retry-read', ...statusActions.filter(action => action !== 'retry-read')]
             : statusActions
       const readFailure = readFailures.get(row.hostId)
+      const startFailure = startFailures.get(row.hostId)
       const storedRead = registration?.remote
       return (
         <div data-threadharbor-panel="" className={styles.root}>
@@ -1994,6 +2009,10 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                             {/* 读取失败的留痕（裁定 6）：原因与上次读到的同时在场。 */}
                             {readFailure !== undefined
                               ? <p data-read-failed="" className={styles.stateBad}>{props.t('panel.notes.readFailed', { reason: readFailure })}</p>
+                              : undefined}
+                            {/* 启动失败的留痕：它说「没能启动」，不借读取失败的话。 */}
+                            {startFailure !== undefined
+                              ? <p data-start-failed="" className={styles.stateBad}>{props.t('panel.notes.startFailed', { reason: startFailure })}</p>
                               : undefined}
                             {readFailure !== undefined && storedRead !== undefined
                               ? (
