@@ -27,7 +27,7 @@
 
 1. **停止语义**：本地立即收场；通知对方取消后 3 秒宽限，未消停即杀进程；
    下一回合自动重开新外部会话（历史重放机制已有）。
-2. **超时**：静默超时（默认 120 秒）+ 总上限（默认 30 分钟）双层。
+2. **超时**：静默超时（默认 120 秒，无**进展活动**即帧静默）+ 总上限（默认 30 分钟）双层。
 3. **展示**：静默 30 秒写一条系统提示（一次即止）；三种强制收场的错误消息统一带
    诊断包。自动刷新的状态行 / 实时日志面板为二期（需动 web 前端）。
 4. **范围**：四家 ACP agent（grok / claude / codex / cursor）通用；zcode 不走 ACP，不涉及。
@@ -36,11 +36,16 @@
 
 ### 1. 活动信标（dsh-acp-agent 传输层，四家通用）
 
-- 传输层记录 `lastActivityAt`：stdout 每到一帧、stderr 每出一行，都算一次打点。
+- 活动分两种，语义不同：
+  - **进展活动**（`lastFrameAt`）：stdout / WebSocket 每到一帧。重置静默计时——
+    帧是对方在干活的最小证据。
+  - **诊断活动**（`lastDiagnosticAt` + stderr 环形缓冲）：stderr 每出一行。
+    **不重置静默计时**，只更新提示与诊断包里的「最近输出」。理由：重试循环会
+    周期性打警告（2026-10-16 事故里 codex 正是如此），若警告算进展，卡死回合
+    永远等不到静默超时。
 - stderr 环形缓冲（现有 20 行）从「遗言专用」升级为随时可读。
-- 对外新增：`lastActivityAt()` 与 `stderrTail()`；`onDeath` 语义不变。
-- Stdio 与 WebSocket（含 GrokServe）两类传输都实现同一信标接口；
-  帧到达即打点，stderr 按各自诊断管道取行。
+- 对外新增：`lastFrameAt()`、`lastDiagnosticAt()`、`stderrTail()`；`onDeath` 不变。
+- Stdio 与 WebSocket（含 GrokServe）两类传输都实现同一信标接口。
 
 ### 2. 网关统一收场（gateway.ts）
 
@@ -49,7 +54,7 @@
 | 触发 | 行为 |
 |---|---|
 | 用户停止 | `end=aborted` 立即收场；`session/cancel` 照发（运行器现有 watchStop 不变）；起宽限计时（默认 3 秒），`run()` 未了结即 `close()` 杀进程 + 丢弃条目 |
-| 静默超时 | 打点重置计时；静默 ≥ stallMs（默认 120 秒）→ `end=error` `ACP_STALLED` 带诊断包 → 杀进程 + 丢弃条目 |
+| 静默超时 | 帧静默 ≥ stallMs（默认 120 秒）→ `end=error` `ACP_STALLED` 带诊断包 → 杀进程 + 丢弃条目 |
 | 总上限 | 现有 600 秒默认迁移为可配 totalMs（默认 30 分钟；0=不限）→ `end=error` `ACP_TIMEOUT` 带诊断包 → 杀进程 + 丢弃条目 |
 
 - **丢弃条件修正**：从「仅 ACP_CONNECTION」扩为四种强制收场统一
