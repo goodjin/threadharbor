@@ -22,7 +22,7 @@ import { describe, expect, it } from 'vitest'
 import { describeVerdict } from '../src/verdict.ts'
 import type { ProbeVerdict } from '../src/verdict.ts'
 import { connectionStatusLabel, heartbeatWord, storagePostureLine } from '../src/panel.tsx'
-import type { HostConnectionStatus } from '../src/panel.tsx'
+import type { HostStatus } from '../src/panel.tsx'
 import type { HostStorePosture } from '../src/host-store.ts'
 import { en, zh } from '../src/locales.ts'
 
@@ -46,6 +46,11 @@ const FAKE_COPY: Record<string, string> = {
   'panel.status.reachableUnsynced': 'STATUS:REACHABLE-UNSYNCED',
   'panel.status.checking': 'STATUS:CHECKING',
   'panel.status.offline': 'STATUS:OFFLINE',
+  'panel.status.self': 'STATUS:SELF',
+  'panel.status.undeployed': 'STATUS:UNDEPLOYED',
+  'panel.status.stopped': 'STATUS:STOPPED',
+  'panel.status.unknown': 'STATUS:UNKNOWN',
+  'panel.status.unchecked': 'STATUS:UNCHECKED',
   'panel.verdict.ok': 'VERDICT:OK',
   'panel.verdict.slow': 'VERDICT:SLOW',
   'panel.verdict.hung': 'VERDICT:HUNG',
@@ -124,16 +129,21 @@ describe('heartbeatWord 走 t', () => {
 })
 
 describe('connectionStatusLabel 走 t', () => {
-  const CASES: readonly (readonly [HostConnectionStatus, string])[] = [
+  const CASES: readonly (readonly [HostStatus, string])[] = [
+    ['self', 'STATUS:SELF'],
+    ['reading', 'STATUS:CHECKING'],
+    ['undeployed', 'STATUS:UNDEPLOYED'],
+    ['stopped', 'STATUS:STOPPED'],
     ['connected', 'STATUS:CONNECTED'],
     ['reachable', 'STATUS:REACHABLE-UNSYNCED'],
-    ['checking', 'STATUS:CHECKING'],
     ['disconnected', 'STATUS:OFFLINE'],
+    ['unchecked', 'STATUS:UNCHECKED'],
+    ['unknown', 'STATUS:UNKNOWN'],
   ]
 
-  it('四种连接状态的词来自 t，两两不同', () => {
+  it('九个状态词全部来自 t，两两不同', () => {
     const words = CASES.map(([, word]) => word)
-    expect(new Set(words).size).toBe(4)
+    expect(new Set(words).size).toBe(9)
     for (const [status, word] of CASES) {
       expect(connectionStatusLabel(status, fakeT), status).toBe(word)
     }

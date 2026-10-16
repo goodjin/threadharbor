@@ -35,6 +35,8 @@ import type { AgentDescriptor, GatewayResult } from './gateway.ts'
 import type { ProbeOutcome } from './probe.ts'
 import { probeReach } from './reach.ts'
 import type { ReachOutcome } from './reach.ts'
+import { hostStatus } from './host-state.ts'
+import type { HostFacts, HostReach, HostStatus } from './host-state.ts'
 import type { HostIdentity, HostRegistration, HostSshInfo, PeerStatus, RegistrationResult, RemoteAgentDeploySelection, SshConnectionInput, SshDeployResult, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
 import { REMOTE_DEPLOY_AGENT_SPECS } from '@threadharbor/dsh-host-federation'
 import type { HostSnapshot } from '@threadharbor/dsh-host-federation'
@@ -208,8 +210,6 @@ type LoadPhase =
  * the channel's presence (self + whoever announces) and the registration list
  * (the operator's inventory, which knows hosts that are not open right now).
  */
-export type HostConnectionStatus = 'connected' | 'reachable' | 'disconnected' | 'checking'
-
 export type HostListRow = {
   readonly hostId: string
   /** What the row leads with: the operator's registered name, else the host's own. */
@@ -217,7 +217,8 @@ export type HostListRow = {
   readonly self: boolean
   /** Present on the channel right now. */
   readonly online: boolean
-  readonly connection: HostConnectionStatus
+  /** hostStatus 推出的那个状态词：这一行显示什么词、给不给探测按钮都由它说话。 */
+  readonly connection: HostStatus
   /** When the host was last heard, in the page's clock; only when online. */
   readonly lastSeen?: number
   /** The address the operator registered; only when there is one. */
@@ -225,22 +226,70 @@ export type HostListRow = {
   readonly launchUrl?: string
 }
 
-export function deriveHostConnection(
-  row: Pick<HostListRow, 'self' | 'online'>,
-  reach?: ReachOutcome | 'probing',
-): HostConnectionStatus {
-  if (reach === 'probing') return 'checking'
-  if (row.self || row.online) return 'connected'
-  if (reach?.kind === 'reachable') return 'reachable'
-  return 'disconnected'
+/**
+ * 存下的 SSH 信息够不够面板自己去读这台机器：只有密钥文件方式、钥匙路径和
+ * 已批准的指纹齐了才成立。密码、粘贴的私钥刻意不落盘，这类主机不可读，
+ * 也就没有部署事实可看——读不读得动由这里一个地方说了算。
+ * 类型收窄成带必填钥匙与指纹的形状，重连路径直接复用同一把尺子。
+ */
+function storedSshUsable(info: HostSshInfo | undefined): info is HostSshInfo & { readonly hostKeyFingerprint: string; readonly identityFile: string } {
+  return info !== undefined
+    && info.authMode === 'identityFile'
+    && info.hostKeyFingerprint !== undefined
+    && info.identityFile !== undefined
 }
 
-export function connectionStatusLabel(status: HostConnectionStatus, t: PanelT): string {
+/**
+ * 面板手头的探测结果读成 host-state 的 HostReach：没探过是 unchecked，
+ * 探测在途是 checking，探完按结论。
+ */
+function hostReachOf(reach: ReachOutcome | 'probing' | undefined): HostReach {
+  if (reach === undefined) return 'unchecked'
+  if (reach === 'probing') return 'checking'
+  return reach.kind === 'reachable' ? 'reachable' : 'unreachable'
+}
+
+/**
+ * 一台主机的事实装配，只此一处：是不是本机、频道在不在场（对方回连）、
+ * 登记簿里存下的远端读数、探测结果、凭据读不读得动。装配只如实搬运——
+ * 读数里缺什么记 unknown，哪个事实算数由 hostStatus 的分支顺序决定。
+ * @param self - 这一行是不是本机。
+ * @param online - 这台机器的频道此刻是否在场（即对方回连可见）。
+ * @param registration - 登记簿条目；路过未登记的主机没有。
+ * @param reach - 对登记地址的探测结果；从未探测时没有。
+ * @returns 推导状态词所需的全部事实。
+ */
+function hostFactsFor(
+  self: boolean,
+  online: boolean,
+  registration: HostRegistration | undefined,
+  reach: ReachOutcome | 'probing' | undefined,
+): HostFacts {
+  return {
+    self,
+    readable: storedSshUsable(registration?.ssh),
+    deployment: registration?.remote?.deployment ?? 'unknown',
+    liveness: registration?.remote?.liveness ?? 'unknown',
+    reach: hostReachOf(reach),
+    reported: online,
+  }
+}
+
+/**
+ * HostStatus 的九个词各查一个 locale 键。词与词不重叠，键与词一一对应，
+ * 这里不留兜底：加状态词先加键。
+ */
+export function connectionStatusLabel(status: HostStatus, t: PanelT): string {
   switch (status) {
+    case 'self': return t('panel.status.self')
+    case 'reading': return t('panel.status.checking')
+    case 'undeployed': return t('panel.status.undeployed')
+    case 'stopped': return t('panel.status.stopped')
     case 'connected': return t('panel.status.connected')
     case 'reachable': return t('panel.status.reachableUnsynced')
-    case 'checking': return t('panel.status.checking')
     case 'disconnected': return t('panel.status.offline')
+    case 'unchecked': return t('panel.status.unchecked')
+    case 'unknown': return t('panel.status.unknown')
   }
 }
 
@@ -261,7 +310,9 @@ export function mergeHostRows(
   reaches?: ReadonlyMap<string, ReachOutcome | 'probing'>,
 ): readonly HostListRow[] {
   const byId = new Map<string, HostListRow>()
+  const registered = new Map(registrations.map(entry => [entry.hostId, entry]))
   for (const host of hosts) {
+    const reach = reaches?.get(host.hostId)
     const base = {
       hostId: host.hostId,
       name: nonEmpty(host.hostTitle) ?? host.hostId,
@@ -271,10 +322,12 @@ export function mergeHostRows(
     }
     byId.set(host.hostId, {
       ...base,
-      connection: deriveHostConnection({ self: base.self, online: true }, reaches?.get(host.hostId)),
+      // 探测在途交给 hostStatus 说「读取中」，不抢答；事实装配只在 hostFactsFor。
+      connection: hostStatus(hostFactsFor(host.self, true, registered.get(host.hostId), reach), reach === 'probing'),
     })
   }
   for (const registration of registrations) {
+    const reach = reaches?.get(registration.hostId)
     const existing = byId.get(registration.hostId)
     const address = nonEmpty(registration.address)
     const launchUrl = nonEmpty(registration.launchUrl)
@@ -289,7 +342,7 @@ export function mergeHostRows(
       }
       byId.set(registration.hostId, {
         ...row,
-        connection: deriveHostConnection(row, reaches?.get(registration.hostId)),
+        connection: hostStatus(hostFactsFor(false, false, registration, reach), reach === 'probing'),
       })
     } else {
       const merged = {
@@ -300,7 +353,7 @@ export function mergeHostRows(
       }
       byId.set(registration.hostId, {
         ...merged,
-        connection: deriveHostConnection(merged, reaches?.get(registration.hostId)),
+        connection: hostStatus(hostFactsFor(merged.self, merged.online, registration, reach), reach === 'probing'),
       })
     }
   }
@@ -603,16 +656,14 @@ export function HostRow(props: {
   // 本机没有登记地址（它的地址就是这个标签页自己的 URL），IP 列以 — 占位，
   // 不硬塞内部标识充数。
   const ip = hostOf(row.address)
-  const status = row.self
-    ? { word: props.t('panel.status.self'), tone: 'self' as const }
-    : row.connection === 'connected'
-      ? { word: props.t('panel.status.connected'), tone: 'online' as const }
-      : row.connection === 'reachable'
-        ? { word: connectionStatusLabel('reachable', props.t), tone: 'online' as const }
-        : row.connection === 'checking'
-          ? { word: connectionStatusLabel('checking', props.t), tone: 'offline' as const }
-          : { word: connectionStatusLabel('disconnected', props.t), tone: 'offline' as const }
-  const connection = row.self ? props.t('panel.status.self') : connectionStatusLabel(row.connection, props.t)
+  // 词只从状态词查表来（connectionStatusLabel），圆点的三色才是这里的取舍：
+  // 本机一色，说得通连上的（已连接/可达未同步）一色，其余一律置灰。
+  const word = connectionStatusLabel(row.connection, props.t)
+  const tone = row.self
+    ? 'self' as const
+    : row.connection === 'connected' || row.connection === 'reachable'
+      ? 'online' as const
+      : 'offline' as const
   return (
     <div data-host-row={row.hostId} className={styles.hostRow}>
       <button
@@ -623,15 +674,15 @@ export function HostRow(props: {
       >
         <span className={styles.hostNameCell}>
           <span
-            data-host-status={status.tone}
+            data-host-status={tone}
             className={styles.hostStatusDot}
-            title={status.word}
-            aria-label={status.word}
+            title={word}
+            aria-label={word}
             role="img"
           />
           <strong data-host-name="" className={styles.hostName}>{row.name}</strong>
         </span>
-        <span data-host-connection="" className={styles.hostConnection} title={status.word}>{connection}</span>
+        <span data-host-connection="" className={styles.hostConnection} title={word}>{word}</span>
         <span data-host-ip="" className={styles.hostIp} title={ip ?? undefined}>{ip ?? '—'}</span>
         {/* 设置按钮是这一行的动作（打开主机的设置页）。整行都是这个按钮，
             这里的 span 是它的第三列外观，不是又一个独立控件。 */}
@@ -1475,8 +1526,8 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   const [deployOpenId, setDeployOpenId] = useState<string | undefined>(undefined)
 
   const storedSshInput = (info: HostSshInfo): (SshConnectionInput & { readonly hostKeyFingerprint: string }) | undefined => {
-    // 密码/粘贴私钥不落盘：免输入重连只对密钥文件方式成立。
-    if (info.authMode !== 'identityFile' || info.hostKeyFingerprint === undefined || info.identityFile === undefined) return undefined
+    // 可读性与事实装配同一把尺子（storedSshUsable）：密码/粘贴私钥不落盘。
+    if (!storedSshUsable(info)) return undefined
     return {
       target: info.target,
       ...(info.port === undefined ? {} : { port: info.port }),
@@ -1660,7 +1711,9 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                     <div data-registry-actions="" className={styles.registryActions}>
                       <p data-host-connection="" className={styles.stateLine}>
                         {props.t('panel.facts.status', { status: connectionStatusLabel(row.connection, props.t) })}
-                        {row.connection === 'disconnected' || row.connection === 'reachable'
+                        {/* 旧模型下这个按钮在「非已连接且非检测中」时出现；
+                            新词表里同一语义就是排除 connected 与 reading。 */}
+                        {!row.self && row.connection !== 'connected' && row.connection !== 'reading'
                           ? (
                               <>
                                 {' '}

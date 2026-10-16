@@ -410,7 +410,7 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
     }
   })
 
-  it('添加：列表页点按钮进表单页，没有事实区；确定后新行以未连接出现', async () => {
+  it('添加：列表页点按钮进表单页，没有事实区；确定后新行以未验证出现', async () => {
     const registry = makeRegistry()
     const { container, root } = await mountPanel(registry)
     try {
@@ -434,10 +434,11 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
       const row = q(container, '[data-host-row="gamma"]')
       expect(row.querySelector('[data-host-name]')?.textContent).toBe('gamma')
       expect(row.querySelector('[data-host-ip]')?.textContent).toBe('192.168.1.30')
-      // 状态不再占一列：以名称旁的圆点标示（title 里带词）。
+      // 状态不再占一列：以名称旁的圆点标示（title 里带词）。刚登记的主机
+      // 没读过、没探过，新模型如实说「未验证」——不再谎称「未连接」。
       const dot = row.querySelector('[data-host-status]')
       expect(dot?.getAttribute('data-host-status')).toBe('offline')
-      expect(dot?.getAttribute('title')).toBe('未连接')
+      expect(dot?.getAttribute('title')).toBe('未验证')
       // IP 字段不带协议：入库时补上 http://。
       expect(registry.list()).toMatchObject([
         { hostId: 'gamma', hostTitle: 'gamma', address: 'http://192.168.1.30:3081' },
@@ -856,5 +857,68 @@ describe('主机详情：使用这台主机 + 远程部署（状态机如实呈�
       await unmount(root)
       delete (globalThis as { fetch?: unknown }).fetch
     }
+  })
+})
+
+describe('主机行状态词由 hostStatus 推导（事实进、一个词出）', () => {
+  const SSH = {
+    target: 'mini.tailb6790d.ts.net',
+    authMode: 'identityFile' as const,
+    identityFile: '/Users/good/.ssh/id_ed25519',
+    hostKeyFingerprint: 'SHA256:abc',
+  }
+
+  /** 登记一台 bench：add 走真实校验，ssh / remote 读数按需补种。 */
+  function seedHost(extra: Record<string, unknown> = {}): HostRegistryPort {
+    const registry = makeRegistry([])
+    const add = registry as unknown as { add: (input: Record<string, unknown>) => { ok: boolean; error?: { detail: string } } }
+    const result = add.add({ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081', ...extra })
+    if (!result.ok) throw new Error(`seed failed: ${result.error?.detail}`)
+    return registry
+  }
+
+  /** 用真实登记簿的 recordRemote 写一次远端读数（readAt 是必填的解析门槛）。 */
+  function recordRemote(registry: HostRegistryPort, deployment: string, liveness: string): void {
+    const port = registry as unknown as { recordRemote: (hostId: string, report: Record<string, unknown>) => boolean }
+    if (!port.recordRemote('bench', { deployment, liveness, readAt: 1_000 })) throw new Error('recordRemote refused the report')
+  }
+
+  async function rowWord(registry: HostRegistryPort): Promise<string | null> {
+    const { container, root } = await mountPanel(registry)
+    try {
+      return q(container, '[data-host-row="bench"] [data-host-connection]').textContent
+    } finally {
+      await unmount(root)
+    }
+  }
+
+  it('读过说没部署：行显示「未部署」，不是含糊的旧词', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemote(registry, 'undeployed', 'unknown')
+    expect(await rowWord(registry)).toBe('未部署')
+  })
+
+  it('读过说部署了但没在跑：行显示「未启动」', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemote(registry, 'deployed', 'stopped')
+    expect(await rowWord(registry)).toBe('未启动')
+  })
+
+  it('部署了但读不出在不在跑：行显示「未知」，如实说不知道', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemote(registry, 'deployed', 'unknown')
+    expect(await rowWord(registry)).toBe('未知')
+  })
+
+  it('部署在跑但没验证过连通性：行显示「未验证」', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemote(registry, 'deployed', 'running')
+    expect(await rowWord(registry)).toBe('未验证')
+  })
+
+  it('没存凭据的主机读不出部署事实：读数不采信，只按连通性说话（未验证）', async () => {
+    const registry = seedHost()
+    recordRemote(registry, 'deployed', 'running')
+    expect(await rowWord(registry)).toBe('未验证')
   })
 })

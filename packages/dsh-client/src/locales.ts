@@ -74,9 +74,8 @@ export const zh = {
   'panel.button.reachTry': '检测可达',
   'panel.button.copyLink': '复制链接',
   /**
-   * 状态词：列表行圆点与详情页状态行共用。main 的状态模型是
-   * row.connection（connected / reachable / checking / disconnected），
-   * 「在线」只留给心跳报数的事实行与 Tailscale 节点徽标。
+   * 状态词：列表行圆点与详情页状态行共用。词表就是 host-state.ts 的
+   * HostStatus 九个词，「在线」只留给心跳报数的事实行与 Tailscale 节点徽标。
    */
   'panel.status.self': '本机',
   'panel.status.online': '在线',
@@ -85,6 +84,10 @@ export const zh = {
   'panel.status.reachable': '可达',
   'panel.status.checking': '检测中',
   'panel.status.reachableUnsynced': '可达未同步',
+  'panel.status.undeployed': '未部署',
+  'panel.status.stopped': '未启动',
+  'panel.status.unknown': '未知',
+  'panel.status.unchecked': '未验证',
   /** 探测的状态行；`{message}` 是接线层报出的错误原文。 */
   'panel.probe.idle': '未探测',
   'panel.probe.running': '探测中……（最多等一分钟）',
@@ -357,6 +360,10 @@ export const en = {
   'panel.status.reachable': 'Reachable',
   'panel.status.checking': 'Checking',
   'panel.status.reachableUnsynced': 'Reachable, not synced',
+  'panel.status.undeployed': 'Not deployed',
+  'panel.status.stopped': 'Not started',
+  'panel.status.unknown': 'Unknown',
+  'panel.status.unchecked': 'Unchecked',
   'panel.probe.idle': 'Not probed yet',
   'panel.probe.running': 'Probing… (up to a minute)',
   'panel.probe.error': 'Probe failed: {message}',

@@ -518,7 +518,8 @@ describe('面板三个界面', () => {
 
   it('状态圆点分三色：本机、在线、未连接', () => {
     const cases: [HostListRow, string][] = [
-      [{ hostId: 'self', name: '本机', self: true, online: true, connection: 'connected' }, 'data-host-status="self"'],
+      // 本机行在新模型里永远携带 'self'（推导表第一条），不再可能是 connected。
+      [{ hostId: 'self', name: '本机', self: true, online: true, connection: 'self' }, 'data-host-status="self"'],
       [{ hostId: 'beta', name: 'b', self: false, online: true, connection: 'connected' }, 'data-host-status="online"'],
       [{ hostId: 'bench', name: 'b', self: false, online: false, connection: 'disconnected' }, 'data-host-status="offline"'],
     ]
