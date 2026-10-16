@@ -97,6 +97,7 @@ const PANEL_KEYS: readonly string[] = [
   'panel.form.fieldStatus',
   'panel.form.fieldIp',
   'panel.form.ipPlaceholder',
+  'panel.form.addressEmptyNote',
   'panel.form.fieldTitle',
   // Storage posture line (storagePostureLine).
   'panel.posture.host',

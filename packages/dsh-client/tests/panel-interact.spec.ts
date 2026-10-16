@@ -566,9 +566,8 @@ describe('从 Tailscale 选：表单前面的选择器', () => {
     })
   }
 
-  it('添加页「从 Tailscale 选」在表单前面；列出 peers（名字+IP+在线徽标），选一台名称和 IP 一起填上且选择器收起', async () => {
-    const registry = makeRegistry()
-    const { container, root } = await mountPanel(registry, undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
+  it('添加页「从 Tailscale 选」在表单前面；列出 peers（名字+IP+在线徽标），选一台只填名称与 SSH 目标、地址栏留空，选择器收起', async () => {
+    const { container, root } = await mountPanel(makeRegistry(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
     try {
       click(container, '[data-action="add-host"]')
       // 入口在表单前面（2026-10-13 用户反馈），不是地址旁的小按钮。
@@ -589,26 +588,25 @@ describe('从 Tailscale 选：表单前面的选择器', () => {
       expect(q(container, '[data-tailscale-peer="labbox"]').getAttribute('data-tailscale-online')).toBe('false')
 
       click(container, '[data-tailscale-peer="bench.tail-scale.ts.net"]')
+      // 选中只填名称与 SSH 目标：Tailscale 的对端只是 SSH 目标，它的 DSH web
+      // 在网上并不直接可达，地址栏留空、由部署或连接成功后写回。
       const name = q(container, '[data-form-field-id]')
       if (!(name instanceof HTMLInputElement)) throw new Error('name input missing')
-      const ip = q(container, '[data-form-field-address]')
-      if (!(ip instanceof HTMLInputElement)) throw new Error('ip input missing')
+      const address = q(container, '[data-form-field-address]')
+      if (!(address instanceof HTMLInputElement)) throw new Error('address input missing')
       expect(name.value).toBe('bench.tail-scale.ts.net')
-      expect(ip.value).toBe('100.101.1.7')
+      expect(address.value).toBe('')
+      const target = q(container, '[data-ssh-target]')
+      if (!(target instanceof HTMLInputElement)) throw new Error('ssh target input missing')
+      expect(target.value).toBe('100.101.1.7')
       expect(container.querySelector('[data-tailscale-picker]')).toBeNull()
       expect(picker).toBeTruthy()
-
-      // 选完直接确定：登记的是名称 + 补协议的 IP。
-      click(container, '[data-form-confirm]')
-      expect(registry.list()).toMatchObject([
-        { hostId: 'bench.tail-scale.ts.net', hostTitle: 'bench.tail-scale.ts.net', address: 'http://100.101.1.7' },
-      ])
     } finally {
       await unmount(root)
     }
   })
 
-  it('离线主机置灰但仍可选：点了照样填名称和 IP，徽标是未连接', async () => {
+  it('离线主机置灰但仍可选：点了照样填名称和 SSH 目标，地址栏照旧留空', async () => {
     const { container, root } = await mountPanel(makeRegistry(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
     try {
       click(container, '[data-action="add-host"]')
@@ -618,10 +616,91 @@ describe('从 Tailscale 选：表单前面的选择器', () => {
       expect(labbox.getAttribute('data-tailscale-online')).toBe('false')
       click(container, '[data-tailscale-peer="labbox"]')
       const name = q(container, '[data-form-field-id]')
-      const ip = q(container, '[data-form-field-address]')
-      if (!(name instanceof HTMLInputElement) || !(ip instanceof HTMLInputElement)) throw new Error('inputs missing')
+      const address = q(container, '[data-form-field-address]')
+      const target = q(container, '[data-ssh-target]')
+      if (!(name instanceof HTMLInputElement) || !(address instanceof HTMLInputElement) || !(target instanceof HTMLInputElement)) throw new Error('inputs missing')
       expect(name.value).toBe('labbox')
-      expect(ip.value).toBe('100.101.2.9')
+      expect(target.value).toBe('100.101.2.9')
+      expect(address.value).toBe('')
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('添加页选中后自动切到 SSH 部署区：IP 进目标栏，名称跟着进主机名栏', async () => {
+    // 探测 HEAD 打通＝部署区可用；选择器选中后 addMode 才真的切得过去。
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/api/threadharbor.host-ssh.operation') && init?.method === 'HEAD') return new Response('', { status: 200 })
+      return new Response(JSON.stringify({ ok: false, error: 'no route' }), { status: 404 })
+    }) as unknown as typeof fetch
+    const { container, root } = await mountPanel(makeRegistry(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
+    try {
+      await settle()
+      click(container, '[data-action="add-host"]')
+      click(container, '[data-action="tailscale-pick"]')
+      await settle()
+      click(container, '[data-tailscale-peer="bench.tail-scale.ts.net"]')
+      expect(container.querySelector('[data-ssh-deploy]')).not.toBeNull()
+      const target = q(container, '[data-ssh-target]')
+      if (!(target instanceof HTMLInputElement)) throw new Error('ssh target input missing')
+      expect(target.value).toBe('100.101.1.7')
+      const hostId = q(container, '[data-ssh-hostid]')
+      if (!(hostId instanceof HTMLInputElement)) throw new Error('hostId input missing')
+      expect(hostId.value).toBe('bench.tail-scale.ts.net')
+    } finally {
+      await unmount(root)
+      delete (globalThis as { fetch?: unknown }).fetch
+    }
+  })
+
+  it('详情页选中不改已登记的地址：输入框原样，登记里 address 前后一致', async () => {
+    const registry = makeRegistry([{ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' }])
+    const { container, root } = await mountPanel(registry, undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
+    try {
+      click(container, '[data-host-open="bench"]')
+      const before = registry.list().find(entry => entry.hostId === 'bench')?.address
+      const address = q(container, '[data-form-field-address]')
+      if (!(address instanceof HTMLInputElement)) throw new Error('address input missing')
+      expect(address.value).toBe('192.168.1.20:3081')
+
+      click(container, '[data-action="tailscale-pick"]')
+      await settle()
+      click(container, '[data-tailscale-peer="bench.tail-scale.ts.net"]')
+      // 名称栏照填（可编辑），地址输入框一个字都不动，登记簿也不动。
+      const name = q(container, '[data-form-field-id]')
+      if (!(name instanceof HTMLInputElement)) throw new Error('name input missing')
+      expect(name.value).toBe('bench.tail-scale.ts.net')
+      const after = q(container, '[data-form-field-address]')
+      if (!(after instanceof HTMLInputElement)) throw new Error('address input missing')
+      expect(after.value).toBe('192.168.1.20:3081')
+      expect(registry.list().find(entry => entry.hostId === 'bench')?.address).toBe(before)
+      expect(before).toBe('http://192.168.1.20:3081')
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('手填地址的路径不受影响：不选 Tailscale、直接填 IP 并确定，登记的地址补上协议', async () => {
+    const registry = makeRegistry()
+    const { container, root } = await mountPanel(registry)
+    try {
+      click(container, '[data-action="add-host"]')
+      type(container, '[data-form-field-id]', 'bench.tail-scale.ts.net')
+      type(container, '[data-form-field-address]', '100.101.1.7')
+      click(container, '[data-form-confirm]')
+      expect(registry.list()).toMatchObject([
+        { hostId: 'bench.tail-scale.ts.net', hostTitle: 'bench.tail-scale.ts.net', address: 'http://100.101.1.7' },
+      ])
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('地址栏旁的注记把话说在面上：留空由部署或连接自动写入', async () => {
+    const { container, root } = await mountPanel(makeRegistry(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
+    try {
+      click(container, '[data-action="add-host"]')
+      expect(q(container, '[data-address-empty-note]').textContent).toBe('留空 = 由部署或连接自动写入')
     } finally {
       await unmount(root)
     }

@@ -826,6 +826,11 @@ function SshDeploySection(props: {
   readonly onError: (message: string) => void
   /** Pre-fill from a stored registration (detail page); absent on first add. */
   readonly initial?: SshSeedFacts | undefined
+  /**
+   * 选择器带进来的 SSH 目标初值（AgentPanel 的 sshTargetDraft）：挂载这一次
+   * 落进 target；已存的登记凭据（initial.target）优先于它，不被草稿盖掉。
+   */
+  readonly initialTarget?: string | undefined
   /** Detail page locks the host identity: no hostId/hostTitle inputs. */
   readonly lockHost?: boolean | undefined
   /** When provided, a connect-without-redeploy button joins the actions. */
@@ -840,7 +845,7 @@ function SshDeploySection(props: {
   /** The locale seat, threaded from the panel. */
   readonly t: PanelT
 }): ReactNode {
-  const [target, setTarget] = useState(props.initial?.target ?? '')
+  const [target, setTarget] = useState(props.initial?.target ?? props.initialTarget ?? '')
   const [port, setPort] = useState(props.initial?.port === undefined ? '22' : String(props.initial.port))
   const [user, setUser] = useState(props.initial?.user ?? '')
   const [proxyJump, setProxyJump] = useState(props.initial?.proxyJump ?? '')
@@ -1271,6 +1276,11 @@ export function HostFormPage(props: {
   readonly onCancel: () => void
   /** 从 Tailscale 选的口（表单前面的入口）；缺省就不显示那个按钮。 */
   readonly tailscale?: TailscalePort | undefined
+  /** 面板持有的 SSH 目标草稿：添加页的目标输入框显示它，选择器往里写。 */
+  readonly sshTargetDraft?: string | undefined
+  readonly onSshTargetChange?: (value: string) => void
+  /** 选中一台对端：面板把 IP 落进 sshTargetDraft（添加页顺带切到 SSH 部署区）。 */
+  readonly onPickedPeer?: (peer: TailscalePeer) => void
   /** The locale seat, threaded from the panel. */
   readonly t: PanelT
 }): ReactNode {
@@ -1289,8 +1299,8 @@ export function HostFormPage(props: {
   const idMatch = reported?.reportedId === undefined ? undefined : reported.reportedId === idDraft.trim()
   const addressHidden = props.mode === 'view' && !fields.address && props.values.address === ''
 
-  // 从 Tailscale 选（表单前面的入口）：点开→读清单→列出；选一台→名称和 IP
-  // 一起填上＋收起；刷新让主机侧重跑一次；收起只关不填。
+  // 从 Tailscale 选（表单前面的入口）：点开→读清单→列出；选一台→名称填上、
+  // IP 交给 SSH 目标＋收起（地址栏不动）；刷新让主机侧重跑一次；收起只关不填。
   const [picker, setPicker] = useState<{ open: boolean; result?: TailscalePeersResult | undefined }>({ open: false })
   const canPickAddress = props.tailscale !== undefined && fields.address
   const openPicker = async (): Promise<void> => {
@@ -1306,10 +1316,11 @@ export function HostFormPage(props: {
     setPicker({ open: true, result })
   }
   const pickPeer = (peer: TailscalePeer): void => {
-    // 选中即填两个字段：名称用 peer 名，IP 用它的 tailnet 地址；端口不一样
-    // 的在 IP 里自己补（如 100.101.1.7:3081）。
+    // 选中只填两处：名称栏填 peer 名，IP 交给面板的 SSH 目标草稿
+    // （onPickedPeer）；地址栏不动——Tailscale 的对端只是 SSH 目标，它的
+    // DSH web 在网上并不直接可达，地址由部署或连接成功后写回（2026-10-15）。
     setIdDraft(peer.name)
-    setIpDraft(peer.ip)
+    props.onPickedPeer?.(peer)
     setPicker({ open: false })
   }
   return (
@@ -1454,6 +1465,9 @@ export function HostFormPage(props: {
                 <label className={styles.field}>
                   {props.t('panel.form.fieldIp')}
                   {fields.address
+                    ? <span data-address-empty-note="" className={styles.note}>{props.t('panel.form.addressEmptyNote')}</span>
+                    : undefined}
+                  {fields.address
                     ? (
                         <input
                           value={ipDraft}
@@ -1467,6 +1481,25 @@ export function HostFormPage(props: {
                 </label>
               )}
         </form>
+        {/* 添加页的 SSH 目标输入：选择器写的草稿在这里显示，也供人手填；
+            部署区挂载时以它为初值（initialTarget）。放在 host form 外面——
+            主机的登记字段只有名称和地址两个（表单字段的钉子测试守着这条），
+            SSH 目标是部署区的草稿，不是登记字段。详情页不渲染——那里的部署
+            区有自己的初值来源（登记凭据）。 */}
+        {props.mode === 'new'
+          ? (
+              <label className={styles.field}>
+                {props.t('panel.ssh.targetLabel')}
+                <input
+                  value={props.sshTargetDraft ?? ''}
+                  data-ssh-target=""
+                  className={styles.input}
+                  onChange={event => { props.onSshTargetChange?.(event.target.value) }}
+                  placeholder={props.t('panel.ssh.targetPlaceholder')}
+                />
+              </label>
+            )
+          : undefined}
         {props.message === undefined
           ? undefined
           : <p data-form-message={props.message.tone} className={props.message.tone === 'ok' ? styles.stateLine : styles.stateBad}>{props.message.text}</p>}
@@ -1517,6 +1550,9 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   const [addIdDraft, setAddIdDraft] = useState('')
   const [addTitleDraft, setAddTitleDraft] = useState('')
   const [addAddressDraft, setAddAddressDraft] = useState('')
+  // 选择器写、部署区读的 SSH 目标草稿：一份在面板手里，添加页的输入框和
+  // 部署区的初值都从它来（选中的对端只是 SSH 目标，地址留给部署/连接写）。
+  const [sshTargetDraft, setSshTargetDraft] = useState('')
   const [sshDeployAvailable, setSshDeployAvailable] = useState(false)
   useEffect(() => {
     void probeSshDeployApi().then(setSshDeployAvailable)
@@ -1835,6 +1871,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
               hostTitle={addTitleDraft}
               onHostIdChange={setAddIdDraft}
               onHostTitleChange={setAddTitleDraft}
+              initialTarget={sshTargetDraft}
               onError={message => { setFormMessage({ tone: 'bad', text: message }) }}
               onDeployed={(deployResult, sshFacts) => {
                 const result = props.registry.add({
@@ -1884,6 +1921,15 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
           }}
           onCancel={openList}
           tailscale={props.tailscale}
+          sshTargetDraft={sshTargetDraft}
+          onSshTargetChange={setSshTargetDraft}
+          onPickedPeer={peer => {
+            // 添加页选中：名称进部署区的主机名、IP 进目标栏，顺带切到部署区
+            // （不可用时留在本页，草稿仍在）；地址没人碰。
+            setAddIdDraft(peer.name)
+            setSshTargetDraft(peer.ip)
+            setAddMode('ssh')
+          }}
           t={props.t}
         />
       </div>
@@ -1947,6 +1993,11 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
             onConfirm={values => row.self ? confirmSelf(values) : confirmEdit(view.hostId, values)}
             onCancel={openList}
             tailscale={props.tailscale}
+            onPickedPeer={peer => {
+              // 详情页选中：IP 只落进草稿（部署区打开时的初值），登记的地址
+              // 与名称都不动——这里不切模式。
+              setSshTargetDraft(peer.ip)
+            }}
             t={props.t}
             footer={registration !== undefined
               ? (
@@ -2073,6 +2124,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                                     hostTitle={row.name}
                                     lockHost
                                     initial={registration.ssh}
+                                    initialTarget={sshTargetDraft}
                                     autoInspect={approveAndReadId === row.hostId}
                                     onApproved={approveAndReadId === row.hostId
                                       ? ssh => {

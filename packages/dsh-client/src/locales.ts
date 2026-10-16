@@ -126,6 +126,8 @@ export const zh = {
   'panel.form.fieldStatus': '状态',
   'panel.form.fieldIp': 'IP',
   'panel.form.ipPlaceholder': '100.101.1.7，可带端口：100.101.1.7:3081',
+  /** 地址栏的注记（2026-10-15）：Tailscale 对端只是 SSH 目标，地址由部署或连接写回。 */
+  'panel.form.addressEmptyNote': '留空 = 由部署或连接自动写入',
   'panel.form.fieldTitle': '显示名',
   /** 存储姿态行（storagePostureLine）；`{detail}` 是存储层报出的原始原因。 */
   'panel.posture.host': '登记与本机名称保存在这台机器上：换浏览器、换标签页、清缓存都不会丢。',
@@ -419,6 +421,7 @@ export const en = {
   'panel.form.fieldStatus': 'Status',
   'panel.form.fieldIp': 'IP',
   'panel.form.ipPlaceholder': '100.101.1.7, with an optional port: 100.101.1.7:3081',
+  'panel.form.addressEmptyNote': 'Leave empty — a deploy or connect fills it in automatically',
   'panel.form.fieldTitle': 'Display name',
   'panel.posture.host': 'Registrations and this machine\'s name are saved on this machine: a different browser or tab, or a cleared cache, loses nothing.',
   'panel.posture.loading': 'Reading saved registrations from this machine…',
