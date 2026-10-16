@@ -18,12 +18,12 @@ import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
 import { AgentPanel } from '../src/panel.tsx'
-import type { AgentListPort, AgentPanelProps, HostRegistryPort, TailscalePeer, TailscalePeersResult, TailscalePort } from '../src/panel.tsx'
+import type { AgentListPort, AgentPanelProps, HostRegistryPort, RemotePort, TailscalePeer, TailscalePeersResult, TailscalePort } from '../src/panel.tsx'
 import type { RollUpSection } from '../src/rollup-section.ts'
 import type { ConfiguredIdentity } from '../src/settings-source.ts'
 import type { AgentDescriptor, GatewayResult } from '../src/gateway.ts'
 import { hostRegistry } from '@threadharbor/dsh-host-federation'
-import type { HostIdentity, HostSnapshot } from '@threadharbor/dsh-host-federation'
+import type { HostIdentity, HostSnapshot, PeerReport, SshConnectionInput } from '@threadharbor/dsh-host-federation'
 import type { HostStorePosture } from '../src/host-store.ts'
 import { zh } from '../src/locales.ts'
 
@@ -151,7 +151,7 @@ const TWO_PEERS: readonly TailscalePeer[] = [
   { name: 'labbox', ip: '100.101.2.9', online: false },
 ]
 
-async function mountPanel(registry: HostRegistryPort, hostStore?: FakeHostStore, rollUp?: FakeRollUp, tailscale?: TailscalePort): Promise<{ container: HTMLElement; root: Root }> {
+async function mountPanel(registry: HostRegistryPort, hostStore?: FakeHostStore, rollUp?: FakeRollUp, tailscale?: TailscalePort, remote?: RemotePort): Promise<{ container: HTMLElement; root: Root }> {
   const container = document.createElement('div')
   document.body.appendChild(container)
   const root = createRoot(container)
@@ -163,6 +163,7 @@ async function mountPanel(registry: HostRegistryPort, hostStore?: FakeHostStore,
     t: zhT,
     ...(hostStore === undefined ? {} : { hostStore }),
     ...(tailscale === undefined ? {} : { tailscale }),
+    ...(remote === undefined ? {} : { remote }),
   }
   await act(async () => {
     root.render(createElement(AgentPanel, props))
@@ -920,5 +921,291 @@ describe('主机行状态词由 hostStatus 推导（事实进、一个词出）'
     const registry = seedHost()
     recordRemote(registry, 'deployed', 'running')
     expect(await rowWord(registry)).toBe('未验证')
+  })
+})
+
+/**
+ * 带原型的假远端读取口：read/start 记下每次调用与实参，读数按构造时的剧本
+ * 给。ssh-deploy 路由层的检查主机密钥（inspect）走 HTTP，测试里用 stub 掉的
+ * fetch 顶上，往同一份 calls 里记 'inspect'，调用次序因此可以被断言。
+ */
+class FakeRemote implements RemotePort {
+  public readonly calls: string[] = []
+  public readonly readInputs: Array<SshConnectionInput & { readonly hostKeyFingerprint: string }> = []
+
+  constructor(
+    private readonly readResult:
+      | { readonly ok: true; readonly report: PeerReport }
+      | { readonly ok: false; readonly error: string },
+    private readonly startResult:
+      | { readonly ok: true; port: number }
+      | { readonly ok: false; readonly error: string } = { ok: true, port: 3081 },
+    private readonly hangRead = false,
+  ) {}
+
+  /** fetch stub 用：把 inspect 的调用记进同一次序。 */
+  note(entry: string): void {
+    this.calls.push(entry)
+  }
+
+  async read(ssh: SshConnectionInput & { readonly hostKeyFingerprint: string }): Promise<{ readonly ok: true; readonly report: PeerReport } | { readonly ok: false; readonly error: string }> {
+    this.calls.push('read')
+    this.readInputs.push(ssh)
+    if (this.hangRead) return new Promise(() => {})
+    return this.readResult.ok ? { ok: true, report: this.readResult.report } : { ok: false, error: this.readResult.error }
+  }
+
+  async start(ssh: SshConnectionInput & { readonly hostKeyFingerprint: string }, port: number): Promise<{ readonly ok: true; readonly port: number } | { readonly ok: false; readonly error: string }> {
+    this.calls.push(`start:${port}`)
+    return this.startResult.ok ? { ok: true, port: this.startResult.port } : { ok: false, error: this.startResult.error }
+  }
+}
+
+/** 一次成功的远端读数：部署了、在跑、回环监听。 */
+const RUNNING_REPORT: PeerReport = {
+  pluginsInstalled: true,
+  listen: 'loopback',
+  port: 3081,
+  launchUrl: 'http://127.0.0.1:3081/?token=t',
+  liveness: 'running',
+}
+
+describe('详情页按钮表与对方状态读取（hostActions 出按钮，remote 口出读数）', () => {
+  const SSH = {
+    target: 'mini.tailb6790d.ts.net',
+    authMode: 'identityFile' as const,
+    identityFile: '/Users/good/.ssh/id_ed25519',
+    hostKeyFingerprint: 'SHA256:abc',
+  }
+
+  /** 登记一台 bench：add 走真实校验，ssh / remote 读数按需补种。 */
+  function seedHost(extra: Record<string, unknown> = {}): HostRegistryPort {
+    const registry = makeRegistry([])
+    const add = registry as unknown as { add: (input: Record<string, unknown>) => { ok: boolean; error?: { detail: string } } }
+    const result = add.add({ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081', ...extra })
+    if (!result.ok) throw new Error(`seed failed: ${result.error?.detail}`)
+    return registry
+  }
+
+  /** 按原始形状写一条远端读数（裁定 1 的用例需要带 livenessNote 的记录）。 */
+  function recordRemoteRaw(registry: HostRegistryPort, report: Record<string, unknown>): void {
+    const port = registry as unknown as { recordRemote: (hostId: string, report: Record<string, unknown>) => boolean }
+    if (!port.recordRemote('bench', report as never)) throw new Error('recordRemote refused the report')
+  }
+
+  /** 把 async 链上的微任务与重渲染冲干净。 */
+  async function flush(times = 1): Promise<void> {
+    for (let i = 0; i < times; i += 1) {
+      await act(async () => { await Promise.resolve() })
+    }
+  }
+
+  it('部署态未部署：详情页状态词是未部署，按钮是部署而不是启动对方', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemoteRaw(registry, { deployment: 'undeployed', liveness: 'unknown', readAt: 1_000 })
+    const { container, root } = await mountPanel(registry)
+    try {
+      click(container, '[data-host-open="bench"]')
+      expect(q(container, '[data-host-connection]').textContent).toContain('未部署')
+      expect(q(container, '[data-host-actions] [data-action="deploy"]')).toBeTruthy()
+      expect(container.querySelector('[data-host-actions] [data-action="start-peer"]')).toBeNull()
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('运行态未启动：详情页是启动对方 DSH 按钮，点了走 remote.start 再重读', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemoteRaw(registry, { deployment: 'deployed', liveness: 'stopped', readAt: 1_000 })
+    // 进入详情页本来就会自动读一次；这里让读取失败，未启动的旧读数才留得住，
+    // 「未启动」这个状态词也因此可断言（读取失败不动旧读数，裁定 6）。
+    const remote = new FakeRemote({ ok: false, error: '读不了' })
+    const { container, root } = await mountPanel(registry, undefined, undefined, undefined, remote)
+    try {
+      click(container, '[data-host-open="bench"]')
+      await flush(3)
+      expect(q(container, '[data-host-connection]').textContent).toContain('未启动')
+      expect(q(container, '[data-host-actions] [data-action="start-peer"]')).toBeTruthy()
+      expect(container.querySelector('[data-host-actions] [data-action="deploy"]')).toBeNull()
+      click(container, '[data-host-actions] [data-action="start-peer"]')
+      await flush(3)
+      expect(remote.calls).toContain('start:3081')
+      // 启动成功后立刻重读一次：按钮给出的不是「应该启动了」，是读回来的事实。
+      expect(remote.calls).toContain('read')
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('隧道在线：详情页是打开页面按钮', async () => {
+    const registry = seedHost()
+    const rollUp = new FakeRollUp([
+      SELF_HOST,
+      { hostId: 'bench', hostTitle: '测试机', lastSeen: 1_000, self: false },
+    ])
+    vi.stubGlobal('fetch', vi.fn(async () => ({ status: 200, json: async () => ({ ok: true, value: {} }) })))
+    try {
+      const { container, root } = await mountPanel(registry, undefined, rollUp)
+      try {
+        click(container, '[data-host-open="bench"]')
+        // 初始未验证：按钮是检查能否打开；探完可达且对方报过数，就是已连接。
+        click(container, '[data-host-actions] [data-action="check-reach"]')
+        await flush(2)
+        expect(q(container, '[data-host-connection]').textContent).toContain('已连接')
+        expect(q(container, '[data-host-actions] [data-action="open-page"]')).toBeTruthy()
+      } finally {
+        await unmount(root)
+      }
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('读失败时保留上次读数：失败原因和上次读到的同时在页面上', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemoteRaw(registry, { deployment: 'deployed', liveness: 'running', readAt: 1_000 })
+    const remote = new FakeRemote({ ok: false, error: 'SSH 读不了' })
+    const { container, root } = await mountPanel(registry, undefined, undefined, undefined, remote)
+    try {
+      click(container, '[data-host-open="bench"]')
+      await flush(3)
+      expect(q(container, '[data-read-failed]').textContent).toContain('这次没读到：SSH 读不了')
+      expect(q(container, '[data-last-read]').textContent).toContain('上次读到的是')
+      expect(q(container, '[data-last-read]').textContent).toContain('已部署')
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('点刷新对方状态会用已保存的 SSH 凭据去读：identityFile 与指纹都来自登记', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemoteRaw(registry, { deployment: 'undeployed', liveness: 'unknown', readAt: 1_000 })
+    // 自动读与手动点的读都失败：旧读数留得住，「读一次对方状态」按钮才在。
+    const remote = new FakeRemote({ ok: false, error: '读不了' })
+    const { container, root } = await mountPanel(registry, undefined, undefined, undefined, remote)
+    try {
+      click(container, '[data-host-open="bench"]')
+      await flush(3)
+      click(container, '[data-host-actions] [data-action="read-peer"]')
+      await flush(3)
+      // 进页面的自动读加上点的这一次，每一次都用登记里存的凭据。
+      expect(remote.readInputs.length).toBeGreaterThanOrEqual(2)
+      for (const input of remote.readInputs) {
+        expect(input.identityFile).toBe(SSH.identityFile)
+        expect(input.hostKeyFingerprint).toBe(SSH.hostKeyFingerprint)
+        expect(input.target).toBe(SSH.target)
+      }
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('密码认证的主机明说读不了：给说明文字，不去发起读取', async () => {
+    const registry = seedHost({ ssh: { target: 'mini.tailb6790d.ts.net', authMode: 'password' } })
+    const remote = new FakeRemote({ ok: false, error: '不应被调用' })
+    const { container, root } = await mountPanel(registry, undefined, undefined, undefined, remote)
+    try {
+      click(container, '[data-host-open="bench"]')
+      await flush(2)
+      expect(q(container, '[data-note-password-auth]').textContent).toContain('凭据不保存')
+      expect(remote.calls).toEqual([])
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('没批准主机密钥时给的是批准并读取；点它先检查密钥再自动读取', async () => {
+    const registry = seedHost({ ssh: { ...SSH, hostKeyFingerprint: 'unapproved' } })
+    const remote = new FakeRemote({ ok: true, report: RUNNING_REPORT })
+    const approvedKey = { target: 'mini.tailb6790d.ts.net', hostKeyFingerprint: 'SHA256:real', algorithm: 'ssh-ed25519' }
+    vi.stubGlobal('fetch', vi.fn(async (input: unknown) => {
+      if (String(input).includes('host-ssh.inspect')) {
+        remote.note('inspect')
+        return { status: 200, json: async () => ({ ok: true, value: { keys: [approvedKey] } }) }
+      }
+      return { status: 200, json: async () => ({ ok: true, value: {} }) }
+    }))
+    try {
+      const { container, root } = await mountPanel(registry, undefined, undefined, undefined, remote)
+      try {
+        click(container, '[data-host-open="bench"]')
+        await flush(2)
+        expect(q(container, '[data-host-actions] [data-action="approve-and-read"]')).toBeTruthy()
+        expect(container.querySelector('[data-host-actions] [data-action="retry-read"]')).toBeNull()
+        click(container, '[data-host-actions] [data-action="approve-and-read"]')
+        await flush(5)
+        expect(remote.calls).toEqual(['inspect', 'read'])
+        expect(remote.readInputs[0]?.hostKeyFingerprint).toBe('SHA256:real')
+      } finally {
+        await unmount(root)
+      }
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('主机行只有状态词：列表行里不出现打开页面/连接并打开/检查能否打开', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemoteRaw(registry, { deployment: 'deployed', liveness: 'running', readAt: 1_000 })
+    const { container, root } = await mountPanel(registry)
+    try {
+      click(container, '[data-host-open="bench"]')
+      // 详情页确实有这些按钮（健全性前提），随后回列表。
+      expect(q(container, '[data-host-actions] [data-action="check-reach"]')).toBeTruthy()
+      click(container, '[data-form-cancel-bottom]')
+      for (const action of ['open-page', 'connect-open', 'check-reach']) {
+        expect(container.querySelector(`[data-host-row] [data-action="${action}"]`)).toBeNull()
+      }
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('带存活附注的读数不说未部署：记录说没装但机器没来得及回答时，按未知呈现（裁定1）', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemoteRaw(registry, { deployment: 'undeployed', liveness: 'unknown', livenessNote: '读取超时', readAt: 1_000 })
+    const { container, root } = await mountPanel(registry)
+    try {
+      // 列表行不说未部署。
+      expect(q(container, '[data-host-row="bench"] [data-host-connection]').textContent).toBe('未知')
+      click(container, '[data-host-open="bench"]')
+      // 详情页也不说未部署——否则操作者会往一台可能已装好的机器上再部署。
+      expect(q(container, '[data-host-connection]').textContent).toContain('未知')
+      expect(container.querySelector('[data-host-actions] [data-action="deploy"]')).toBeNull()
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('已部署但存活读不出：重试读取是主按钮（裁定2 的唯一例外）', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemoteRaw(registry, { deployment: 'deployed', liveness: 'unknown', readAt: 1_000 })
+    const { container, root } = await mountPanel(registry)
+    try {
+      click(container, '[data-host-open="bench"]')
+      expect(q(container, '[data-host-connection]').textContent).toContain('未知')
+      const actions = [...q(container, '[data-host-actions]').querySelectorAll('[data-action]')]
+      expect(actions[0]?.getAttribute('data-action')).toBe('retry-read')
+      expect(actions.map(action => action.getAttribute('data-action'))).toContain('fill-ssh')
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('读取在途：行和详情页都说检测中，不抢答', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemoteRaw(registry, { deployment: 'deployed', liveness: 'running', readAt: 1_000 })
+    const remote = new FakeRemote({ ok: true, report: RUNNING_REPORT }, { ok: true, port: 3081 }, true)
+    const { container, root } = await mountPanel(registry, undefined, undefined, undefined, remote)
+    try {
+      click(container, '[data-host-open="bench"]')
+      await flush(2)
+      expect(q(container, '[data-host-connection]').textContent).toContain('检测中')
+      // 回列表：读取还悬着，行同样说检测中，不说旧读数的词。
+      click(container, '[data-form-cancel-bottom]')
+      expect(q(container, '[data-host-row="bench"] [data-host-connection]').textContent).toBe('检测中')
+    } finally {
+      await unmount(root)
+    }
   })
 })

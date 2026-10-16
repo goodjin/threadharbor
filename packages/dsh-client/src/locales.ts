@@ -74,6 +74,17 @@ export const zh = {
   'panel.button.reachTry': '检测可达',
   'panel.button.copyLink': '复制链接',
   /**
+   * 详情页按钮表（hostActions）的动作文案。deploy/fill-ssh/open-page/
+   * connect-open 复用既有的 deploy.use 词汇；这里只收状态模型自己的词。
+   */
+  'panel.button.readPeer': '读一次对方状态',
+  'panel.button.startPeer': '启动对方 DSH',
+  'panel.button.redeploy': '重新部署',
+  'panel.button.checkReach': '检查能否打开',
+  'panel.button.retryRead': '重试读取',
+  'panel.button.approveAndRead': '批准并读取',
+  'panel.button.keyNotApproved': '还没批准这台机器的主机密钥',
+  /**
    * 状态词：列表行圆点与详情页状态行共用。词表就是 host-state.ts 的
    * HostStatus 九个词，「在线」只留给心跳报数的事实行与 Tailscale 节点徽标。
    */
@@ -140,6 +151,14 @@ export const zh = {
   'panel.facts.match': '（与填写一致）',
   'panel.facts.idMismatch': '（与填写的不一样；两边都保留，把名称改成它，两边就对上了）',
   'panel.facts.reportedTitle': '主机自报名称：{name}',
+  /** 详情页远端读数事实区：标签与取值词。取值词缺的两种（已部署/运行中）就地补。 */
+  'panel.facts.deployment': '部署',
+  'panel.facts.liveness': '运行',
+  'panel.facts.deployed': '已部署',
+  'panel.facts.running': '运行中',
+  'panel.facts.entry': '本机入口',
+  'panel.facts.reported': '对方回连',
+  'panel.facts.readAt': '读到的时刻',
   /** 删除登记的确认句。 */
   'panel.registry.removeNote': '只从这台机器的登记列表里移除，不动远端那台机器。确定？',
   /** 详情页登记区：打开含 token 页面的链接。 */
@@ -164,6 +183,10 @@ export const zh = {
   'panel.notes.selfHeal': '连接由主机自己照看：发现断了会自动丢弃并在下一次对话时自动重连，无需在这里操作。',
   'panel.notes.onlineMeaning': '「在线」= 这台机器的页面在同一个浏览器的同源标签页里开着并按心跳报数；关闭或崩溃的页面过了静默窗口会自动转为未列出。',
   'panel.notes.otherSource': '另一台机器（另一个源）的页面不在这个频道里；它的行以「未连接」出现，靠的是登记。',
+  /** 详情页读取失败的留痕：失败原因与上一次读到的话同时在场，不留空白。 */
+  'panel.notes.readFailed': '这次没读到：{reason}',
+  'panel.notes.lastRead': '上次读到的是：{summary}（{at}）',
+  'panel.notes.passwordAuth': '这台主机用密码认证，凭据不保存，读不了对方状态',
   /** 列表页的空态。 */
   'panel.list.empty': '还没有主机。点「添加新主机」登记第一台。',
   /**
@@ -353,6 +376,14 @@ export const en = {
   'panel.button.settings': 'Settings',
   'panel.button.reachTry': 'Check reachability',
   'panel.button.copyLink': 'Copy link',
+  /** Detail-page action-table copy. deploy/fill-ssh/open-page/connect-open reuse the existing use wording. */
+  'panel.button.readPeer': 'Read peer status once',
+  'panel.button.startPeer': 'Start the peer DSH',
+  'panel.button.redeploy': 'Redeploy',
+  'panel.button.checkReach': 'Check it opens',
+  'panel.button.retryRead': 'Retry the read',
+  'panel.button.approveAndRead': 'Approve and read',
+  'panel.button.keyNotApproved': "This machine's host key has not been approved yet",
   'panel.status.self': 'This machine',
   'panel.status.online': 'Online',
   'panel.status.offline': 'Not connected',
@@ -406,6 +437,14 @@ export const en = {
   'panel.facts.match': ' (matches what was entered)',
   'panel.facts.idMismatch': ' (differs from what was entered; both stay — set the name to this one and the two line up)',
   'panel.facts.reportedTitle': 'Host-reported name: {name}',
+  /** Detail-page remote-read facts: labels and their value words; the two missing value words live here. */
+  'panel.facts.deployment': 'Deployment',
+  'panel.facts.liveness': 'Process',
+  'panel.facts.deployed': 'Deployed',
+  'panel.facts.running': 'Running',
+  'panel.facts.entry': 'Entry on this machine',
+  'panel.facts.reported': 'Peer reporting in',
+  'panel.facts.readAt': 'Read at',
   'panel.registry.removeNote': "Removes it from this machine's registration list only; the remote machine is untouched. Delete?",
   'panel.registry.launchLink': 'Connect (opens the page that carries the token)',
   'panel.reach.probeTimeout': 'The check timed out ({ms} ms)',
@@ -423,6 +462,10 @@ export const en = {
   'panel.notes.selfHeal': 'The host minds its own connections: a broken one is dropped on its own and reconnected at the next turn — nothing to do here.',
   'panel.notes.onlineMeaning': '"Online" = this machine\'s page is open in a same-origin tab of the same browser and announcing on its heartbeat; a closed or crashed page drops out of the list on its own after the quiet window.',
   'panel.notes.otherSource': "Another machine's page (another origin) is not on this channel; its row shows up as \"Not connected\", carried by the registration.",
+  /** Detail-page read-failure trail: the reason and the last good read stay on screen together. */
+  'panel.notes.readFailed': 'Nothing read this time: {reason}',
+  'panel.notes.lastRead': 'Last read said: {summary} ({at})',
+  'panel.notes.passwordAuth': 'This host authenticates with a password; the credential is never stored, so the peer status cannot be read',
   'panel.list.empty': 'No hosts yet. Press "Add a new host" to register the first one.',
   // The ssh-deploy section. The intro is two keys because one sentence mixes
   // a <strong> and a <code> segment and richSegments wraps one kind per call;

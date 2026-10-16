@@ -54,6 +54,14 @@ const PANEL_KEYS: readonly string[] = [
   'panel.button.settings',
   'panel.button.reachTry',
   'panel.button.copyLink',
+  // Detail-page action table (hostActions) and the read flow's buttons.
+  'panel.button.readPeer',
+  'panel.button.startPeer',
+  'panel.button.redeploy',
+  'panel.button.checkReach',
+  'panel.button.retryRead',
+  'panel.button.approveAndRead',
+  'panel.button.keyNotApproved',
   // Status words: the row badge and the detail page's status line.
   'panel.status.self',
   'panel.status.online',
@@ -112,6 +120,14 @@ const PANEL_KEYS: readonly string[] = [
   'panel.facts.match',
   'panel.facts.idMismatch',
   'panel.facts.reportedTitle',
+  // The remote-read facts block (labels and the two value words with no status-word reuse).
+  'panel.facts.deployment',
+  'panel.facts.liveness',
+  'panel.facts.deployed',
+  'panel.facts.running',
+  'panel.facts.entry',
+  'panel.facts.reported',
+  'panel.facts.readAt',
   // The remove-registration confirmation and the launch link.
   'panel.registry.removeNote',
   'panel.registry.launchLink',
@@ -131,6 +147,10 @@ const PANEL_KEYS: readonly string[] = [
   'panel.notes.selfHeal',
   'panel.notes.onlineMeaning',
   'panel.notes.otherSource',
+  // The read-failure trail and the password-auth gate on the detail page.
+  'panel.notes.readFailed',
+  'panel.notes.lastRead',
+  'panel.notes.passwordAuth',
   // The list page's empty state.
   'panel.list.empty',
   // The ssh-deploy section (inspect / deploy / progress / result).
@@ -201,6 +221,8 @@ const PARAMETERIZED: readonly (readonly [string, readonly string[]])[] = [
   ['panel.tailscale.peerMeta', ['ip', 'status']],
   ['panel.ssh.progressFailed', ['error']],
   ['panel.ssh.registered', ['endpoint']],
+  ['panel.notes.readFailed', ['reason']],
+  ['panel.notes.lastRead', ['summary', 'at']],
 ]
 
 /** Every `{name}` placeholder a value carries, in order. */
