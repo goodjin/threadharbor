@@ -78,6 +78,26 @@ const UNCLASSIFIED_CODE = 'ACP_ERROR'
  */
 const DEFAULT_ANSWER_TIMEOUT_MS = 600_000
 
+/**
+ * How long a user stop waits for the agent to settle on its own before the
+ * gateway kills the process and drops the conversation. The stop must show
+ * immediately either way; the grace only decides the process's fate.
+ * Zero kills at once.
+ */
+const DEFAULT_GRACE_MS = 3_000
+
+/** Watchdog limits one preset may override; absent fields use the defaults. */
+export type GatewayLimits = {
+  /** Frame-silence deadline — see `stallMs` on the preset config. */
+  readonly stallMs?: number
+  /** Absolute cap on one answer, however chatty — `totalMs` on the preset. */
+  readonly totalMs?: number
+  /** Frame-silence threshold for the one status note — `warnMs` on the preset. */
+  readonly warnMs?: number
+  /** Post-stop grace before the kill — `graceMs` on the preset. */
+  readonly graceMs?: number
+}
+
 export type GatewaySink = { readonly chunk: (chunk: GatewayChunk) => void }
 
 /**
@@ -262,7 +282,7 @@ export class GatewayConversations {
   private readonly report: (message: string) => void
   private readonly sessionAppend: GatewaySessionAppend | undefined
   private readonly positionOf: ((sessionId: string) => StepPosition | undefined) | undefined
-  private readonly answerTimeoutMs: number | ((presetId: string) => number | undefined) | undefined
+  private readonly limits: ((presetId: string) => GatewayLimits) | undefined
 
   // Plain assignments, not parameter properties — same strip-only reason as
   // above; this module is host-loaded without a transpiler.
@@ -271,13 +291,18 @@ export class GatewayConversations {
     report: (message: string) => void = () => {},
     sessionAppend?: GatewaySessionAppend,
     positionOf?: (sessionId: string) => StepPosition | undefined,
-    answerTimeoutMs?: number | ((presetId: string) => number | undefined),
+    limits?: (presetId: string) => GatewayLimits,
   ) {
     this.open = open
     this.report = report
     this.sessionAppend = sessionAppend
     this.positionOf = positionOf
-    this.answerTimeoutMs = answerTimeoutMs
+    this.limits = limits
+  }
+
+  /** One preset's watchdog limits, defaults unfilled so `??` stays meaningful. */
+  private limitsOf(presetId: string): GatewayLimits {
+    return this.limits?.(presetId) ?? {}
   }
 
   /** Answer one request in place; chunks reach the sink as the agent works. */
@@ -329,8 +354,9 @@ export class GatewayConversations {
     // stopping the session) is forwarded into it, so the runner watches one
     // signal either way.
     const controller = new AbortController()
-    request.signal?.addEventListener('abort', () => controller.abort())
-    const configured = typeof this.answerTimeoutMs === 'function' ? this.answerTimeoutMs(presetId) : this.answerTimeoutMs
+    const limits = this.limitsOf(presetId)
+    const graceMs = limits.graceMs ?? DEFAULT_GRACE_MS
+    const configured = limits.stallMs
     const timeoutMs = configured ?? DEFAULT_ANSWER_TIMEOUT_MS
     // The deadline is an IDLE deadline, not a total-duration cap: every
     // streamed chunk and every tool write re-arms it. A turn may legitimately
@@ -414,10 +440,39 @@ export class GatewayConversations {
     run.catch(() => {}) // a late rejection from an already-ended turn must not crash the host
     const result = await new Promise<{ end: GatewayStepEnd }>((resolve, reject) => {
       settle = resolve
+      // A user stop ends the answer HERE, not whenever the agent gets around
+      // to it. The turn is the user's to close — 2026-10-16 session 423817a9:
+      // codex network-dead in its own retry loop, every stop press swallowed
+      // for ten minutes until the deadline ended the turn as if by accident.
+      // The cancel still goes out first; the grace timer below decides only
+      // whether the process survives it.
+      let graceTimer: ReturnType<typeof setTimeout> | undefined
+      let runSettled = false
+      const stopped = (): void => {
+        controller.abort()
+        done({ end: { kind: 'aborted', reason: 'stopped by user' } })
+        const kill = (): void => {
+          if (runSettled) return
+          this.close(sessionId)
+          this.report(`acp gateway: session ${sessionId} did not settle within ${String(graceMs)}ms of stop — external conversation dropped`)
+        }
+        if (graceMs <= 0) { kill(); return }
+        graceTimer = setTimeout(kill, graceMs)
+      }
+      if (request.signal?.aborted === true) stopped()
+      else request.signal?.addEventListener('abort', stopped, { once: true })
       noteActivity()
       run.then(
-        value => done(value as { end: GatewayStepEnd }),
-        reject,
+        value => {
+          runSettled = true
+          if (graceTimer !== undefined) clearTimeout(graceTimer)
+          done(value as { end: GatewayStepEnd })
+        },
+        error => {
+          runSettled = true
+          if (graceTimer !== undefined) clearTimeout(graceTimer)
+          reject(error)
+        },
       )
     })
     const end = result.end

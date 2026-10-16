@@ -51,6 +51,11 @@ export type AcpPresetConfig = {
   readonly warnMs?: number
   readonly graceMs?: number
   /**
+   * Deprecated alias for `stallMs` — both are frame-silence deadlines. Kept
+   * so existing preset rows keep their meaning; new rows use `stallMs`.
+   */
+  readonly answerTimeoutMs?: number
+  /**
    * The models this agent serves, as offered in the model picker.
    *
    * Declared rather than probed: probing needs the agent to be running, and the

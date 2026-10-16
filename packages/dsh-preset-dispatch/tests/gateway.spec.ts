@@ -15,7 +15,7 @@
  *   never sent (failed open) is still asked in full next time.
  */
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { GatewayConversations, GatewayChunkStream } from '../src/gateway.ts'
 import type { AcpSession } from '../src/registry.ts'
 import type { RunnerOptions } from '../src/runner.ts'
@@ -61,6 +61,7 @@ function fakeSession() {
     position?: { turn: number; step: number }
   }
   let reply: (turn: Turnish) => Promise<GatewayStepEnd> = async () => ({ kind: 'completed' })
+  const closes = { count: 0 }
   const endResult = (end: GatewayStepEnd) => ({ frames: [], end })
   const session: AcpSession = {
     run: async (decision: { messages?: unknown }, turn: unknown) => {
@@ -78,12 +79,14 @@ function fakeSession() {
       })
       return endResult(await reply(t)) as never
     },
-    close: () => {},
+    close: () => { closes.count += 1 },
     onDead: () => {},
+    diagnostics: () => ({ lastFrameAt: Date.now(), lastDiagnosticAt: Date.now(), stderrTail: [] }),
   } as unknown as AcpSession
   return {
     session,
     seen,
+    closes,
     answerWith(next: (turn: Turnish) => Promise<GatewayStepEnd>) { reply = next },
   }
 }
@@ -539,7 +542,7 @@ describe('GatewayConversations — one external conversation per session', () =>
       message => { reports.push(message) },
       undefined,
       undefined,
-      40,
+      () => ({ stallMs: 40 }),
     )
     await gate.answer('s1', 'acp-codex', { messages: [user('你好')] }, { chunk: c => { chunks.push(c) } })
 
@@ -565,7 +568,7 @@ describe('GatewayConversations — one external conversation per session', () =>
       message => { reports.push(message) },
       undefined,
       undefined,
-      presetId => (presetId === 'acp-codex' ? 40 : 0),
+      presetId => (presetId === 'acp-codex' ? { stallMs: 40 } : { stallMs: 0 }),
     )
     const first: GatewayChunk[] = []
     await gate.answer('s1', 'acp-codex', { messages: [user('你好')] }, { chunk: c => { first.push(c) } })
@@ -596,7 +599,7 @@ describe('GatewayConversations — one external conversation per session', () =>
     })
     const reports: string[] = []
     const chunks: GatewayChunk[] = []
-    const gate = new GatewayConversations(async () => slow.session, message => { reports.push(message) }, undefined, undefined, 40)
+    const gate = new GatewayConversations(async () => slow.session, message => { reports.push(message) }, () => ({ stallMs: 40 }))
     await gate.answer('s1', 'acp-grok', { messages: [user('慢慢想')], position }, { chunk: c => { chunks.push(c) } })
     expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
     expect(reports.some(message => message.includes('answer timed out'))).toBe(false)
@@ -612,10 +615,97 @@ describe('GatewayConversations — one external conversation per session', () =>
       return { kind: 'completed' }
     })
     const reports: string[] = []
-    const gate = new GatewayConversations(async () => busy.session, message => { reports.push(message) }, undefined, undefined, 40)
+    const gate = new GatewayConversations(async () => busy.session, message => { reports.push(message) }, undefined, undefined, () => ({ stallMs: 40 }))
     const chunks: GatewayChunk[] = []
     await gate.answer('s1', 'acp-grok', { messages: [user('跑工具')], position }, { chunk: c => { chunks.push(c) } })
     expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
     expect(reports.some(message => message.includes('answer timed out'))).toBe(false)
+  })
+})
+
+describe('GatewayConversations — 用户停止立即收场与宽限杀', () => {
+  it('停止信号立即以 aborted 收场；宽限后未了结则杀会话，下一请求重开', async () => {
+    vi.useFakeTimers()
+    try {
+      const fake = fakeSession()
+      fake.answerWith(() => new Promise<GatewayStepEnd>(() => {}))
+      const opens: string[] = []
+      const gate = new GatewayConversations(async presetId => { opens.push(presetId); return fake.session })
+      const controller = new AbortController()
+      const chunks: GatewayChunk[] = []
+      const answering = gate.answer('s1', 'acp-codex', {
+        messages: [user('卡住的问题')],
+        position,
+        signal: controller.signal,
+      }, { chunk: c => { chunks.push(c) } })
+      await vi.advanceTimersByTimeAsync(1)
+      controller.abort()
+      const outcome = await Promise.race([
+        answering.then(() => 'resolved'),
+        vi.advanceTimersByTimeAsync(120_000).then(() => 'still-hanging'),
+      ])
+      expect(outcome).toBe('resolved')
+      expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'aborted' } })
+      expect(fake.closes.count).toBe(0)
+      await vi.advanceTimersByTimeAsync(3_000)
+      expect(fake.closes.count).toBe(1)
+      fake.answerWith(async () => ({ kind: 'completed' }))
+      await gate.answer('s1', 'acp-codex', { messages: [user('再来一问')], position }, { chunk: () => {} })
+      expect(opens).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('宽限期内 run 了结：不 close、会话复用', async () => {
+    vi.useFakeTimers()
+    try {
+      const fake = fakeSession()
+      let settle: ((end: GatewayStepEnd) => void) | undefined
+      fake.answerWith(() => new Promise<GatewayStepEnd>(resolve => { settle = resolve }))
+      const opens: string[] = []
+      const gate = new GatewayConversations(async presetId => { opens.push(presetId); return fake.session })
+      const controller = new AbortController()
+      const answering = gate.answer('s1', 'acp-codex', {
+        messages: [user('慢慢来')],
+        position,
+        signal: controller.signal,
+      }, { chunk: () => {} })
+      await vi.advanceTimersByTimeAsync(1)
+      controller.abort()
+      await answering
+      settle?.({ kind: 'aborted', reason: 'agent accepted the cancel' })
+      await vi.advanceTimersByTimeAsync(3_000)
+      expect(fake.closes.count).toBe(0)
+      fake.answerWith(async () => ({ kind: 'completed' }))
+      await gate.answer('s1', 'acp-codex', { messages: [user('慢慢来'), user('接着用')], position }, { chunk: () => {} })
+      expect(opens).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('停止先于送达（signal 已中止）：同样立即收场', async () => {
+    vi.useFakeTimers()
+    try {
+      const fake = fakeSession()
+      fake.answerWith(() => new Promise<GatewayStepEnd>(() => {}))
+      const gate = new GatewayConversations(async () => fake.session)
+      const controller = new AbortController()
+      controller.abort()
+      const chunks: GatewayChunk[] = []
+      const outcome = await Promise.race([
+        gate.answer('s1', 'acp-codex', {
+          messages: [user('立刻停')],
+          position,
+          signal: controller.signal,
+        }, { chunk: c => { chunks.push(c) } }).then(() => 'resolved'),
+        vi.advanceTimersByTimeAsync(120_000).then(() => 'still-hanging'),
+      ])
+      expect(outcome).toBe('resolved')
+      expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'aborted' } })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

@@ -268,10 +268,21 @@ export function applyAcpPlugin(
       // row's scoped context never sees foreign sessions' notices.
       return stepPositionOfSession(sessionId) ?? deps.sessionPositionOf?.(sessionId)
     },
-    // The old answerTimeoutMs config became totalMs (the 600 s deadline was
-    // always a total cap, whatever its doc claimed); the stall/warn/grace
-    // fields join here once the gateway grows their parameters.
-    presetId => presets.presets[presetId]?.totalMs,
+    // Watchdog limits per preset. answerTimeoutMs stays as a deprecated
+    // alias for stallMs — both are frame-silence deadlines, so an existing
+    // 600000 keeps its meaning instead of silently becoming 120000.
+    presetId => {
+      const preset = presets.presets[presetId]
+      if (preset === undefined) return {}
+      return {
+        ...(preset.stallMs === undefined && preset.answerTimeoutMs === undefined
+          ? {}
+          : { stallMs: preset.stallMs ?? preset.answerTimeoutMs }),
+        ...(preset.totalMs === undefined ? {} : { totalMs: preset.totalMs }),
+        ...(preset.warnMs === undefined ? {} : { warnMs: preset.warnMs }),
+        ...(preset.graceMs === undefined ? {} : { graceMs: preset.graceMs }),
+      }
+    },
   )
   catalogDeps.gateway = gateway
   // The exit cleaner is registered the moment the gateway exists — the row is
