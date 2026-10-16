@@ -169,8 +169,8 @@ export const zh = {
   'panel.reach.probeTimeout': '检测超时（{ms} ms）',
   /** 网络层失败、地址带了端口：不猜是哪一种，只把可能说全。 */
   'panel.reach.networkLayer': '网络层失败：地址不可达、端口没有监听，或浏览器拦下了这个请求',
-  /** 网络层失败、地址没写端口：`{url}` 是实际检测的地址，端口按 http 默认的 80 说。 */
-  'panel.reach.defaultPort': '正在检测 {url} 的 80 端口（地址没写端口）',
+  /** 网络层失败、地址没写端口：`{url}` 是实际检测的地址，`{port}` 是按 scheme 补的默认端口（http 80、https 443）。 */
+  'panel.reach.defaultPort': '正在检测 {url} 的 {port} 端口（地址没写端口）',
   /** 请求本身失败、没到网络层；`{name}` 是错误名。 */
   'panel.reach.requestFailed': '请求失败：{name}',
   /** 本机 agent 区。 */
@@ -460,7 +460,7 @@ export const en = {
   'panel.registry.launchLink': 'Connect (opens the page that carries the token)',
   'panel.reach.probeTimeout': 'The check timed out ({ms} ms)',
   'panel.reach.networkLayer': 'Network-layer failure: the address is unreachable, nothing listens on that port, or the browser blocked the request',
-  'panel.reach.defaultPort': 'Probing {url} on port 80 (the address named no port)',
+  'panel.reach.defaultPort': 'Probing {url} on port {port} (the address named no port)',
   'panel.reach.requestFailed': 'Request failed: {name}',
   'panel.agents.loading': "Reading this machine's agents…",
   'panel.agents.failed': 'Reading failed: {message}',

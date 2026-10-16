@@ -25,6 +25,13 @@ describe('describeProbeTarget', () => {
     expect(target.text).toContain('3081')
     expect(target.hasPort).toBe(true)
   })
+
+  it('不带端口的 https 地址补出 443 而不是 80', () => {
+    const target = describeProbeTarget('https://100.101.1.7')
+    expect(target.text).toContain('443')
+    expect(target.text).not.toContain('80')
+    expect(target.hasPort).toBe(false)
+  })
 })
 
 describe('probeReach', () => {
@@ -62,6 +69,16 @@ describe('probeReach', () => {
     const outcome = await probeReach(() => Promise.reject(new TypeError('fetch failed')), ADDRESS, 1000)
     expect(outcome.kind).toBe('unreachable')
     if (outcome.kind === 'unreachable') expect(outcome.reason).not.toContain('没写端口')
+  })
+
+  it('不带端口的 https 地址失败时原因写 443 而不是 80', async () => {
+    const outcome = await probeReach(() => Promise.reject(new TypeError('fetch failed')), 'https://100.101.1.7', 1000)
+    expect(outcome.kind).toBe('unreachable')
+    if (outcome.kind === 'unreachable') {
+      expect(outcome.reason).toContain('https://100.101.1.7')
+      expect(outcome.reason).toContain('443')
+      expect(outcome.reason).not.toContain('80')
+    }
   })
 
   it('reports non-TYPEError failures with their name', async () => {

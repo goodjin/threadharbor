@@ -29,21 +29,35 @@ export type ReachFetch = (input: string, init: RequestInit) => Promise<unknown>
 
 /**
  * The target a probe will actually hit, port included. A browser fetch of an
- * origin without a port lands on the plain-http default, so the text spells
- * that port out instead of leaving the operator to guess it.
+ * origin without a port lands on the scheme's default — http 80, https 443 —
+ * so the text spells that port out instead of leaving the operator to guess
+ * it. An address whose scheme has no such default (or that cannot be parsed
+ * at all) yields no `defaultPort`: the caller then falls back to the sentence
+ * that asserts no port rather than naming one that would not be hit.
  * @param address - the origin to ask for.
- * @returns the target as actually probed, and whether the address named a port itself.
+ * @returns the target as actually probed, whether the address named a port itself, and the implied default port when there is one.
  */
-export function describeProbeTarget(address: string): { readonly text: string; readonly hasPort: boolean } {
+export function describeProbeTarget(address: string): {
+  readonly text: string
+  readonly hasPort: boolean
+  /** 地址没写端口时按 scheme 补的默认端口（http 80、https 443）；说不出默认端口时没有。 */
+  readonly defaultPort: number | undefined
+} {
   let parsed: URL
   try {
     parsed = new URL(address)
   } catch {
     // 读不出来的地址说不好默认端口：text 照抄，让原因走不做端口断言的那句话。
-    return { text: address, hasPort: true }
+    return { text: address, hasPort: false, defaultPort: undefined }
   }
-  if (parsed.port !== '') return { text: address, hasPort: true }
-  return { text: `${parsed.protocol}//${parsed.host}:80`, hasPort: false }
+  if (parsed.port !== '') return { text: address, hasPort: true, defaultPort: undefined }
+  const scheme = parsed.protocol.replace(/:$/, '')
+  const defaultPort = scheme === 'http' ? 80 : scheme === 'https' ? 443 : undefined
+  return {
+    text: defaultPort === undefined ? address : `${parsed.protocol}//${parsed.host}:${defaultPort}`,
+    hasPort: false,
+    defaultPort,
+  }
 }
 
 /**
@@ -71,15 +85,14 @@ export async function probeReach(fetcher: ReachFetch, address: string, timeoutMs
     if (controller.signal.aborted) return { kind: 'timeout', ms: elapsed }
     const name = error instanceof Error ? error.name : String(error)
     if (name !== 'TypeError') return { kind: 'unreachable', reason: t('panel.reach.requestFailed', { name }) }
-    // 网络层失败按检测目标选话：地址带了端口沿用不猜原因的那句；没带端口把
-    // 实际地址和补出来的默认端口说出来，别让操作者猜探的是哪个端口。
-    const { hasPort } = describeProbeTarget(address)
-    return {
-      kind: 'unreachable',
-      reason: hasPort
-        ? t('panel.reach.networkLayer')
-        : t('panel.reach.defaultPort', { url: address }),
+    // 网络层失败按检测目标选话：地址带了端口（或说不出默认端口）沿用不猜
+    // 原因的那句；没写端口的把实际地址和按 scheme 补出来的默认端口说出来，
+    // 别让操作者猜探的是哪个端口。
+    const target = describeProbeTarget(address)
+    if (target.hasPort || target.defaultPort === undefined) {
+      return { kind: 'unreachable', reason: t('panel.reach.networkLayer') }
     }
+    return { kind: 'unreachable', reason: t('panel.reach.defaultPort', { url: address, port: target.defaultPort }) }
   } finally {
     clearTimeout(timer)
   }

@@ -222,7 +222,7 @@ const PARAMETERIZED: readonly (readonly [string, readonly string[]])[] = [
   ['panel.facts.heartbeat', ['age']],
   ['panel.facts.reportedTitle', ['name']],
   ['panel.reach.probeTimeout', ['ms']],
-  ['panel.reach.defaultPort', ['url']],
+  ['panel.reach.defaultPort', ['url', 'port']],
   ['panel.reach.requestFailed', ['name']],
   ['panel.agents.failed', ['message']],
   ['panel.tailscale.peerMeta', ['ip', 'status']],
