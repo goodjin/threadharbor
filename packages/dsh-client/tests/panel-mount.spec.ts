@@ -50,6 +50,9 @@ function shellWith(core: SlotCore): void {
         // The composer dock under the input box: the zcode quota pills land
         // beside the official stats pills (ui-chat's registration).
         'conversation.composer.dock': { kind: 'list', scope: 'session' },
+        // The turn-tail list: the interrupted-turn recovery row rides here
+        // (declared by ui-chat's turn-tail renderer).
+        'conversation.chat.turnTail': { kind: 'list', scope: 'session' },
       },
       inject: () => null,
     },

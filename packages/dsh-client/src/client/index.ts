@@ -58,6 +58,7 @@ import { maybeRegisterSidebarTree } from '../sidebar-tree.ts'
 import { registerModelSeat } from '../model-seat.ts'
 import { registerSessionIdBar } from '../session-id-bar.ts'
 import { createQuotaPoller, registerQuotaDockPills, routeQuotaFetcher } from '../quota-pill.ts'
+import { registerInterruptedTurnRecovery } from '../interrupted-turn-recovery.ts'
 import { HOST_REGISTRY_KEY, HOST_STORE_ENTRY_ID, TAILSCALE_ERROR_KEY, TAILSCALE_PEERS_KEY, TAILSCALE_REFRESHED_KEY, TAILSCALE_REFRESH_KEY, hostRegistry } from '@threadharbor/dsh-host-federation'
 import type { TailscalePeer } from '@threadharbor/dsh-host-federation'
 import { startHostStore } from '../host-store.ts'
@@ -428,6 +429,11 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
 
   // 会话头工具行：会话编号 + 复制按钮（会话作用域槽位，inject 首参即编号）。
   registerSessionIdBar(seatHost)
+
+  // 「被打断且无正文」轮次的找回入口（2026-10-16 治本）：挂在轮次结尾的
+  // turnTail 列表座位（折叠范围之外），命中盲区条件时给一个展开过程按钮，
+  // 走聊天存储现成的展开动作。座位由轮次结尾渲染器声明，inject 负责等它。
+  ctx.effect(() => registerInterruptedTurnRecovery(seatHost), 'threadharbor: interrupted turn recovery')
 
   // GLM 套餐配额胶囊：输入框下方 dock 里、token 用量同一排。配额是账号级
   // 数字，轮询器全浏览器一份（5 分钟一拍，回到页面再补一拍）；数据走宿主侧

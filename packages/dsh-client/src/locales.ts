@@ -282,6 +282,9 @@ export const zh = {
   'quota.fiveHour.title': 'GLM 套餐 5 小时窗口：已用 {used} / {total}',
   'quota.weekly.title': 'GLM 套餐周窗口：已用 {used} / {total}',
   'quota.resetAt': '，{reset} 重置',
+  /** 被打断且无正文轮次的找回入口（轮次结尾）。 */
+  'recovery.interrupted.note': '本轮被中断，{steps} 项过程内容已折叠',
+  'recovery.interrupted.expand': '展开本轮过程',
   'panel.tree.openFailed': '打开会话失败：本机界面服务未就绪或拒绝了这次调用。',
   /** 详情页「远程部署与插件」折叠区。 */
   'panel.deploy.expand': '远程部署与插件（展开）',
@@ -584,6 +587,9 @@ export const en = {
   'quota.fiveHour.title': 'GLM plan five-hour window: {used} / {total} used',
   'quota.weekly.title': 'GLM plan weekly window: {used} / {total} used',
   'quota.resetAt': ', resets {reset}',
+  /** Recovery row for turns interrupted without any reply (turn tail). */
+  'recovery.interrupted.note': 'This turn was interrupted; {steps} process items are folded',
+  'recovery.interrupted.expand': 'Show this turn’s process',
   'panel.tree.openFailed': 'Could not open the session: the local UI service is not ready or refused the call.',
   'panel.deploy.expand': 'Remote deploy and plugins (expand)',
   'panel.deploy.collapse': 'Collapse deploy area',

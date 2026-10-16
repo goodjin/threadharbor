@@ -59,3 +59,24 @@
 ## 相关测试
 
 - gateway.spec：「连接类失败自动丢弃会话」「非连接类失败保留外部会话」。
+
+---
+
+# 附：同日关联问题 ·「被打断且无正文」的轮次在历史里整个消失
+
+## 现象与根因
+
+会话 ef20f6ac 第 17 轮（58 步、70 次工具调用、零段正文）重启打断后，重开
+会话界面只剩用户的请求，所有过程内容不可见、也没有可点的折叠行。对照同会话
+第 1、2 轮（同样 interrupted 但有正文）一直显示正常，定位为显示层死角：已
+结束轮次的过程内容默认折叠，aborted/error 豁免而 interrupted 不豁免，无
+正文锚点时折叠行也渲染不出来。数据从未丢失（磁盘记录完整）。
+
+## 治本（2026-10-16 用户拍板）
+
+客户端新增 `interrupted-turn-recovery.ts`：往轮次结尾的
+`conversation.chat.turnTail` 列表座位（折叠范围之外）挂一条兜底行，只在
+「已关闭 + interrupted + 无正文锚点 + 确有过过程内容」命中时渲染，按钮调用
+聊天存储现成的 `setTurnProcessOpen(turn, 0, true)`——与官方折叠行的展开
+同一条路，展开后本行自动消失。见
+`packages/dsh-client/tests/interrupted-turn-recovery.spec.ts`。
