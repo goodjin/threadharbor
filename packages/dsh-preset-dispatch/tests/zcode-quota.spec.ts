@@ -215,4 +215,32 @@ describe('registerZcodeQuotaRoute（行为层）', () => {
       swapQuotaFetch(undefined)
     }
   })
+
+  it('默认取数带超时信号：上游挂住时这一路不会无限等', async () => {
+    // 审计补漏（2026-10-16）：网关层的期限改成了无活动期限，这个转发口原先
+    // 什么都不带——上游挂住则接口跟着挂。默认取数必须自带超时信号。
+    const real = globalThis.fetch
+    const seen: Array<{ signal?: AbortSignal }> = []
+    globalThis.fetch = (async (_url: unknown, init?: { signal?: AbortSignal }) => {
+      seen.push(init?.signal === undefined ? {} : { signal: init.signal })
+      return new Response(JSON.stringify({
+        code: 200,
+        success: true,
+        data: { level: 'max', limits: [
+          { type: 'TOKENS_LIMIT', unit: 3, number: 5, currentValue: 1, usage: 100, percentage: 1, nextResetTime: 1792150126523 },
+          { type: 'TOKENS_LIMIT', unit: 6, number: 1, currentValue: 1, usage: 100, percentage: 1, nextResetTime: 1792564552999 },
+        ] },
+      }), { status: 200 })
+    }) as typeof fetch
+    try {
+      const { defaultQuotaFetch, QUOTA_UPSTREAM_TIMEOUT_MS } = await import('../src/zcode-quota.ts')
+      expect(QUOTA_UPSTREAM_TIMEOUT_MS).toBeGreaterThan(0)
+      const answer = await defaultQuotaFetch()
+      expect(seen).toHaveLength(1)
+      expect(seen[0]?.signal).toBeInstanceOf(AbortSignal)
+      expect(answer?.fiveHour?.kind).toBe('five-hour')
+    } finally {
+      globalThis.fetch = real
+    }
+  })
 })

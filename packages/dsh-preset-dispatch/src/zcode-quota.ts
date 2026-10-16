@@ -129,8 +129,11 @@ export function registerZcodeQuotaRoute(ctx: ZcodeQuotaContext, deps: ZcodeQuota
   )
 }
 
-/** 生产取数器：密钥、地址、环境变量全在 quota 模块内解析。 */
-const defaultQuotaFetch: ZcodeQuotaFetch = () => fetchCodingPlanQuota({})
+/** 上游取数超时：挂住的上游不该把这一路接口一起挂住（2026-10-16 审计补漏）。 */
+export const QUOTA_UPSTREAM_TIMEOUT_MS = 15_000
+
+/** 生产取数器：密钥、地址、环境变量全在 quota 模块内解析；自带超时信号。 */
+export const defaultQuotaFetch: ZcodeQuotaFetch = () => fetchCodingPlanQuota({ signal: AbortSignal.timeout(QUOTA_UPSTREAM_TIMEOUT_MS) })
 
 /** JSON 应答：no-store（缓存归宿主管，不许任何一环替我们缓存）+ 固定长度。 */
 function respondJson(res: ServerResponse, status: number, body: string): void {
