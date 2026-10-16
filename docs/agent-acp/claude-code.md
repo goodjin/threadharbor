@@ -85,7 +85,7 @@ _meta.claudeCode.toolName = "Bash"                    ← 真正的工具名
 
 私有扩展：`_meta.claudeCode.promptQueueing: true`（表示支持提示队列）。
 
-**`subagents` 已接**（2026-10-20）：claude-agent-acp 0.76.0 实现了[草案 #1992](https://github.com/agentclientprotocol/agent-client-protocol/pull/1992)外加**异步任务扩展**——Task 委派走 `subagent_spawned` / `subagent_state_update`，后台任务走 `async_task_spawned` / `async_task_progress` / `async_task_state_update`（带进度摘要、token 数、时长、输出文件路径）。投影规则见 [README.md](./README.md) 的帧表；后台任务可能跨回合活着，回合结束仍 running 的结果文本带 `[still running]` 前缀。真机验收帧存 `tests/fixtures/captured-subagent-frames.json`。
+**`subagents` 已接**（2026-10-20）：claude-agent-acp 0.76.0 实现了[草案 #1992](https://github.com/agentclientprotocol/agent-client-protocol/pull/1992)外加**异步任务扩展**——Task 委派走 `subagent_spawned` / `subagent_state_update`，后台任务走 `async_task_spawned` / `async_task_progress` / `async_task_state_update`（带进度摘要、token 数、时长、输出文件路径）。投影规则见 [README.md](./README.md) 的帧表；后台任务可能跨回合活着，回合结束仍 running 的结果文本带 `[still running]` 前缀。帧级真机验收已通过（2026-10-20）：Task 委派后 `subagent_spawned`（task 逐字带任务描述）与 `subagent_state_update` 到达并投成 subagent 卡片（3.5 秒完成），原始帧存 `tests/fixtures/captured-subagent-frames.json` 的 `claude` 键、并有单测照它钉死。与 codex 同一教训：草案字段会被 SDK 剥掉，握手须同时发 `_meta.jetbrains.air` 备用通道（见 README），否则 Agent 工具退成普通卡（失败取证在 `claude-failed` 键）。本轮抓包未触发后台任务，`async_task_*` 的真机帧待一次真实后台命令后补录。
 
 ## 权限请求
 

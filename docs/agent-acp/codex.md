@@ -91,7 +91,9 @@ codex 的 `initialize` 声明了 `sessionCapabilities` 的**全部七项**：`re
 
 对本项目直接相关的：**`fork`**（分叉会话）和 **`list`/`resume`**（枚举与恢复）目前没接。
 
-**`subagents` 已接**（2026-10-20）：客户端握手声明 `clientCapabilities.subagents` 后，codex-acp 1.10.0 按[草案 #1992](https://github.com/agentclientprotocol/agent-client-protocol/pull/1992)发送 `subagent_spawned` / `subagent_state_update`，子会话帧带子会话编号；投影规则见 [README.md](./README.md) 的帧表。真机验收：委派一次乘法小任务，`subagent_spawned` 到达并投成 `subagent` 卡片（`live.spec.ts` 的 native subagent 组，原始帧在 `tests/fixtures/captured-subagent-frames.json`）。
+**`subagents` 已接**（2026-10-20）：客户端握手声明 `clientCapabilities.subagents` 后，codex-acp 1.10.0 按[草案 #1992](https://github.com/agentclientprotocol/agent-client-protocol/pull/1992)发送 `subagent_spawned` / `subagent_state_update`，子会话帧带子会话编号；投影规则见 [README.md](./README.md) 的帧表。
+
+验证已闭环（2026-10-20）：**协商实测**——codex 回 `sessionCapabilities.subagents: {}`；**帧级真机验收通过**——委派小任务后 `subagent_spawned`（name: Calculate）与 `subagent_state_update` 按草案形状到达并投成 subagent 卡片（14.9 秒完成），原始帧存 `tests/fixtures/captured-subagent-frames.json` 的 `codex` 键、并有单测照它钉死。**关键教训**：只发草案字段时 SDK 会把它剥掉、codex 把委派退成「Start subagent …」普通工具卡——必须同时发 `_meta.jetbrains.air` 备用通道（见 README 的握手一节），失败取证在同文件的 `codex-failed` 键。
 
 ## 私有扩展
 

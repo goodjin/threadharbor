@@ -22,7 +22,7 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 agent 接进 
 - 手机通道（核对时间 2026-10-15）：`@threadharbor/dsh-mobile-entry` 在 DSH Web 上挂 `/threadharbor/mobile/` 手机页——主机清单（tailnet 名单 + 各机 DSH 探测）、看会话、发消息、批权限、停止回合——以及先过官方准入的 `peers` / `pair-url` 两个接口。桌面侧栏「手机配对」面板出二维码（需配置 `mobileOrigin`，只收 https 源），手机扫码经官方授权入口把令牌换成 cookie 完成配对。可达性由 `tailscale serve --bg` 提供，dsh 启动须带 `--trusted-host`；`scripts/mobile-setup.sh <dsh端口>` 一键完成发布并打印两步配置，详见 [docs/mobile-client.zh.md](docs/mobile-client.zh.md)。
 - 原生 dsh preset 的行为不受影响：组合行只认得自己 presetId 下的会话，其余一律不接管。
 - 各 agent 的端到端活测（建会话 → 提问 → 收到回答 → 工具调用正确投影、权限批准后回合继续）默认跳过，带 `THREADHARBOR_LIVE_ACP=1` 运行；见下文「真机活测」。
-- ACP 四家的委派看得见（核对时间 2026-10-20）：握手声明 [ACP 子代理草案](https://github.com/agentclientprotocol/agent-client-protocol/pull/1992)的 `subagents` 能力后，codex 与 claude 的子代理委派、claude 的后台任务以原生帧（`subagent_spawned` 等）到达，实时投成 `subagent` / `async_task` 卡片，子会话内容不漏进父回答；未实现草案的 grok / cursor 忽略该字段。帧表与投影规则见 [docs/agent-acp/README.md](docs/agent-acp/README.md)。
+- ACP 四家的委派看得见（核对时间 2026-10-20）：握手声明 [ACP 子代理草案](https://github.com/agentclientprotocol/agent-client-protocol/pull/1992)的 `subagents` 能力后，codex 与 claude 的子代理委派、claude 的后台任务以原生帧（`subagent_spawned` 等）到达，实时投成 `subagent` / `async_task` 卡片，子会话内容不漏进父回答（单测照真实抓包钉死投影行为；codex / claude / grok 三家帧级真机验收均已通过，2026-10-20）；grok 不实现草案但发自己的一套子代理帧（私有方法名＋蛇形字段，经方言归一化后同样投成卡片，真机抓包已钉死）；cursor 忽略该字段。帧表与投影规则见 [docs/agent-acp/README.md](docs/agent-acp/README.md)。
 
 **已知未接的部分**（代码与测试都在，但从宿主加载的入口走不到，登记在 `tests/wiring.spec.ts` 的 `KNOWN_UNWIRED`）：
 

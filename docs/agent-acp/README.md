@@ -66,10 +66,13 @@ agent  → client:  session/prompt 响应 { stopReason, usage? }
 ### `clientCapabilities` 声明什么
 
 ```json
-{ "fs": { "readTextFile": true, "writeTextFile": true }, "terminal": true, "subagents": {} }
+{ "fs": { "readTextFile": true, "writeTextFile": true }, "terminal": true, "subagents": {},
+  "_meta": { "jetbrains": { "air": { "version": 1, "capabilities": ["nativeSubagentSessions", "asyncTasks"] } } } }
 ```
 
-`fs`/`terminal` 的含义同上。`subagents` 是 [ACP 子代理草案（PR #1992）](https://github.com/agentclientprotocol/agent-client-protocol/pull/1992)的客户端开关：声明了它，实现了草案的适配器（codex-acp 1.10.0+、claude-agent-acp 0.76.0+，均按本机安装实测）就改用**原生子代理帧**报告委派，而不是把整段委派折叠成一个普通工具调用；未实现的 agent（grok、cursor）忽略该字段，握手与回合不受影响（grok 已真机验证，见 grok.md）。帧的形状与投影见下节。
+`fs`/`terminal` 的含义同上。`subagents` 是 [ACP 子代理草案（PR #1992）](https://github.com/agentclientprotocol/agent-client-protocol/pull/1992)的客户端开关：声明了它，实现了草案的适配器（codex-acp 1.10.0+、claude-agent-acp 0.76.0+，均按本机安装实测）就改用**原生子代理帧**报告委派，而不是把整段委派折叠成一个普通工具调用；未实现的 agent（grok、cursor）按协议忽略未知字段——grok 的握手容忍已按 `agent stdio` 实测（initialize 正常应答，2026-10-20），cursor 未实测。帧的形状与投影见下节。
+
+**为什么有两种写法（2026-10-20 实测教训）**：已发布的 `@agentclientprotocol/sdk` 在 initialize 时会把草案字段 `subagents` 从 clientCapabilities 里**剥掉**——只发草案写法时，codex 把委派退成「Start subagent …」普通工具卡、claude 把 Agent 工具退成普通卡（失败取证存 `tests/fixtures/captured-subagent-frames.json` 的 `codex-failed` / `claude-failed`）。两家适配器文档化的备用通道是 `_meta.jetbrains.air` 扩展（`version: 1` + 能力数组，schema 会放行 `_meta`），claude 的异步任务能力对应数组里的 `asyncTasks`。两种写法同时发：`_meta` 通道今天生效，草案写法等 SDK 收录后自然接管。
 
 ### 子代理与异步任务帧（草案 #1992，2026-10-20 接入）
 
@@ -84,7 +87,9 @@ agent  → client:  session/prompt 响应 { stopReason, usage? }
 
 两条刻意的设计：**子会话帧绝不漏进父回答**（按 `params.sessionId` 归属路由）；**回合结束时仍未报终态的运行**（claude 的后台任务可能跨回合活着）结果文本带 `[still running]` 前缀，不冒充成功——会话日志不允许步骤在开着的工具调用上收尾，诚实只能写在文本里。
 
-真机抓的原始帧存 `tests/fixtures/captured-subagent-frames.json`（活测 `live.spec.ts` 的 native subagent 组写入）。
+**grok 是第三种方言**（2026-10-20 真机抓包）：它不实现草案，用自己的方法名（`_x.ai/session_notification`）和蛇形字段发同一套生命周期——`subagent_spawned`（`child_session_id` / `subagent_type` / `description`）、`subagent_progress`（纯指标，丢弃）、`subagent_finished`（`status` / `output`，子代理回答整段在此，不流子会话内容帧）。经 grok 方言的 `frameUpdate` + `normalizeSubagentUpdate` 两个钩子归一化后走同一条投影路；详见 [grok.md](./grok.md)。
+
+帧级真机验收在 `live.spec.ts` 的 native subagent 组（codex/claude 必须等到 `subagent_spawned` 并验投影，grok 按其私有帧验收）：三家均已通过（2026-10-20），原始帧存 `tests/fixtures/captured-subagent-frames.json`（含两轮失败取证 `codex-failed` / `claude-failed`，保留作 SDK 剥字段的证据）；单测层（`subagent-frames.spec.ts`、`mid-turn-tools.spec.ts`）照真实抓包与草案形状钉死全部投影行为。
 
 ### `initialize` 的能力声明（实测，差异很大）
 
@@ -111,7 +116,7 @@ agent  → client:  session/prompt 响应 { stopReason, usage? }
 **两条要紧的结论：**
 
 - **「声明了 authMethods」不等于「必须先鉴权」。** codex 声明了 `api-key`/`chat-gpt`，但 `initialize` 后直接 `session/new` 照样成功（实测）。**只有 Cursor 是硬门槛**——不 `authenticate` 直接 `-32000`。
-- **`sessionCapabilities` 里的 `resume` / `list` / `fork` 是四家共同支持的一组会话操作**，和本项目「中途换 agent 要带历史」「恢复会话」的需求直接相关。目前一个都没接。`subagents` 已接（2026-10-20）：客户端握手声明该能力，codex/claude 的委派与后台任务即按上节的原生帧到达并投影。
+- **`sessionCapabilities` 里的 `resume` / `list` / `fork` 是四家共同支持的一组会话操作**，和本项目「中途换 agent 要带历史」「恢复会话」的需求直接相关。目前一个都没接。`subagents` 已接（2026-10-20）：客户端握手声明该能力，codex 协商已实测（回 `sessionCapabilities.subagents`）；claude 同版实现。帧级真机验收待跑（见上节末尾）。
 
 ### 私有扩展方法
 

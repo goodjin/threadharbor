@@ -93,6 +93,26 @@ grok 即使命令失败也报 `status: 'completed'`。本项目的处理是**忠
 
 **本轮新增实测**：`initialize` 的完整能力声明、`authMethods`、`promptCapabilities.image` 为 false。
 
+## 1.0.60 复测（2026-10-20）
+
+本机 grok 已从 1.0.46 升到 1.0.60，三点复测结论：
+
+- **`agent serve` 可用；冷启动慢、热启动秒起**：grok 1.0.60 把重活放在共享的后台主进程（`grok agent leader`）里——第一次启动要把认证/更新等做完才打印地址与密钥，之后的 serve 挂在现成 leader 上直接成功（正常终端实测，2026-10-20）。传输层的就绪等待默认 30 秒（`waitForPort`）：热启动绰绰有余，唯一暴露窗口是开机/登出后的第一次冷启动，其耗时未计时，若实际超过 30 秒需加长默认值。
+- **`agent stdio` 也可用且接受子代理草案字段**：initialize 带 `clientCapabilities.subagents` 正常应答，可作备选传输。能力声明仍是 `list` / `resume` / `close` 三项（无 `subagents`），`_meta.x.ai/hooks` 仍含 `subagent_stop`。
+
+## 子代理帧：grok 的私有一套（2026-10-20 真机抓包）
+
+grok 不实现草案 #1992，但**确实报告子代理生命周期**，用自己的方法名和字段（真机抓包存 `tests/fixtures/captured-subagent-frames.json`，单测 `subagent-frames.spec.ts` 直接照它钉死）：
+
+| 帧 | 方法 | 关键字段 | 投影 |
+|---|---|---|---|
+| `subagent_spawned` | `_x.ai/session_notification` | `child_session_id` / `subagent_type` / `description`（无 `task` 字段，description 即任务描述） | `subagent` 卡片（`{prompt: description, agent: subagent_type}`） |
+| `subagent_progress` | 同上 | 纯指标：`tokens_used` / `duration_ms` / `context_usage_pct` 等 | 丢弃——没有正文，造进度行等于编造 |
+| `subagent_finished` | 同上 | `status` / `output`（子代理的最终回答整段在此） | 卡片结果；非 completed 记错误 |
+
+三个要点：全部帧挂在**父会话**名下（不像草案用子会话编号标内容帧，grok 不流子会话内容）；方法名是私有的 `_x.ai/session_notification`（方言的 `frameUpdate` 钩子认领它，否则帧进不了投影门）；委派同时还有一次普通的 `spawn_subagent` 工具调用帧——工具卡和子代理卡**并存**，各自如实。
+- **排查时注意**：受限网络环境下 serve 拉不起来（启动时回连 grok.com 被挡，横幅后无声悬挂）——这是之前误判「serve 坏了」的原因，不代表生产故障。
+
 ## 权限请求
 
 和其他家一样是阻塞式：**必须用 JSON-RPC 响应回同一个 id**。
