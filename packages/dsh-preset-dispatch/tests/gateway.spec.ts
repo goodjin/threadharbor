@@ -854,3 +854,80 @@ describe('GatewayConversations — 帧静默超时、提示与诊断包', () => 
     }
   })
 })
+
+describe('GatewayConversations — 总上限与统一丢弃', () => {
+  it('总上限到点：ACP_TIMEOUT 带诊断包并丢弃会话，下一请求重开', async () => {
+    vi.useFakeTimers()
+    try {
+      const fake = fakeSession()
+      // 持续吐字的活轮次：静默永远不触发，只有总上限能收场。
+      fake.answerWith(async turn => {
+        const handle = turn.openStream?.()
+        for (;;) {
+          handle?.textDelta('还在干')
+          await new Promise(resolve => { setTimeout(resolve, 500) })
+        }
+      })
+      fake.diagnosticsState.stderrTail = ['working']
+      const opens: string[] = []
+      const gate = new GatewayConversations(
+        async presetId => { opens.push(presetId); return fake.session },
+        undefined, undefined, undefined,
+        () => ({ stallMs: 5_000, totalMs: 20_000 }),
+      )
+      const chunks: GatewayChunk[] = []
+      const outcome = await Promise.race([
+        gate.answer('s1', 'acp-codex', { messages: [user('跑长任务')], position }, { chunk: c => { chunks.push(c) } }).then(() => 'resolved'),
+        vi.advanceTimersByTimeAsync(19_000).then(() => 'at-19s'),
+      ])
+      expect(outcome).toBe('at-19s')
+      await vi.advanceTimersByTimeAsync(2_000)
+      // 桩在强停后仍继续吐字（真实 runner 会丢弃中止后的帧），所以找
+      // 第一条 finish，而不是数组的最后一块。
+      const finish = chunks.find(c => c.type === 'finish') as { reason: { kind: string; failure?: { code?: string; message?: string } } }
+      // 总上限在 20s 收场：错误码 ACP_TIMEOUT，消息带总上限与诊断。
+      expect(finish).toBeDefined()
+      expect(finish.reason.kind).toBe('error')
+      expect(finish.reason.failure?.code).toBe('ACP_TIMEOUT')
+      expect(finish.reason.failure?.message).toContain('总上限')
+      expect(finish.reason.failure?.message).toContain('working')
+      expect(fake.closes.count).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('totalMs=0 不限：帧持续时远超总上限仍挂起，不误杀', async () => {
+    vi.useFakeTimers()
+    try {
+      const fake = fakeSession()
+      fake.answerWith(async turn => {
+        const handle = turn.openStream?.()
+        for (;;) {
+          handle?.textDelta('还在干')
+          await new Promise(resolve => { setTimeout(resolve, 500) })
+        }
+      })
+      const gate = new GatewayConversations(async () => fake.session, undefined, undefined, undefined, () => ({ stallMs: 5_000, totalMs: 0 }))
+      const outcome = await Promise.race([
+        gate.answer('s1', 'acp-codex', { messages: [user('不限时长')], position }, { chunk: () => {} }).then(() => 'resolved'),
+        vi.advanceTimersByTimeAsync(3_600_000).then(() => 'still-hanging'),
+      ])
+      expect(outcome).toBe('still-hanging')
+      expect(fake.closes.count).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('ACP_CONNECTION 仍丢弃（回归），ACP_STALLED 同样丢弃', async () => {
+    const connection = fakeSession()
+    connection.answerWith(async () => ({
+      kind: 'error',
+      error: { code: 'ACP_CONNECTION', message: '外部 agent 连接已断开：acp agent exited' },
+    }))
+    const gate = new GatewayConversations(async () => connection.session)
+    await gate.answer('s1', 'acp-codex', { messages: [user('死了')], position }, { chunk: () => {} })
+    expect(connection.closes.count).toBe(1)
+  })
+})

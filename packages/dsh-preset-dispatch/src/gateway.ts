@@ -69,14 +69,20 @@ type GatewayFailure = {
 const UNCLASSIFIED_CODE = 'ACP_ERROR'
 
 /**
- * How long one in-place answer may run before the gateway ends the turn as an
- * error itself. The observed failure (2026-10-16 session 03067bcc) was a
- * backend wedged in its own retry loop: the turn stayed open for hours with
- * the UI silent, because nothing but the external agent could end it. The
- * gateway owns a deadline so a hung answer becomes a bounded one. Zero
- * disables it.
+ * Default frame-silence deadline: a turn whose agent sends no frame for this
+ * long ends as an error, whatever its process is still doing. The observed
+ * failure (2026-10-16 session 03067bcc) was a backend wedged in its own retry
+ * loop: the turn stayed open for hours with the UI silent, because nothing
+ * but the external agent could end it. Zero disables it.
  */
-const DEFAULT_ANSWER_TIMEOUT_MS = 600_000
+const DEFAULT_STALL_MS = 120_000
+
+/**
+ * Default absolute cap on one answer, however chatty the agent stays. The
+ * silence watchdog cannot end a turn that streams forever; this one can.
+ * Zero disables it.
+ */
+const DEFAULT_TOTAL_MS = 1_800_000
 
 /**
  * How long a user stop waits for the agent to settle on its own before the
@@ -364,7 +370,8 @@ export class GatewayConversations {
     const limits = this.limitsOf(presetId)
     const graceMs = limits.graceMs ?? DEFAULT_GRACE_MS
     const configured = limits.stallMs
-    const timeoutMs = configured ?? DEFAULT_ANSWER_TIMEOUT_MS
+    const timeoutMs = configured ?? DEFAULT_STALL_MS
+    const totalMs = limits.totalMs ?? DEFAULT_TOTAL_MS
     // The deadline is an IDLE deadline, not a total-duration cap: every
     // streamed chunk and every tool write re-arms it. A turn may legitimately
     // run for hours while it keeps producing (2026-10-16 session 03067bcc:
@@ -374,6 +381,7 @@ export class GatewayConversations {
     // watch the turn — and every later answer serialized behind it — would
     // wait forever.
     let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+    let totalTimer: ReturnType<typeof setTimeout> | undefined
     let pollTimer: ReturnType<typeof setInterval> | undefined
     let settled = false
     let warned = false
@@ -381,31 +389,43 @@ export class GatewayConversations {
     let lastSeenFrameAt = entry.session?.diagnostics().lastFrameAt ?? Date.now()
     let settle!: (value: { end: GatewayStepEnd }) => void
     const stderrTailNow = (): readonly string[] => entry.session?.diagnostics().stderrTail ?? []
-    /** The diagnostics block every forced ending carries, so「为什么停」self-explains. */
-    const stallMessage = (silentForMs: number): string => {
+    /** The tail block every forced ending carries, so「为什么停」self-explains. */
+    const tailLines = (): string => {
       const lines = stderrTailNow().slice(-5).map(line => (line.length > 200 ? `${line.slice(0, 200)}…` : line))
-      return `外部 agent 静默 ${String(Math.round(silentForMs / 1000))}s 无进展，已自动停止并重开新会话。`
-        + `进程处置：已终止；agent 输出尾部：\n${lines.length === 0 ? '（无）' : lines.join('\n')}`
+      return lines.length === 0 ? '（无）' : lines.join('\n')
     }
     const fireStall = (): void => {
       const silentForMs = Date.now() - lastActivityWall
       this.report(`acp gateway: session ${sessionId} answer stalled — no agent activity for ${String(silentForMs)}ms (limit ${String(timeoutMs)}ms) — ending the turn as error`)
       controller.abort()
-      // Stalled this long means the process is not worth keeping: drop it now
-      // so the next request reopens instead of reusing the wedged one
-      // (2026-10-16 session 423817a9: ACP_TIMEOUT kept the entry, and every
-      // retry inherited the same dead codex for another full timeout round).
-      this.close(sessionId)
-      settle({
+      done({
         end: {
           kind: 'error',
-          error: { message: stallMessage(silentForMs), code: 'ACP_STALLED' },
+          error: {
+            message: `外部 agent 静默 ${String(Math.round(silentForMs / 1000))}s 无进展，已自动停止并重开新会话。进程处置：已终止；agent 输出尾部：\n${tailLines()}`,
+            code: 'ACP_STALLED',
+          },
+        },
+      })
+    }
+    const fireTotal = (): void => {
+      const silentForMs = Date.now() - lastActivityWall
+      this.report(`acp gateway: session ${sessionId} answer exceeded the total cap of ${String(totalMs)}ms — ending the turn as error`)
+      controller.abort()
+      done({
+        end: {
+          kind: 'error',
+          error: {
+            message: `外部 agent 回合超过总上限 ${String(totalMs)}ms，已自动停止并重开新会话。静默 ${String(Math.round(silentForMs / 1000))}s；进程处置：已终止；agent 输出尾部：\n${tailLines()}`,
+            code: 'ACP_TIMEOUT',
+          },
         },
       })
     }
     const done = (value: { end: GatewayStepEnd }): void => {
       settled = true
       if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
+      if (totalTimer !== undefined) clearTimeout(totalTimer)
       if (pollTimer !== undefined) clearInterval(pollTimer)
       settle(value)
     }
@@ -464,6 +484,10 @@ export class GatewayConversations {
     entry.cursor = plan.cursor
     const run = entry.session.run(decision, turn) as Promise<unknown>
     run.catch(() => {}) // a late rejection from an already-ended turn must not crash the host
+    // The total cap is absolute: armed once at delivery, never re-armed. The
+    // silence watchdog below cannot end a turn that streams forever — only
+    // this one bounds it.
+    if (totalMs > 0) totalTimer = setTimeout(fireTotal, totalMs)
     // The frame beacon watches the one signal neither the chunk tap nor the
     // tool writes can see: an agent whose process stays alive but answers
     // nothing (2026-10-16 codex — "tls handshake eof" on stderr, zero frames,
@@ -537,17 +561,20 @@ export class GatewayConversations {
     if (end.kind !== 'completed' && end.kind !== 'max-tokens' && end.kind !== 'aborted') {
       this.report(`acp gateway: session ${sessionId}'s in-place answer ended as ${end.kind}`)
     }
-    // ACP_CONNECTION's message promises the next request opens a fresh external
-    // conversation. Keeping the entry would break that promise twice over: the
-    // retry reuses a transport whose process is wedged or dead (2026-10-16
-    // session f60dcf2b: three identical 60s handshake timeouts in a row), and
-    // the wedged child itself leaks until dsh restarts. Drop the whole entry —
-    // close() also kills the child — so the next request reopens and re-primes.
-    // Other error codes keep the conversation: an agent-side failure leaves a
-    // live session, and continuing it spares the full-history primer.
-    if (end.kind === 'error' && (end.error as { code?: string } | undefined)?.code === 'ACP_CONNECTION') {
+    // Forced endings drop the conversation — every one of them, not only the
+    // connection's: keeping the entry would break the "next request opens
+    // fresh" promise twice over. The retry reuses a transport whose process
+    // is wedged or dead (2026-10-16 session f60dcf2b: three identical 60s
+    // handshake timeouts in a row), and the wedged child itself leaks until
+    // dsh restarts. Worse, a cap that kept the entry handed the next request
+    // the same dead process — 2026-10-16 session 423817a9: ACP_TIMEOUT
+    // rounds of exactly 600s in a loop until the user restarted the host.
+    // Other error codes keep the conversation: an agent-side failure leaves
+    // a live session, and continuing it spares the full-history primer.
+    const endCode = end.kind === 'error' ? (end.error as { code?: string } | undefined)?.code : undefined
+    if (endCode === 'ACP_CONNECTION' || endCode === 'ACP_STALLED' || endCode === 'ACP_TIMEOUT') {
       this.close(sessionId)
-      this.report(`acp gateway: session ${sessionId}'s connection-class failure dropped the external conversation — the next request opens a fresh one`)
+      this.report(`acp gateway: session ${sessionId}'s forced ending (${String(endCode)}) dropped the external conversation — the next request opens a fresh one`)
     }
   }
 
