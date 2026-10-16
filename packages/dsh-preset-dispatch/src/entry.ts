@@ -231,6 +231,12 @@ export function apply(ctx: unknown, config: Config): void {
   // for the same reason the takeover is announced at mount — a listener that
   // only exists after some agent has already stepped misses every earlier turn.
   host.on('agent/pre-step', (payload, next) => {
+    // TODO(probe, remove me): one-shot dump of the real pre-step payload shape.
+    probeCount += 1
+    if (probeCount <= 5) {
+      const agent = (payload as { agent?: unknown }).agent as { id?: unknown; session?: { id?: unknown } } | undefined
+      process.stderr.write(`[threadharbor][probe] pre-step #${probeCount}: agent=${typeof agent} agent.id=${JSON.stringify(agent?.id)} agent.session.id=${JSON.stringify(agent?.session?.id)} turn=${JSON.stringify((payload as { turn?: unknown }).turn)} step=${JSON.stringify((payload as { step?: unknown }).step)} keys=${JSON.stringify(Object.keys(payload ?? {}))}\n`)
+    }
     rememberStepPosition(payload)
     return next()
   })
@@ -540,6 +546,9 @@ function openAssistantStream(
  * concurrent step elsewhere must not be able to shift them.
  */
 const stepPositions = new WeakMap<object, StepPosition>()
+
+// TODO(probe, remove me): counts pre-step payload dumps.
+let probeCount = 0
 
 function rememberStepPosition(payload: { agent: unknown; turn: unknown; step: unknown }): void {
   const agent = payload.agent

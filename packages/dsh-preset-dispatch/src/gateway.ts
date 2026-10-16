@@ -253,7 +253,8 @@ type Entry = {
 
 /**
  * The gateway itself: per-session external conversations, serialized prompts,
- * cursors that only advance on answers the session actually got.
+ * cursors that advance when a prompt is delivered to the external
+ * conversation — a turn that later errors does not re-feed what it sent.
  */
 export class GatewayConversations {
   private readonly entries = new Map<string, Entry>()
@@ -367,6 +368,13 @@ export class GatewayConversations {
     // maps onto a finish chunk. The deadline races it: a backend wedged in
     // its own retry loop never returns, and without this race the turn — and
     // every later answer serialized behind it — would wait forever.
+    // Delivery anchors the cursor: once run() hands the prompt to the
+    // external conversation, those user texts live in its history for good —
+    // a turn that later errors must not re-feed them (2026-10-16 session
+    // 03067bcc: a re-sent approval arrived at the agent twice). A failure
+    // BEFORE this point — the open handshake above — still leaves the cursor
+    // where it was, so a question never sent is asked in full next time.
+    entry.cursor = plan.cursor
     const run = entry.session.run(decision, turn) as Promise<unknown>
     run.catch(() => {}) // a late rejection from an already-ended turn must not crash the host
     const result = await new Promise<{ end: GatewayStepEnd }>((resolve, reject) => {
@@ -394,9 +402,7 @@ export class GatewayConversations {
     })
     const end = result.end
     stream.finish(end)
-    if (end.kind === 'completed' || end.kind === 'max-tokens') {
-      entry.cursor = plan.cursor
-    } else if (end.kind !== 'aborted') {
+    if (end.kind !== 'completed' && end.kind !== 'max-tokens' && end.kind !== 'aborted') {
       this.report(`acp gateway: session ${sessionId}'s in-place answer ended as ${end.kind}`)
     }
     // ACP_CONNECTION's message promises the next request opens a fresh external

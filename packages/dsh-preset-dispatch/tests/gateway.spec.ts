@@ -10,8 +10,9 @@
  * - the chunk order the loop assembles messages from: block-start, deltas,
  *   block-end, and only then the finish that closes the response;
  * - prompts on one session serialize; two answers never interleave;
- * - a failed or aborted answer advances nothing, so a retry asks the same
- *   thing instead of silently skipping the question.
+ * - the cursor advances when a prompt is delivered, so a failed turn does not
+ *   re-feed the user text the external agent already received; a question
+ *   never sent (failed open) is still asked in full next time.
  */
 
 import { describe, expect, it } from 'vitest'
@@ -438,6 +439,55 @@ describe('GatewayConversations — one external conversation per session', () =>
     fake.answerWith(async () => ({ kind: 'completed' }))
     await gate.answer('s1', 'acp-codex', { messages: [user('第一问'), user('再试')], position }, { chunk: () => {} })
     expect(opened).toHaveLength(1)
+    expect(fake.seen.at(-1)?.prompt).toContain('再试')
+  })
+
+  it('提示送达即前进：出错回合之后的下一问只带新消息', async () => {
+    // 03067bcc 的实际故障形状：第四轮成功（游标前进）、第五轮已送达但以错误
+    // 告终、用户重发。旧游标把第五轮的话再打包一遍，外部代理收到同一句话
+    // 两次。提示发出去游标就前进——回合再怎么失败，已送达的话不重发。
+    const fake = fakeSession()
+    const gate = new GatewayConversations(async () => fake.session)
+    fake.answerWith(async () => ({ kind: 'completed' }))
+    await gate.answer('s1', 'acp-codex', { messages: [user('第一问')], position }, { chunk: () => {} })
+    fake.answerWith(async () => ({ kind: 'error', error: { code: 'ACP_ERROR', message: 'model overloaded' } }))
+    await gate.answer('s1', 'acp-codex', {
+      messages: [user('第一问'), user('可以，按这个方案实施')],
+      position,
+    }, { chunk: () => {} })
+    fake.answerWith(async () => ({ kind: 'completed' }))
+    await gate.answer('s1', 'acp-codex', {
+      messages: [user('第一问'), user('可以，按这个方案实施'), user('可以，按这个方案实施')],
+      position,
+    }, { chunk: () => {} })
+    const prompt = fake.seen.at(-1)?.prompt ?? ''
+    // 一句归一句：第三次请求只携带新一轮的用户文本，出错那轮已送达的不重发。
+    expect(prompt.match(/可以，按这个方案实施/g)).toHaveLength(1)
+  })
+
+  it('开场失败不前进：提示从未发出，重试仍从第一问开始', async () => {
+    // 送达的定义是 run 已经把提示交给外部会话；连会话都没开起来时游标留在
+    // 原地，下一问重新 prime 全量——那是唯一能保证消息不丢的路径。
+    const fake = fakeSession()
+    fake.answerWith(async () => ({ kind: 'completed' }))
+    const primers: (string | undefined)[] = []
+    let openFailures = 1
+    const gate = new GatewayConversations(async (_presetId, options) => {
+      if (openFailures > 0) {
+        openFailures -= 1
+        throw new Error('handshake timeout')
+      }
+      const primer = (options as RunnerOptions & {
+        primer?: { take(id: string): string | undefined }
+      }).primer
+      primers.push(primer?.take('s1'))
+      return fake.session
+    })
+    await gate.answer('s1', 'acp-codex', { messages: [user('第一问')] }, { chunk: () => {} }).catch(() => {})
+    await gate.answer('s1', 'acp-codex', { messages: [user('第一问'), user('再试')], position }, { chunk: () => {} })
+    // 第二次开场带全量 primer：从未发出的第一问必须还在里面（最后一句
+    // 「再试」照常作为 prompt 单独送出）。
+    expect(primers.at(-1) ?? '').toContain('第一问')
     expect(fake.seen.at(-1)?.prompt).toContain('再试')
   })
 
