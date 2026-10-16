@@ -98,7 +98,12 @@ export const agentSwitchHandoverDefinition: ConversationNodeDefinition<HandoverS
   target: 'chat',
   match: (event) => {
     if (event.type === 'turn/start') return { id: String(event.data.turn), role: 'start' }
-    if (handoverOf(event) !== undefined) return { id: String(event.data.turn), role: 'update' }
+    // Test the discriminant here rather than `handoverOf(event) !== undefined`:
+    // that call returns data and narrows nothing, so reading `event.data.turn`
+    // right after it was only ever sound while the event union degraded to any.
+    if (event.type === 'turn/end' && event.data.reason.kind === 'agent-switch/handover') {
+      return { id: String(event.data.turn), role: 'update' }
+    }
     return null
   },
   start: (_context, match) => {

@@ -14,6 +14,11 @@ const cssSuffix = '.mjs'
 const externals = new Set([
   'react',
   'react/jsx-runtime',
+  // Seeded by DSH's own platform table (client/web/src/platform.ts). The
+  // composer model seat is upstream's component and portals its menu; leaving
+  // react-dom out of this set inlined the CJS build into the page bundle, where
+  // its `process.env.NODE_ENV` read has no `process` to answer it.
+  'react-dom',
   '@deepseek-ai/dsh-client-runtime/client',
   '@deepseek-ai/dsh-client-ui-layout/client',
   '@deepseek-ai/dsh-client-ui-primitives',

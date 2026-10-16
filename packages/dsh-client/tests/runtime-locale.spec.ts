@@ -10,6 +10,11 @@
  */
 
 import { describe, expect, it, vi, afterEach } from 'vitest'
+// The client entry reaches the composer model seat, upstream's component, which
+// renders over ui-primitives' styled components — CSS modules Node cannot load.
+// Nothing in this spec renders them.
+vi.mock('@deepseek-ai/dsh-client-ui-primitives', async () => await import('./stubs/ui-primitives.ts'))
+
 import { agentListPort, panelProbe } from '../src/client/index.ts'
 import { inspectSshHost, startSshDeploy, waitSshDeployOperation } from '../src/ssh-deploy.ts'
 import { en, fallbackT, zh } from '../src/locales.ts'

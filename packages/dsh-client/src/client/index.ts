@@ -53,6 +53,7 @@ import { runSessionProbe } from '../probe.ts'
 import type { ProbeOutcome } from '../probe.ts'
 import { layeredIdentitySettings, IDENTITY_STORAGE_KEY } from '../settings-source.ts'
 import { maybeRegisterSidebarTree } from '../sidebar-tree.ts'
+import { registerModelSeat } from '../model-seat.ts'
 import { registerSessionIdBar } from '../session-id-bar.ts'
 import { HOST_REGISTRY_KEY, HOST_STORE_ENTRY_ID, TAILSCALE_ERROR_KEY, TAILSCALE_PEERS_KEY, TAILSCALE_REFRESHED_KEY, TAILSCALE_REFRESH_KEY, hostRegistry } from '@threadharbor/dsh-host-federation'
 import type { TailscalePeer } from '@threadharbor/dsh-host-federation'
@@ -395,8 +396,18 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // 列表照常——升级漂移时的一键退路。
   maybeRegisterSidebarTree(ctx.slots, ctx, registry)
 
+  // 输入框上的模型入口：同样用更低优先级盖住官方那一份，好让选外部 agent 时
+  // 按钮上看得见是谁在回答。目录、选择提交这些仍是官方的服务，换的只是标签。
+  // 开关 threadharbor.modelSeat=off 时不注册，原生入口照常。
+  //
+  // `ctx.slots` 的 register 是按座位种类分派的一组泛型重载，本地那套手写的结构
+  // 接口表达不了它（种类条件类型在泛型下摊不开），所以这里按调用方给的最小接
+  // 口投影一次——和下面 registerSessionIdBar 同一处境，不是这一行特有的将就。
+  const seatHost = ctx.slots as never
+  ctx.effect(() => registerModelSeat(seatHost, ctx as never), 'threadharbor: composer model seat')
+
   // 会话头工具行：会话编号 + 复制按钮（会话作用域槽位，inject 首参即编号）。
-  registerSessionIdBar(ctx.slots)
+  registerSessionIdBar(seatHost)
 
   // 手机配对 section：和主机面板同一套侧栏注册面（sidebar.panellist + main），
   // 数据只有一条同源 GET（pair-url）。带令牌的网址只进面板状态、只画在这台

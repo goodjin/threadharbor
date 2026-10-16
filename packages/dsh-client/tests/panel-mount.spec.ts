@@ -15,7 +15,12 @@
  * `rollup-mount.spec.ts` for that; the name now says what it tests.
  */
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+// The client entry reaches the composer model seat, upstream's component, which
+// renders over ui-primitives' styled components — CSS modules Node cannot load.
+// Nothing in this spec renders them.
+vi.mock('@deepseek-ai/dsh-client-ui-primitives', async () => await import('./stubs/ui-primitives.ts'))
+
 import { SlotCore } from '@deepseek-ai/dsh-client-ui-slots'
 import { createElement } from 'react'
 import { apply, type ClientPanelContext, type PanelSlotHost } from '../src/client/index.ts'
@@ -39,6 +44,9 @@ function shellWith(core: SlotCore): void {
         'shell.overlay': { kind: 'list', scope: 'root' },
         'conversation.session.header': { kind: 'single', scope: 'session' },
         'conversation.session.header.utilities': { kind: 'list', scope: 'session' },
+        // ui-conversation declares this seat too; the model entry registers
+        // into it, so a shell that omits it stops modeling the real host.
+        'conversation.input.model': { kind: 'single', scope: 'session' },
       },
       inject: () => null,
     },
