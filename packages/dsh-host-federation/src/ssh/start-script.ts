@@ -28,6 +28,14 @@ import { shellQuote } from './parse.ts'
  * install script has always used (a start script omits them); `releaseDir`
  * adds the `release=` header variable the install script needs to install the
  * local plugin.
+ *
+ * `skipProfileWrites` drops the two profile-file writes — the agents-patch
+ * payload, its `mkdir`/`printf`, and the identity `printf` — for the start
+ * path, where the peer's real identity and agent selection are unknowable and
+ * overwriting them destroys deployed data. Everything that merely references
+ * the files stays: the unit's `EnvironmentFile` and `dsh_args`' `--patch`
+ * still read what the original deploy wrote. Absent (the deploy path) the
+ * emitted script is unchanged byte for byte.
  */
 export function buildRemoteEnv(input: {
   readonly channel: string
@@ -38,8 +46,9 @@ export function buildRemoteEnv(input: {
   readonly remoteAgentsPatch: string
   readonly releaseDir?: string
   readonly installLines?: readonly string[]
+  readonly skipProfileWrites?: boolean
 }): string {
-  const { channel, nodePath, remotePort, hostId, hostTitle, remoteAgentsPatch, releaseDir, installLines } = input
+  const { channel, nodePath, remotePort, hostId, hostTitle, remoteAgentsPatch, releaseDir, installLines, skipProfileWrites } = input
   return [
     'set -eu',
     `channel=${shellQuote(channel)}`,
@@ -56,13 +65,13 @@ export function buildRemoteEnv(input: {
     'log_file="$state/dsh-web.log"',
     'export DSH_HOME="$dsh_home"',
     ...(installLines ?? []),
-    `agents_patch_yaml=${shellQuote(remoteAgentsPatch)}`,
+    ...(skipProfileWrites ? [] : [`agents_patch_yaml=${shellQuote(remoteAgentsPatch)}`]),
     'agents_patch="$dsh_home/profiles/web/threadharbor-remote-agents.patch.yml"',
-    'mkdir -p "$(dirname "$agents_patch")"',
-    'printf \'%s\' "$agents_patch_yaml" > "$agents_patch"',
+    ...(skipProfileWrites ? [] : ['mkdir -p "$(dirname "$agents_patch")"']),
+    ...(skipProfileWrites ? [] : ['printf \'%s\' "$agents_patch_yaml" > "$agents_patch"']),
     'bind_host="127.0.0.1"',
     'identity_file="$dsh_home/profiles/web/threadharbor-identity.env"',
-    'printf \'DSH_HOST_ID=%s\\nDSH_HOST_TITLE=%s\\n\' "$host_id" "$host_title" > "$identity_file"',
+    ...(skipProfileWrites ? [] : ['printf \'DSH_HOST_ID=%s\\nDSH_HOST_TITLE=%s\\n\' "$host_id" "$host_title" > "$identity_file"']),
     'case "$bind_host" in (0.0.0.0|"") echo "refusing wildcard bind" >&2; exit 1;; esac',
     'dsh_bin="$(command -v dsh)"',
     'dsh_args="--profile web --no-open --port $port --host $bind_host --patch $agents_patch"',
@@ -116,6 +125,7 @@ export function buildStartScript(input: {
   readonly hostId: string
   readonly hostTitle: string
   readonly remoteAgentsPatch: string
+  readonly skipProfileWrites?: boolean
 }): string {
   return [buildRemoteEnv(input), buildStartBranch(input)].join('\n')
 }

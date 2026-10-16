@@ -658,6 +658,11 @@ function peerStartScript(channel: string, nodePath: string, port: number): strin
       hostId: '',
       hostTitle: '',
       remoteAgentsPatch: buildRemoteAgentsPatchYaml(),
+      // The peer's real identity and remote-agent selection were written by
+      // the original deploy and are unknowable here; rewriting them would
+      // blank the identity the systemd restart then reloads. Leave both
+      // profile files exactly as deployed.
+      skipProfileWrites: true,
     }),
   ].join('\n')
 }

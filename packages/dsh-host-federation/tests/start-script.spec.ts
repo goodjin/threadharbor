@@ -162,4 +162,52 @@ describe('buildStartScript', () => {
     expect(script).toContain('threadharbor-dsh-web-$channel.service')
     expect(script).toContain('--profile web')
   })
+
+  it('leaves the peer profile files untouched when profile writes are skipped', () => {
+    // The start path cannot know the peer's real hostId / hostTitle / agent
+    // selection, so it must not rewrite either profile file: doing so blanks a
+    // real identity (which the systemd restart then reloads) and resets the
+    // operator's remote-agent selection. Skipping the writes must remove the
+    // payload assignment and both redirections — and nothing else.
+    const script = buildStartScript({ ...input, skipProfileWrites: true })
+    expect(script).not.toContain('agents_patch_yaml=')
+    expect(script).not.toContain('> "$agents_patch"')
+    expect(script).not.toContain('> "$identity_file"')
+  })
+
+  it('still reads the deployed profile files when profile writes are skipped', () => {
+    // Skipping the writes must not drop the references: dsh still applies the
+    // patch file and the systemd unit still loads the identity file the
+    // original deploy wrote.
+    const script = buildStartScript({ ...input, skipProfileWrites: true })
+    expect(script).toContain('--patch $agents_patch')
+    expect(script).toContain('EnvironmentFile=-$identity_file')
+  })
+
+  it('still parses under POSIX sh when profile writes are skipped', () => {
+    // Removing lines from the middle of a fragment can unbalance the script;
+    // check the emitted text rather than assuming the removals are inert.
+    expect(spawnSync('sh', ['-n'], {
+      input: buildStartScript({ ...input, skipProfileWrites: true }),
+    }).status).toBe(0)
+  })
+
+  it('still writes both profile files on the deploy path', () => {
+    // Guard so a later change cannot quietly suppress the writes everywhere:
+    // only the start path may skip them.
+    const script = buildInstallScript({
+      channel: 'stable',
+      releaseDir: '/srv/threadharbor/release',
+      nodePath: '/usr/bin/node',
+      remotePort: '3081',
+      hostId: 'host-7f3a',
+      hostTitle: 'Build Farm',
+      upgrade: true,
+      installFromGithub: true,
+      remotePlugins: ['@threadharbor/plugin-a', '@threadharbor/plugin-b'],
+      remoteAgentsPatch: 'agents:\n  - id: demo',
+    })
+    expect(script).toContain('printf \'%s\' "$agents_patch_yaml" > "$agents_patch"')
+    expect(script).toContain('printf \'DSH_HOST_ID=%s\\nDSH_HOST_TITLE=%s\\n\' "$host_id" "$host_title" > "$identity_file"')
+  })
 })
