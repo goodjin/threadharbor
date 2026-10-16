@@ -167,6 +167,12 @@ export const zh = {
   'panel.registry.launchLink': '连接（打开含 token 的页面）',
   /** 详情页的可达性复查；`{ms}` 是超时毫秒数。 */
   'panel.reach.probeTimeout': '检测超时（{ms} ms）',
+  /** 网络层失败、地址带了端口：不猜是哪一种，只把可能说全。 */
+  'panel.reach.networkLayer': '网络层失败：地址不可达、端口没有监听，或浏览器拦下了这个请求',
+  /** 网络层失败、地址没写端口：`{url}` 是实际检测的地址，端口按 http 默认的 80 说。 */
+  'panel.reach.defaultPort': '正在检测 {url} 的 80 端口（地址没写端口）',
+  /** 请求本身失败、没到网络层；`{name}` 是错误名。 */
+  'panel.reach.requestFailed': '请求失败：{name}',
   /** 本机 agent 区。 */
   'panel.agents.loading': '正在读取本机 agent……',
   'panel.agents.failed': '读取失败：{message}',
@@ -453,6 +459,9 @@ export const en = {
   'panel.registry.removeNote': "Removes it from this machine's registration list only; the remote machine is untouched. Delete?",
   'panel.registry.launchLink': 'Connect (opens the page that carries the token)',
   'panel.reach.probeTimeout': 'The check timed out ({ms} ms)',
+  'panel.reach.networkLayer': 'Network-layer failure: the address is unreachable, nothing listens on that port, or the browser blocked the request',
+  'panel.reach.defaultPort': 'Probing {url} on port 80 (the address named no port)',
+  'panel.reach.requestFailed': 'Request failed: {name}',
   'panel.agents.loading': "Reading this machine's agents…",
   'panel.agents.failed': 'Reading failed: {message}',
   'panel.agents.empty': 'This host lists no acp agents — maybe no preset is configured, or the model catalog read failed; press "Refresh" and try again.',

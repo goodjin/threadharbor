@@ -134,6 +134,9 @@ const PANEL_KEYS: readonly string[] = [
   'panel.registry.launchLink',
   // The reach check under the registry actions.
   'panel.reach.probeTimeout',
+  'panel.reach.networkLayer',
+  'panel.reach.defaultPort',
+  'panel.reach.requestFailed',
   // The agent section on the self detail page.
   'panel.agents.loading',
   'panel.agents.failed',
@@ -219,6 +222,8 @@ const PARAMETERIZED: readonly (readonly [string, readonly string[]])[] = [
   ['panel.facts.heartbeat', ['age']],
   ['panel.facts.reportedTitle', ['name']],
   ['panel.reach.probeTimeout', ['ms']],
+  ['panel.reach.defaultPort', ['url']],
+  ['panel.reach.requestFailed', ['name']],
   ['panel.agents.failed', ['message']],
   ['panel.tailscale.peerMeta', ['ip', 'status']],
   ['panel.ssh.progressFailed', ['error']],
@@ -281,6 +286,11 @@ describe('panel 的 locale 键', () => {
   it('离线时在线标识列表的分隔符是键，zh 值是「、」', () => {
     expect(zh['panel.facts.onlineIdsSeparator']).toBe('、')
     expect(en['panel.facts.onlineIdsSeparator']).toBeDefined()
+  })
+
+  it('探测超时的文案不在可达性原因改造里被挪动', () => {
+    expect(zh['panel.reach.probeTimeout']).toBe('检测超时（{ms} ms）')
+    expect(en['panel.reach.probeTimeout']).toBe('The check timed out ({ms} ms)')
   })
 })
 
