@@ -24,6 +24,7 @@ export default defineConfig({
       ['packages/dsh-host-federation/tests/rollup-mount.spec.ts', 'jsdom'],
       // 手机页挂接层 bootApp 跑真 DOM（jsdom）：入口探测、页签、横幅、表单。
       ['packages/dsh-mobile-entry/tests/app.spec.ts', 'jsdom'],
+      ['packages/dsh-mobile-entry/tests/hub-app.spec.ts', 'jsdom'],
     ],
   },
 })

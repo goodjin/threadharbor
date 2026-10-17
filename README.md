@@ -10,7 +10,7 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 agent 接进 
 
 ## 当前能力
 
-以下每条都以当前代码为准（核对时间 2026-10-13；「真机可达」按 `tests/wiring.spec.ts` 从宿主加载入口做的传递可达性检查口径）：
+以下每条都以当前代码为准（核对时间 2026-10-16；「真机可达」按 `tests/wiring.spec.ts` 从宿主加载入口做的传递可达性检查口径）：
 
 - 四个 agent（grok、codex、claude code、cursor）走同一套通用 ACP 接入层（`@threadharbor/dsh-acp-agent`）：stdio 与 WebSocket 两种传输、各家的帧方言、帧到 DSH 会话事件的投影、终端与文件两个子协议的应答。zcode 不走这条路：它在模型列表里单独成一组 GLM，用本机 ZCode 的登录密钥直连 Coding Plan，文字和工具调用交回 DSH 自己的循环。它的 5 小时/周套餐限额也带到了界面上（核对时间 2026-10-16）：GLM 会话的输入框下方、token 用量同一排有两枚胶囊，显示已用百分比，悬停看已用/总量和重置时刻，详见 [docs/agent-acp/zcode.md](docs/agent-acp/zcode.md)。
 - 权限请求桥接到 DSH 审批服务：请求在回合内发起，应答是回带同一 id 的 JSON-RPC 响应帧；宿主没有审批服务时一律拒绝并在启动自报里写明 `approvals=refuse-all`。
@@ -19,6 +19,7 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 agent 接进 
 - 中途切换 agent（判定 / 历史交接 / 执行三段）：已经在说话的会话锁死了预设，只能在目标预设上新建会话继续。切换时整段对话既作为上下文交给新 agent，也原样回填到新会话自己的记录上——打开新会话看到的还是刚才那段对话，只是底下接上了新的内容；旧会话留下一条交接提示并自动跳过去。轮次历史的可读性同理有兜底：「被打断且全程没有正文」的轮次（长工具轮次遇重启的常态）会在轮次结尾出现一条找回入口，一键展开全部过程内容（核对时间 2026-10-16）。
 - 切换过程看得见：面板整个换掉，所以切换一开始就在窗口顶部挂一条进度（准备 → 读新会话的历史 → 就绪），同时先把新会话的首屏读出来，读完才跳过去，跳过去时内容已经在屏幕上。首屏读不出来或迟迟不来都不卡住跳转，最多等 4 秒。历史长不长都只取首屏（DSH 自带的分页，约 50 条消息起），更早的用「加载更早」按页取。
 - 主机侧的 agent 探测（发一条真实小任务看是否回应）与重启已实现，但目前没有界面入口。
+- 云主机中转通道（核对时间 2026-10-16）：`@threadharbor/dsh-mobile-relay` 让手机只经公网 HTTPS 连一台云主机、不装 Tailscale，即可切换多台机器——数据面是 SSH 本地隧道，tailnet 只做在线发现。入口 `dsh.agentlab.fun`（灰云 DNS + Let's Encrypt + nginx 反代 + 一层 HTTP 口令），机器清单、会话转发、审批按机器归属与事件汇流都在这个包里；配置片段由 `scripts/relay-setup.sh` 生成（只打印，不改文件）。
 - 手机通道（核对时间 2026-10-15）：`@threadharbor/dsh-mobile-entry` 在 DSH Web 上挂 `/threadharbor/mobile/` 手机页——主机清单（tailnet 名单 + 各机 DSH 探测）、看会话、发消息、批权限、停止回合——以及先过官方准入的 `peers` / `pair-url` 两个接口。桌面侧栏「手机配对」面板出二维码（需配置 `mobileOrigin`，只收 https 源），手机扫码经官方授权入口把令牌换成 cookie 完成配对。可达性由 `tailscale serve --bg` 提供，dsh 启动须带 `--trusted-host`；`scripts/mobile-setup.sh <dsh端口>` 一键完成发布并打印两步配置，详见 [docs/mobile-client.zh.md](docs/mobile-client.zh.md)。
 - 原生 dsh preset 的行为不受影响：组合行只认得自己 presetId 下的会话，其余一律不接管。
 - 各 agent 的端到端活测（建会话 → 提问 → 收到回答 → 工具调用正确投影、权限批准后回合继续）默认跳过，带 `THREADHARBOR_LIVE_ACP=1` 运行；见下文「真机活测」。

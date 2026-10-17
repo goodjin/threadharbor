@@ -18,7 +18,11 @@ export declare function renderLoading(): string
 export declare function renderErrorScreen(message: string): string
 
 /** 配对引导屏（R2：只有 'unpaired' | 'untrusted' 两支）。 */
-export declare function pairingGuideView(reason: 'unpaired' | 'untrusted'): string
+/**
+ * reason 只收两支（无效令牌等第三种情况不进引导）。mode 省略时是直连模式，
+ * 文案逐字不变；中转模式换成对中转站配对的那一套。
+ */
+export declare function pairingGuideView(reason: 'unpaired' | 'untrusted', mode?: 'machine' | 'hub'): string
 
 /** 一台 peer 的形状（Task 5 应答项）。 */
 export interface PeerBody {

@@ -22,6 +22,10 @@
       "types": "./src/ssh-deploy.ts",
       "default": "./src/ssh-deploy.ts"
     },
+    "./ssh/manager": {
+      "types": "./src/ssh/manager.ts",
+      "default": "./src/ssh/manager.ts"
+    },
     "./ssh/types": {
       "types": "./src/ssh/types.ts",
       "default": "./src/ssh/types.ts"

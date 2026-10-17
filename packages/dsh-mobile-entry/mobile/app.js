@@ -24,6 +24,8 @@
  * 逃进 MuxConnection 的重连定时器回调，否则退避循环会永久卡死。
  */
 
+import { createMachineBackend } from './backend-machine.js'
+import { createHubBackend } from './backend-hub.js'
 import {
   MUX_PATH,
   MuxConnection,
@@ -31,6 +33,7 @@ import {
   SESSION_HISTORY_ENDPOINT,
   SESSION_LIST_ENDPOINT,
   SESSION_PROMPT_ENDPOINT,
+  PEERS_PATH,
   rpcCall,
 } from './wire.js'
 import {
@@ -42,11 +45,9 @@ import {
   renderHostList,
   renderLoading,
   renderSessionList,
+  escapeHtml,
   stateFold,
 } from './views.js'
-
-/** 本机 peers 接口（Task 5 的 exact 路由，同源 GET）。 */
-const PEERS_PATH = '/threadharbor/mobile/peers'
 
 /** session/page 一页最多取多少条 durable 记录。 */
 const PAGE_SIZE = 50
@@ -143,7 +144,20 @@ export function nextScrollTop(mode, anchor, newHeight) {
  */
 export async function bootApp(root, deps = {}) {
   const fetchLike = deps.fetchLike ?? ((...args) => globalThis.fetch(...args))
+  // 服务端在 index.html 里注入的模式（{"mode":"hub"}）。注入的 config 优先，
+  // 其次看 window 上的全局（页面直开时没有），都没有就是直连。
+  const injectedMode = deps.mode
+    ?? (typeof globalThis.__THREADHARBOR_MOBILE__ === 'object' && globalThis.__THREADHARBOR_MOBILE__ !== null
+      ? globalThis.__THREADHARBOR_MOBILE__.mode
+      : undefined)
+  if (injectedMode === 'hub' && deps.backend === undefined) {
+    deps = { ...deps, backend: createHubBackend({ fetchLike, WebSocketCtor: deps.WebSocketCtor }) }
+  }
   const WebSocketCtor = deps.WebSocketCtor ?? globalThis.WebSocket
+  // 后端是「数据从哪来」的唯一出处。不注入时用直连那套，且它的每个方法都只是
+  // 转交下面这些既有调用——直连行为不是靠两套代码保持一致，而是没有第二套。
+  const isHub = deps.backend !== undefined && deps.backend.mode === 'hub'
+  const eventsHolder = { handle: null }
 
   let rpcSeq = 0
   let connection = null
@@ -155,10 +169,16 @@ export async function bootApp(root, deps = {}) {
   // 滚动意图：由改状态的代码声明，render 消费后归 keep。
   let convScrollIntent = 'bottom'
 
+  /**
+   * 中转模式下 `machineId` 是「现在看的是哪台机器」；null 表示停在机器清单屏。
+   * 直连模式全程为 null——那条路上没有第二台机器可切。
+   */
   const state = {
     screen: 'boot',
     guideReason: null,
     errorMessage: '',
+    machineId: null,
+    machines: [],
     hosts: { peers: [], error: undefined, loading: false },
     sessions: [],
     sessionsShown: SESSIONS_BATCH,
@@ -169,9 +189,20 @@ export async function bootApp(root, deps = {}) {
     olderLoading: false,
     draft: '',
     approvals: new Map(),
+    /** 事件 id → 它来自哪台机器。应答按它路由，不按「当前在看哪台」。 */
+    approvalHosts: new Map(),
     pendingAnswers: new Set(),
+    sessionsError: undefined,
     mux: 'connecting',
     muxDetail: '',
+    /**
+     * 最近一次「操作没成」的一句话：应答、发消息、停止。放在横幅那一带，任何屏
+     * 都看得到，且**不会被下一次成功刷新抹掉**。
+     *
+     * 为什么不用会话那一格：那里放的是「这次没取到内容」，一次成功刷新就会把它
+     * 顶掉——而停止失败恰恰会被紧接着的刷新抹掉，操作者看到的就是「按了没反应」。
+     */
+    noticeError: undefined,
   }
 
   function shell() {
@@ -203,6 +234,14 @@ export async function bootApp(root, deps = {}) {
     return state.sessions.find(item => item?.sessionId === state.sessionId) ?? null
   }
 
+  /** 当前机器的显示名（没有选中机器时为 null——直连模式一直是 null）。 */
+  function currentMachineLabel() {
+    if (state.machineId === null) return null
+    const machine = state.machines.find(item => item?.hostId === state.machineId)
+    if (machine === undefined) return null
+    return machine.name ?? state.machineId
+  }
+
   function visibleSessions() {
     return state.sessions.slice(0, state.sessionsShown)
   }
@@ -212,15 +251,21 @@ export async function bootApp(root, deps = {}) {
     const chip = root.querySelector('#mux-state')
     if (chip !== null) {
       chip.textContent = muxStateText()
-      chip.hidden = !(state.screen === 'hosts' || state.screen === 'sessions' || state.screen === 'conversation')
+      chip.hidden = !(state.screen === 'hosts' || state.screen === 'machines' || state.screen === 'sessions' || state.screen === 'conversation')
       chip.className = `mux-state mux-${state.mux}`
     }
     const banners = root.querySelector('#banners')
     if (banners !== null) {
-      banners.innerHTML = renderApprovalBanners(
+      // 应答那一下没送出去要说一句。之前它塞在「事件通道」那一格，而那一格只在
+      // 通道断开时才显示那句话——通道好好的（常见情形）就一个字都不露，横幅
+      // 挂在那里不消失，人只会以为还在转圈。
+      const notice = typeof state.noticeError === 'string' && state.noticeError.length > 0
+        ? `<p class="notice-error" role="alert">${escapeHtml(state.noticeError)}</p>`
+        : ''
+      banners.innerHTML = notice + renderApprovalBanners(
         [...state.approvals.values()].map(item => ({ ...item, pending: state.pendingAnswers.has(item.eventId) })),
       )
-      banners.hidden = state.approvals.size === 0
+      banners.hidden = state.approvals.size === 0 && notice === ''
     }
     const main = root.querySelector('#main')
     const tabbar = root.querySelector('#tabbar')
@@ -231,11 +276,19 @@ export async function bootApp(root, deps = {}) {
         tabbar.innerHTML = ''
         break
       case 'guide':
-        main.innerHTML = pairingGuideView(state.guideReason)
+        main.innerHTML = pairingGuideView(state.guideReason, isHub ? 'hub' : 'machine')
         tabbar.innerHTML = ''
         break
       case 'error':
         main.innerHTML = renderErrorScreen(state.errorMessage)
+        tabbar.innerHTML = ''
+        break
+      case 'machines':
+        main.innerHTML = renderHostList({
+          machines: state.machines,
+          error: state.hosts.error,
+          loading: state.hosts.loading,
+        })
         tabbar.innerHTML = ''
         break
       case 'hosts':
@@ -243,9 +296,16 @@ export async function bootApp(root, deps = {}) {
         tabbar.innerHTML = tabbarHtml('hosts')
         break
       case 'sessions':
-        main.innerHTML = renderSessionList({
+        main.innerHTML = (isHub && state.machineId !== null
+          ? '<button type="button" class="ghost" data-action="back-to-machines">← 换机器</button>'
+          : '')
+        + renderSessionList({
           items: visibleSessions(),
           hasMore: state.sessions.length > state.sessionsShown,
+          machineLabel: currentMachineLabel(),
+          // 取会话这一拍失败过：得说出来。以前这行读了却没人渲染，故障时手机上
+          // 显示的是「还没有会话」——像空列表，不像出事。
+          error: state.sessionsError,
         })
         tabbar.innerHTML = tabbarHtml('sessions')
         break
@@ -312,6 +372,15 @@ export async function bootApp(root, deps = {}) {
     state.muxDetail = ''
     state.screen = 'boot'
     render()
+    if (isHub) {
+      // 中转模式：首屏就是机器清单，选定机器之后才去取那台机的会话。
+      // 放在直连那步之前——它自己不走本机的 RPC 通道。
+      state.screen = 'machines'
+      render()
+      await loadMachines()
+      openHubEvents()
+      return
+    }
     let outcome
     try {
       outcome = await rpcCall(fetchLike, SESSION_LIST_ENDPOINT, { _request: {} }, `boot-${++rpcSeq}`)
@@ -346,6 +415,106 @@ export async function bootApp(root, deps = {}) {
     state.errorMessage = outcome.message
   }
 
+  // ---------- 机器清单（中转模式） ----------
+
+  async function loadMachines() {
+    state.hosts = { peers: [], error: undefined, loading: true }
+    render()
+    try {
+      const body = await state.backend.listHosts()
+      // 断掉的机器补一句「最后一次有动静是什么时候」：否则「离线很久」与
+      // 「从来没成功过」在界面上长得一模一样。看板已经把 lastSeenText 这个位
+      // 备好了，之前没有东西往里填。
+      state.machines = Array.isArray(body?.hosts)
+        ? body.hosts.map(host => ({ ...host, lastSeenText: lastSeenTextOf(host) }))
+        : []
+      state.hosts = { peers: [], error: body?.error, loading: false }
+    } catch (error) {
+      state.machines = []
+      state.hosts = { peers: [], error: messageOf(error), loading: false }
+    }
+    // 横幅的机器名是事件**到的那一刻**取的。清单当时是空的（刷新失败期间就是
+    // 空的），横幅只能写机器编号 mac-a，而编号对看的人没意义——两台机器都在
+    // 列表里，得自己猜哪个是哪个。清单回来之后补一次。
+    for (const [eventId, hostId] of state.approvalHosts) {
+      const item = state.approvals.get(eventId)
+      if (item === undefined || item.machineLabel !== hostId) continue
+      const name = state.machines.find(machine => machine?.hostId === hostId)?.name
+      if (typeof name === 'string' && name.length > 0) {
+        state.approvals.set(eventId, { ...item, machineLabel: name })
+      }
+    }
+    render()
+  }
+
+  /**
+   * 进入某台机器：会话代际 +1，让上一台机器在途的慢应答整体作废。不这么做的话，
+   * A 的应答回来时会画到 B 上——不报错，操作者却读到了另一台机器的内容。
+   */
+  async function enterMachine(hostId) {
+    const machine = state.machines.find(item => item?.hostId === hostId)
+    if (machine === undefined) return
+    if (machine.online === false || machine.reachable === false) return
+    convGeneration += 1
+    state.machineId = hostId
+    state.sessions = []
+    state.sessionsError = undefined
+    state.sessionId = null
+    state.conv = null
+    state.screen = 'sessions'
+    state.sessionsShown = SESSIONS_BATCH
+    render()
+    await refreshSessions()
+  }
+
+  function backToMachines() {
+    convGeneration += 1
+    state.machineId = null
+    state.sessions = []
+    state.sessionId = null
+    state.conv = null
+    state.screen = 'machines'
+    render()
+  }
+
+  /** 事件流：每帧带 hostId，据此更新对应机器的状态与该机的待批事项。 */
+  function openHubEvents() {
+    if (eventsHolder.handle !== null) return
+    eventsHolder.handle = state.backend.connectEvents({
+      onEvent(hostId, type, value) {
+        if (typeof hostId !== 'string') return
+        // 词表只有一份：中转转发的是上游 mux 的原始 item（type 是
+        // waterfall/emit/cancel，事件名与字段都在同一层 value 上），所以这里
+        // **复用直连分支的处理器**，不另编一套词表——上一版自己编了
+        // 'approval/request'/'session/update' 这套线上不存在的名字，结果待批
+        // 横幅在中转模式下永远不出现、广播也永远不触发刷新。
+        if (type === 'waterfall') {
+          if (value?.event !== 'approval/request' || typeof value.eventId !== 'string') return
+          // 归属必须在入队前记下：应答要回到**发起它的那台**，而不是正在看的。
+          state.approvalHosts.set(value.eventId, hostId)
+          const from = state.machines.find(item => item?.hostId === hostId)
+          onWaterfall(value, from?.name ?? hostId)
+          return
+        }
+        if (type === 'cancel') {
+          onCancelFrame(value)
+          return
+        }
+        if (type === 'emit') {
+          // 别的机器的广播只更新它自己的会话；正在看的那台变了才补拉。
+          if (hostId === state.machineId) onEmit(value)
+          return
+        }
+        if (type === 'ready') return
+      },
+      onStatus(status, detail) {
+        state.mux = status === 'online' ? 'online' : status === 'connecting' ? 'connecting' : 'offline'
+        state.muxDetail = detail ?? ''
+        render()
+      },
+    })
+  }
+
   // ---------- 主机清单 ----------
 
   async function loadHosts() {
@@ -374,6 +543,31 @@ export async function bootApp(root, deps = {}) {
     if (refreshingSessions) return
     refreshingSessions = true
     try {
+      if (isHub) {
+        if (state.machineId === null) return
+        const body = await state.backend.listSessions(state.machineId)
+        if (typeof body?.error === 'string') {
+          // 手机与中转站的连接断了：进配对引导，与直连同一支路。少了这一步，
+          // 列表页只会写一句「与中转站的连接已过期」，操作者不知道该做什么。
+          const guide = guidanceReasonForKind(body.kind)
+          if (guide !== null) {
+            state.sessions = []
+            state.sessionsError = undefined
+            state.screen = 'guide'
+            state.guideReason = guide
+            render()
+            return
+          }
+          state.sessions = []
+          state.sessionsError = body.error
+          render()
+          return
+        }
+        state.sessionsError = undefined
+        state.sessions = Array.isArray(body?.items) ? body.items : []
+        if (state.screen === 'sessions' || state.screen === 'conversation') render()
+        return
+      }
       const outcome = await rpcCall(fetchLike, SESSION_LIST_ENDPOINT, { _request: {} }, `sessions-${++rpcSeq}`)
       if (outcome.ok === true) {
         state.sessions = Array.isArray(outcome.result?.items) ? outcome.result.items : []
@@ -408,6 +602,13 @@ export async function bootApp(root, deps = {}) {
   // ---------- 会话内容 ----------
 
   async function rpcSessionPage(sessionId, throughSeq, maxMessages, label) {
+    if (isHub && state.machineId !== null) {
+      const body = await state.backend.pageMessages(state.machineId, sessionId, throughSeq, maxMessages)
+      // 手机自己的连接断了走配对引导；那台机器在重连就只是这次没拿到内容。
+      if (typeof body?.error === 'string') return { ok: false, kind: body.kind ?? 'rpc-error', message: body.error }
+      if (body?.conv === undefined) return { ok: false, kind: 'rpc-error', message: '那台机器没有返回会话内容' }
+      return { ok: true, result: body.conv }
+    }
     return rpcCall(fetchLike, SESSION_HISTORY_ENDPOINT, {
       request: { address: { kind: 'session', sessionId }, throughSeq, maxMessages },
     }, `${label}-${++rpcSeq}`)
@@ -563,6 +764,20 @@ export async function bootApp(root, deps = {}) {
 
   async function sendPrompt(text) {
     if (state.sessionId === null) return
+    if (isHub && state.machineId !== null) {
+      const result = await state.backend.prompt(state.machineId, state.sessionId, text)
+      if (result.ok === true) {
+        state.draft = ''
+        state.noticeError = undefined
+        void refreshConversation()
+      } else {
+        // 放常驻那一句而不是会话那一格：草稿还留着，操作者随时可能自己再点一次，
+        // 得让他知道刚才那条没出去。放会话那格会被下一次成功刷新顶掉。
+        state.noticeError = result.message
+      }
+      render()
+      return
+    }
     const outcome = await rpcCall(fetchLike, SESSION_PROMPT_ENDPOINT, {
       request: {
         requestId: makeRequestId(rpcSeq),
@@ -589,6 +804,20 @@ export async function bootApp(root, deps = {}) {
 
   async function stopSession() {
     if (state.sessionId === null) return
+    if (isHub && state.machineId !== null) {
+      const result = await state.backend.cancel(state.machineId, state.sessionId)
+      if (result.ok !== true) {
+        // 这里必须用常驻那一句：紧接着的 refreshConversation 一成功，会话那格就被
+        // 清掉，停止失败的话一个字都不剩——按了跟没按一样。
+        state.noticeError = result.message
+      } else {
+        state.noticeError = undefined
+      }
+      await refreshSessions()
+      await refreshConversation()
+      render()
+      return
+    }
     const outcome = await rpcCall(fetchLike, SESSION_CANCEL_ENDPOINT, {
       request: { sessionId: state.sessionId },
     }, `cancel-${++rpcSeq}`)
@@ -648,14 +877,21 @@ export async function bootApp(root, deps = {}) {
     })
   }
 
-  /** waterfall 事件：v1 只接 approval/request，进顶部横幅。 */
-  function onWaterfall(value) {
+  /**
+   * waterfall 事件：v1 只接 approval/request，进顶部横幅。
+   *
+   * machineLabel 只有中转模式会传：那边两台机器可能同时有待批事项，不标明来源
+   * 操作者只能靠猜。直连是本机、没有「来自哪台」这回事，不传时 DOM 与改之前
+   * 逐字相同。
+   */
+  function onWaterfall(value, machineLabel) {
     if (value?.event !== 'approval/request' || typeof value.eventId !== 'string') return
     state.approvals.set(value.eventId, {
       eventId: value.eventId,
       toolName: typeof value.request?.toolName === 'string' ? value.request.toolName : '未知工具',
       displayReason: typeof value.request?.displayReason === 'string' ? value.request.displayReason : undefined,
       reason: typeof value.request?.reason === 'string' ? value.request.reason : undefined,
+      ...(typeof machineLabel === 'string' && machineLabel.length > 0 ? { machineLabel } : {}),
     })
     render()
   }
@@ -675,7 +911,40 @@ export async function bootApp(root, deps = {}) {
   // ---------- 应答 ----------
 
   async function answerApproval(eventId, approve) {
-    if (connection === null || state.pendingAnswers.has(eventId)) return
+    if (state.pendingAnswers.has(eventId)) return
+    if (isHub) {
+      // 归属靠事件带来的 hostId：应答必须回到发起它的那台机器，不能按「当前
+      // 在看哪台」猜——操作者可能正看着 B，A 的待批却先弹出来。
+      const hostId = state.approvalHosts.get(eventId)
+      if (hostId === undefined) return
+      state.pendingAnswers.add(eventId)
+      render()
+      const outcome = await state.backend.answer(hostId, eventId, {
+        kind: 'result',
+        value: approve ? 'allowed-once' : 'rejected',
+      })
+      state.pendingAnswers.delete(eventId)
+      if (outcome.ok === true) {
+        state.approvals.delete(eventId)
+        state.approvalHosts.delete(eventId)
+        state.noticeError = undefined
+        render()
+        return
+      }
+      // 手机与中转站的连接断了：进配对引导。只往顶栏塞一句文案的话，操作者
+      // 看到的只是一次「答不上」，横幅还挂在那里，重试多少次都一样。
+      const guide = guidanceReasonForKind(outcome.kind)
+      if (guide !== null) {
+        state.screen = 'guide'
+        state.guideReason = guide
+        render()
+        return
+      }
+      state.noticeError = outcome.message
+      render()
+      return
+    }
+    if (connection === null) return
     // 在途标记：横幅按钮渲染成 disabled（UI 不邀双击），重复派发在此拦下。
     state.pendingAnswers.add(eventId)
     render()
@@ -710,7 +979,13 @@ export async function bootApp(root, deps = {}) {
         }
         break
       }
-      case 'refresh-hosts': void loadHosts(); break
+      case 'enter-machine': {
+        const hostId = target.getAttribute('data-machine-id')
+        if (hostId !== null) void enterMachine(hostId)
+        break
+      }
+      case 'back-to-machines': backToMachines(); break
+      case 'refresh-hosts': void (isHub ? loadMachines() : loadHosts()); break
       case 'load-more-sessions':
         state.sessionsShown += SESSIONS_BATCH
         render()
@@ -755,6 +1030,71 @@ export async function bootApp(root, deps = {}) {
     }
   }
 
+  // 直连后端：每个方法都转交既有调用，行为与今天逐字一致。
+  state.backend = deps.backend ?? createMachineBackend({
+    listSessions: async () => {
+      const outcome = await rpcCall(fetchLike, SESSION_LIST_ENDPOINT, { _request: {} }, `sessions-${++rpcSeq}`)
+      return outcome.ok === true ? { items: outcome.result?.items ?? [] } : { error: outcome.message }
+    },
+    pageMessages: (sessionId, throughSeq, maxMessages) => rpcSessionPage(sessionId, throughSeq, maxMessages, 'page'),
+    prompt: async (sessionId, text) => {
+      const outcome = await rpcCall(fetchLike, SESSION_PROMPT_ENDPOINT, {
+        request: {
+          requestId: makeRequestId(rpcSeq),
+          sessionId,
+          mode: 'queue',
+          content: [{ type: 'text', text }],
+          clientTimeZone: clientTimeZone(),
+        },
+      }, `prompt-${++rpcSeq}`)
+      return outcome.ok === true ? { ok: true } : { ok: false, message: outcome.message }
+    },
+    cancel: async sessionId => {
+      const outcome = await rpcCall(fetchLike, SESSION_CANCEL_ENDPOINT, { request: { sessionId } }, `cancel-${++rpcSeq}`)
+      return outcome.ok === true ? { ok: true } : { ok: false, message: outcome.message }
+    },
+    answer: async (eventId, outcome) => {
+      if (connection === null) return { ok: false, message: '事件通道还没连上' }
+      return await connection.answer(eventId, outcome)
+    },
+    connectEvents: handlers => {
+      openConnection(handlers)
+      return {
+        close() {
+          if (connection !== null) connection.close()
+          connection = null
+        },
+      }
+    },
+    listHosts: async () => {
+      const response = await fetchLike(PEERS_PATH)
+      if (response.status !== 200) return { peers: [], error: `主机清单请求失败：HTTP ${response.status}` }
+      const body = JSON.parse(await response.text())
+      return { peers: Array.isArray(body?.peers) ? body.peers : [], error: typeof body?.error === 'string' ? body.error : undefined }
+    },
+  })
+
   shell()
   await boot()
+}
+
+/**
+ * 机器最后一次被联系上的时间，说成「多久之前」。中转在清单里给的是
+ * `lastSeenAt`（epoch 毫秒）；在线的机器不需要这句话，所以只有断掉的才补。
+ *
+ * 导出是为了能被用例直接问：这个文案错了不影响功能，但会让「离线」看起来像
+ * 「死了」或「没问题」，两种都误导人。
+ */
+export function lastSeenTextOf(host, now = Date.now()) {
+  if (host === null || typeof host !== 'object') return undefined
+  const online = host.online !== false && host.reachable !== false
+  if (online) return undefined
+  const at = host.lastSeenAt
+  if (typeof at !== 'number' || !Number.isFinite(at)) return undefined
+  const minutes = Math.floor((now - at) / 60000)
+  if (minutes < 1) return '刚刚还有动静'
+  if (minutes < 60) return `${minutes} 分钟前还有动静`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours} 小时前还有动静`
+  return `${Math.floor(hours / 24)} 天前还有动静`
 }

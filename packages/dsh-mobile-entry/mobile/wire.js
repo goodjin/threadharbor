@@ -52,6 +52,13 @@ export const SESSION_CANCEL_ENDPOINT = 'session/cancel'
 export const MUX_PATH = '/api/remote.mux'
 export const EVENTS_STREAM_ENDPOINT = '$events'
 export const EVENT_RESULT_ENDPOINT = '$events/result'
+/**
+ * 本机的 peers 接口（exact 路由，同源 GET）——server 端那个同值常量定义在
+ * `../src/peers.ts`，这里硬编码是仓库先例（`HELLO_PATH` 同款：跨包拿不到就
+ * 各自抄一份并互认）。它得放在这一层而不是各自声明：浏览器侧两个模块都要用，
+ * 抄两份迟早会漂。
+ */
+export const PEERS_PATH = '/threadharbor/mobile/peers'
 
 /** 退避阶梯（毫秒）：前三次走阶梯，之后封顶。 */
 const BACKOFF_STEPS_MS = [1000, 2000, 5000]

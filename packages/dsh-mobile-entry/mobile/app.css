@@ -118,6 +118,23 @@ button[data-action='approve'] {
 .boot-loading { color: var(--muted); text-align: center; }
 
 /* 列表（主机 / 会话） */
+/* 应答没送出去时横幅上方那一句：与横幅同一个容器，所以跟着横幅一起排版。 */
+.notice-error {
+  margin: 0 0 6px;
+  padding: 8px 10px;
+  border: 1px solid #d97706;
+  border-radius: 8px;
+  background: #fff7ed;
+  color: #7c2d12;
+  font-size: 13px;
+}
+
+/* 机器行上「为什么进不去」那半句：跟 lastSeen 同一类，但要看清楚，所以加重。 */
+.hint-warn {
+  color: #7c2d12;
+  font-weight: 600;
+}
+
 .list-error, .list-loading, .list-empty, .conv-error, .conv-loading {
   color: var(--muted);
   margin: 12px 0;

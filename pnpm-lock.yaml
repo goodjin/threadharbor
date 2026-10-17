@@ -17,6 +17,9 @@ importers:
       '@threadharbor/dsh-mobile-entry':
         specifier: workspace:^
         version: link:packages/dsh-mobile-entry
+      '@threadharbor/dsh-mobile-relay':
+        specifier: workspace:^
+        version: link:packages/dsh-mobile-relay
       '@threadharbor/dsh-preset-dispatch':
         specifier: workspace:^
         version: link:packages/dsh-preset-dispatch
@@ -138,6 +141,21 @@ importers:
       '@threadharbor/dsh-host-federation':
         specifier: workspace:^
         version: link:../dsh-host-federation
+
+  packages/dsh-mobile-relay:
+    dependencies:
+      '@deepseek-ai/schemastery':
+        specifier: ^3.18.4
+        version: 3.18.4
+      '@threadharbor/dsh-host-federation':
+        specifier: workspace:^
+        version: link:../dsh-host-federation
+      '@threadharbor/dsh-mobile-entry':
+        specifier: workspace:^
+        version: link:../dsh-mobile-entry
+      ws:
+        specifier: ^8.21.0
+        version: 8.22.0
 
   packages/dsh-preset-dispatch:
     dependencies:

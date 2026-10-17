@@ -28,6 +28,31 @@ const DEFAULT_MOBILE_DIR = fileURLToPath(new URL('../mobile', import.meta.url))
 const INDEX_FILE = 'index.html'
 
 /**
+ * index.html 里的模式占位。静态页是浏览器原生 ESM、没有构建步骤，所以配置
+ * 只能由服务端在返回时注入。占位没被替换（直接打开本地文件）时 app.js 按
+ * 缺省走直连，所以这不是硬依赖。
+ */
+const CONFIG_PLACEHOLDER = '__MOBILE_CONFIG__'
+
+/**
+ * 替换目标是**整行赋值**而不是裸 token：注释里也提到这个占位名，按裸 token
+ * 替换会先把注释里的那个换掉，脚本行原封不动——而页面上什么都看不出来，
+ * 症状是「模式永远不生效」。
+ */
+const CONFIG_LINE = `window.__THREADHARBOR_MOBILE__ = ${CONFIG_PLACEHOLDER}`
+
+/** 允许注入的取值：只这两种，多余的一律当缺省（防止把任意内容塞进 HTML）。 */
+export type MobileMode = 'machine' | 'hub'
+
+/** 把 index.html 里的占位换成配置；其余文件原样返回。 */
+export function injectMobileConfig(body: string, fileName: string, mode: MobileMode): string {
+  if (fileName !== INDEX_FILE) return body
+  const safeMode: MobileMode = mode === 'hub' ? 'hub' : 'machine'
+  const payload = JSON.stringify({ mode: safeMode }).replace(/</g, '\\u003c')
+  return body.replace(CONFIG_LINE, `window.__THREADHARBOR_MOBILE__ = ${payload}`)
+}
+
+/**
  * 静态资源登记表：扩展名 → content-type。只收 utf8 文本能安全服务的类型——
  * 读取器按文本读文件，二进制资源（图片/字体等）必须先把读取改成 Buffer
  * 再登记，否则会被 utf8 静默损坏。未登记的扩展名按 application/octet-stream
@@ -96,7 +121,11 @@ const NOT_FOUND: MobileAsset = { status: 404 }
  * @param pathname - 请求路径（可带查询串）。
  * @param mobileDir - 资源目录，缺省为包内 `mobile/`；测试注入临时目录。
  */
-export function resolveMobileAsset(pathname: string, mobileDir: string = DEFAULT_MOBILE_DIR): MobileAsset {
+export function resolveMobileAsset(
+  pathname: string,
+  mobileDir: string = DEFAULT_MOBILE_DIR,
+  mode: MobileMode = 'machine',
+): MobileAsset {
   let url: URL
   try {
     url = new URL(pathname, 'http://threadharbor.invalid')
@@ -138,7 +167,7 @@ export function resolveMobileAsset(pathname: string, mobileDir: string = DEFAULT
 
   if (!existsSync(candidate) || !statSync(candidate).isFile()) return NOT_FOUND
   const contentType = CONTENT_TYPES[extname(candidate).toLowerCase()] ?? 'application/octet-stream'
-  return { status: 200, body: readFileSync(candidate, 'utf8'), contentType }
+  return { status: 200, body: injectMobileConfig(readFileSync(candidate, 'utf8'), fileSegments.at(-1) ?? INDEX_FILE, mode), contentType }
 }
 
 /**
@@ -167,9 +196,10 @@ function isMobileIndexRequest(url: string): boolean {
  * hello 不做准入：GET 直接回固定 JSON，非 GET 回 405。
  *
  * @param ctx - 宿主上下文（effect / webServer / connection）。
- * @param _config - 组合配置；本任务无字段，Task 4 起才消费。
+ * @param config - 组合配置；`mode` 决定注入手机页的模式（缺省 machine=直连）。
  */
-export function registerMobileRoutes(ctx: MobileRouteContext, _config: unknown): void {
+export function registerMobileRoutes(ctx: MobileRouteContext, config?: { readonly mode?: MobileMode }): void {
+  const mode: MobileMode = config?.mode === 'hub' ? 'hub' : 'machine'
   ctx.effect(
     () =>
       ctx.webServer.register({
@@ -189,7 +219,7 @@ export function registerMobileRoutes(ctx: MobileRouteContext, _config: unknown):
             )
             if (outcome === 'owned') return
           }
-          const asset = resolveMobileAsset(url)
+          const asset = resolveMobileAsset(url, DEFAULT_MOBILE_DIR, mode)
           if (asset.status === 404) {
             res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
             res.end('not found')

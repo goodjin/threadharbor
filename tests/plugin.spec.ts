@@ -21,6 +21,7 @@ describe('remote Web bundle', () => {
       '@threadharbor/dsh-client': 'workspace:^',
       '@threadharbor/dsh-host-federation': 'workspace:^',
       '@threadharbor/dsh-mobile-entry': 'workspace:^',
+      '@threadharbor/dsh-mobile-relay': 'workspace:^',
       '@threadharbor/dsh-preset-dispatch': 'workspace:^',
     })
 
@@ -38,6 +39,7 @@ describe('remote Web bundle', () => {
     }
     expect(patch).toContain("- id: threadharbor-client\n      name: '@threadharbor/dsh-client'")
     expect(patch).toContain("threadharbor-ssh-deploy")
+    expect(patch).toContain("threadharbor-mobile-relay")
 
     // Phase 6 removed the hostd gateway. Agents run as in-process ACP plugins
     // on the machine serving the page, so there is no remote host to proxy to

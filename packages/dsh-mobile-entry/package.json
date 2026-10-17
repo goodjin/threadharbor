@@ -10,6 +10,10 @@
       "types": "./src/index.ts",
       "default": "./src/index.ts"
     },
+    "./pair-url": {
+      "types": "./src/pair-url.ts",
+      "default": "./src/pair-url.ts"
+    },
     "./package.json": "./package.json"
   },
   "dependencies": {

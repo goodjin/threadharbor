@@ -17,6 +17,11 @@
  */
 
 /** HTML 转义：&, <, >, ", ' 全量替换。 */
+/** 机器显示名：有名用名，没名退回 hostId（手机上一眼看不出是哪台是最糟的）。 */
+function machineLabel(name, hostId) {
+  return typeof name === 'string' && name.length > 0 ? name : String(hostId ?? '')
+}
+
 export function escapeHtml(value) {
   return String(value)
     .replaceAll('&', '&amp;')
@@ -58,7 +63,39 @@ export function renderErrorScreen(message) {
  * - unpaired：没有本机凭据或凭据已失效——从桌面端的二维码入口重新扫码；
  * - untrusted：主机 403——域名不在 tailscale serve 的信任名单，查安装配置。
  */
-export function pairingGuideView(reason) {
+export function pairingGuideView(reason, mode = 'machine') {
+  // 中转模式下这两段文案必须换：凭据是对**中转站**的，不是对本机的，照直连那套
+  // 一步步做下来会拿自己电脑上的二维码去扫——扫完手机配到那台机器上，页面变成
+  // 直连模式，中转这条链路整个白走一遍，而且看上去「配对了」，最难查。
+  if (mode === 'hub') {
+    return [
+      '<section class="guide">',
+      reason === 'untrusted'
+        ? '<h1>中转站还没信任你</h1>'
+        : '<h1>还没跟中转站配对</h1>',
+      '<p>这台手机页与<strong>中转站</strong>的凭据已经失效，'
+        + (reason === 'untrusted'
+          ? '或者中转站拒绝了这次访问（HTTP 403）。'
+          : '或者从来没有建立过（HTTP 401）。')
+        + '</p>',
+      '<ol>',
+      '<li>在<strong>中转站那个页面</strong>（形如 '
+        + '<code>https://&lt;子域&gt;.&lt;主域&gt;/threadharbor/mobile/</code>）'
+        + '上打开「手机配对」面板——在你自己电脑上的 ThreadHarbor 里打开同一个网址也行；</li>',
+      '<li>出示二维码；</li>',
+      '<li>用这台手机<strong>重新扫码</strong>打开本页。</li>',
+      '</ol>',
+      '<p class="guide-warn">别用你自己电脑上 ThreadHarbor 桌面端那个二维码：'
+        + '那会把手机配到那台机器上，配完手机上打开的就不是中转页而是那台机器自己的直连页。</p>',
+      '<button type="button" data-action="retry-boot">重新检测</button>',
+      '</section>',
+    ].join('')
+  }
+  return pairingGuideMachine(reason)
+}
+
+/** 直连模式的引导文案：中转分支抽走后剩下的原文，保持逐字不变。 */
+function pairingGuideMachine(reason) {
   if (reason === 'untrusted') {
     return [
       '<section class="guide">',
@@ -88,8 +125,73 @@ export function pairingGuideView(reason) {
  * peers 只是展示（v1 每台机器各自伺服自己的页面，不跨域连接）；tailscale
  * 查询失败时 error 带原文，清单区提示不可用，其余功能不受影响。
  */
+/**
+ * 主机清单。两种模式共用这一个视图：
+ * - 直连：`peers` 是本机 tailnet 里的发现结果（今天的行为，一字未改）；
+ * - 中转：`machines` 是中转登记的机器清单，每行带 `hostId` 与机器名，
+ *   离线的行点不动（没有会话可看）。
+ *
+ * `machineLabel` / `lastSeenText` 是可选的：缺省不渲染，保证直连模式的 DOM
+ * 与改之前逐字相同。
+ */
+/**
+ * 机器行上那半句「为什么进不去」。只认中转给的两条真实取值：
+ * `reason === 'fingerprint-unapproved'` 是指纹没登记（要跑登记命令），
+ * `credential !== 'ok'` 且原因是别的（换不到凭据，多半那台机器的 DSH 没起）。
+ * 认不出的组合一律不渲染——宁可不说，也不要说错方向。
+ */
+function credentialHint(machine) {
+  if (machine.credential === undefined || machine.credential === 'ok') return ''
+  if (machine.reason === 'fingerprint-unapproved') {
+    return '<span class="hint hint-warn">需先确认指纹</span>'
+  }
+  if (machine.reason === 'ssh-failed') {
+    // ssh-failed 是**隧道没建起来**（ensure 直接失败了），跟凭据换没换到完全
+    // 不是一层。写成「隧道通但凭据没换到」会把人引到完全相反的方向：他会去
+    // 查凭据、反复重试，而真正要动的是 ssh 那条路（密钥、指纹、网络）。
+    return '<span class="hint hint-warn">连不上那台机器，隧道没建起来</span>'
+  }
+  if (machine.reason === 'credential-missing') {
+    return '<span class="hint hint-warn">隧道通但凭据没换到</span>'
+  }
+  return ''
+}
+
 export function renderHostList(state) {
-  const { peers = [], error, loading } = state ?? {}
+  const { peers = [], machines, error, loading } = state ?? {}
+  if (Array.isArray(machines)) {
+    const parts = []
+    if (error !== undefined) parts.push(`<p class="list-error">机器清单暂时拿不到：${escapeHtml(error)}</p>`)
+    if (loading === true) parts.push('<p class="list-loading">正在获取机器清单…</p>')
+    if (machines.length > 0) {
+      parts.push('<ul class="host-list">')
+      for (const machine of machines) {
+        const online = machine.online !== false && machine.reachable !== false
+        const mark = online
+          ? '<span class="mark mark-online">在线</span>'
+          : '<span class="mark mark-offline">离线</span>'
+        const label = machineLabel(machine.name, machine.hostId)
+        const hint = machine.lastSeenText === undefined ? '' : `<span class="hint">${escapeHtml(machine.lastSeenText)}</span>`
+        // 中转已经算好了这台机器「登没登记指纹 / 凭据换没换到」，install 与手机
+        // 文档也都写了这两种状态。以前这些字段传到了手机上却没人渲染，操作者只能
+        // 点了进去看到一句「正在重连」——那句话对「指纹没登记」完全是误导：那要
+        // 在中转上跑登记命令，不是等一会儿就好。
+        const blocked = credentialHint(machine)
+        const disabled = online ? '' : ' aria-disabled="true"'
+        parts.push(
+          `<li class="host"><span class="host-name">${escapeHtml(label)}</span>${mark}${hint}${blocked}`
+          + `<button type="button" class="host-enter" data-action="enter-machine" data-machine-id="${escapeHtml(machine.hostId)}"${disabled}>进入</button></li>`,
+        )
+      }
+      parts.push('</ul>')
+    } else if (loading !== true && error === undefined) {
+      parts.push('<p class="list-empty">中转站还没登记任何机器。</p>')
+    }
+    // 中转模式原来没有这个按钮（直连那支才有），于是两件事都做不到：拿不到
+    // 清单时只能整个页面退出重来；一台机器刚恢复，得退出再进才知道。
+    parts.push('<button type="button" class="ghost" data-action="refresh-hosts">刷新机器清单</button>')
+    return parts.join('')
+  }
   const parts = []
   if (error !== undefined) {
     parts.push(`<p class="list-error">本机 Tailscale 不可用：${escapeHtml(error)}</p>`)
@@ -134,18 +236,36 @@ function sessionTitle(item) {
  * 会话列表屏。state：{ items:[SessionSummary], hasMore }。
  * hasMore 为真时渲染「加载更早」（app.js 做客户端分页，每次多亮一批）。
  */
+/**
+ * 会话列表。`machineLabel` 缺省不渲染——直连模式下不显示机器名（今天没有这个
+ * 概念，显示一个空标签只会在每行后面多出一段空白）。
+ */
 export function renderSessionList(state) {
-  const { items = [], hasMore = false } = state ?? {}
+  const { items = [], hasMore = false, machineLabel = null, error = undefined } = state ?? {}
   const parts = []
+  if (typeof error === 'string' && error.length > 0) {
+    // 故障**先说**：列表空了是「这台机器还没有会话」，说错话比空着更像一切正常。
+    // 排障提示放在这里，不在列表里堆技术细节（那句「找运维看日志」在别处）。
+    // class 与空列表那句共用一条样式（app.css 里已并在一起）：两者都是「列表
+    // 里没有条目」这一类，不为一句话单开一套配色。
+    parts.push(`<p class="conv-error" role="alert">${escapeHtml(error)}</p>`)
+  }
   if (items.length === 0) {
-    parts.push('<p class="list-empty">还没有会话。可以在桌面端新建一个。</p>')
+    // 已经说过故障了，就别再说「还没有会话」——两句互相矛盾。
+    if (!(typeof error === 'string' && error.length > 0)) {
+      parts.push('<p class="list-empty">还没有会话。可以在桌面端新建一个。</p>')
+    }
   } else {
     parts.push('<ul class="session-list">')
     for (const item of items) {
       const runningMark = item.running ? '<span class="badge badge-running">运行中</span>' : ''
+      const machine = typeof machineLabel === 'string' && machineLabel.length > 0
+        ? `<span class="badge badge-machine">${escapeHtml(machineLabel)}</span>`
+        : ''
       parts.push(
         '<li>'
         + `<button type="button" class="session-item" data-action="open-session" data-session-id="${escapeHtml(item.sessionId)}">`
+        + machine
         + `<span class="session-title">${escapeHtml(sessionTitle(item))}</span>`
         + `<span class="session-meta">${runningMark}<time>${formatTime(item.updatedAt)}</time></span>`
         + '</button>'
@@ -269,8 +389,14 @@ export function renderApprovalBanners(items) {
         ? item.reason
         : '请求执行工具'
     const disabled = item.pending === true ? ' disabled' : ''
+    // 机器名只在有值时渲染：中转模式下两台机器可能同时有待批事项，不标明来源
+    //就只能靠猜。直连模式没有这个字段，DOM 与改之前逐字相同。
+    const from = typeof item.machineLabel === 'string' && item.machineLabel.length > 0
+      ? `<p class="approval-machine">来自 ${escapeHtml(item.machineLabel)}</p>`
+      : ''
     return [
       '<div class="approval">',
+      from,
       `<p class="approval-title">待批准：工具 ${escapeHtml(item.toolName)}</p>`,
       `<p class="approval-reason">${escapeHtml(reason)}</p>`,
       '<div class="approval-actions">'

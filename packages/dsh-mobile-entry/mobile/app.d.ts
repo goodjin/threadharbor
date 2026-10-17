@@ -37,6 +37,10 @@ export declare function makeSocketFactory(
 export interface BootDeps {
   fetchLike?: (url: string, init?: { method?: string, body?: string }) => Promise<{ status: number, text(): Promise<string> }>
   WebSocketCtor?: (new (url: string) => unknown) | undefined
+  /** 注入后端（测试与嵌入页面用）；不给则按 mode 选。 */
+  backend?: MobileBackend
+  /** 页面模式；不给则读 index.html 注入的全局，再不给就是直连。 */
+  mode?: 'machine' | 'hub'
 }
 
 /** 滚动锚点：上一次渲染的消息列表的阅读位与高度。 */
@@ -58,3 +62,10 @@ export declare function nextScrollTop(
 
 /** 启动应用：建壳、探测配对、渲染、挂事件。boot 完成后首屏已渲染。 */
 export declare function bootApp(root: HTMLElement, deps?: BootDeps): Promise<void>
+
+/**
+ * 机器最后一次被联系上的时间，说成「多久之前」；在线的机器与从未成功联系过
+ * 的机器都返回 undefined（不编时间）。
+ */
+export declare function lastSeenTextOf(host: unknown, now?: number): string | undefined
+

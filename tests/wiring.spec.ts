@@ -19,7 +19,7 @@ import { describe, expect, it } from 'vitest'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
-const PACKAGES = ['dsh-acp-agent', 'dsh-client', 'dsh-host-federation', 'dsh-mobile-entry', 'dsh-preset-dispatch'] as const
+const PACKAGES = ['dsh-acp-agent', 'dsh-client', 'dsh-host-federation', 'dsh-mobile-entry', 'dsh-mobile-relay', 'dsh-preset-dispatch'] as const
 
 /**
  * What the host actually loads.

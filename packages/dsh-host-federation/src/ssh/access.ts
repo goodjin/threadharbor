@@ -111,3 +111,41 @@ export function parseDeployMarkers(stdout: string): {
   }
   return { alreadyRunning, ...(launchUrl === undefined ? {} : { launchUrl }), ...(bindHost === undefined ? {} : { bindHost }) }
 }
+
+/**
+ * `dsh web: <url>` 那一行里的网址（dsh 自己启动时打印的形态）。
+ *
+ * 与 {@link parseDeployMarkers} 分开而不是塞进去：那个函数的契约是「解析
+ * deploy 写的标记」，把另一种日志形态混进去会让它的名字与行为对不上。
+ * 同样遵守「最后一条赢」——日志是只追加的。
+ */
+export function parseStdoutLaunchLine(stdout: string): string | undefined {
+  let launchUrl: string | undefined
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.startsWith('dsh web: ')) continue
+    const value = line.slice('dsh web: '.length).trim()
+    if (value !== '') launchUrl = value
+  }
+  return launchUrl
+}
+
+/**
+ * 日志里最新一条启动网址，两种形态都认（`LAUNCH_URL=` 与 `dsh web: `），
+ * **按出现顺序取最后一条**。
+ *
+ * 不能「优先 deploy 标记」：一台机器先被 deploy 起过、后来手工重启，
+ * 日志里两种形态各有一条，此时最新那条是手工启动的那条。日志是只追加的，
+ * 所以位置就是时间。
+ */
+export function latestLaunchUrl(stdout: string): string | undefined {
+  let launchUrl: string | undefined
+  for (const line of stdout.split(/\r?\n/)) {
+    const value = line.startsWith('LAUNCH_URL=')
+      ? line.slice('LAUNCH_URL='.length).trim()
+      : line.startsWith('dsh web: ')
+        ? line.slice('dsh web: '.length).trim()
+        : ''
+    if (value !== '') launchUrl = value
+  }
+  return launchUrl
+}
