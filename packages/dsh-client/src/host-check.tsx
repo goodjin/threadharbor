@@ -62,7 +62,7 @@ export function PeerCheckList(props: {
   readonly t: RuntimeT
 }): ReactNode {
   const { report, t } = props
-  const rows = report === undefined ? [] : peerCheckRows(report, t)
+  const rows = report?.steps === undefined ? [] : peerCheckRows(report, t)
   return (
     <div data-peer-check="" className={styles.sshKeys}>
       <p className={styles.summary}>{t('panel.check.title')}</p>

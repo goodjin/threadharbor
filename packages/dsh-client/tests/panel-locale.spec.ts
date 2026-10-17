@@ -134,7 +134,7 @@ const PANEL_KEYS: readonly string[] = [
   'panel.registry.launchLink',
   // The reach check under the registry actions.
   'panel.reach.probeTimeout',
-  'panel.reach.networkLayer',
+  'panel.reach.networkFailure',
   'panel.reach.defaultPort',
   'panel.reach.requestFailed',
   // The agent section on the self detail page.

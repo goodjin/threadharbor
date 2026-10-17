@@ -271,6 +271,24 @@ describe('远端会话拉取（host-remote-sessions）', () => {
     expect(snap.sessions.every(s => s.projectId === 'w1')).toBe(true)
   })
 
+  it('两边清单都是空的：这是一台还没有会话的主机，不当成拉取失败', async () => {
+    stubFetch((url, request) => {
+      if (url.includes('/?token=tk') && !url.includes('/api/')) {
+        return { status: 303, headers: { 'set-cookie': 'dsh-auth=abc; Path=/; HttpOnly', location: './' } }
+      }
+      if (url.includes('/api/workspace/list') && request?.method === 'POST') {
+        return { status: 200, body: { result: { ok: true, value: { items: [], archivedSessionIds: [] } } } }
+      }
+      if (url.includes('/api/session/list') && request?.method === 'POST') {
+        return { status: 200, body: { result: { ok: true, value: { items: [] } } } }
+      }
+      return undefined
+    })
+    const snap = await fetchRemoteSessions('http://127.0.0.1:4000/?token=tk')
+    expect(snap.sessions).toEqual([])
+    expect(snap.note).toBeUndefined()
+  })
+
   it('鉴权与 RPC 都失败：空清单 + 说明', async () => {
     stubFetch(() => ({ status: 500 }))
     const snap = await fetchRemoteSessions('http://127.0.0.1:4000/?token=tk')

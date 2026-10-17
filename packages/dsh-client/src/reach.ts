@@ -86,11 +86,12 @@ export async function probeReach(fetcher: ReachFetch, address: string, timeoutMs
     const elapsed = Date.now() - started
     if (controller.signal.aborted) return { kind: 'timeout', ms: elapsed }
     const name = error instanceof Error ? error.name : String(error)
-    return {
-      kind: 'unreachable',
-      reason: name === 'TypeError'
-        ? t('panel.reach.networkFailure')
-        : t('panel.reach.requestFailed', { name }),
+    if (name !== 'TypeError') return { kind: 'unreachable', reason: t('panel.reach.requestFailed', { name }) }
+    // 网络层失败按检测目标选话：地址带了端口（或说不出默认端口）沿用不猜
+    // 原因的那句；没写端口的把实际地址和按 scheme 补出来的默认端口说出来。
+    const target = describeProbeTarget(address)
+    if (target.hasPort || target.defaultPort === undefined) {
+      return { kind: 'unreachable', reason: t('panel.reach.networkFailure') }
     }
     return { kind: 'unreachable', reason: t('panel.reach.defaultPort', { url: address, port: target.defaultPort }) }
   } finally {
