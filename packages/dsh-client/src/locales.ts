@@ -60,6 +60,7 @@ export const zh = {
   'panel.title.selfAgents': '本机 agent',
   'panel.title.connectionCare': '连接由谁照看',
   'panel.title.notes': '说明',
+  'panel.title.sessionTree': '会话（按主机）',
   /** 按钮。 */
   'panel.button.probe': '探测',
   'panel.button.confirm': '确定',
@@ -175,181 +176,106 @@ export const zh = {
   'panel.notes.selfHeal': '连接由主机自己照看：发现断了会自动丢弃并在下一次对话时自动重连，无需在这里操作。',
   'panel.notes.onlineMeaning': '「在线」= 这台机器的页面在同一个浏览器的同源标签页里开着并按心跳报数；关闭或崩溃的页面过了静默窗口会自动转为未列出。',
   'panel.notes.otherSource': '另一台机器（另一个源）的页面不在这个频道里；它的行以「未连接」出现，靠的是登记。',
-  'panel.notes.sessionTree': 'The tree on the left lists projects and sessions per host: this machine\'s come from DSH\'s projection; other hosts are fetched via launchUrl in the registry (if that fails, press "Connect" to open that machine\'s page). Every host is a peer — there is no separate management machine.',
-  // The roll-up section's empty state and cross-host note (rollup-section.ts).
-  'panel.rollup.emptySessions': 'This host has no session data yet — press "Connect" to open the remote DSH, or wait for the background pull.',
-  'panel.rollup.crossSourceNote': 'Cross-host note: the channel between tabs only reaches same-origin tabs. Several tabs of the same DSH see one another; another machine\'s page (another origin) is not on this channel — to make it appear, open its own page on that machine.',
-  // This host's session source, when it cannot read yet (session-source.ts).
-  'panel.session.noWorkspacesService': 'Could not read the project list: the host has no workspaces service (it may still be loading).',
-  'panel.session.readFailed': 'Reading the project list failed: the host reported an error; the subscription retries it automatically.',
-  'panel.session.stillLoading': 'The project list is still loading.',
-  'panel.list.empty': 'No hosts yet. Press "Add a new host" to register the first one.',
-  // The ssh-deploy section. The intro is two keys because one sentence mixes
-  // a <strong> and a <code> segment and richSegments wraps one kind per call;
-  // the split sits on a sentence boundary, so reordering stays safe. The
-  // `{…}` segments carry their contents per language; counts match zh.
-  'panel.ssh.title': 'Automated SSH deploy',
-  'panel.ssh.manualEntry': 'Register manually',
-  'panel.ssh.intro': 'The remote DSH listens only on 127.0.0.1. Any host with ThreadHarbor installed can SSH to another, read whether the plugin is installed and the tokenized URL, then open a local SSH tunnel to reach it. The private-key path is an absolute path on {this machine}; a pasted private key or password is sent only to this machine\'s DSH process and is never written to a log.',
-  'panel.ssh.introLoopback': 'A non-loopback bind never uses 0.0.0.0 and still relies on DSH\'s {?token=} cookie exchange.',
-  'panel.ssh.accessMode': 'Access mode',
-  'panel.ssh.accessHostIp': 'Host IP (default: the remote side auto-detects its IP and binds it, registering {http://<host IP>:<port>}; no SSH tunnel)',
-  'panel.ssh.accessTunnel': 'Local SSH tunnel (remote 127.0.0.1 + local port forwarding)',
-  'panel.ssh.bindHostLabel': 'Bind address (optional; leave empty to let the remote side auto-detect its Tailscale / NIC IP)',
-  'panel.ssh.bindHostPlaceholder': '192.168.x.x or 100.x.x.x',
-  'panel.ssh.trustedHostLabel': '--trusted-host (optional; a MagicDNS name)',
+  'panel.notes.sessionTree': '左侧树按主机列出项目与会话：本机来自 DSH 投影；其他主机用登记里的 launchUrl 拉取（失败时请点「连接」打开那台机器的页面）。各主机对等，没有单独的管理机。',
+  /** 汇总区块的空态与说明（rollup-section.ts 产出，画进树和「说明」一节）。 */
+  'panel.rollup.emptySessions': '这台主机还没有会话数据——请点「连接」打开远端 DSH，或等待后台拉取。',
+  'panel.rollup.crossSourceNote': '跨主机说明：页签间的通道只在同源之间通信。同一台 DSH 的多个标签页会互相看见；另一台机器（另一个源）的页面不在这个频道里，要让它出现，请在那里打开它自己的页面。',
+  /** 本机会话来源读不出来时的三条提示（session-source.ts 产出）。 */
+  'panel.session.noWorkspacesService': '读不到项目列表：主机上没有 workspaces 服务（可能还没加载完）。',
+  'panel.session.readFailed': '项目列表读取失败：主机报了错误，稍后会随订阅自动重试。',
+  'panel.session.stillLoading': '项目列表还在加载。',
+  /** 列表页的空态。 */
+  'panel.list.empty': '还没有主机。点「添加新主机」登记第一台。',
+  /**
+   * SSH 自动部署（main 新增的界面）。intro 用 `{当前这台机器}` 标 strong 段；
+   * introLoopback 等键保留给门禁与历史 rich 文案检查。
+   */
+  'panel.ssh.title': 'SSH 自动部署',
+  'panel.ssh.manualEntry': '手动登记',
+  'panel.ssh.intro': '对方的 DSH 只听 127.0.0.1。任意一台已安装 ThreadHarbor 的主机都可以 SSH 到另一台，读取对方是否已装插件和带 token 的地址，再在本机打开 SSH 隧道访问。私钥路径指{当前这台机器}上的绝对路径；粘贴私钥或密码只发给本机 DSH 进程，不会写入日志。',
+  'panel.ssh.introLoopback': '非 loopback 绑定不会使用 0.0.0.0，仍依赖 DSH 的 {?token=} 换 cookie。',
+  'panel.ssh.accessMode': '访问方式',
+  'panel.ssh.accessHostIp': '主机 IP（默认：远端自动检测 IP 并绑定，登记 {http://<主机IP>:<端口>}，不建 SSH 隧道）',
+  'panel.ssh.accessTunnel': '本机 SSH 隧道（远端 127.0.0.1 + 本地端口转发）',
+  'panel.ssh.bindHostLabel': '绑定地址（可选，留空则远端自动检测 Tailscale / 网卡 IP）',
+  'panel.ssh.bindHostPlaceholder': '192.168.x.x 或 100.x.x.x',
+  'panel.ssh.trustedHostLabel': '--trusted-host（可选，MagicDNS 名）',
   'panel.ssh.trustedHostPlaceholder': 'mybox.tail1234.ts.net',
-  'panel.ssh.targetLabel': 'SSH host',
+  'panel.ssh.targetLabel': 'SSH 主机',
   'panel.ssh.targetPlaceholder': '192.168.1.10',
-  'panel.ssh.portLabel': 'Port',
-  'panel.ssh.userLabel': 'User',
+  'panel.ssh.portLabel': '端口',
+  'panel.ssh.userLabel': '用户',
   'panel.ssh.userPlaceholder': 'deploy',
-  'panel.ssh.proxyJumpLabel': 'ProxyJump (optional)',
-  'panel.ssh.authModeLabel': 'Authentication',
-  'panel.ssh.authIdentityFile': 'Private key path on this machine',
-  'panel.ssh.authIdentityPem': 'Paste PEM private key',
-  'panel.ssh.authPassword': 'Password (needs sshpass on this machine)',
-  'panel.ssh.identityFileLabel': 'Private key path (on the web-serving host)',
+  'panel.ssh.proxyJumpLabel': 'ProxyJump（可选）',
+  'panel.ssh.authModeLabel': '认证方式',
+  'panel.ssh.authIdentityFile': '本机私钥路径',
+  'panel.ssh.authIdentityPem': '粘贴私钥 PEM',
+  'panel.ssh.authPassword': '密码（需本机安装 sshpass）',
+  'panel.ssh.identityFileLabel': '私钥路径（Web 服务主机上）',
   'panel.ssh.identityFilePlaceholder': '/home/me/.ssh/id_ed25519',
-  'panel.ssh.identityPemLabel': 'Private key PEM',
-  'panel.ssh.passwordLabel': 'SSH password',
-  'panel.ssh.remotePortLabel': 'Remote DSH web port',
-  'panel.ssh.remoteAgentsLegend': 'Remote agents (ACP preset)',
-  'panel.ssh.remoteAgentsNote': 'Checked agents are enabled in the remote DSH bundle (commands use PATH; the target machine must already have the matching binaries installed). Unchecked ones are disabled after deploy.',
-  'panel.ssh.readingPeer': 'Reading…',
-  'panel.ssh.readPeer': 'Read remote status over SSH',
-  'panel.ssh.peerLoopback': 'The remote side has the plugin installed and DSH listens on 127.0.0.1. Opening the page goes through a local SSH tunnel.',
-  'panel.ssh.peerNotLoopback': 'This remote record is not loopback-only. Redeploying will bind to 127.0.0.1 only and reach it through a local tunnel.',
-  'panel.ssh.peerMissing': 'There is no ThreadHarbor peer record on the remote side yet (not installed, or installed but not started successfully). You can deploy from here.',
-  'panel.ssh.inspect': 'Check SSH host keys',
-  'panel.ssh.inspecting': 'Checking…',
-  'panel.ssh.deploy': 'Deploy DSH and register',
-  'panel.ssh.deploying': 'Deploying…',
-  'panel.ssh.pickKeyPrompt': 'Check the fingerprints and pick the one key to trust:',
-  'panel.ssh.progressFailed': '({error})',
-  'panel.ssh.launchUrlPrompt': 'Open this link to exchange the cookie and go live (already written to the registry):',
-  'panel.ssh.open': 'Open',
-  'panel.ssh.hostIdLabel': 'Host id (registers the host after the deploy)',
-  'panel.ssh.approveFingerprintFirst': 'Check and approve an SSH host key fingerprint first',
-  'panel.ssh.hostIdRequired': 'Fill in the host id first',
-  'panel.ssh.deployFailed': 'The deploy failed',
-  'panel.ssh.registered': 'Registered {endpoint}. After you press "Open" and finish the token exchange in the new tab, the cross-tab channel shows it online.',
-  'panel.ssh.addFooterPrefix': 'DSH and ThreadHarbor can also be installed on the remote machine automatically:',
-  'panel.ssh.redeploy': 'Redeploy DSH',
-  'panel.ssh.upgrade': 'Upgrade reinstall (replace the remote release and restart the service)',
-  'panel.ssh.connectOnly': 'Connect (no redeploy)',
-  'panel.ssh.progressLogTitle': 'Deploy progress (every phase, verbatim)',
-  'panel.ssh.failedTitle': 'Deploy failed — the raw reason:',
-  'panel.ssh.retry': 'Retry deploy',
-  'panel.use.title': 'Use this host',
-  'panel.use.noSsh': 'No SSH connection facts saved for this host yet. Fill them in once (only non-secret facts like a key-file path) and one click connects from then on.',
-  'panel.use.fillSsh': 'Fill in the connection',
-  'panel.use.tunnel.online': 'Tunnel online: this machine can open its page.',
-  'panel.use.tunnel.offline': 'Tunnel down: the local forward port is not answering. Press "Connect and open" to rebuild it.',
-  'panel.use.tunnel.checking': 'Checking the tunnel…',
-  'panel.use.tunnel.unknown': 'Tunnel not checked yet. The remote DSH listens on its own 127.0.0.1; reaching it from here goes through a local SSH tunnel.',
-  'panel.use.connect': 'Connect and open',
-  'panel.use.reconnect': 'Reconnect',
-  'panel.use.connecting': 'Connecting…',
-  'panel.use.check': 'Check tunnel',
-  'panel.use.checking': 'Checking…',
-  'panel.use.open': 'Open page',
-  'panel.use.secretHint': 'This host authenticates with a password or a pasted key, which is never stored: re-enter it under "Remote deploy and plugins", then press "Connect".',
-  'panel.use.noCredential': 'No reusable SSH credentials yet (no stored connection, or it uses a password/pasted key). Enter them below and connect.',
-  'panel.use.failedTitle': 'Connect failed — the raw reason:',
-  'panel.use.retry': 'Retry connect',
-  'panel.tree.undeployedNote': 'Not deployed on this host yet — click to open its detail page and deploy.',
-  'panel.tree.fetchFailedTitle': 'Fetch failed: ',
-  'panel.tree.noSessions': 'No sessions fetched from this host yet.',
-  'panel.tree.newSession': 'Start a new session in this project',
-  'panel.tree.noHosts': 'No hosts yet.',
-  'panel.tree.selfHost': 'This machine',
-  'panel.tree.menuTitle': 'More actions',
-  'panel.tree.menuRenameWorkspace': 'Rename project',
-  'panel.tree.menuDeleteWorkspace': 'Delete project',
-  'panel.tree.menuConfirmDelete': 'Confirm delete',
-  'panel.tree.menuRenameSession': 'Rename session',
-  'panel.tree.menuArchiveSession': 'Archive session',
-  'panel.tree.menuPinSession': 'Pin session',
-  'panel.tree.menuUnpinSession': 'Unpin',
-  'panel.tree.menuForkSession': 'Fork session',
-  'panel.tree.expandMore': 'Show {n} more sessions',
-  'panel.tree.collapseSessions': 'Collapse',
-  'panel.tree.actionFailed': 'Action failed: ',
-  'panel.tree.searchPlaceholder': 'Search this machine',
-  'panel.tree.searchClear': 'Clear search',
-  'panel.tree.searchPending': 'Searching session history…',
-  'panel.tree.searchNoMatches': 'No matching sessions',
-  'panel.tree.searchFailed': 'Search failed: ',
-  'panel.tree.searchHasMore': 'Showing first {n} results; narrow the query.',
-  'panel.tree.viewOptions': 'View options',
-  'panel.tree.orderManual': 'Sort: manual',
-  'panel.tree.orderUpdated': 'Sort: recently updated',
-  'panel.tree.sessionRunning': 'Running',
-  'panel.tree.sessionWaitingApproval': 'Waiting for approval',
-  'panel.tree.sessionPlanReview': 'Plan awaiting review',
-  'panel.tree.sessionWaitingAnswer': 'Waiting for answer',
-  'panel.tree.filterHideArchived': 'Filter: hide archived',
-  'panel.tree.filterShowArchived': 'Filter: all conversations',
-  'panel.tree.filterOnlyArchived': 'Filter: archived only',
-  'panel.sessionBar.copy': 'Copy',
-  'panel.sessionBar.copied': 'Copied',
-  'panel.sessionBar.copyFailed': 'Copy failed: ',
-  /** GLM plan quota pills (below the composer, in the token-usage row). */
-  'quota.fiveHour.label': '5h {percent}%',
-  'quota.weekly.label': 'wk {percent}%',
-  'quota.fiveHour.title': 'GLM plan five-hour window: {used} / {total} used',
-  'quota.weekly.title': 'GLM plan weekly window: {used} / {total} used',
-  'quota.resetAt': ', resets {reset}',
-  /** Recovery row for turns interrupted without any reply (turn tail). */
-  'recovery.interrupted.note': 'This turn was interrupted; {steps} process items are folded',
-  'recovery.interrupted.expand': 'Show this turn’s process',
-  'panel.tree.openFailed': 'Could not open the session: the local UI service is not ready or refused the call.',
-  'panel.deploy.expand': 'Remote deploy and plugins (expand)',
-  'panel.deploy.collapse': 'Collapse deploy area',
-  'panel.ssh.httpInvalid': 'Invalid response (HTTP {status})',
-  'panel.ssh.httpFailed': 'Request failed (HTTP {status})',
-  'panel.check.title': 'Peer status check (Tailscale Serve access)',
-  'panel.check.intro': 'Checks the peer step by step: SSH, Tailscale, Node/DSH, plugins, service, tailscale serve and the ts.net URL. When everything passes the host is saved with its ts.net URL — no SSH tunnel.',
-  'panel.check.run': 'Check peer status',
-  'panel.check.running': 'Checking…',
-  'panel.check.busyAction': 'Working…',
-  'panel.check.save': 'Save this host with its ts.net URL',
-  'panel.check.saved': 'Saved with {url}.',
-  'panel.check.notReady': 'Some items have not passed yet; fix them and press “Check again”.',
-  'panel.check.step.ssh': 'SSH reachable',
-  'panel.check.step.tailscale': 'Tailscale installed and logged in (MagicDNS name)',
-  'panel.check.step.node': 'Node.js 22+',
-  'panel.check.step.dsh': 'DSH installed',
-  'panel.check.step.plugins': 'ThreadHarbor plugins deployed',
-  'panel.check.step.running': 'DSH Web running',
-  'panel.check.step.serve': 'tailscale serve proxies the DSH port',
-  'panel.check.step.https': 'ts.net URL reachable and token accepted',
-  'panel.check.state.ok': 'Passed',
-  'panel.check.state.fail': 'Failed',
-  'panel.check.state.warn': 'Needs review',
-  'panel.check.state.skip': 'Waiting on earlier step',
-  'panel.check.reason.unreachable': 'Unreachable',
-  'panel.check.reason.not-installed': 'Not installed',
-  'panel.check.reason.logged-out': 'Not logged in or not running; run tailscale up on the peer',
-  'panel.check.reason.no-magicdns': 'No MagicDNS name; enable MagicDNS in the admin console',
-  'panel.check.reason.node-too-old': 'Too old; version 22 or later is required',
-  'panel.check.reason.not-deployed': 'Not deployed (no peer.json)',
-  'panel.check.reason.not-running': 'Port does not answer',
-  'panel.check.reason.other-port': 'serve is configured but proxies a different port',
-  'panel.check.reason.not-configured': 'Not configured yet',
-  'panel.check.reason.not-checked': 'Not checked yet',
-  'panel.check.reason.auth-failed': 'Token rejected; restart DSH to refresh it',
-  'panel.check.reason.no-token': 'Reachable, but the peer record has no token to verify',
-  'panel.check.action.deploy': 'Install/deploy DSH and plugins',
-  'panel.check.action.start': 'Start DSH',
-  'panel.check.action.restart': 'Restart DSH',
-  'panel.check.action.serve': 'Configure tailscale serve',
-  'panel.check.action.retry': 'Check again',
-  'panel.check.manualHint': 'Neither the SSH user nor sudo -n may configure tailscale serve. Run these commands on the peer in order, then press “Check again”:',
-  'panel.check.copy': 'Copy',
-} satisfies Record<ClientLocaleKey, string>
+  'panel.ssh.identityPemLabel': '私钥 PEM',
+  'panel.ssh.passwordLabel': 'SSH 密码',
+  'panel.ssh.remotePortLabel': '远端 DSH Web 端口',
+  'panel.ssh.remoteAgentsLegend': '远端 Agent（ACP preset）',
+  'panel.ssh.remoteAgentsNote': '勾选的 agent 会在远端 DSH 组合中启用（命令走 PATH，需目标机已安装对应二进制）；未勾选的将在部署后禁用。',
+  'panel.ssh.readingPeer': '正在读取……',
+  'panel.ssh.readPeer': '通过 SSH 读取对方状态',
+  'panel.ssh.peerLoopback': '对方已安装插件，DSH 听在 127.0.0.1。打开页面会走本机 SSH 隧道。',
+  'panel.ssh.peerNotLoopback': '对方这份记录不是回环监听。重新部署会改成只听 127.0.0.1，并由本机隧道访问。',
+  'panel.ssh.peerMissing': '对方还没有 ThreadHarbor 的 peer 记录（尚未安装，或安装后还没成功启动）。可以在这里部署。',
+  'panel.ssh.inspect': '检查 SSH 主机密钥',
+  'panel.ssh.inspecting': '正在检查……',
+  'panel.ssh.deploy': '部署 DSH 并登记',
+  'panel.ssh.deploying': '正在部署……',
+  'panel.ssh.pickKeyPrompt': '请核对指纹后选择要信任的那把钥匙：',
+  'panel.ssh.progressFailed': '（{error}）',
+  'panel.ssh.launchUrlPrompt': '打开链接即可换 cookie 上线（已写入登记）：',
+  'panel.ssh.open': '打开',
+  'panel.ssh.hostIdLabel': '主机标识（部署后登记用）',
+  'panel.ssh.approveFingerprintFirst': '请先检查并批准 SSH 主机密钥指纹',
+  'panel.ssh.hostIdRequired': '请填写主机标识',
+  'panel.ssh.deployFailed': '部署失败',
+  'panel.ssh.registered': '已登记 {endpoint}。点「打开」在新标签页完成 token 交换后，跨标签页频道会显示在线。',
+  'panel.ssh.addFooterPrefix': '也可以在远端自动安装 DSH 与 ThreadHarbor：',
+  'panel.ssh.redeploy': '重新部署 DSH',
+  /** ssh-deploy HTTP 层的错误模板；`{status}` 是 HTTP 状态码。 */
+  'panel.ssh.httpInvalid': '无效响应（HTTP {status}）',
+  'panel.ssh.httpFailed': '请求失败（HTTP {status}）',
+} satisfies Record<string, string>
 
+/** 这份文案的全部键，也是命名空间声明进 `LocaleNamespaceMap` 的键域。 */
+export type ClientLocaleKey = keyof typeof zh
+
+/**
+ * 运行时层读词典的面：入口接线与 ssh-deploy 的函数把它当参数收（面板的
+ * `t` 席位、入口 `locale.bind` 的活函数，结构上都满足它）。占位符约定与
+ * 宿主 locale 服务一致：`{name}` 记号、`t(key, { name })` 传值。
+ */
+export type RuntimeT = (key: ClientLocaleKey, params?: Record<string, unknown>) => string
+
+/**
+ * locale 服务缺席时的回落：直接读中文词典并替换 `{占位符}`。
+ *
+ * 产出必须与迁移前散在端口里的硬编码串逐字节一致（无 locale 行为不变，
+ * tests/runtime-locale.spec.ts 钉住这一点）；替换用单趟正则、函数形式，
+ * 参数里的 `$` 序列按字面落进文案，不当替换模式展开；单趟也保证已替换进去的
+ * 值里若含 `{name}` 不会被再替换（与宿主 translate 的单趟语义一致）。
+ */
+
+export const fallbackT: RuntimeT = (key, params) => {
+  const template: string = zh[key]
+  if (params === undefined) return template
+  return template.replace(/\{(\w+)\}/g, (match, name: string) =>
+    name in params ? String(params[name]) : match)
+}
+
+/** 切换进度条的键。 */
+export type ProgressKey = Extract<ClientLocaleKey, `progress.${string}`>
+
+/** 交接卡的键。 */
+export type HandoverKey = Extract<ClientLocaleKey, `handover.${string}`>
+
+/** 英文词典，键域与 zh 完全一致。 */
 export const en = {
   'panel.label': 'Hosts',
   'progress.preparing': 'Preparing to open the new session · {target}',
@@ -533,15 +459,6 @@ export const en = {
   'panel.ssh.httpInvalid': 'Invalid response (HTTP {status})',
   'panel.ssh.httpFailed': 'Request failed (HTTP {status})',
 } satisfies Record<ClientLocaleKey, string>
-
-
-/** locale 缺席时的回落函数：读本文件词典。 */
-export const fallbackT: RuntimeT = (key, params) => {
-  const template: string = zh[key]
-  if (params === undefined) return template
-  return template.replace(/\{(\w+)\}/g, (match, name: string) =>
-    name in params ? String(params[name]) : match)
-}
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
