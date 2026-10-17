@@ -350,6 +350,14 @@ export const zh = {
   'panel.check.copy': 'Copy',
 } satisfies Record<ClientLocaleKey, string>
 
+/** locale 缺席时的回落函数：读本文件词典。 */
+export const fallbackT: RuntimeT = (key, params) => {
+  const template: string = zh[key]
+  if (params === undefined) return template
+  return template.replace(/\{(\w+)\}/g, (match, name: string) =>
+    name in params ? String(params[name]) : match)
+}
+
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
     /** 这份插件自己的文案：侧栏行、切换进度条、交接卡、面板本体。 */
