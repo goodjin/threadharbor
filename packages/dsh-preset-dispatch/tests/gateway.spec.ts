@@ -984,4 +984,39 @@ describe('GatewayConversations — 停止宽限窗口内的新请求', () => {
       vi.useRealTimers()
     }
   })
+
+  it('工具结果随回合收尾落盘：produce 投影进写入，调用不再悬空', async () => {
+    // 2026-10-17 的真机教训（session 423817a9 turn 39 起）：实时卡只写
+    // 宣告与 tool/call，结果在回合末 produce 的帧投影里，而网关的 produce
+    // 返回空数组——每个用了工具的就地回合都留下未闭合调用，会话从此加载
+    // 必炸（step/end leaves unresolved tool call）。
+    const append = recordingAppend()
+    const fake = fakeSession()
+    fake.answerWith(async turn => {
+      // 与真实 runner 相同的收尾次序：先实时写宣告+调用卡，回合末把
+      // produce 的投影交给 write（结果只能从这条路来）。
+      turn.write?.([
+        { type: 'assistant/message', payload: { turn: 11, step: 1, message: { id: 'm1', role: 'assistant', content: [{ type: 'tool-call', id: 'c1', tool: 'grep', arguments: '{}' }] } } },
+        { type: 'tool/call', payload: { turn: 11, step: 1, callId: 'c1', name: 'grep', arguments: '{}' } },
+      ] as never)
+      const produce = (turn as unknown as { produce?: (result: unknown) => readonly unknown[] }).produce
+      const produced = produce?.({ frames: [], end: { kind: 'completed' } })
+      if (produced !== undefined && produced.length > 0) turn.write?.(produced as never)
+      return { kind: 'completed' }
+    })
+    const gate = new GatewayConversations(
+      async () => fake.session,
+      () => {},
+      sessionId => (sessionId === 's1' ? append : undefined),
+      sessionId => (sessionId === 's1' ? { turn: 11, step: 1 } : undefined),
+      undefined,
+      () => (_result: unknown, at: { turn: number; step: number }) => [
+        { type: 'tool/result', payload: { turn: at.turn, step: at.step, callId: 'c1', message: { role: 'tool', callId: 'c1', content: [{ type: 'text', text: 'ok' }] } } },
+      ],
+    )
+    await gate.answer('s1', 'acp-grok', { messages: [user('查一下')] }, { chunk: () => {} })
+    const types = append.written.map(w => w.type)
+    expect(types).toContain('tool/call')
+    expect(types).toContain('tool/result')
+  })
 })

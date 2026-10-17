@@ -21,7 +21,7 @@ import type { FeedCursor } from './gateway-feed.ts'
 import { makeToolOnlyWriter } from './content-writer.ts'
 import type { SessionAppend } from './content-writer.ts'
 import type { AcpSession } from './registry.ts'
-import type { TurnContext, StepDecisionLike, StepPosition, TurnStreamHandle } from './dispatch.ts'
+import type { TurnContext, StepDecisionLike, StepPosition, TurnStreamHandle, AcpStepResult, ContentEvent } from './dispatch.ts'
 
 /** The step endings that reach the gateway, as the runner reports them. */
 export type GatewayStepEnd =
@@ -306,6 +306,7 @@ export class GatewayConversations {
   private readonly sessionAppend: GatewaySessionAppend | undefined
   private readonly positionOf: ((sessionId: string) => StepPosition | undefined) | undefined
   private readonly limits: ((presetId: string) => GatewayLimits) | undefined
+  private readonly produceOf: ((presetId: string) => ((result: AcpStepResult, position: StepPosition) => readonly ContentEvent[]) | undefined) | undefined
 
   // Plain assignments, not parameter properties — same strip-only reason as
   // above; this module is host-loaded without a transpiler.
@@ -315,12 +316,14 @@ export class GatewayConversations {
     sessionAppend?: GatewaySessionAppend,
     positionOf?: (sessionId: string) => StepPosition | undefined,
     limits?: (presetId: string) => GatewayLimits,
+    produceOf?: (presetId: string) => ((result: AcpStepResult, position: StepPosition) => readonly ContentEvent[]) | undefined,
   ) {
     this.open = open
     this.report = report
     this.sessionAppend = sessionAppend
     this.positionOf = positionOf
     this.limits = limits
+    this.produceOf = produceOf
   }
 
   /** One preset's watchdog limits, defaults unfilled so `??` stays meaningful. */
@@ -490,7 +493,17 @@ export class GatewayConversations {
     const turn = {
       sessionId,
       position,
-      produce: () => [],
+      // The runner writes live opening cards itself, but a tool's RESULT only
+      // exists in the turn-end projection — an empty produce leaves every
+      // call unresolved and the session unloadable afterwards (2026-10-17
+      // session 423817a9: "step/end leaves unresolved tool call"). So the
+      // gateway projects through the preset's dialect and hands the events to
+      // the same tool-only writer, which keeps the announcements honest.
+      produce: (result: AcpStepResult) => {
+        const project = this.produceOf?.(presetId)
+        if (project === undefined || position === undefined) return []
+        return project(result, position)
+      },
       write: writingTools,
       openStream: () => stream.port(),
       abort: () => controller.signal,

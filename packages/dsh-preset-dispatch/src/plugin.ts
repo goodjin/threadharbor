@@ -24,6 +24,7 @@ import type {
   PermissionDecision,
   PermissionRequest,
 } from '@threadharbor/dsh-acp-agent'
+import { projectStepContent } from '@threadharbor/dsh-acp-agent'
 import { buildPresetTable, cwdForOpen, openSessionsOf, sessionsRegistry } from './registry.ts'
 import type { AcpPresetConfig, PresetConfig } from './registry.ts'
 import { makeSessionFactory } from './factory.ts'
@@ -307,6 +308,19 @@ export function applyAcpPlugin(
         ...(preset.warnMs === undefined ? {} : { warnMs: preset.warnMs }),
         ...(preset.graceMs === undefined ? {} : { graceMs: preset.graceMs }),
       }
+    },
+    // The turn-end projection, so a tool's RESULT reaches the session log:
+    // live cards carry only the call, and an unresolved call makes the whole
+    // session unloadable (2026-10-17 session 423817a9).
+    presetId => {
+      const dialect = table.get(presetId)?.dialect
+      if (dialect === undefined) return undefined
+      return (result, at) => projectStepContent(result.frames, {
+        turn: at.turn,
+        step: at.step,
+        dialect,
+        ...(result.stream === undefined ? {} : { stream: result.stream }),
+      })
     },
   )
   catalogDeps.gateway = gateway
