@@ -11,6 +11,9 @@
  * the token — the wording everywhere around this probe says so.
  */
 
+import { fallbackT } from './locales.ts'
+import type { RuntimeT } from './locales.ts'
+
 /** How one reachability attempt ended. */
 export type ReachOutcome =
   | { readonly kind: 'reachable'; readonly ms: number }
@@ -25,9 +28,11 @@ export type ReachFetch = (input: string, init: RequestInit) => Promise<unknown>
  * @param fetcher - the fetch implementation to use.
  * @param address - the origin to ask for; only its reachability is observed.
  * @param timeoutMs - how long to wait before calling it a timeout.
+ * @param t - reads the unreachable reasons in the active language; absent
+ * (tests, no locale service) it falls back to the dictionary's source text.
  * @returns one of the three outcomes; never throws.
  */
-export async function probeReach(fetcher: ReachFetch, address: string, timeoutMs: number): Promise<ReachOutcome> {
+export async function probeReach(fetcher: ReachFetch, address: string, timeoutMs: number, t: RuntimeT = fallbackT): Promise<ReachOutcome> {
   const controller = new AbortController()
   const started = Date.now()
   const timer = setTimeout(() => { controller.abort() }, timeoutMs)
@@ -46,8 +51,8 @@ export async function probeReach(fetcher: ReachFetch, address: string, timeoutMs
     return {
       kind: 'unreachable',
       reason: name === 'TypeError'
-        ? '网络层失败：地址不可达、端口没有监听，或浏览器拦下了这个请求'
-        : `请求失败：${name}`,
+        ? t('panel.reach.networkFailure')
+        : t('panel.reach.requestFailed', { name }),
     }
   } finally {
     clearTimeout(timer)

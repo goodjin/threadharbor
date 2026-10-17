@@ -1606,7 +1606,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   }
   const startReach = (registration: HostRegistration): void => {
     setReaches(previous => new Map(previous).set(registration.hostId, 'probing'))
-    void probeReach((input, init) => fetch(input, init), registration.address, 5000).then(outcome => {
+    void probeReach((input, init) => fetch(input, init), registration.address, 5000, props.t).then(outcome => {
       setReaches(previous => new Map(previous).set(registration.hostId, outcome))
     })
   }
