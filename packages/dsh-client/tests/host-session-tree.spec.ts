@@ -183,7 +183,7 @@ describe('HostSessionTree', () => {
       // 项目行点击 → 折叠
       click(container, '[data-project-toggle]')
       expect(container.querySelectorAll('[data-session-row]')).toHaveLength(0)
-      expect(JSON.parse(localStorage.getItem('threadharbor.tree.projects') ?? '[]')).toEqual(['w1'])
+      expect(JSON.parse(localStorage.getItem('threadharbor.tree.projects') ?? '[]')).toEqual(['self/w1'])
     } finally { await unmount(root) }
   })
 
@@ -426,6 +426,66 @@ describe('HostSessionTree', () => {
         await Promise.resolve()
       })
       expect(archive).toEqual(['s1'])
+    } finally { await unmount(root) }
+  })
+
+  it('点远端会话走打开回调，不打开本机会话', async () => {
+    const opened: string[] = []
+    const { container, root, ctx } = await mountTree({
+      launchUrls: { mini: 'http://mini.example/?token=tk' },
+      onOpenRemote: target => { opened.push(target.sessionId); return true },
+    })
+    try {
+      click(container, '[data-host-node="mini"] [data-host-toggle]')
+      click(container, '[data-session-row="r1"]')
+      expect(opened).toEqual(['r1'])
+      expect(ctx.opened).toEqual([])
+    } finally { await unmount(root) }
+  })
+
+  it('远端会话菜单打到那台机器，不调用本机归档', async () => {
+    const localArchive: string[] = []
+    const remoteArchive: string[] = []
+    const ui = { archiveSession: async (id: string) => { localArchive.push(id) } }
+    const ctx = { get: (name: string) => name === 'uiWorkspace' ? ui : name === 'workspaces' ? {} : undefined }
+    const { container, root } = await mountTree({
+      ctx,
+      launchUrls: { mini: 'http://mini.example/?token=tk' },
+      remoteActions: {
+        startSession: async () => ({ sessionId: 'new' }),
+        renameWorkspace: async () => undefined,
+        deleteWorkspace: async () => undefined,
+        renameSession: async () => undefined,
+        archiveSession: async (_url, id) => { remoteArchive.push(id); return undefined },
+        pinSession: async () => undefined,
+        forkSession: async () => ({ sessionId: 'child' }),
+      },
+    })
+    try {
+      click(container, '[data-host-node="mini"] [data-host-toggle]')
+      click(container, '[data-session-row="r1"] [data-action="row-menu"]')
+      await act(async () => {
+        click(container, '[data-action="menu-archive-session"]')
+        await Promise.resolve()
+      })
+      expect(remoteArchive).toEqual(['r1'])
+      expect(localArchive).toEqual([])
+    } finally { await unmount(root) }
+  })
+
+  it('健康的空主机只说还没有会话，不叠拉取失败', async () => {
+    const empty = {
+      hosts: [{
+        hostId: 'quiet', label: '空主机', self: false, lastSeen: 1, sessionCount: 0, empty: true,
+        projects: [],
+      }],
+      totalSessions: 0,
+      empty: false,
+    }
+    const { container, root } = await mountTree({ view: empty, initialExpanded: ['quiet'] })
+    try {
+      expect(container.querySelector('[data-host-node="quiet"] [data-host-error]')).toBeNull()
+      expect(container.querySelector('[data-host-node="quiet"]')?.textContent).toContain('还没有会话')
     } finally { await unmount(root) }
   })
 

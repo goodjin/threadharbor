@@ -15,6 +15,7 @@ export const ROUTE_CHECK = '/api/threadharbor.host-ssh.check'
 export const ROUTE_SERVE = '/api/threadharbor.host-ssh.serve'
 export const ROUTE_SERVICE = '/api/threadharbor.host-ssh.service'
 export const ROUTE_REMOTE_SESSIONS = '/api/threadharbor.host-remote.sessions'
+export const ROUTE_REMOTE_OP = '/api/threadharbor.host-remote.op'
 
 type ApiResult<T> =
   | { readonly ok: true; readonly value: T }
@@ -131,4 +132,9 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 /** Pull a remote host's project/session list through the host-side route. */
 export async function fetchRemoteHostSessions(launchUrl: string, t: RuntimeT = fallbackT): Promise<ApiResult<{ readonly sessions: readonly HostSession[]; readonly note?: string }>> {
   return await postJson(ROUTE_REMOTE_SESSIONS, { launchUrl }, t)
+}
+
+/** Forward one allowlisted operation to the host that owns the session. */
+export async function remoteSessionOp<T>(body: Record<string, unknown>, t: RuntimeT = fallbackT): Promise<ApiResult<T>> {
+  return await postJson(ROUTE_REMOTE_OP, body, t)
 }

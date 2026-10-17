@@ -15,6 +15,7 @@ import { deploymentChannel, redactSshForLog } from './ssh/parse.ts'
 import type { SshDeployOperationView, SshDeployRequest } from './ssh/types.ts'
 import { isValidHostId } from './identity.ts'
 import { fetchRemoteSessions } from './host-remote-sessions.ts'
+import { performRemoteOp } from './host-remote-ops.ts'
 import { parseAccessMode } from './ssh/access.ts'
 import { DEFAULT_REMOTE_DSH_PLUGINS, normalizePluginSpecs } from './ssh/deploy-plugins.ts'
 import { parseRemoteAgentSelection } from './ssh/remote-agents.ts'
@@ -29,6 +30,7 @@ export const ROUTE_DEPLOY = '/api/threadharbor.host-ssh.deploy'
 export const ROUTE_OPERATION = '/api/threadharbor.host-ssh.operation'
 export const ROUTE_PEER = '/api/threadharbor.host-ssh.peer'
 export const ROUTE_REMOTE_SESSIONS = '/api/threadharbor.host-remote.sessions'
+export const ROUTE_REMOTE_OP = '/api/threadharbor.host-remote.op'
 export const ROUTE_CONNECT = '/api/threadharbor.host-ssh.connect'
 export const ROUTE_CHECK = '/api/threadharbor.host-ssh.check'
 export const ROUTE_SERVE = '/api/threadharbor.host-ssh.serve'
@@ -154,6 +156,11 @@ export function apply(ctx: unknown, config: Config = {}): void {
     const launchUrl = typeof record['launchUrl'] === 'string' ? record['launchUrl'] : ''
     if (launchUrl.trim() === '') throw new Error('launchUrl 必填')
     return await fetchRemoteSessions(launchUrl)
+  })
+
+  register(ROUTE_REMOTE_OP, async body => {
+    if (!isRecord(body)) throw new Error('请求体必须是对象')
+    return await performRemoteOp(body)
   })
 
   register(ROUTE_CONNECT, async body => {

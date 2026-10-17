@@ -167,6 +167,27 @@ function readViewOptions(): { orderBy: OrderBy; filterBy: FilterBy } {
   }
 }
 
+/** A session that lives on another host, named well enough to open it here. */
+export type RemoteTarget = {
+  readonly hostId: string
+  readonly hostTitle: string
+  readonly launchUrl: string
+  readonly sessionId: string
+  readonly title: string
+  readonly projectId: string
+}
+
+/** Row actions that must run on the host that owns the session, not this page. */
+export type RemoteTreeActions = {
+  startSession(launchUrl: string, projectId: string): Promise<{ readonly sessionId?: string; readonly error?: string }>
+  renameWorkspace(launchUrl: string, projectId: string, title: string): Promise<string | undefined>
+  deleteWorkspace(launchUrl: string, projectId: string): Promise<string | undefined>
+  renameSession(launchUrl: string, sessionId: string, title: string): Promise<string | undefined>
+  archiveSession(launchUrl: string, sessionId: string): Promise<string | undefined>
+  pinSession(launchUrl: string, sessionId: string, pinned: boolean): Promise<string | undefined>
+  forkSession(launchUrl: string, sessionId: string): Promise<{ readonly sessionId?: string; readonly error?: string }>
+}
+
 type Props = {
   readonly view: RollUpView
   readonly ctx: SessionActionsCtx
@@ -174,10 +195,25 @@ type Props = {
   /** The open session's id; its row renders selected while the conversation owns main. */
   readonly currentSessionId?: string | undefined
   readonly t: RuntimeT
+  /** launchUrl by host id, for hosts this page can actually reach. */
+  readonly launchUrls?: Readonly<Record<string, string>>
+  /** Open a remote session in the main area. `false` means the panel did not open. */
+  readonly onOpenRemote?: (target: RemoteTarget) => boolean
+  /** Leave the remote panel before a local session takes the main area back. */
+  readonly onLeaveRemote?: () => void
+  readonly remoteActions?: RemoteTreeActions
 }
 
+const projectKeyOf = (hostId: string, projectId: string): string => `${hostId}/${projectId}`
+
 type MenuState = { readonly kind: 'project' | 'session'; readonly key: string } | null
-type RenameState = { readonly kind: 'project' | 'session'; readonly key: string; readonly draft: string } | null
+type RenameState = {
+  readonly kind: 'project' | 'session'
+  readonly key: string
+  readonly draft: string
+  readonly hostId: string
+  readonly self: boolean
+} | null
 
 function readJsonArray(key: string): string[] {
   try {
@@ -189,11 +225,11 @@ function readJsonArray(key: string): string[] {
   }
 }
 
-export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, t }: Props) {
+export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, t, launchUrls, onOpenRemote, onLeaveRemote, remoteActions }: Props) {
   const [openFailed, setOpenFailed] = useState(false)
   const [menu, setMenu] = useState<MenuState>(null)
   const [renaming, setRenaming] = useState<RenameState>(null)
-  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null)
+  const [confirmingDelete, setConfirmingDelete] = useState<{ projectId: string; hostId: string } | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
 
   const [expanded, setExpanded] = useState<readonly string[]>(() => {
@@ -344,23 +380,53 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
   const commitRename = useCallback(() => {
     const state = renaming
     if (state === null || state.draft.trim() === '') return
+    const title = state.draft.trim()
     setRenaming(null)
+    if (!state.self) {
+      const launchUrl = launchUrls?.[state.hostId]
+      if (launchUrl === undefined || remoteActions === undefined) {
+        setActionError(t('panel.tree.remoteOpenFailed'))
+        return
+      }
+      void run(() => state.kind === 'project'
+        ? remoteActions.renameWorkspace(launchUrl, state.key, title)
+        : remoteActions.renameSession(launchUrl, state.key, title))
+      return
+    }
     void run(() => state.kind === 'project'
-      ? renameWorkspace(ctx, state.key, state.draft.trim())
-      : renameSession(ctx, state.key, state.draft.trim()))
-  }, [ctx, renaming, run])
+      ? renameWorkspace(ctx, state.key, title)
+      : renameSession(ctx, state.key, title))
+  }, [ctx, renaming, run, launchUrls, remoteActions, t])
 
   const normalizedQuery = query.trim()
-  // Flat search results: local title matches first, then history hits, deduped.
-  const localMatches = normalizedQuery === '' ? [] : view.hosts.find(host => host.self)?.projects
+  // Flat search results: titles from every host already on the tree, then this
+  // machine's history index. History search is still local — the index lives here.
+  const titleMatches = normalizedQuery === '' ? [] : view.hosts.flatMap(host => host.projects
     .flatMap(project => project.sessions
       .filter(session => passesFilter(session, filterBy) && session.title.toLowerCase().includes(normalizedQuery.toLowerCase()))
-      .map(session => ({ sessionId: session.sessionId, title: session.title, projectId: project.projectId })))
-    ?? []
-  const seen = new Set(localMatches.map(row => row.sessionId))
-  const historyMatches = remote.items.filter(row => !seen.has(row.sessionId)).map(row => ({ ...row, projectId: undefined as string | undefined }))
-  const allResults = [...localMatches, ...historyMatches].slice(0, SEARCH_RESULT_LIMIT)
-  const resultCount = localMatches.length + historyMatches.length
+      .map(session => ({
+        sessionId: session.sessionId,
+        title: session.title,
+        projectId: project.projectId,
+        hostId: host.hostId,
+        hostTitle: host.label,
+        self: host.self,
+        launchUrl: launchUrls?.[host.hostId],
+      }))))
+  const seenLocal = new Set(titleMatches.filter(row => row.self).map(row => row.sessionId))
+  const historyMatches = remote.items
+    .filter(row => !seenLocal.has(row.sessionId))
+    .map(row => ({
+      sessionId: row.sessionId,
+      title: row.title,
+      projectId: undefined as string | undefined,
+      hostId: 'local',
+      hostTitle: '',
+      self: true,
+      launchUrl: undefined as string | undefined,
+    }))
+  const allResults = [...titleMatches, ...historyMatches].slice(0, SEARCH_RESULT_LIMIT)
+  const resultCount = titleMatches.length + historyMatches.length
 
   return (
     <div className={styles.tree} data-host-tree>
@@ -402,12 +468,32 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
           <div className={styles.searchResults} data-search-results>
             {allResults.map(row => (
               <button
-                key={row.sessionId}
+                key={`${row.hostId}:${row.sessionId}`}
                 type="button"
                 className={styles.sessionRow}
                 data-search-result={row.sessionId}
-                data-active={currentSessionId === row.sessionId ? 'true' : undefined}
-                onClick={() => { setOpenFailed(openLocalSession(ctx, row.sessionId) === false) }}
+                data-search-host={row.hostId}
+                data-active={currentSessionId === row.sessionId && row.self ? 'true' : undefined}
+                onClick={() => {
+                  if (row.self) {
+                    onLeaveRemote?.()
+                    setOpenFailed(openLocalSession(ctx, row.sessionId) === false)
+                    return
+                  }
+                  if (row.launchUrl === undefined || onOpenRemote === undefined) {
+                    setActionError(t('panel.tree.remoteOpenFailed'))
+                    return
+                  }
+                  const opened = onOpenRemote({
+                    hostId: row.hostId,
+                    hostTitle: row.hostTitle,
+                    launchUrl: row.launchUrl,
+                    sessionId: row.sessionId,
+                    title: row.title,
+                    projectId: row.projectId ?? '',
+                  })
+                  if (!opened) setActionError(t('panel.tree.remoteOpenFailed'))
+                }}
               >
                 <span className={styles.sessionTitle}>{row.title === '' ? row.sessionId : row.title}</span>
               </button>
@@ -449,16 +535,18 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                 ? <p className={styles.note} data-local-note>{host.note}</p>
                 : <p className={styles.error} data-host-error>{t('panel.tree.fetchFailedTitle')}{host.note}</p>
               : null}
-            {open && !host.self && host.projects.length === 0 && host.undeployed !== true
+            {open && !host.self && host.projects.length === 0 && host.undeployed !== true && host.note === undefined
               ? <p className={styles.note}>{t('panel.tree.noSessions')}</p>
               : null}
             {open ? host.projects.map(project => {
-              const projectOpen = !collapsedProjects.includes(project.projectId)
+              const foldedKey = projectKeyOf(host.hostId, project.projectId)
+              const projectOpen = !collapsedProjects.includes(foldedKey)
               const ordered = orderSessions(project.sessions.filter(session => passesFilter(session, filterBy)), orderBy)
-              const overflow = overflowOpen.includes(project.projectId)
+              const overflow = overflowOpen.includes(foldedKey)
               const { shown, hiddenCount } = visibleSessions(ordered, IDLE_SESSION_LIMIT)
               const rendered = overflow ? ordered : shown
-              const projectMenu = menu?.kind === 'project' && menu.key === project.projectId
+              const projectMenu = menu?.kind === 'project' && menu.key === foldedKey
+              const launchUrl = launchUrls?.[host.hostId]
               return (
                 <div key={project.projectId} className={styles.project} data-project-group={project.projectId}>
                   <div className={styles.projectRow}>
@@ -467,7 +555,7 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                       className={styles.projectToggle}
                       data-project-toggle
                       title={project.label}
-                      onClick={() => { toggleProject(project.projectId) }}
+                      onClick={() => { toggleProject(foldedKey) }}
                     >
                       <span className={styles.caretSlot} data-caret={projectOpen ? 'open' : 'closed'}>
                         <svg className={styles.caretIcon} viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
@@ -475,13 +563,13 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                         </svg>
                       </span>
                       <span className={styles.projectLabel}>
-                        {renaming?.kind === 'project' && renaming.key === project.projectId
+                        {renaming?.kind === 'project' && renaming.key === project.projectId && renaming.hostId === host.hostId
                           ? <input
                               className={styles.renameInput}
                               data-rename-input
                               value={renaming.draft}
                               autoFocus
-                              onChange={event => { setRenaming({ kind: 'project', key: project.projectId, draft: event.target.value }) }}
+                              onChange={event => { setRenaming({ kind: 'project', key: project.projectId, draft: event.target.value, hostId: host.hostId, self: host.self }) }}
                               onKeyDown={event => {
                                 if (event.key === 'Enter') commitRename()
                                 if (event.key === 'Escape') setRenaming(null)
@@ -490,20 +578,43 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                           : project.label}
                       </span>
                     </button>
-                    {host.self
-                      ? <button
-                          type="button"
-                          className={styles.newSession}
-                          title={t('panel.tree.newSession')}
-                          data-action="tree-new-session"
-                          onClick={event => { event.stopPropagation(); void run(() => startSessionInProject(ctx, project.projectId)) }}
-                        >
-                          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M13.5 7.2 V12 a1.5 1.5 0 0 1 -1.5 1.5 H5 L2.5 15.5 V3 A1.5 1.5 0 0 1 4 1.5 h4.3" />
-                            <path d="M11.5 1.5 v4 M9.5 3.5 h4" />
-                          </svg>
-                        </button>
-                      : null}
+                    <button
+                      type="button"
+                      className={styles.newSession}
+                      title={t('panel.tree.newSession')}
+                      data-action="tree-new-session"
+                      onClick={event => {
+                        event.stopPropagation()
+                        if (host.self) {
+                          void run(() => startSessionInProject(ctx, project.projectId))
+                          return
+                        }
+                        if (launchUrl === undefined || remoteActions === undefined) {
+                          setActionError(t('panel.tree.remoteOpenFailed'))
+                          return
+                        }
+                        void run(async () => {
+                          const created = await remoteActions.startSession(launchUrl, project.projectId)
+                          if (created.error !== undefined) return created.error
+                          if (created.sessionId !== undefined && onOpenRemote !== undefined) {
+                            onOpenRemote({
+                              hostId: host.hostId,
+                              hostTitle: host.label,
+                              launchUrl,
+                              sessionId: created.sessionId,
+                              title: t('panel.tree.newSession'),
+                              projectId: project.projectId,
+                            })
+                          }
+                          return undefined
+                        })
+                      }}
+                    >
+                      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M13.5 7.2 V12 a1.5 1.5 0 0 1 -1.5 1.5 H5 L2.5 15.5 V3 A1.5 1.5 0 0 1 4 1.5 h4.3" />
+                        <path d="M11.5 1.5 v4 M9.5 3.5 h4" />
+                      </svg>
+                    </button>
                     <button
                       type="button"
                       className={styles.rowMenu}
@@ -511,7 +622,7 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                       title={t('panel.tree.menuTitle')}
                       onClick={event => {
                         event.stopPropagation()
-                        setMenu(current => current?.kind === 'project' && current.key === project.projectId ? null : { kind: 'project', key: project.projectId })
+                        setMenu(current => current?.kind === 'project' && current.key === foldedKey ? null : { kind: 'project', key: foldedKey })
                       }}
                     >
                       ⋯
@@ -521,15 +632,27 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                     {projectMenu
                       ? <div className={styles.menu} data-row-menu>
                           {/* 新会话不进菜单（2026-10-16 用户决定）：行尾加号图标就是唯一入口。 */}
-                          <button type="button" data-action="menu-rename-workspace" className={styles.menuItem} onClick={() => { setMenu(null); setRenaming({ kind: 'project', key: project.projectId, draft: project.label }) }}>{t('panel.tree.menuRenameWorkspace')}</button>
-                          {confirmingDelete === project.projectId
-                            ? <button type="button" data-action="menu-confirm-delete" className={styles.menuItemDanger} onClick={() => { setConfirmingDelete(null); void run(() => deleteWorkspace(ctx, project.projectId)) }}>{t('panel.tree.menuConfirmDelete')}</button>
-                            : <button type="button" data-action="menu-delete-workspace" className={styles.menuItem} onClick={() => { setConfirmingDelete(project.projectId) }}>{t('panel.tree.menuDeleteWorkspace')}</button>}
+                          <button type="button" data-action="menu-rename-workspace" className={styles.menuItem} onClick={() => { setMenu(null); setRenaming({ kind: 'project', key: project.projectId, draft: project.label, hostId: host.hostId, self: host.self }) }}>{t('panel.tree.menuRenameWorkspace')}</button>
+                          {confirmingDelete?.projectId === project.projectId && confirmingDelete.hostId === host.hostId
+                            ? <button type="button" data-action="menu-confirm-delete" className={styles.menuItemDanger} onClick={() => {
+                                setConfirmingDelete(null)
+                                if (host.self) {
+                                  void run(() => deleteWorkspace(ctx, project.projectId))
+                                  return
+                                }
+                                if (launchUrl === undefined || remoteActions === undefined) {
+                                  setActionError(t('panel.tree.remoteOpenFailed'))
+                                  return
+                                }
+                                void run(() => remoteActions.deleteWorkspace(launchUrl, project.projectId))
+                              }}>{t('panel.tree.menuConfirmDelete')}</button>
+                            : <button type="button" data-action="menu-delete-workspace" className={styles.menuItem} onClick={() => { setConfirmingDelete({ projectId: project.projectId, hostId: host.hostId }) }}>{t('panel.tree.menuDeleteWorkspace')}</button>}
                         </div>
                       : null}
                   </div>
                   {projectOpen ? rendered.map(session => {
-                    const sessionMenu = menu?.kind === 'session' && menu.key === session.sessionId
+                    const sessionMenuKey = `${host.hostId}/${session.sessionId}`
+                    const sessionMenu = menu?.kind === 'session' && menu.key === sessionMenuKey
                     const kind = liveKind(session)
                     const liveLabel = kind === undefined ? undefined : t(liveLabelKey(kind))
                     return (
@@ -544,7 +667,24 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                           data-pending={session.pendingInteraction}
                           data-live={kind}
                           onClick={() => {
-                            if (host.self) setOpenFailed(openLocalSession(ctx, session.sessionId) === false)
+                            if (host.self) {
+                              onLeaveRemote?.()
+                              setOpenFailed(openLocalSession(ctx, session.sessionId) === false)
+                              return
+                            }
+                            if (launchUrl === undefined || onOpenRemote === undefined) {
+                              setActionError(t('panel.tree.remoteOpenFailed'))
+                              return
+                            }
+                            const opened = onOpenRemote({
+                              hostId: host.hostId,
+                              hostTitle: host.label,
+                              launchUrl,
+                              sessionId: session.sessionId,
+                              title: session.title,
+                              projectId: project.projectId,
+                            })
+                            if (!opened) setActionError(t('panel.tree.remoteOpenFailed'))
                           }}
                         >
                           {kind !== undefined && liveLabel !== undefined
@@ -552,13 +692,13 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                             : null}
                           {session.pinned === true ? <span className={styles.sessionPin} data-session-pinned>📌</span> : null}
                           <span className={styles.sessionTitle}>
-                            {renaming?.kind === 'session' && renaming.key === session.sessionId
+                            {renaming?.kind === 'session' && renaming.key === session.sessionId && renaming.hostId === host.hostId
                               ? <input
                                   className={styles.renameInput}
                                   data-rename-input
                                   value={renaming.draft}
                                   autoFocus
-                                  onChange={event => { setRenaming({ kind: 'session', key: session.sessionId, draft: event.target.value }) }}
+                                  onChange={event => { setRenaming({ kind: 'session', key: session.sessionId, draft: event.target.value, hostId: host.hostId, self: host.self }) }}
                                   onKeyDown={event => {
                                     if (event.key === 'Enter') commitRename()
                                     if (event.key === 'Escape') setRenaming(null)
@@ -574,7 +714,7 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                             title={t('panel.tree.menuTitle')}
                             onClick={event => {
                               event.stopPropagation()
-                              setMenu(current => current?.kind === 'session' && current.key === session.sessionId ? null : { kind: 'session', key: session.sessionId })
+                              setMenu(current => current?.kind === 'session' && current.key === sessionMenuKey ? null : { kind: 'session', key: sessionMenuKey })
                             }}
                           >
                             ⋯
@@ -582,12 +722,42 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                         </button>
                         {sessionMenu
                           ? <div className={styles.menu} data-row-menu>
-                              <button type="button" data-action="menu-rename-session" className={styles.menuItem} onClick={() => { setMenu(null); setRenaming({ kind: 'session', key: session.sessionId, draft: session.title }) }}>{t('panel.tree.menuRenameSession')}</button>
-                              <button type="button" data-action="menu-archive-session" className={styles.menuItem} onClick={() => { void run(() => archiveSession(ctx, session.sessionId)) }}>{t('panel.tree.menuArchiveSession')}</button>
+                              <button type="button" data-action="menu-rename-session" className={styles.menuItem} onClick={() => { setMenu(null); setRenaming({ kind: 'session', key: session.sessionId, draft: session.title, hostId: host.hostId, self: host.self }) }}>{t('panel.tree.menuRenameSession')}</button>
+                              <button type="button" data-action="menu-archive-session" className={styles.menuItem} onClick={() => {
+                                if (host.self) { void run(() => archiveSession(ctx, session.sessionId)); return }
+                                if (launchUrl === undefined || remoteActions === undefined) { setActionError(t('panel.tree.remoteOpenFailed')); return }
+                                void run(() => remoteActions.archiveSession(launchUrl, session.sessionId))
+                              }}>{t('panel.tree.menuArchiveSession')}</button>
                               {session.pinned === true
-                                ? <button type="button" data-action="menu-unpin-session" className={styles.menuItem} onClick={() => { void run(() => unpinSession(ctx, session.sessionId)) }}>{t('panel.tree.menuUnpinSession')}</button>
-                                : <button type="button" data-action="menu-pin-session" className={styles.menuItem} onClick={() => { void run(() => pinSession(ctx, session.sessionId)) }}>{t('panel.tree.menuPinSession')}</button>}
-                              <button type="button" data-action="menu-fork-session" className={styles.menuItem} onClick={() => { void run(() => forkSession(ctx, session.sessionId)) }}>{t('panel.tree.menuForkSession')}</button>
+                                ? <button type="button" data-action="menu-unpin-session" className={styles.menuItem} onClick={() => {
+                                    if (host.self) { void run(() => unpinSession(ctx, session.sessionId)); return }
+                                    if (launchUrl === undefined || remoteActions === undefined) { setActionError(t('panel.tree.remoteOpenFailed')); return }
+                                    void run(() => remoteActions.pinSession(launchUrl, session.sessionId, false))
+                                  }}>{t('panel.tree.menuUnpinSession')}</button>
+                                : <button type="button" data-action="menu-pin-session" className={styles.menuItem} onClick={() => {
+                                    if (host.self) { void run(() => pinSession(ctx, session.sessionId)); return }
+                                    if (launchUrl === undefined || remoteActions === undefined) { setActionError(t('panel.tree.remoteOpenFailed')); return }
+                                    void run(() => remoteActions.pinSession(launchUrl, session.sessionId, true))
+                                  }}>{t('panel.tree.menuPinSession')}</button>}
+                              <button type="button" data-action="menu-fork-session" className={styles.menuItem} onClick={() => {
+                                if (host.self) { void run(() => forkSession(ctx, session.sessionId)); return }
+                                if (launchUrl === undefined || remoteActions === undefined) { setActionError(t('panel.tree.remoteOpenFailed')); return }
+                                void run(async () => {
+                                  const forked = await remoteActions.forkSession(launchUrl, session.sessionId)
+                                  if (forked.error !== undefined) return forked.error
+                                  if (forked.sessionId !== undefined && onOpenRemote !== undefined) {
+                                    onOpenRemote({
+                                      hostId: host.hostId,
+                                      hostTitle: host.label,
+                                      launchUrl,
+                                      sessionId: forked.sessionId,
+                                      title: session.title,
+                                      projectId: project.projectId,
+                                    })
+                                  }
+                                  return undefined
+                                })
+                              }}>{t('panel.tree.menuForkSession')}</button>
                             </div>
                           : null}
                       </div>
@@ -595,8 +765,8 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
                   }) : null}
                   {projectOpen && hiddenCount > 0
                     ? overflow
-                      ? <button type="button" className={styles.overflowToggle} data-action="tree-collapse-sessions" onClick={() => { toggleOverflow(project.projectId) }}>{t('panel.tree.collapseSessions')}</button>
-                      : <button type="button" className={styles.overflowToggle} data-action="tree-expand-more" onClick={() => { toggleOverflow(project.projectId) }}>{t('panel.tree.expandMore', { n: hiddenCount })}</button>
+                      ? <button type="button" className={styles.overflowToggle} data-action="tree-collapse-sessions" onClick={() => { toggleOverflow(foldedKey) }}>{t('panel.tree.collapseSessions')}</button>
+                      : <button type="button" className={styles.overflowToggle} data-action="tree-expand-more" onClick={() => { toggleOverflow(foldedKey) }}>{t('panel.tree.expandMore', { n: hiddenCount })}</button>
                     : null}                </div>
               )
             }) : null}

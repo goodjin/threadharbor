@@ -157,6 +157,7 @@ describe('面板挂载', () => {
     expect(sections.some(entry => entry.options.id === 'threadharbor-rollup')).toBe(true)
     expect(ctx.core.entriesOfSlot('main').some(entry => entry.options.key === 'threadharbor-rollup')).toBe(false)
     expect(ctx.core.entriesOfSlot('sidebar.panellist').some(entry => entry.options.id === 'threadharbor-rollup')).toBe(false)
+    expect(ctx.core.entriesOfSlot('main').some(entry => entry.options.key === 'threadharbor-remote-session')).toBe(true)
   })
 
   it('输入框的模型入口在主机给出目录服务时接管那个座位', () => {
