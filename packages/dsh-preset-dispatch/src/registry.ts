@@ -31,6 +31,13 @@ export type AcpPresetConfig = {
   readonly args?: readonly string[]
   readonly model?: string
   readonly mode?: string
+  /**
+   * Accepted so an old config still loads. Never used as a workspace.
+   *
+   * An external conversation opens only in the DSH session's own workspace.
+   * A directory pinned here used to send every project into one folder, and
+   * this process's directory is not a workspace either.
+   */
   readonly cwd?: string
   /**
    * Watchdog limits for an in-place answer on this preset, in milliseconds.
@@ -200,6 +207,25 @@ export type PresetTableOptions = {
   readonly replay?: {
     take(sessionId: string): string | undefined
   }
+  /**
+   * The project directory of one DSH session, when the host can name it.
+   *
+   * A new external conversation opens there and nowhere else. No directory
+   * means this session has no workspace, and the open is refused.
+   */
+  readonly cwdOfSession?: (sessionId: string) => string | undefined
+}
+
+/**
+ * The workspace a new external conversation may open in.
+ *
+ * Only the session's own directory counts. A preset directory and this
+ * process's directory are not workspaces, so a session that names neither
+ * is refused instead of being parked in one of them.
+ */
+export function cwdForOpen(sessionCwd: string | undefined): string {
+  if (typeof sessionCwd === 'string' && sessionCwd !== '') return sessionCwd
+  throw new Error('这个会话没有工作区，外部会话不会在预设目录或宿主进程目录里开工')
 }
 
 /**
@@ -240,7 +266,7 @@ export function buildPresetTable(
         let session = opened.get(turn.sessionId)
         if (session === undefined) {
           session = await factory.open(presetId, {
-            cwd: preset.cwd ?? process.cwd(),
+            cwd: cwdForOpen(options.cwdOfSession?.(turn.sessionId)),
             // Named so the opened client can put the host session on any
             // question it asks the human — the session host services resolve
             // an agent by.

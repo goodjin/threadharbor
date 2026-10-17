@@ -126,8 +126,14 @@ function present<T>(value: T | undefined, name: string): T {
   return value
 }
 
-/** The cwd a session was opened in, read flat off its header. */
-function cwdOf(session: unknown): string | undefined {
+/**
+ * The project directory a session was opened in, read flat off its header.
+ *
+ * This is the workspace the user picked. External conversations open here;
+ * a directory written on the preset is only a fallback for a session that
+ * has none.
+ */
+export function cwdOfSession(session: unknown): string | undefined {
   const header = (typeof session === 'object' && session !== null ? session : {}) as {
     header?: { cwd?: unknown }
   }
@@ -172,10 +178,14 @@ export function switchPortsOf(
       if (source === undefined) {
         throw new Error(`acp switch: session ${request.sessionId} is not on this host anymore; nothing to switch`)
       }
-      const cwd = cwdOf(source)
+      const cwd = cwdOfSession(source)
+      // Omitting the directory would let the host stamp its own process
+      // directory onto the new session. That is not a workspace.
+      if (cwd === undefined) {
+        throw new Error('这个会话没有工作区，不能换到另一边开工')
+      }
       const presetPart = request.preset === undefined ? {} : { agentPreset: request.preset }
-      const cwdPart = cwd === undefined ? {} : { cwd }
-      const created = (await create({ ...presetPart, ...cwdPart })) as { sessionId?: unknown } | null
+      const created = (await create({ ...presetPart, cwd })) as { sessionId?: unknown } | null
       if (typeof created?.sessionId !== 'string' || created.sessionId === '') {
         throw new Error('the host accepted the switch but did not name the session it created')
       }

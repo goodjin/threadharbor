@@ -359,7 +359,11 @@ function installedRow(deps: { transport: () => AcpTransport & { die(reason: stri
   transports: readonly (AcpTransport & { die(reason: string): void })[]
 } {
   let captured: ReadonlyMap<string, AcpPresetBinding> | undefined
-  const context = ctx()
+  const context = Object.assign(ctx(), {
+    get: (key: string) => (key === 'sessions'
+      ? { get: () => ({ header: { cwd: '/workspace' } }) }
+      : undefined),
+  })
   const transports: (AcpTransport & { die(reason: string): void })[] = []
   applyAcpPlugin(context, 'acp-grok', { agent: 'grok', url: 'ws://127.0.0.1:2419' }, {
     install: (_agent, _presetId, _dialect, table) => { captured = table },
@@ -484,6 +488,86 @@ describe('加载路径的模型报告真的进目录（applyAcpPlugin 端到端�
   /** Yield long enough for the runner's awaited request to be on the wire. */
   const settle = (): Promise<void> => new Promise(resolve => { setTimeout(resolve, 0) })
 
+  it('新开的外部会话用这条会话自己的项目目录，不用预设上写死的目录', async () => {
+    const project = '/Users/good/qg/nexa-service'
+    const pinned = '/Users/good/Documents/deepseek-harness'
+    let adapter: { stream?(options: Record<string, unknown>): AsyncIterable<unknown> } | undefined
+    const context = {
+      ...ctx(),
+      get: (key: string) => {
+        if (key === 'llm') {
+          return { registerAdapter: (_routes: string[], registered: { stream?: (o: Record<string, unknown>) => AsyncIterable<unknown> }) => { adapter = registered } }
+        }
+        if (key === 'sessions') {
+          return { get: (id: string) => (id === 's1' ? { header: { cwd: project } } : undefined) }
+        }
+        return undefined
+      },
+    }
+    const scripted = scriptedTransport()
+    applyAcpPlugin(context, 'acp-codex', { agent: 'codex', command: 'codex-acp', cwd: pinned }, {
+      install: () => {},
+      transport: () => scripted,
+    })
+    const chunks = adapter?.stream?.({
+      provider: 'acp:acp-codex',
+      model: 'gpt-6-astra',
+      sessionId: 's1',
+      messages: [{ role: 'user', content: [{ type: 'text', text: '看看项目里有什么' }] }],
+    })
+    void (async () => { for await (const chunk of chunks ?? []) { void chunk } })()
+    const answered = new Set<string>()
+    let openedIn: string | undefined
+    for (let pass = 0; pass < 8 && openedIn === undefined; pass++) {
+      await settle()
+      for (const frame of scripted.sent) {
+        const request = JSON.parse(frame) as { id?: number; method?: string; params?: { cwd?: string } }
+        if (request.id === undefined || answered.has(frame)) continue
+        answered.add(frame)
+        if (request.method === 'initialize') {
+          scripted.receive(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: {} }))
+        }
+        if (request.method === 'session/new') {
+          openedIn = request.params?.cwd
+          scripted.receive(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { sessionId: 'x1' } }))
+        }
+      }
+    }
+    expect(openedIn).toBe(project)
+  })
+
+  it('会话没有工作区时不开外部会话，预设上的目录也不顶上', async () => {
+    let adapter: { stream?(options: Record<string, unknown>): AsyncIterable<unknown> } | undefined
+    const context = {
+      ...ctx(),
+      get: (key: string) => {
+        if (key === 'llm') {
+          return { registerAdapter: (_routes: string[], registered: { stream?: (o: Record<string, unknown>) => AsyncIterable<unknown> }) => { adapter = registered } }
+        }
+        if (key === 'sessions') return { get: () => ({ header: {} }) }
+        return undefined
+      },
+    }
+    const scripted = scriptedTransport()
+    const reports: string[] = []
+    applyAcpPlugin(context, 'acp-codex', { agent: 'codex', command: 'codex-acp', cwd: '/Users/good/Documents/deepseek-harness' }, {
+      install: () => {},
+      transport: () => scripted,
+      report: message => { reports.push(message) },
+    })
+    const chunks = adapter?.stream?.({
+      provider: 'acp:acp-codex',
+      model: 'gpt-6-astra',
+      sessionId: 's1',
+      messages: [{ role: 'user', content: [{ type: 'text', text: '看看项目里有什么' }] }],
+    })
+    await expect((async () => {
+      for await (const chunk of chunks ?? []) { void chunk }
+    })()).rejects.toThrow(/没有工作区/)
+    expect(scripted.sent.some(frame => frame.includes('session/new'))).toBe(false)
+    expect(reports.some(message => message.includes('cwd 已忽略'))).toBe(true)
+  })
+
   it('hands the session writer down to the in-place path, so tool cards are recorded', async () => {
     // 装载期这一段是整条链的最后一节：entry 从会话服务取出写入器，经 deps 传到
     // 网关。断了它，网关里的写入器就永远拿不到东西，工具卡片依旧无处可去——
@@ -492,9 +576,13 @@ describe('加载路径的模型报告真的进目录（applyAcpPlugin 端到端�
     let adapter: { stream?(options: Record<string, unknown>): AsyncIterable<unknown> } | undefined
     const context = {
       ...ctx(),
-      get: (key: string) => key === 'llm'
-        ? { registerAdapter: (_routes: string[], registered: { stream?: (o: Record<string, unknown>) => AsyncIterable<unknown> }) => { adapter = registered } }
-        : undefined,
+      get: (key: string) => {
+        if (key === 'llm') {
+          return { registerAdapter: (_routes: string[], registered: { stream?: (o: Record<string, unknown>) => AsyncIterable<unknown> }) => { adapter = registered } }
+        }
+        if (key === 'sessions') return { get: () => ({ header: { cwd: '/workspace' } }) }
+        return undefined
+      },
     }
     const scripted = scriptedTransport()
     applyAcpPlugin(context, 'acp-codex', { agent: 'codex', command: 'codex-acp' }, {
@@ -572,9 +660,13 @@ describe('加载路径的模型报告真的进目录（applyAcpPlugin 端到端�
     const context = ctx()
     let adapter: { listModels(provider: string): Promise<readonly { id: string; name?: string }[]> } | undefined
     const withRegistry = Object.assign(context, {
-      get: (key: string) => (key === 'llm'
-        ? { registerAdapter: (_providers: string[], registered: never) => { adapter = registered } }
-        : undefined),
+      get: (key: string) => {
+        if (key === 'llm') {
+          return { registerAdapter: (_providers: string[], registered: never) => { adapter = registered } }
+        }
+        if (key === 'sessions') return { get: () => ({ header: { cwd: '/workspace' } }) }
+        return undefined
+      },
     })
 
     const transport = scriptedTransport()

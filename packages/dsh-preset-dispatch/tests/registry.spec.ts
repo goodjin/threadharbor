@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 
 let closed = 0
 beforeEach(() => { closed = 0 })
-import { buildPresetTable, sessionsRegistry } from '../src/registry.ts'
+import { buildPresetTable, cwdForOpen, sessionsRegistry } from '../src/registry.ts'
 import type { AcpSessionFactory } from '../src/registry.ts'
 import type { AcpDialect } from '@threadharbor/dsh-acp-agent'
 
@@ -44,6 +44,9 @@ function killableSession(): KillableSession {
     die: reason => { death(reason) },
   }
 }
+
+/** A session directory the tests that are not about workspaces can open in. */
+const inProject = { cwdOfSession: () => '/workspace' }
 
 function killableFactory(): AcpSessionFactory & { built: string[]; sessions: KillableSession[] } {
   const built: string[] = []
@@ -81,7 +84,7 @@ describe('buildPresetTable', () => {
 
   it('opens one agent per session, not one per turn', async () => {
     const factory = killableFactory()
-    const table = buildPresetTable(CONFIG, factory, sessionsRegistry())
+    const table = buildPresetTable(CONFIG, factory, sessionsRegistry(), inProject)
     const binding = table.get('acp-grok')!
     const decision = { kind: 'enter' as const, messages: [] }
 
@@ -93,7 +96,7 @@ describe('buildPresetTable', () => {
 
   it('gives each preset its own agent', async () => {
     const factory = killableFactory()
-    const table = buildPresetTable(CONFIG, factory, sessionsRegistry())
+    const table = buildPresetTable(CONFIG, factory, sessionsRegistry(), inProject)
     await table.get('acp-grok')!.run({ kind: 'enter', messages: [] }, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
     await table.get('acp-claude')!.run({ kind: 'enter', messages: [] }, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
 
@@ -112,7 +115,7 @@ describe('buildPresetTable', () => {
       },
     }
 
-    const table = buildPresetTable(CONFIG, factory, sessionsRegistry())
+    const table = buildPresetTable(CONFIG, factory, sessionsRegistry(), inProject)
     await table.get('acp-grok')!.run({ kind: 'enter', messages: [] }, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
     await table.get('acp-claude')!.run({ kind: 'enter', messages: [] }, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
     expect(opened).toContainEqual({ presetId: 'acp-grok', modelId: 'grok-4.7' })
@@ -122,6 +125,34 @@ describe('buildPresetTable', () => {
   it('ignores a preset whose configuration names no agent', () => {
     const table = buildPresetTable({ presets: { broken: {} } } as never, killableFactory(), sessionsRegistry())
     expect(table.size).toBe(0)
+  })
+
+  it('opens only in the session project, and refuses when that session has none', async () => {
+    const opened: string[] = []
+    const factory: AcpSessionFactory = {
+      dialectFor: () => stubDialect('x'),
+      open: (_presetId, options) => {
+        opened.push(options.cwd)
+        return Promise.resolve(killableSession())
+      },
+    }
+    const table = buildPresetTable(
+      { presets: { 'acp-grok': { agent: 'grok', cwd: '/Users/good/Documents/deepseek-harness' } } },
+      factory,
+      sessionsRegistry(),
+      { cwdOfSession: id => (id === 's1' ? '/Users/good/qg/nexa-service' : undefined) },
+    )
+    const turn = (sessionId: string) => ({ sessionId, position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
+    await table.get('acp-grok')!.run({ kind: 'enter', messages: [] }, turn('s1'))
+    await expect(table.get('acp-grok')!.run({ kind: 'enter', messages: [] }, turn('s2'))).rejects.toThrow(/没有工作区/)
+    // The directory pinned on the preset is not a place to open.
+    expect(opened).toEqual(['/Users/good/qg/nexa-service'])
+  })
+
+  it('cwdForOpen uses only the session directory', () => {
+    expect(cwdForOpen('/proj')).toBe('/proj')
+    expect(() => cwdForOpen(undefined)).toThrow(/没有工作区/)
+    expect(() => cwdForOpen('')).toThrow(/没有工作区/)
   })
 })
 
@@ -137,6 +168,7 @@ describe('连接死亡后的自愈', () => {
     const factory = killableFactory()
     const dropped: { presetId: string; sessionId: string; reason: string }[] = []
     const table = buildPresetTable(CONFIG, factory, sessionsRegistry(), {
+      ...inProject,
       onDropped: event => { dropped.push(event) },
     })
     const binding = table.get('acp-grok')!
@@ -153,7 +185,7 @@ describe('连接死亡后的自愈', () => {
 
   it('一个会话的连接死了，别的会话的连接不受影响', async () => {
     const factory = killableFactory()
-    const table = buildPresetTable(CONFIG, factory, sessionsRegistry())
+    const table = buildPresetTable(CONFIG, factory, sessionsRegistry(), inProject)
     const binding = table.get('acp-grok')!
 
     await binding.run(decision, turnOf('s1'))
@@ -171,7 +203,7 @@ describe('连接死亡后的自愈', () => {
 
   it('连接没死时下一回合照旧复用，不无故重开', async () => {
     const factory = killableFactory()
-    const table = buildPresetTable(CONFIG, factory, sessionsRegistry())
+    const table = buildPresetTable(CONFIG, factory, sessionsRegistry(), inProject)
     const binding = table.get('acp-grok')!
     await binding.run(decision, turnOf('s1'))
     await binding.run(decision, turnOf('s1'))
@@ -182,7 +214,7 @@ describe('连接死亡后的自愈', () => {
     // A connection that dies between turns must still drop the entry: the next
     // turn would otherwise reuse a corpse that fails only mid-turn.
     const factory = killableFactory()
-    const table = buildPresetTable(CONFIG, factory, sessionsRegistry())
+    const table = buildPresetTable(CONFIG, factory, sessionsRegistry(), inProject)
     const binding = table.get('acp-grok')!
     await binding.run(decision, turnOf('s1'))
     factory.sessions[0]!.die('process exited between turns')

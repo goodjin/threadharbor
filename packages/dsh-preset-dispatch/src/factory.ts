@@ -26,6 +26,7 @@ import type {
   PermissionDecision,
   PermissionRequest,
 } from '@threadharbor/dsh-acp-agent'
+import { cwdForOpen } from './registry.ts'
 import type { AcpPresetConfig, AcpSession, AcpSessionFactory, PresetConfig } from './registry.ts'
 import { AcpTurnRunner } from './runner.ts'
 import type { AcpClientPort } from './runner.ts'
@@ -134,6 +135,9 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
       if (preset.agent === 'zcode') {
         throw new Error('zcode answers as a model inside the native loop; it is not opened as an ACP session')
       }
+      // Refuse before any child starts. An omitted directory would otherwise
+      // inherit this process's directory, which is not the session's workspace.
+      const cwd = cwdForOpen(options.cwd)
 
       // grok is reached over a `grok agent serve` WebSocket this transport starts
       // and owns (random port + secret, ready-wait, kill on close) — unlike the
@@ -144,9 +148,13 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
         : preset.agent === 'grok'
           ? await GrokServeTransport.create({
               command: preset.command ?? 'grok',
-              ...(preset.cwd === undefined ? {} : { cwd: preset.cwd }),
+              cwd,
             })
-          : new StdioAcpTransport({ command: preset.command ?? '', args: stdioArgsFor(preset) }))
+          : new StdioAcpTransport({
+              command: preset.command ?? '',
+              args: stdioArgsFor(preset),
+              cwd,
+            }))
       // The client and the registry's death watcher both listen; the fanout is
       // what lets them without one stealing the other's slot.
       const transport = new DeathFanoutTransport(raw)
@@ -188,6 +196,7 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
       // catalog keyed by the preset that opened.
       const runner = new AcpTurnRunner(adaptClient(client, dialect), {
         ...options,
+        cwd,
         dialect,
         ...(deps.onRuntimeModels === undefined ? {} : { onModels: models => { deps.onRuntimeModels!(presetId, models) } }),
       })

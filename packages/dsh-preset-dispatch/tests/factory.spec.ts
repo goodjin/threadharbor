@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { claudeDialect, codexDialect, grokDialect } from '@threadharbor/dsh-acp-agent'
@@ -224,6 +224,23 @@ async function spawnArgvOf(config: PresetConfig, presetId: string): Promise<read
   return binary.argv()
 }
 
+
+/** A stand-in binary that records the directory it was started in. */
+function recordingCwd(): { command: string; cwd: () => string } {
+  const dir = mkdtempSync(join(tmpdir(), 'threadharbor-cwd-'))
+  const cwdFile = join(dir, 'cwd.txt')
+  const script = join(dir, 'agent')
+  writeFileSync(script, [
+    '#!/usr/bin/env node',
+    'const { writeFileSync } = require("node:fs")',
+    `writeFileSync(${JSON.stringify(cwdFile)}, process.cwd())`,
+    'process.exit(0)',
+    '',
+  ].join('\n'))
+  chmodSync(script, 0o755)
+  return { command: script, cwd: () => readFileSync(cwdFile, 'utf8') }
+}
+
 describe('拉起外部 agent 时补齐 ACP 所需的参数', () => {
   it('cursor 带上 acp 子命令：裸 agent 是交互式 CLI，不会应答 JSON-RPC', async () => {
     // Cursor 的官方文档：`agent acp` 才是 stdio 上的 ACP 服务。少了这个子
@@ -237,6 +254,33 @@ describe('拉起外部 agent 时补齐 ACP 所需的参数', () => {
     // claude-agent-acp / codex-acp 启动即服务；给它们加参数反而会启动错的东西。
     expect(await spawnArgvOf({ presets: { 'acp-claude': { agent: 'claude' } } }, 'acp-claude')).toEqual([])
     expect(await spawnArgvOf({ presets: { 'acp-codex': { agent: 'codex' } } }, 'acp-codex')).toEqual([])
+  })
+
+  it('子进程开在这次给出的项目目录，预设上写死的目录不另算', async () => {
+    // 预设上的目录曾经盖过会话自己的项目：子进程和 session/new 各看各的，
+    // 新会话就开到了写死的那一处。两边都必须用同一次打开给出的目录。
+    const binary = recordingCwd()
+    const project = mkdtempSync(join(tmpdir(), 'threadharbor-project-'))
+    const factory = makeSessionFactory(
+      { presets: { 'acp-codex': { agent: 'codex', command: binary.command, cwd: '/Users/good/Documents/deepseek-harness' } } },
+      deps,
+    )
+    const session = await factory.open('acp-codex', { cwd: project })
+    const dead = new Promise<void>(resolve => { session.onDead(() => { resolve() }) })
+    await session.run(
+      { kind: 'enter', messages: [] },
+      { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 },
+    ).catch(() => {})
+    await dead
+    expect(realpathSync(binary.cwd())).toBe(realpathSync(project))
+  })
+
+  it('没有给出项目目录就拒绝打开，不会落到本进程的目录', async () => {
+    const factory = makeSessionFactory(
+      { presets: { 'acp-codex': { agent: 'codex', command: 'codex-acp' } } },
+      deps,
+    )
+    await expect(factory.open('acp-codex', { cwd: '' })).rejects.toThrow(/没有工作区/)
   })
 
   it('配置显式写了参数时以配置为准，不再补默认值', async () => {

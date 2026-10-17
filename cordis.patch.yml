@@ -58,7 +58,8 @@
               agent: codex
               hideFromRoster: true
               command: /Users/good/.local/bin/codex-acp
-              cwd: /Users/good/Documents/deepseek-harness
+              # 不写 cwd。写了也会被忽略。
+              # 外部会话只用这条 DSH 会话自己的工作区；没有工作区就不开工。
               # mode 留空 = 该构建的默认 agent（"Approve for me"）。
               # 清单 = 2026-10-10 真机探针（对该命令做一次真实
               # initialize + session/new）读到的 models.availableModels，
@@ -147,7 +148,6 @@
               agent: claude
               hideFromRoster: true
               command: /Users/good/.local/bin/claude-agent-acp
-              cwd: /Users/good/Documents/deepseek-harness
               # claude 默认 bypassPermissions，不显式写 default 它永远不问。
               mode: default
               # 清单 = 2026-10-10 真机探针（对该命令做一次真实
@@ -186,7 +186,6 @@
               # 会先拉起 `grok agent serve`（随机端口 + 密钥、等它就绪、关闭时
               # 回收），再连上它返回的 ws url。command 指向 grok 二进制本身。
               command: /Users/good/.local/bin/grok
-              cwd: /Users/good/Documents/deepseek-harness
               # 清单 = 2026-10-09 真机探针（captured-frames.json 的 session/new）
               # 读到的 availableModels，一字不差。
               models:
@@ -210,7 +209,6 @@
               # 的（会冲突）——这里必须指向 cursor 自己的 agent 二进制。本机
               # 装好后改成真实路径，例如 ~/.local/bin/cursor-agent。
               command: /Users/good/.local/bin/cursor-agent
-              cwd: /Users/good/github/threadharbor
               # cursor 的 modelId 带配置后缀（grok-4.7[context=256k,...]），是
               # 不同的配置组合而非推理档位，不能按 effort 归并——否则不同的
               # 配置会被压成一行。关掉归并，每个 id 独立成行。

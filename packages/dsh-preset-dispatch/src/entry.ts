@@ -122,6 +122,10 @@ export type Config = {
   args?: string[]
   model?: string
   mode?: string
+  /**
+   * Ignored. Still accepted so an old config file loads.
+   * The session's own workspace is the only directory an external conversation uses.
+   */
   cwd?: string
   models?: { id: string; name: string; description?: string; contextWindow?: number }[]
   hosts?: string[]

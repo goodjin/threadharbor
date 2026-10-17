@@ -158,7 +158,7 @@ describe('stop wiring — dispatch to runner', () => {
         }
       },
     }
-    const table = buildPresetTable({ presets: { 'acp-grok': { agent: 'fake' } } }, factory, sessionsRegistry())
+    const table = buildPresetTable({ presets: { 'acp-grok': { agent: 'fake' } } }, factory, sessionsRegistry(), { cwdOfSession: () => '/workspace' })
     installAcpDispatch(agent, table, { produce: () => [], write: () => undefined, positionOf: () => ({ turn: 1, step: 1 }) })
     return { agent, client }
   }

@@ -24,12 +24,12 @@ import type {
   PermissionDecision,
   PermissionRequest,
 } from '@threadharbor/dsh-acp-agent'
-import { buildPresetTable, openSessionsOf, sessionsRegistry } from './registry.ts'
+import { buildPresetTable, cwdForOpen, openSessionsOf, sessionsRegistry } from './registry.ts'
 import type { AcpPresetConfig, PresetConfig } from './registry.ts'
 import { makeSessionFactory } from './factory.ts'
 import { forgetSession, stepPositionOfSession } from './step-position.ts'
 import { modelsOfPreset, registerCatalog, runtimeModels } from './catalog-registration.ts'
-import { servicesOf } from './switch-mount.ts'
+import { cwdOfSession, servicesOf } from './switch-mount.ts'
 import { GatewayConversations } from './gateway.ts'
 import type { GatewaySessionAppend } from './gateway.ts'
 import { followModelSelection, followPresetSelection } from './follow.ts'
@@ -145,6 +145,23 @@ export type AcpPluginDeps = {
 }
 
 /**
+ * The project directory of one live session, or undefined when this host
+ * cannot name it.
+ *
+ * A store that throws on an unknown id is the same as a missing session.
+ * Either way the open is refused: there is no other directory to use.
+ */
+function projectDirectory(ctx: object, sessionId: string): string | undefined {
+  const read = servicesOf(ctx).sessions
+  if (read === undefined) return undefined
+  try {
+    return cwdOfSession(read(sessionId))
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Take over ACP-backed sessions in this plugin's scope.
  *
  * One session failing must not take the rest with it: `agent/created` is awaited
@@ -157,6 +174,11 @@ export function applyAcpPlugin(
   config: AcpPresetConfig,
   deps: AcpPluginDeps,
 ): void {
+  // Old rows still name a cwd. Say so once and then ignore it: using it
+  // would put every project's new conversation in that one folder.
+  if (config.cwd !== undefined) {
+    deps.report?.(`acp ${presetId}: 配置里的 cwd 已忽略，外部会话只用会话自己的工作区`)
+  }
   const presets: PresetConfig = { presets: { [presetId]: config } }
   // The ledger the factory feeds and the catalog reads, created BEFORE the
   // factory so the wiring below can hand both ends the same object. Created
@@ -225,6 +247,9 @@ export function applyAcpPlugin(
     replay: {
       take: sessionId => switchShared.replayPrimer(sessionId),
     },
+    // The session's project directory, not the directory this process was
+    // started in and not a directory pinned on the preset.
+    cwdOfSession: sessionId => projectDirectory(ctx, sessionId),
   })
   // What makes the external agent's models appear in the host's own model
   // picker: the catalog is global to this Host generation and already read by
@@ -250,7 +275,7 @@ export function applyAcpPlugin(
   // this model's own chunk stream. The conversation never moves.
   const gateway = new GatewayConversations(
     async (presetId, options) => await factory.open(presetId, {
-      cwd: presets.presets[presetId]?.cwd ?? process.cwd(),
+      cwd: cwdForOpen(projectDirectory(ctx, options.dshSessionId)),
       dshSessionId: options.dshSessionId,
       primer: options.primer,
       ...(presets.presets[presetId]?.model === undefined ? {} : { modelId: presets.presets[presetId]?.model }),

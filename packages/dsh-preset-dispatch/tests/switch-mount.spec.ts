@@ -259,6 +259,22 @@ describe('switchDrivenSession — the pick a driven session makes at its turn', 
     expect(primed).not.toContain('现在的问题')
   })
 
+  it('没有工作区就不建新会话，免得宿主把进程目录写进去', async () => {
+    const fixture = hostWith({
+      sessions: new Map([['s1', { id: 's1', header: {} }]]),
+      projection: (_session: unknown, key: string) => key === 'turnBoundary' ? switchedBoundary : undefined,
+    })
+    mounted(fixture.shared)
+    const decision = await switchDrivenSession({
+      ctx: fixture.ctx, shared: fixture.shared, presetId: 'acp-grok',
+      target: 'acp-claude', selection: pick, agent, decision: claim,
+      report: () => {},
+    })
+    expect(decision.kind).toBe('refuse')
+    expect(decision.kind === 'refuse' && decision.reason).toContain('没有工作区')
+    expect(fixture.effects.created).toEqual([])
+  })
+
   it('points at the earlier switch instead of making another one', async () => {
     const fixture = hostWith({
       projection: (_session: unknown, key: string) => key === 'turnBoundary' ? switchedBoundary : undefined,
