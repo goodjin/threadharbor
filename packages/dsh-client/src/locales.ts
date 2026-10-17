@@ -76,9 +76,19 @@ export const zh = {
   'panel.button.reachTry': '检测可达',
   'panel.button.copyLink': '复制链接',
   /**
-   * 状态词：列表行圆点与详情页状态行共用。main 的状态模型是
-   * row.connection（connected / reachable / checking / disconnected），
-   * 「在线」只留给心跳报数的事实行与 Tailscale 节点徽标。
+   * 详情页按钮表（hostActions）的动作文案。deploy/fill-ssh/open-page/
+   * connect-open 复用既有的 deploy.use 词汇；这里只收状态模型自己的词。
+   */
+  'panel.button.readPeer': '读一次对方状态',
+  'panel.button.startPeer': '启动对方 DSH',
+  'panel.button.redeploy': '重新部署',
+  'panel.button.checkReach': '检查能否打开',
+  'panel.button.retryRead': '重试读取',
+  'panel.button.approveAndRead': '批准并读取',
+  'panel.button.keyNotApproved': '还没批准这台机器的主机密钥',
+  /**
+   * 状态词：列表行圆点与详情页状态行共用。词表就是 host-state.ts 的
+   * HostStatus 九个词，「在线」只留给心跳报数的事实行与 Tailscale 节点徽标。
    */
   'panel.status.self': '本机',
   'panel.status.online': '在线',
@@ -87,6 +97,10 @@ export const zh = {
   'panel.status.reachable': '可达',
   'panel.status.checking': '检测中',
   'panel.status.reachableUnsynced': '可达未同步',
+  'panel.status.undeployed': '未部署',
+  'panel.status.stopped': '未启动',
+  'panel.status.unknown': '未知',
+  'panel.status.unchecked': '未验证',
   /** 探测的状态行；`{message}` 是接线层报出的错误原文。 */
   'panel.probe.idle': '未探测',
   'panel.probe.running': '探测中……（最多等一分钟）',
@@ -120,6 +134,8 @@ export const zh = {
   'panel.form.fieldStatus': '状态',
   'panel.form.fieldIp': 'IP',
   'panel.form.ipPlaceholder': '100.101.1.7，可带端口：100.101.1.7:3081',
+  /** 地址栏的注记（2026-10-15）：Tailscale 对端只是 SSH 目标，地址由部署或连接写回。 */
+  'panel.form.addressEmptyNote': '留空 = 由部署或连接自动写入',
   'panel.form.fieldTitle': '显示名',
   /** 存储姿态行（storagePostureLine）；`{detail}` 是存储层报出的原始原因。 */
   'panel.posture.host': '登记与本机名称保存在这台机器上：换浏览器、换标签页、清缓存都不会丢。',
@@ -149,6 +165,14 @@ export const zh = {
   'panel.facts.match': '（与填写一致）',
   'panel.facts.idMismatch': '（与填写的不一样；两边都保留，把名称改成它，两边就对上了）',
   'panel.facts.reportedTitle': '主机自报名称：{name}',
+  /** 详情页远端读数事实区：标签与取值词。取值词缺的两种（已部署/运行中）就地补。 */
+  'panel.facts.deployment': '部署',
+  'panel.facts.liveness': '运行',
+  'panel.facts.deployed': '已部署',
+  'panel.facts.running': '运行中',
+  'panel.facts.entry': '本机入口',
+  'panel.facts.reported': '对方回连',
+  'panel.facts.readAt': '读到的时刻',
   /** 删除登记的确认句。 */
   'panel.registry.removeNote': '只从这台机器的登记列表里移除，不动远端那台机器。确定？',
   /** 详情页登记区：打开含 token 页面的链接。 */
@@ -314,6 +338,14 @@ export const en = {
   'panel.button.settings': 'Settings',
   'panel.button.reachTry': 'Check reachability',
   'panel.button.copyLink': 'Copy link',
+  /** Detail-page action-table copy. deploy/fill-ssh/open-page/connect-open reuse the existing use wording. */
+  'panel.button.readPeer': 'Read peer status once',
+  'panel.button.startPeer': 'Start the peer DSH',
+  'panel.button.redeploy': 'Redeploy',
+  'panel.button.checkReach': 'Check it opens',
+  'panel.button.retryRead': 'Retry the read',
+  'panel.button.approveAndRead': 'Approve and read',
+  'panel.button.keyNotApproved': "This machine's host key has not been approved yet",
   'panel.status.self': 'This machine',
   'panel.status.online': 'Online',
   'panel.status.offline': 'Not connected',
@@ -321,6 +353,10 @@ export const en = {
   'panel.status.reachable': 'Reachable',
   'panel.status.checking': 'Checking',
   'panel.status.reachableUnsynced': 'Reachable, not synced',
+  'panel.status.undeployed': 'Not deployed',
+  'panel.status.stopped': 'Not started',
+  'panel.status.unknown': 'Unknown',
+  'panel.status.unchecked': 'Unchecked',
   'panel.probe.idle': 'Not probed yet',
   'panel.probe.running': 'Probing… (up to a minute)',
   'panel.probe.error': 'Probe failed: {message}',
@@ -349,6 +385,7 @@ export const en = {
   'panel.form.fieldStatus': 'Status',
   'panel.form.fieldIp': 'IP',
   'panel.form.ipPlaceholder': '100.101.1.7, with an optional port: 100.101.1.7:3081',
+  'panel.form.addressEmptyNote': 'Leave empty — a deploy or connect fills it in automatically',
   'panel.form.fieldTitle': 'Display name',
   'panel.posture.host': 'Registrations and this machine\'s name are saved on this machine: a different browser or tab, or a cleared cache, loses nothing.',
   'panel.posture.loading': 'Reading saved registrations from this machine…',
@@ -374,6 +411,14 @@ export const en = {
   'panel.facts.match': ' (matches what was entered)',
   'panel.facts.idMismatch': ' (differs from what was entered; both stay — set the name to this one and the two line up)',
   'panel.facts.reportedTitle': 'Host-reported name: {name}',
+  /** Detail-page remote-read facts: labels and their value words; the two missing value words live here. */
+  'panel.facts.deployment': 'Deployment',
+  'panel.facts.liveness': 'Process',
+  'panel.facts.deployed': 'Deployed',
+  'panel.facts.running': 'Running',
+  'panel.facts.entry': 'Entry on this machine',
+  'panel.facts.reported': 'Peer reporting in',
+  'panel.facts.readAt': 'Read at',
   'panel.registry.removeNote': "Removes it from this machine's registration list only; the remote machine is untouched. Delete?",
   'panel.registry.launchLink': 'Connect (opens the page that carries the token)',
   'panel.reach.probeTimeout': 'The check timed out ({ms} ms)',

@@ -35,7 +35,9 @@ import type { AgentDescriptor, GatewayResult } from './gateway.ts'
 import type { ProbeOutcome } from './probe.ts'
 import { probeReach } from './reach.ts'
 import type { ReachOutcome } from './reach.ts'
-import type { HostIdentity, HostRegistration, HostSshInfo, PeerStatus, RegistrationResult, RemoteAgentDeploySelection, SshConnectionInput, SshDeployResult, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
+import { hostActions, hostStatus } from './host-state.ts'
+import type { HostAction, HostFacts, HostReach, HostStatus, RemoteDeployment, RemoteLiveness } from './host-state.ts'
+import type { HostIdentity, HostRegistration, HostSshInfo, PeerReport, PeerStatus, RegistrationResult, RemoteAgentDeploySelection, RemoteReport, SshConnectionInput, SshDeployResult, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
 import { REMOTE_DEPLOY_AGENT_SPECS } from '@threadharbor/dsh-host-federation'
 import type { HostSnapshot } from '@threadharbor/dsh-host-federation'
 import type { HostStorePosture } from './host-store.ts'
@@ -109,6 +111,28 @@ export type HostRegistryPort = {
     readonly ssh?: HostSshInfo
   }): RegistrationResult
   remove(hostId: string): boolean
+  /** Persist one remote read for a host, in the remote-report.ts shape (readAt required). */
+  recordRemote(hostId: string, report: RemoteReport): boolean
+}
+
+/** One remote read, as the panel consumes it: the report or the raw reason. */
+export type RemoteReadResult =
+  | { readonly ok: true; readonly report: PeerReport }
+  | { readonly ok: false; readonly error: string }
+
+/** One remote start, as the panel consumes it: the answering port or the raw reason. */
+export type RemoteStartResult =
+  | { readonly ok: true; readonly port: number }
+  | { readonly ok: false; readonly error: string }
+
+/**
+ * 面板读/启对方部署体的口。凭据在调用方组装（已存、已批准指纹的形状），
+ * 面板不碰 SSH 本身；缺了这个口，详情页就没有读数可显示，状态词退回
+ * 只看连通性与登记。
+ */
+export type RemotePort = {
+  read(ssh: SshConnectionInput & { readonly hostKeyFingerprint: string }): Promise<RemoteReadResult>
+  start(ssh: SshConnectionInput & { readonly hostKeyFingerprint: string }, port: number): Promise<RemoteStartResult>
 }
 
 /** The `t` seat, as the framework synthesizes it for this plugin's namespace. */
@@ -139,6 +163,11 @@ export type AgentPanelBusinessProps = {
    * （主机侧插件没装、或设置通道缺失），地址旁就不出现那个按钮。
    */
   readonly tailscale?: TailscalePort
+  /**
+   * 读/启对方部署体的口。缺省（主机侧路由缺失）时详情页不发起读取，
+   * 也不渲染读数事实区——状态词如实退回连通性与登记。
+   */
+  readonly remote?: RemotePort
   /** Storage events re-read the registry; injectable for tests. */
   listenStorage?(handler: () => void): () => void
   /** Said instead of an empty list, so "none listed" never reads as "none configured". */
@@ -213,8 +242,6 @@ type LoadPhase =
  * the channel's presence (self + whoever announces) and the registration list
  * (the operator's inventory, which knows hosts that are not open right now).
  */
-export type HostConnectionStatus = 'connected' | 'reachable' | 'disconnected' | 'checking'
-
 export type HostListRow = {
   readonly hostId: string
   /** What the row leads with: the operator's registered name, else the host's own. */
@@ -222,7 +249,8 @@ export type HostListRow = {
   readonly self: boolean
   /** Present on the channel right now. */
   readonly online: boolean
-  readonly connection: HostConnectionStatus
+  /** hostStatus 推出的那个状态词：这一行显示什么词、给不给探测按钮都由它说话。 */
+  readonly connection: HostStatus
   /** When the host was last heard, in the page's clock; only when online. */
   readonly lastSeen?: number
   /** The address the operator registered; only when there is one. */
@@ -230,22 +258,133 @@ export type HostListRow = {
   readonly launchUrl?: string
 }
 
-export function deriveHostConnection(
-  row: Pick<HostListRow, 'self' | 'online'>,
-  reach?: ReachOutcome | 'probing',
-): HostConnectionStatus {
-  if (reach === 'probing') return 'checking'
-  if (row.self || row.online) return 'connected'
-  if (reach?.kind === 'reachable') return 'reachable'
-  return 'disconnected'
+/**
+ * 存下的 SSH 信息够不够面板自己去读这台机器：只有密钥文件方式、钥匙路径和
+ * 已批准的指纹齐了才成立。密码、粘贴的私钥刻意不落盘，这类主机不可读，
+ * 也就没有部署事实可看——读不读得动由这里一个地方说了算。
+ * 类型收窄成带必填钥匙与指纹的形状，重连路径直接复用同一把尺子。
+ */
+function storedSshUsable(info: HostSshInfo | undefined): info is HostSshInfo & { readonly hostKeyFingerprint: string; readonly identityFile: string } {
+  return info !== undefined
+    && info.authMode === 'identityFile'
+    && info.hostKeyFingerprint !== undefined
+    && info.identityFile !== undefined
 }
 
-export function connectionStatusLabel(status: HostConnectionStatus, t: PanelT): string {
+/**
+ * 面板手头的探测结果读成 host-state 的 HostReach：没探过是 unchecked，
+ * 探测在途是 checking，探完按结论。
+ */
+function hostReachOf(reach: ReachOutcome | 'probing' | undefined): HostReach {
+  if (reach === undefined) return 'unchecked'
+  if (reach === 'probing') return 'checking'
+  return reach.kind === 'reachable' ? 'reachable' : 'unreachable'
+}
+
+/**
+ * 一台主机的事实装配，只此一处：是不是本机、频道在不在场（对方回连）、
+ * 登记簿里存下的远端读数、探测结果、凭据读不读得动。装配只如实搬运——
+ * 读数里缺什么记 unknown，哪个事实算数由 hostStatus 的分支顺序决定。
+ * @param self - 这一行是不是本机。
+ * @param online - 这台机器的频道此刻是否在场（即对方回连可见）。
+ * @param registration - 登记簿条目；路过未登记的主机没有。
+ * @param reach - 对登记地址的探测结果；从未探测时没有。
+ * @returns 推导状态词所需的全部事实。
+ */
+function hostFactsFor(
+  self: boolean,
+  online: boolean,
+  registration: HostRegistration | undefined,
+  reach: ReachOutcome | 'probing' | undefined,
+): HostFacts {
+  const remote = registration?.remote
+  return {
+    self,
+    readable: storedSshUsable(registration?.ssh),
+    // 评审裁定 1 在展示层的闸：读数若说「未部署」却带着存活附注，说明机器
+    // 没能在预算内答话（记录超时也是这么报的），不是真的没装——按未知呈现，
+    // 否则面板会劝操作者往一台已经装好的机器上再部署一遍。只看附注在不在，
+    // 绝不比对附注的文字。
+    deployment: remote?.deployment === 'undeployed' && remote.livenessNote !== undefined
+      ? 'unknown'
+      : remote?.deployment ?? 'unknown',
+    liveness: remote?.liveness ?? 'unknown',
+    reach: hostReachOf(reach),
+    reported: online,
+  }
+}
+
+/**
+ * 一次读取的回信折算成登记簿的读数。裁定 1 的另一半闸在落库这一侧：
+ * 记录说没装、却带着存活附注，是降级读取（机器没来得及答话），部署事实
+ * 按 unknown 落库——「未部署」只留给没有附注、真的没有记录的那次回答。
+ * @param report - 对方的读数原样。
+ * @param readAt - 读取发生的时刻（页面时钟）。
+ * @returns 可以交给 recordRemote 的读数。
+ */
+function remoteRecordOf(report: PeerReport, readAt: number): RemoteReport {
+  const deployment: RemoteDeployment = report.pluginsInstalled
+    ? 'deployed'
+    : report.livenessNote !== undefined ? 'unknown' : 'undeployed'
+  return {
+    deployment,
+    liveness: report.liveness,
+    ...(report.livenessNote === undefined ? {} : { livenessNote: report.livenessNote }),
+    ...(report.port === undefined ? {} : { port: report.port }),
+    ...(report.launchUrl === undefined ? {} : { launchUrl: report.launchUrl }),
+    readAt,
+  }
+}
+
+/** 部署事实的取值词；缺「已部署」一词，facts 键就地补，其余复用状态词。 */
+function deploymentWord(deployment: RemoteDeployment, t: PanelT): string {
+  if (deployment === 'deployed') return t('panel.facts.deployed')
+  if (deployment === 'undeployed') return t('panel.status.undeployed')
+  return t('panel.status.unknown')
+}
+
+/** 存活事实的取值词；缺「运行中」一词，facts 键就地补，其余复用状态词。 */
+function livenessWord(liveness: RemoteLiveness, t: PanelT): string {
+  if (liveness === 'running') return t('panel.facts.running')
+  if (liveness === 'stopped') return t('panel.status.stopped')
+  return t('panel.status.unknown')
+}
+
+/**
+ * 状态行动作标识符的按钮文案。host-state 只产出标识符，人话在这里查表；
+ * approve-and-read 是面板自有的一条（指纹未批准时的读取路径），不在
+ * host-state 的词表里。
+ */
+function actionLabel(action: HostAction | 'approve-and-read', t: PanelT): string {
+  switch (action) {
+    case 'deploy': return t('panel.deploy.expand')
+    case 'read-peer': return t('panel.button.readPeer')
+    case 'start-peer': return t('panel.button.startPeer')
+    case 'redeploy': return t('panel.button.redeploy')
+    case 'open-page': return t('panel.use.open')
+    case 'connect-open': return t('panel.use.connect')
+    case 'check-reach': return t('panel.button.checkReach')
+    case 'fill-ssh': return t('panel.use.fillSsh')
+    case 'retry-read': return t('panel.button.retryRead')
+    case 'approve-and-read': return t('panel.button.approveAndRead')
+  }
+}
+
+/**
+ * HostStatus 的九个词各查一个 locale 键。词与词不重叠，键与词一一对应，
+ * 这里不留兜底：加状态词先加键。
+ */
+export function connectionStatusLabel(status: HostStatus, t: PanelT): string {
   switch (status) {
+    case 'self': return t('panel.status.self')
+    case 'reading': return t('panel.status.checking')
+    case 'undeployed': return t('panel.status.undeployed')
+    case 'stopped': return t('panel.status.stopped')
     case 'connected': return t('panel.status.connected')
     case 'reachable': return t('panel.status.reachableUnsynced')
-    case 'checking': return t('panel.status.checking')
     case 'disconnected': return t('panel.status.offline')
+    case 'unchecked': return t('panel.status.unchecked')
+    case 'unknown': return t('panel.status.unknown')
   }
 }
 
@@ -264,9 +403,15 @@ export function mergeHostRows(
   hosts: readonly HostSnapshot[],
   registrations: readonly HostRegistration[],
   reaches?: ReadonlyMap<string, ReachOutcome | 'probing'>,
+  reading?: ReadonlySet<string>,
 ): readonly HostListRow[] {
   const byId = new Map<string, HostListRow>()
+  const registered = new Map(registrations.map(entry => [entry.hostId, entry]))
+  // 读取在途（探测或远端读取）交给 hostStatus 说「读取中」，不抢答。
+  const readingNow = (hostId: string, reach: ReachOutcome | 'probing' | undefined): boolean =>
+    reach === 'probing' || reading?.has(hostId) === true
   for (const host of hosts) {
+    const reach = reaches?.get(host.hostId)
     const base = {
       hostId: host.hostId,
       name: nonEmpty(host.hostTitle) ?? host.hostId,
@@ -276,10 +421,12 @@ export function mergeHostRows(
     }
     byId.set(host.hostId, {
       ...base,
-      connection: deriveHostConnection({ self: base.self, online: true }, reaches?.get(host.hostId)),
+      // 探测在途交给 hostStatus 说「读取中」，不抢答；事实装配只在 hostFactsFor。
+      connection: hostStatus(hostFactsFor(host.self, true, registered.get(host.hostId), reach), readingNow(host.hostId, reach)),
     })
   }
   for (const registration of registrations) {
+    const reach = reaches?.get(registration.hostId)
     const existing = byId.get(registration.hostId)
     const address = nonEmpty(registration.address)
     const launchUrl = nonEmpty(registration.launchUrl)
@@ -294,7 +441,7 @@ export function mergeHostRows(
       }
       byId.set(registration.hostId, {
         ...row,
-        connection: deriveHostConnection(row, reaches?.get(registration.hostId)),
+        connection: hostStatus(hostFactsFor(false, false, registration, reach), readingNow(registration.hostId, reach)),
       })
     } else {
       const merged = {
@@ -305,7 +452,7 @@ export function mergeHostRows(
       }
       byId.set(registration.hostId, {
         ...merged,
-        connection: deriveHostConnection(merged, reaches?.get(registration.hostId)),
+        connection: hostStatus(hostFactsFor(merged.self, merged.online, registration, reach), readingNow(registration.hostId, reach)),
       })
     }
   }
@@ -635,16 +782,14 @@ export function HostRow(props: {
   // 本机没有登记地址（它的地址就是这个标签页自己的 URL），IP 列以 — 占位，
   // 不硬塞内部标识充数。
   const ip = hostOf(row.address)
-  const status = row.self
-    ? { word: props.t('panel.status.self'), tone: 'self' as const }
-    : row.connection === 'connected'
-      ? { word: props.t('panel.status.connected'), tone: 'online' as const }
-      : row.connection === 'reachable'
-        ? { word: connectionStatusLabel('reachable', props.t), tone: 'online' as const }
-        : row.connection === 'checking'
-          ? { word: connectionStatusLabel('checking', props.t), tone: 'offline' as const }
-          : { word: connectionStatusLabel('disconnected', props.t), tone: 'offline' as const }
-  const connection = row.self ? props.t('panel.status.self') : connectionStatusLabel(row.connection, props.t)
+  // 词只从状态词查表来（connectionStatusLabel），圆点的三色才是这里的取舍：
+  // 本机一色，说得通连上的（已连接/可达未同步）一色，其余一律置灰。
+  const word = connectionStatusLabel(row.connection, props.t)
+  const tone = row.self
+    ? 'self' as const
+    : row.connection === 'connected' || row.connection === 'reachable'
+      ? 'online' as const
+      : 'offline' as const
   return (
     <div data-host-row={row.hostId} className={styles.hostRow}>
       <button
@@ -655,15 +800,15 @@ export function HostRow(props: {
       >
         <span className={styles.hostNameCell}>
           <span
-            data-host-status={status.tone}
+            data-host-status={tone}
             className={styles.hostStatusDot}
-            title={status.word}
-            aria-label={status.word}
+            title={word}
+            aria-label={word}
             role="img"
           />
           <strong data-host-name="" className={styles.hostName}>{row.name}</strong>
         </span>
-        <span data-host-connection="" className={styles.hostConnection} title={status.word}>{connection}</span>
+        <span data-host-connection="" className={styles.hostConnection} title={word}>{word}</span>
         <span data-host-ip="" className={styles.hostIp} title={ip ?? undefined}>{ip ?? '—'}</span>
         {/* 设置按钮是这一行的动作（打开主机的设置页）。整行都是这个按钮，
             这里的 span 是它的第三列外观，不是又一个独立控件。 */}
@@ -725,6 +870,16 @@ function SshDeploySection(props: {
   readonly onError: (message: string) => void
   /** Pre-fill from a stored registration (detail page); absent on first add. */
   readonly initial?: SshSeedFacts | undefined
+  /**
+   * 选择器带进来的 SSH 目标初值（AgentPanel 的 sshTargetDraft）：挂载这一次
+   * 落进 target；已存的登记凭据（initial.target）优先于它，不被草稿盖掉。
+   */
+  readonly initialTarget?: string | undefined
+  /**
+   * 详情页显式选点的一次性覆盖：只在该次重挂里当 target 初值，压过已存的
+   * initial.target。没有它时优先级不变——已存凭据仍优先于草稿初值。
+   */
+  readonly pickedTarget?: string | undefined
   /** Detail page locks the host identity: no hostId/hostTitle inputs. */
   readonly lockHost?: boolean | undefined
   /** When provided, a connect-without-redeploy button joins the actions. */
@@ -737,7 +892,7 @@ function SshDeploySection(props: {
   /** The locale seat, threaded from the panel. */
   readonly t: PanelT
 }): ReactNode {
-  const [target, setTarget] = useState(props.initial?.target ?? '')
+  const [target, setTarget] = useState(props.pickedTarget ?? props.initial?.target ?? props.initialTarget ?? '')
   const [port, setPort] = useState(props.initial?.port === undefined ? '22' : String(props.initial.port))
   const [user, setUser] = useState(props.initial?.user ?? '')
   const [proxyJump, setProxyJump] = useState(props.initial?.proxyJump ?? '')
@@ -748,7 +903,12 @@ function SshDeploySection(props: {
   const [remoteWebPort, setRemoteWebPort] = useState(props.initial?.remoteWebPort === undefined ? '3081' : String(props.initial.remoteWebPort))
   const [upgrade, setUpgrade] = useState(false)
   const [keys, setKeys] = useState<readonly SshHostKeyCandidate[]>([])
-  const [approvedFingerprint, setApprovedFingerprint] = useState(props.initial?.hostKeyFingerprint ?? '')
+  // 已存的「未批准」标记不是批准：照原样种进来，读取/只连接/部署三个按钮
+  // 都靠「指纹非空」放行，操作者没认过指纹就撞上主机端口的生英文错误。
+  // 未批准按没批准处理，入口只有检查主机密钥那套审批交互。
+  const [approvedFingerprint, setApprovedFingerprint] = useState(
+    props.initial?.hostKeyFingerprint === 'unapproved' ? '' : props.initial?.hostKeyFingerprint ?? '',
+  )
   const [busy, setBusy] = useState<'inspect' | 'peer' | 'deploy' | undefined>(undefined)
   // 部署过程逐行留痕：不是只显示最后一行，每一阶段的原话都留在面上。
   const [progressLog, setProgressLog] = useState<readonly SshDeployProgress[]>([])
@@ -774,6 +934,14 @@ function SshDeploySection(props: {
     return withJump
   }
 
+  /** 批准一把钥匙：既记下指纹，也在 approve-and-read 路径里接着往下走。 */
+  const approve = (fingerprint: string): void => {
+    setApprovedFingerprint(fingerprint)
+    if (fingerprint !== '' && fingerprint !== 'unapproved') {
+      props.onApproved?.({ ...sshPayload(), hostKeyFingerprint: fingerprint })
+    }
+  }
+
   const runInspect = (): void => {
     setBusy('inspect')
     setKeys([])
@@ -793,6 +961,13 @@ function SshDeploySection(props: {
       }
     })
   }
+
+  // approve-and-read 路径：区块一打开就自动检查一次主机密钥，操作者只需要
+  // 认指纹（唯一钥匙时自动批准并接着读取）。只在挂载这一刻跑一次。
+  useEffect(() => {
+    if (props.autoInspect === true) runInspect()
+    // 只在挂载这一刻自动检查；表单草稿的变化不该反复发起检查。
+  }, [])
 
   const runReadPeer = (): void => {
     if (approvedFingerprint === '') {
@@ -1065,7 +1240,7 @@ function SshDeploySection(props: {
                     type="radio"
                     name="ssh-host-key"
                     checked={approvedFingerprint === key.hostKeyFingerprint}
-                    onChange={() => { setApprovedFingerprint(key.hostKeyFingerprint) }}
+                    onChange={() => { approve(key.hostKeyFingerprint) }}
                   />
                   <span>{key.algorithm} · {key.hostKeyFingerprint}</span>
                 </label>
@@ -1161,12 +1336,15 @@ function HostUseSection(props: {
   readonly connecting: boolean
   readonly error: string | undefined
   readonly onConnect: () => void
-  readonly onCheckTunnel: () => void
   readonly onOpenDeploy: () => void
   readonly t: PanelT
 }): ReactNode {
   const { sshInfo, launchUrl } = props
-  const canAutoConnect = sshInfo !== undefined && sshInfo.authMode === 'identityFile' && sshInfo.hostKeyFingerprint !== undefined
+  // 连接一族要已批准的指纹：未批准时不给连接按钮（裁定 5，与按钮表同一道
+  // 闸），说明行也不拿「没存凭据」搪塞——真实原因是密钥还没认。
+  const keyUnapproved = sshInfo?.hostKeyFingerprint === 'unapproved'
+  const canAutoConnect = sshInfo !== undefined && sshInfo.authMode === 'identityFile'
+    && sshInfo.hostKeyFingerprint !== undefined && !keyUnapproved
   const tunnelWord = props.t(`panel.use.tunnel.${props.tunnel}`)
   return (
     <section data-use-section="" className={styles.sshSection}>
@@ -1187,16 +1365,15 @@ function HostUseSection(props: {
                 {launchUrl !== undefined
                   ? <a className={styles.action} data-action="open-page" href={launchUrl} target="_blank" rel="noreferrer">{props.t('panel.use.open')}</a>
                   : undefined}
-                <button type="button" className={styles.action} data-action="tunnel-check" disabled={props.connecting || launchUrl === undefined} onClick={props.onCheckTunnel}>
-                  {props.tunnel === 'checking' ? props.t('panel.use.checking') : props.t('panel.use.check')}
-                </button>
+                {/* 「检查隧道」并进了详情页按钮表的 check-reach（都问登记里
+                    那个地址）；这里只留状态行与打开/连接两个动作。 */}
                 {canAutoConnect
                   ? (
                       <button type="button" className={styles.actionPrimary} data-action="connect-open" disabled={props.connecting} onClick={props.onConnect}>
                         {props.connecting ? props.t('panel.use.connecting') : props.t(props.tunnel === 'online' ? 'panel.use.reconnect' : 'panel.use.connect')}
                       </button>
                     )
-                  : <p className={styles.stateLine}>{props.t('panel.use.secretHint')}</p>}
+                  : <p className={styles.stateLine}>{props.t(keyUnapproved ? 'panel.button.keyNotApproved' : 'panel.use.secretHint')}</p>}
               </div>
             </>
           )}
@@ -1250,6 +1427,11 @@ export function HostFormPage(props: {
   readonly onCancel: () => void
   /** 从 Tailscale 选的口（表单前面的入口）；缺省就不显示那个按钮。 */
   readonly tailscale?: TailscalePort | undefined
+  /** 面板持有的 SSH 目标草稿：添加页的目标输入框显示它，选择器往里写。 */
+  readonly sshTargetDraft?: string | undefined
+  readonly onSshTargetChange?: (value: string) => void
+  /** 选中一台对端：面板把 IP 落进 sshTargetDraft（添加页顺带切到 SSH 部署区）。 */
+  readonly onPickedPeer?: (peer: TailscalePeer) => void
   /** The locale seat, threaded from the panel. */
   readonly t: PanelT
 }): ReactNode {
@@ -1268,8 +1450,8 @@ export function HostFormPage(props: {
   const idMatch = reported?.reportedId === undefined ? undefined : reported.reportedId === idDraft.trim()
   const addressHidden = props.mode === 'view' && !fields.address && props.values.address === ''
 
-  // 从 Tailscale 选（表单前面的入口）：点开→读清单→列出；选一台→名称和 IP
-  // 一起填上＋收起；刷新让主机侧重跑一次；收起只关不填。
+  // 从 Tailscale 选（表单前面的入口）：点开→读清单→列出；选一台→名称填上、
+  // IP 交给 SSH 目标＋收起（地址栏不动）；刷新让主机侧重跑一次；收起只关不填。
   const [picker, setPicker] = useState<{ open: boolean; result?: TailscalePeersResult | undefined }>({ open: false })
   const canPickAddress = props.tailscale !== undefined && fields.address
   const openPicker = async (): Promise<void> => {
@@ -1285,10 +1467,11 @@ export function HostFormPage(props: {
     setPicker({ open: true, result })
   }
   const pickPeer = (peer: TailscalePeer): void => {
-    // 选中即填两个字段：名称用 peer 名，IP 用它的 tailnet 地址；端口不一样
-    // 的在 IP 里自己补（如 100.101.1.7:3081）。
+    // 选中只填两处：名称栏填 peer 名，IP 交给面板的 SSH 目标草稿
+    // （onPickedPeer）；地址栏不动——Tailscale 的对端只是 SSH 目标，它的
+    // DSH web 在网上并不直接可达，地址由部署或连接成功后写回（2026-10-15）。
     setIdDraft(peer.name)
-    setIpDraft(peer.ip)
+    props.onPickedPeer?.(peer)
     setPicker({ open: false })
   }
   return (
@@ -1433,6 +1616,9 @@ export function HostFormPage(props: {
                 <label className={styles.field}>
                   {props.t('panel.form.fieldIp')}
                   {fields.address
+                    ? <span data-address-empty-note="" className={styles.note}>{props.t('panel.form.addressEmptyNote')}</span>
+                    : undefined}
+                  {fields.address
                     ? (
                         <input
                           value={ipDraft}
@@ -1446,6 +1632,25 @@ export function HostFormPage(props: {
                 </label>
               )}
         </form>
+        {/* 添加页的 SSH 目标输入：选择器写的草稿在这里显示，也供人手填；
+            部署区挂载时以它为初值（initialTarget）。放在 host form 外面——
+            主机的登记字段只有名称和地址两个（表单字段的钉子测试守着这条），
+            SSH 目标是部署区的草稿，不是登记字段。详情页不渲染——那里的部署
+            区有自己的初值来源（登记凭据）。 */}
+        {props.mode === 'new'
+          ? (
+              <label className={styles.field}>
+                {props.t('panel.ssh.targetLabel')}
+                <input
+                  value={props.sshTargetDraft ?? ''}
+                  data-ssh-target=""
+                  className={styles.input}
+                  onChange={event => { props.onSshTargetChange?.(event.target.value) }}
+                  placeholder={props.t('panel.ssh.targetPlaceholder')}
+                />
+              </label>
+            )
+          : undefined}
         {props.message === undefined
           ? undefined
           : <p data-form-message={props.message.tone} className={props.message.tone === 'ok' ? styles.stateLine : styles.stateBad}>{props.message.text}</p>}
@@ -1496,6 +1701,9 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   const [addIdDraft, setAddIdDraft] = useState('')
   const [addTitleDraft, setAddTitleDraft] = useState('')
   const [addAddressDraft, setAddAddressDraft] = useState('')
+  // 选择器写、部署区读的 SSH 目标草稿：一份在面板手里，添加页的输入框和
+  // 部署区的初值都从它来（选中的对端只是 SSH 目标，地址留给部署/连接写）。
+  const [sshTargetDraft, setSshTargetDraft] = useState('')
   const [sshDeployAvailable, setSshDeployAvailable] = useState(false)
   useEffect(() => {
     void probeSshDeployApi().then(setSshDeployAvailable)
@@ -1505,6 +1713,14 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   // event says which host's detail page to open.
   const [confirmingRemove, setConfirmingRemove] = useState(false)
   const [reaches, setReaches] = useState<ReadonlyMap<string, ReachOutcome | 'probing'>>(new Map())
+  // 远端读取的在途与失败：在途喂给 hostStatus 说「读取中」，失败把原因挂在
+  // 该主机上、上次读到的话留在页面上（评审裁定 6）。
+  const [readingId, setReadingId] = useState<string | undefined>(undefined)
+  const [readFailures, setReadFailures] = useState<ReadonlyMap<string, string>>(new Map())
+  // 启动失败单记一处：启动的失败用自己的话说，不借读取失败的留痕冒充。
+  const [startFailures, setStartFailures] = useState<ReadonlyMap<string, string>>(new Map())
+  // approve-and-read 进行中的那台主机：部署区为此打开并自动检查密钥。
+  const [approveAndReadId, setApproveAndReadId] = useState<string | undefined>(undefined)
   // The host list lives in the section, not in React state; this tick is what
   // re-reads it — presence changes and heartbeat ages both arrive without one.
   const [, setListTick] = useState(0)
@@ -1564,6 +1780,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   const openList = (): void => {
     setFormMessage(undefined)
     setConfirmingRemove(false)
+    setApproveAndReadId(undefined)
     setView({ page: 'list' })
   }
   const confirmAdd = (values: HostFormValues): boolean => {
@@ -1617,10 +1834,16 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   const [connectBusyId, setConnectBusyId] = useState<string | undefined>(undefined)
   const [connectError, setConnectError] = useState<{ readonly hostId: string; readonly text: string } | undefined>(undefined)
   const [deployOpenId, setDeployOpenId] = useState<string | undefined>(undefined)
+  // 详情页选点的一次性覆盖：详情页换目标部署是受支持的动作（目标栏可编辑、
+  // 部署成功就改写登记），显式选点必须赢过已存目标。只记「哪台主机、第几次
+  // 选点、选了什么」：序号进部署区的 key 推动重挂，目标作为该次挂载的初值
+  // 压过已存凭据。它与 sshTargetDraft（面板级草稿）刻意分开——草稿不翻转
+  // 优先级，添加页留下的旧草稿盖不掉已存的好凭据；部署区一关覆盖即作废。
+  const [deployPick, setDeployPick] = useState<{ readonly hostId: string; readonly serial: number; readonly target: string } | undefined>(undefined)
 
   const storedSshInput = (info: HostSshInfo): (SshConnectionInput & { readonly hostKeyFingerprint: string }) | undefined => {
-    // 密码/粘贴私钥不落盘：免输入重连只对密钥文件方式成立。
-    if (info.authMode !== 'identityFile' || info.hostKeyFingerprint === undefined || info.identityFile === undefined) return undefined
+    // 可读性与事实装配同一把尺子（storedSshUsable）：密码/粘贴私钥不落盘。
+    if (!storedSshUsable(info)) return undefined
     return {
       target: info.target,
       ...(info.port === undefined ? {} : { port: info.port }),
@@ -1631,13 +1854,118 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
     }
   }
 
-  const checkTunnel = (registration: HostRegistration): void => {
-    if (registration.launchUrl === undefined) return
-    setTunnelChecks(previous => new Map(previous).set(registration.hostId, 'checking'))
-    void probeReach((input, init) => fetch(input, init), registration.launchUrl ?? '', 3000).then(outcome => {
-      setTunnelChecks(previous => new Map(previous).set(registration.hostId, outcome.kind === 'reachable' ? 'online' : 'offline'))
+  /** 用给定凭据读一次对方状态：读数落进登记簿，失败把原因挂在该主机上。 */
+  const readPeerWith = (registration: HostRegistration, ssh: SshConnectionInput & { readonly hostKeyFingerprint: string }): void => {
+    if (props.remote === undefined) return
+    setReadingId(registration.hostId)
+    void props.remote.read(ssh).then(result => {
+      setReadingId(previous => previous === registration.hostId ? undefined : previous)
+      if (!result.ok) {
+        // 失败不动已存的读数：上次读到的话留在屏幕上，原因挂在旁边（裁定 6）。
+        setReadFailures(previous => new Map(previous).set(registration.hostId, result.error))
+        return
+      }
+      setReadFailures(previous => {
+        const next = new Map(previous)
+        next.delete(registration.hostId)
+        return next
+      })
+      // 裁定 1 在落库侧的闸（remoteRecordOf）：降级读取不落成「未部署」。
+      if (props.registry.recordRemote(registration.hostId, remoteRecordOf(result.report, Date.now()))) {
+        setRegistryRevision(revision => revision + 1)
+      }
     })
   }
+
+  /**
+   * 读一次对方状态。入口闸与可读性是同一把尺子：凭据没存（密码/粘贴私钥）
+   * 或指纹还没批准的登记不读（裁定 4/5）——前者面板已明说读不了，后者的
+   * 入口是「批准并读取」。
+   */
+  const readPeer = (registration: HostRegistration): void => {
+    const stored = registration.ssh
+    if (stored === undefined || stored.hostKeyFingerprint === 'unapproved') return
+    const ssh = storedSshInput(stored)
+    if (ssh === undefined) return
+    readPeerWith(registration, ssh)
+  }
+
+  /**
+   * 启动对方 DSH：入口闸与 readPeer 同一把尺子（凭据没存、指纹没批准都不发，
+   * 裁定 4/5），成功后立即重读，屏幕上摆的是读回来的存活，不是假设。
+   * 启动的失败记在启动自己名下（startFailures），不与读取失败的留痕混写。
+   */
+  const startPeer = (registration: HostRegistration): void => {
+    const stored = registration.ssh
+    if (stored === undefined || stored.hostKeyFingerprint === 'unapproved') return
+    const ssh = storedSshInput(stored)
+    if (ssh === undefined || props.remote === undefined) return
+    void props.remote.start(ssh, stored.remoteWebPort ?? 3081).then(result => {
+      if (!result.ok) {
+        setStartFailures(previous => new Map(previous).set(registration.hostId, result.error))
+        return
+      }
+      // 这次启动成了，上次启动失败的留痕随之作废。
+      setStartFailures(previous => {
+        const next = new Map(previous)
+        next.delete(registration.hostId)
+        return next
+      })
+      readPeer(registration)
+    })
+  }
+
+  /**
+   * 批准并读取：打开既有部署区（密钥批准交互只有这一套，裁定 5），自动
+   * 检查一次主机密钥；操作者认完指纹（唯一钥匙时自动批准）就接着读。
+   */
+  const approveAndRead = (registration: HostRegistration): void => {
+    setApproveAndReadId(registration.hostId)
+    setDeployOpenId(registration.hostId)
+  }
+
+  /** 详情页按钮表的统一出口：动作标识符到既有流程的映射，不新增流程。 */
+  const runDetailAction = (registration: HostRegistration, action: HostAction | 'approve-and-read'): void => {
+    switch (action) {
+      case 'deploy':
+      case 'redeploy':
+      case 'fill-ssh':
+        setDeployOpenId(registration.hostId)
+        break
+      case 'read-peer':
+      case 'retry-read':
+        readPeer(registration)
+        break
+      case 'start-peer':
+        startPeer(registration)
+        break
+      case 'open-page':
+      case 'connect-open':
+        runConnect(registration)
+        break
+      case 'check-reach':
+        startReach(registration)
+        break
+      case 'approve-and-read':
+        approveAndRead(registration)
+        break
+    }
+  }
+
+  // 进入详情页即读一次对方状态（有口、有已存凭据、指纹已批准才有得读；
+  // 裁定 5：未批准的登记不自动读）。只在切换到某台主机时触发，登记的
+  // 后续变化不反复发起读取。
+  useEffect(() => {
+    if (view.page !== 'detail') return
+    const registration = props.registry.list().find(entry => entry.hostId === view.hostId)
+    if (registration !== undefined) readPeer(registration)
+  }, [view])
+
+  // 选点覆盖只用这一程：部署区收起或离开详情页就作废，下次展开仍是已存优先。
+  useEffect(() => {
+    if (deployPick === undefined) return
+    if (view.page !== 'detail' || deployOpenId !== deployPick.hostId) setDeployPick(undefined)
+  }, [view, deployOpenId, deployPick])
 
   const runConnect = (
     registration: HostRegistration,
@@ -1645,6 +1973,10 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
     facts?: SshSeedFacts | undefined,
   ): void => {
     const stored = registration.ssh
+    // 入口闸与 readPeer/startPeer 同一把尺子（裁定 5）：指纹没批准的已存凭据
+    // 不发——连过去只会撞回主机端口的一条生英文错误，正路是「批准并读取」。
+    // 部署区现填的凭据（sshInput 在场）刚走过区块自己的批准交互，不受这道闸。
+    if (sshInput === undefined && stored?.hostKeyFingerprint === 'unapproved') return
     const ssh = sshInput ?? (stored === undefined ? undefined : storedSshInput(stored))
     if (ssh === undefined) {
       // 没有可直接复用的凭据（未存方式，或密码/私钥）：如实说明并指去部署区块。
@@ -1678,7 +2010,13 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   // Re-read on every render: presence and the registry both change out from
   // under this component.
   const presence = props.rollUp.hosts()
-  const hostRows = mergeHostRows(presence, registrations, reaches)
+  // 读取在途的那台喂给行推导：现在读数真实存在，「检测中」不再只代表探测。
+  const hostRows = mergeHostRows(
+    presence,
+    registrations,
+    reaches,
+    readingId === undefined ? undefined : new Set([readingId]),
+  )
 
   if (view.page === 'add') {
     if (sshDeployAvailable && addMode === 'ssh') {
@@ -1700,6 +2038,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
               hostTitle={addTitleDraft}
               onHostIdChange={setAddIdDraft}
               onHostTitleChange={setAddTitleDraft}
+              initialTarget={sshTargetDraft}
               onError={message => { setFormMessage({ tone: 'bad', text: message }) }}
               onDeployed={(deployResult, sshFacts) => {
                 const result = props.registry.add({
@@ -1758,6 +2097,15 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
           }}
           onCancel={openList}
           tailscale={props.tailscale}
+          sshTargetDraft={sshTargetDraft}
+          onSshTargetChange={setSshTargetDraft}
+          onPickedPeer={peer => {
+            // 添加页选中：名称进部署区的主机名、IP 进目标栏，顺带切到部署区
+            // （不可用时留在本页，草稿仍在）；地址没人碰。
+            setAddIdDraft(peer.name)
+            setSshTargetDraft(peer.ip)
+            setAddMode('ssh')
+          }}
           t={props.t}
         />
       </div>
@@ -1787,6 +2135,25 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
         ? { id: true, address: false }
         : { id: true, address: true }
       const reach = reaches.get(row.hostId)
+      // 详情页按钮表：状态词查表得动作（主按钮在前），两处按事实裁决——
+      // 指纹未批准（裁定 5）与已部署但存活读不出（裁定 2 的唯一例外）。
+      // 未批准时 retry-read 与 start-peer 都不出：读取和启动都要已批准的
+      // 凭据；open-page 与 connect-open 同理不出——连接一族走的是同一条
+      // 已存凭据的路，入口只有批准并读取。都返回新数组：hostActions 的表
+      // 是共享实例，只渲染、不改动（裁定 3）。
+      const statusActions = hostActions(row.connection)
+      const detailActions: readonly (HostAction | 'approve-and-read')[] =
+        registration !== undefined && registration.ssh?.hostKeyFingerprint === 'unapproved'
+          ? ['approve-and-read', ...statusActions.filter(action => action !== 'retry-read' && action !== 'start-peer' && action !== 'open-page' && action !== 'connect-open')]
+          : row.connection === 'unknown' && storedSshUsable(registration?.ssh) && registration?.remote?.deployment === 'deployed'
+            ? ['retry-read', ...statusActions.filter(action => action !== 'retry-read')]
+            : statusActions
+      const readFailure = readFailures.get(row.hostId)
+      const startFailure = startFailures.get(row.hostId)
+      const storedRead = registration?.remote
+      // 本机详情页在场的选点覆盖（deployPick 只服务这一台）：不是本机的选点
+      // 一律不带，重挂与初值都轮不到别人家的。
+      const pickedDeploy = deployPick !== undefined && deployPick.hostId === row.hostId ? deployPick : undefined
       return (
         <div data-threadharbor-panel="" className={styles.root}>
           {/* Key on the row's id only: a background identity re-read (the
@@ -1806,6 +2173,18 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
             onConfirm={values => row.self ? confirmSelf(values) : confirmEdit(view.hostId, values)}
             onCancel={openList}
             tailscale={props.tailscale}
+            onPickedPeer={peer => {
+              // 详情页选中：IP 只落进草稿，登记的地址与名称都不动——这里不切
+              // 模式。选点是显式意图：展开部署区并重挂一次（序号进 key），让
+              // 选中的地址成为这次挂载的目标初值，已存凭据的旧目标不压它。
+              setSshTargetDraft(peer.ip)
+              setDeployOpenId(row.hostId)
+              setDeployPick(previous => ({
+                hostId: row.hostId,
+                serial: (previous?.serial ?? 0) + 1,
+                target: peer.ip,
+              }))
+            }}
             t={props.t}
             footer={registration !== undefined
               ? (
@@ -1813,14 +2192,8 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                     <div data-registry-actions="" className={styles.registryActions}>
                       <p data-host-connection="" className={styles.stateLine}>
                         {props.t('panel.facts.status', { status: connectionStatusLabel(row.connection, props.t) })}
-                        {row.connection === 'disconnected' || row.connection === 'reachable'
-                          ? (
-                              <>
-                                {' '}
-                                <button type="button" data-registry-reach-try="" className={styles.action} onClick={() => { startReach(registration) }}>{props.t('panel.button.reachTry')}</button>
-                              </>
-                            )
-                          : undefined}
+                        {/* 检测可达的动作并进了下面的按钮表（check-reach），
+                            状态行只说话，不再带按钮。 */}
                       </p>
                       {reach !== undefined && reach !== 'probing' && reach.kind !== 'reachable'
                         ? <p className={styles.stateBad}>{reach.kind === 'timeout' ? props.t('panel.reach.probeTimeout', { ms: reach.ms }) : reach.reason}</p>
@@ -1851,6 +2224,60 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                     </div>
                     {!row.self
                       ? (
+                          <>
+                            {/* 详情页按钮表：hostActions 按状态词给出动作，主按钮在前。
+                                密码认证的主机在旁边明说读不了（裁定 4）。 */}
+                            <div data-host-actions="" className={styles.formActions}>
+                              {detailActions.map((action, index) => (
+                                <button
+                                  key={action}
+                                  type="button"
+                                  data-action={action}
+                                  className={index === 0 ? styles.actionPrimary : styles.action}
+                                  onClick={() => { runDetailAction(registration, action) }}
+                                >{actionLabel(action, props.t)}</button>
+                              ))}
+                            </div>
+                            {registration.ssh !== undefined && !storedSshUsable(registration.ssh)
+                              ? <p data-note-password-auth="" className={styles.stateLine}>{props.t('panel.notes.passwordAuth')}</p>
+                              : undefined}
+                            {registration.ssh?.hostKeyFingerprint === 'unapproved'
+                              ? <p data-note-key-unapproved="" className={styles.stateLine}>{props.t('panel.button.keyNotApproved')}</p>
+                              : undefined}
+                            {/* 读取失败的留痕（裁定 6）：原因与上次读到的同时在场。 */}
+                            {readFailure !== undefined
+                              ? <p data-read-failed="" className={styles.stateBad}>{props.t('panel.notes.readFailed', { reason: readFailure })}</p>
+                              : undefined}
+                            {/* 启动失败的留痕：它说「没能启动」，不借读取失败的话。 */}
+                            {startFailure !== undefined
+                              ? <p data-start-failed="" className={styles.stateBad}>{props.t('panel.notes.startFailed', { reason: startFailure })}</p>
+                              : undefined}
+                            {readFailure !== undefined && storedRead !== undefined
+                              ? (
+                                  <p data-last-read="" className={styles.stateLine}>
+                                    {props.t('panel.notes.lastRead', {
+                                      summary: `${deploymentWord(storedRead.deployment, props.t)} · ${livenessWord(storedRead.liveness, props.t)}`,
+                                      at: new Date(storedRead.readAt).toLocaleString(),
+                                    })}
+                                  </p>
+                                )
+                              : undefined}
+                            {storedRead !== undefined
+                              ? (
+                                  <div data-remote-facts="" className={styles.reportedFacts}>
+                                    <p data-fact-deployment="" className={styles.stateLine}>{props.t('panel.facts.deployment')}{'：'}{deploymentWord(storedRead.deployment, props.t)}</p>
+                                    <p data-fact-liveness="" className={styles.stateLine}>{props.t('panel.facts.liveness')}{'：'}{livenessWord(storedRead.liveness, props.t)}</p>
+                                    <p data-fact-entry="" className={styles.stateLine}>{props.t('panel.facts.entry')}{'：'}{registration.launchUrl ?? storedRead.launchUrl ?? '—'}</p>
+                                    <p data-fact-reported="" className={styles.stateLine}>{props.t('panel.facts.reported')}{'：'}{row.online ? props.t('panel.status.online') : props.t('panel.status.offline')}</p>
+                                    <p data-fact-read-at="" className={styles.stateLine}>{props.t('panel.facts.readAt')}{'：'}{new Date(storedRead.readAt).toLocaleString()}</p>
+                                  </div>
+                                )
+                              : undefined}
+                          </>
+                        )
+                      : undefined}
+                    {!row.self
+                      ? (
                           <HostUseSection
                             sshInfo={registration.ssh}
                             launchUrl={registration.launchUrl}
@@ -1858,7 +2285,6 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                             connecting={connectBusyId === row.hostId}
                             error={connectError?.hostId === row.hostId ? connectError.text : undefined}
                             onConnect={() => { runConnect(registration) }}
-                            onCheckTunnel={() => { checkTunnel(registration) }}
                             onOpenDeploy={() => { setDeployOpenId(deployOpenId === row.hostId ? undefined : row.hostId) }}
                             t={props.t}
                           />
@@ -1878,10 +2304,25 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                             {deployOpenId === row.hostId
                               ? (
                                   <SshDeploySection
+                                    // key 带上 approve-and-read 标记：从「批准并读取」
+                                    // 打开时重挂一次，自动检查密钥的 effect 才会跑。
+                                    // 末段是选点序号：只由详情页选点推动，选点重挂
+                                    // 一次带上新目标；不挂草稿值，免得输入被冲掉。
+                                    key={`deploy-${row.hostId}-${approveAndReadId === row.hostId}-${pickedDeploy === undefined ? 0 : pickedDeploy.serial}`}
                                     hostId={row.hostId}
                                     hostTitle={row.name}
                                     lockHost
                                     initial={registration.ssh}
+                                    initialTarget={sshTargetDraft}
+                                    pickedTarget={pickedDeploy?.target}
+                                    autoInspect={approveAndReadId === row.hostId}
+                                    onApproved={approveAndReadId === row.hostId
+                                      ? ssh => {
+                                          // 认完指纹接着读：approve-and-read 的后半段，
+                                          // 用的就是这次批准的指纹。
+                                          readPeerWith(registration, ssh)
+                                        }
+                                      : undefined}
                                     onHostIdChange={() => undefined}
                                     onHostTitleChange={() => undefined}
                                     onDeployed={(result, facts) => {

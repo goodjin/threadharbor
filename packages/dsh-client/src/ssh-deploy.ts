@@ -49,7 +49,7 @@ export async function inspectSshHost(ssh: SshConnectionInput, t: RuntimeT = fall
 export async function readRemotePeer(
   ssh: SshConnectionInput & { readonly hostKeyFingerprint: string },
   t: RuntimeT = fallbackT,
-): Promise<ApiResult<PeerStatus>> {
+): Promise<ApiResult<PeerReport>> {
   return await postJson(ROUTE_PEER, { ssh }, t)
 }
 

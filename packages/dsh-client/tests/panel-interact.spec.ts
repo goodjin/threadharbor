@@ -18,12 +18,12 @@ import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
 import { AgentPanel } from '../src/panel.tsx'
-import type { AgentListPort, AgentPanelProps, HostRegistryPort, TailscalePeer, TailscalePeersResult, TailscalePort } from '../src/panel.tsx'
+import type { AgentListPort, AgentPanelProps, HostRegistryPort, RemotePort, RemoteReadResult, RemoteStartResult, TailscalePeer, TailscalePeersResult, TailscalePort } from '../src/panel.tsx'
 import type { RollUpSection } from '../src/rollup-section.ts'
 import type { ConfiguredIdentity } from '../src/settings-source.ts'
 import type { AgentDescriptor, GatewayResult } from '../src/gateway.ts'
 import { hostRegistry } from '@threadharbor/dsh-host-federation'
-import type { HostIdentity, HostSnapshot } from '@threadharbor/dsh-host-federation'
+import type { HostIdentity, HostSnapshot, PeerReport, SshConnectionInput } from '@threadharbor/dsh-host-federation'
 import type { HostStorePosture } from '../src/host-store.ts'
 import { zh } from '../src/locales.ts'
 
@@ -151,7 +151,7 @@ const TWO_PEERS: readonly TailscalePeer[] = [
   { name: 'labbox', ip: '100.101.2.9', online: false },
 ]
 
-async function mountPanel(registry: HostRegistryPort, hostStore?: FakeHostStore, rollUp?: FakeRollUp, tailscale?: TailscalePort): Promise<{ container: HTMLElement; root: Root }> {
+async function mountPanel(registry: HostRegistryPort, hostStore?: FakeHostStore, rollUp?: FakeRollUp, tailscale?: TailscalePort, remote?: RemotePort): Promise<{ container: HTMLElement; root: Root }> {
   const container = document.createElement('div')
   document.body.appendChild(container)
   const root = createRoot(container)
@@ -163,6 +163,7 @@ async function mountPanel(registry: HostRegistryPort, hostStore?: FakeHostStore,
     t: zhT,
     ...(hostStore === undefined ? {} : { hostStore }),
     ...(tailscale === undefined ? {} : { tailscale }),
+    ...(remote === undefined ? {} : { remote }),
   }
   await act(async () => {
     root.render(createElement(AgentPanel, props))
@@ -410,7 +411,7 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
     }
   })
 
-  it('添加：列表页点按钮进表单页，没有事实区；确定后新行以未连接出现', async () => {
+  it('添加：列表页点按钮进表单页，没有事实区；确定后新行以未验证出现', async () => {
     const registry = makeRegistry()
     const { container, root } = await mountPanel(registry)
     try {
@@ -434,10 +435,11 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
       const row = q(container, '[data-host-row="gamma"]')
       expect(row.querySelector('[data-host-name]')?.textContent).toBe('gamma')
       expect(row.querySelector('[data-host-ip]')?.textContent).toBe('192.168.1.30')
-      // 状态不再占一列：以名称旁的圆点标示（title 里带词）。
+      // 状态不再占一列：以名称旁的圆点标示（title 里带词）。刚登记的主机
+      // 没读过、没探过，新模型如实说「未验证」——不再谎称「未连接」。
       const dot = row.querySelector('[data-host-status]')
       expect(dot?.getAttribute('data-host-status')).toBe('offline')
-      expect(dot?.getAttribute('title')).toBe('未连接')
+      expect(dot?.getAttribute('title')).toBe('未验证')
       // IP 字段不带协议：入库时补上 http://。
       expect(registry.list()).toMatchObject([
         { hostId: 'gamma', hostTitle: 'gamma', address: 'http://192.168.1.30:3081' },
@@ -564,9 +566,8 @@ describe('从 Tailscale 选：表单前面的选择器', () => {
     })
   }
 
-  it('添加页「从 Tailscale 选」在表单前面；列出 peers（名字+IP+在线徽标），选一台名称和 IP 一起填上且选择器收起', async () => {
-    const registry = makeRegistry()
-    const { container, root } = await mountPanel(registry, undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
+  it('添加页「从 Tailscale 选」在表单前面；列出 peers（名字+IP+在线徽标），选一台只填名称与 SSH 目标、地址栏留空，选择器收起', async () => {
+    const { container, root } = await mountPanel(makeRegistry(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
     try {
       click(container, '[data-action="add-host"]')
       // 入口在表单前面（2026-10-13 用户反馈），不是地址旁的小按钮。
@@ -587,26 +588,25 @@ describe('从 Tailscale 选：表单前面的选择器', () => {
       expect(q(container, '[data-tailscale-peer="labbox"]').getAttribute('data-tailscale-online')).toBe('false')
 
       click(container, '[data-tailscale-peer="bench.tail-scale.ts.net"]')
+      // 选中只填名称与 SSH 目标：Tailscale 的对端只是 SSH 目标，它的 DSH web
+      // 在网上并不直接可达，地址栏留空、由部署或连接成功后写回。
       const name = q(container, '[data-form-field-id]')
       if (!(name instanceof HTMLInputElement)) throw new Error('name input missing')
-      const ip = q(container, '[data-form-field-address]')
-      if (!(ip instanceof HTMLInputElement)) throw new Error('ip input missing')
+      const address = q(container, '[data-form-field-address]')
+      if (!(address instanceof HTMLInputElement)) throw new Error('address input missing')
       expect(name.value).toBe('bench.tail-scale.ts.net')
-      expect(ip.value).toBe('100.101.1.7')
+      expect(address.value).toBe('')
+      const target = q(container, '[data-ssh-target]')
+      if (!(target instanceof HTMLInputElement)) throw new Error('ssh target input missing')
+      expect(target.value).toBe('100.101.1.7')
       expect(container.querySelector('[data-tailscale-picker]')).toBeNull()
       expect(picker).toBeTruthy()
-
-      // 选完直接确定：登记的是名称 + 补协议的 IP。
-      click(container, '[data-form-confirm]')
-      expect(registry.list()).toMatchObject([
-        { hostId: 'bench.tail-scale.ts.net', hostTitle: 'bench.tail-scale.ts.net', address: 'http://100.101.1.7' },
-      ])
     } finally {
       await unmount(root)
     }
   })
 
-  it('离线主机置灰但仍可选：点了照样填名称和 IP，徽标是未连接', async () => {
+  it('离线主机置灰但仍可选：点了照样填名称和 SSH 目标，地址栏照旧留空', async () => {
     const { container, root } = await mountPanel(makeRegistry(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
     try {
       click(container, '[data-action="add-host"]')
@@ -616,10 +616,91 @@ describe('从 Tailscale 选：表单前面的选择器', () => {
       expect(labbox.getAttribute('data-tailscale-online')).toBe('false')
       click(container, '[data-tailscale-peer="labbox"]')
       const name = q(container, '[data-form-field-id]')
-      const ip = q(container, '[data-form-field-address]')
-      if (!(name instanceof HTMLInputElement) || !(ip instanceof HTMLInputElement)) throw new Error('inputs missing')
+      const address = q(container, '[data-form-field-address]')
+      const target = q(container, '[data-ssh-target]')
+      if (!(name instanceof HTMLInputElement) || !(address instanceof HTMLInputElement) || !(target instanceof HTMLInputElement)) throw new Error('inputs missing')
       expect(name.value).toBe('labbox')
-      expect(ip.value).toBe('100.101.2.9')
+      expect(target.value).toBe('100.101.2.9')
+      expect(address.value).toBe('')
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('添加页选中后自动切到 SSH 部署区：IP 进目标栏，名称跟着进主机名栏', async () => {
+    // 探测 HEAD 打通＝部署区可用；选择器选中后 addMode 才真的切得过去。
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/api/threadharbor.host-ssh.operation') && init?.method === 'HEAD') return new Response('', { status: 200 })
+      return new Response(JSON.stringify({ ok: false, error: 'no route' }), { status: 404 })
+    }) as unknown as typeof fetch
+    const { container, root } = await mountPanel(makeRegistry(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
+    try {
+      await settle()
+      click(container, '[data-action="add-host"]')
+      click(container, '[data-action="tailscale-pick"]')
+      await settle()
+      click(container, '[data-tailscale-peer="bench.tail-scale.ts.net"]')
+      expect(container.querySelector('[data-ssh-deploy]')).not.toBeNull()
+      const target = q(container, '[data-ssh-target]')
+      if (!(target instanceof HTMLInputElement)) throw new Error('ssh target input missing')
+      expect(target.value).toBe('100.101.1.7')
+      const hostId = q(container, '[data-ssh-hostid]')
+      if (!(hostId instanceof HTMLInputElement)) throw new Error('hostId input missing')
+      expect(hostId.value).toBe('bench.tail-scale.ts.net')
+    } finally {
+      await unmount(root)
+      delete (globalThis as { fetch?: unknown }).fetch
+    }
+  })
+
+  it('详情页选中不改已登记的地址：输入框原样，登记里 address 前后一致', async () => {
+    const registry = makeRegistry([{ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' }])
+    const { container, root } = await mountPanel(registry, undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
+    try {
+      click(container, '[data-host-open="bench"]')
+      const before = registry.list().find(entry => entry.hostId === 'bench')?.address
+      const address = q(container, '[data-form-field-address]')
+      if (!(address instanceof HTMLInputElement)) throw new Error('address input missing')
+      expect(address.value).toBe('192.168.1.20:3081')
+
+      click(container, '[data-action="tailscale-pick"]')
+      await settle()
+      click(container, '[data-tailscale-peer="bench.tail-scale.ts.net"]')
+      // 名称栏照填（可编辑），地址输入框一个字都不动，登记簿也不动。
+      const name = q(container, '[data-form-field-id]')
+      if (!(name instanceof HTMLInputElement)) throw new Error('name input missing')
+      expect(name.value).toBe('bench.tail-scale.ts.net')
+      const after = q(container, '[data-form-field-address]')
+      if (!(after instanceof HTMLInputElement)) throw new Error('address input missing')
+      expect(after.value).toBe('192.168.1.20:3081')
+      expect(registry.list().find(entry => entry.hostId === 'bench')?.address).toBe(before)
+      expect(before).toBe('http://192.168.1.20:3081')
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('手填地址的路径不受影响：不选 Tailscale、直接填 IP 并确定，登记的地址补上协议', async () => {
+    const registry = makeRegistry()
+    const { container, root } = await mountPanel(registry)
+    try {
+      click(container, '[data-action="add-host"]')
+      type(container, '[data-form-field-id]', 'bench.tail-scale.ts.net')
+      type(container, '[data-form-field-address]', '100.101.1.7')
+      click(container, '[data-form-confirm]')
+      expect(registry.list()).toMatchObject([
+        { hostId: 'bench.tail-scale.ts.net', hostTitle: 'bench.tail-scale.ts.net', address: 'http://100.101.1.7' },
+      ])
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('地址栏旁的注记把话说在面上：留空由部署或连接自动写入', async () => {
+    const { container, root } = await mountPanel(makeRegistry(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
+    try {
+      click(container, '[data-action="add-host"]')
+      expect(q(container, '[data-address-empty-note]').textContent).toBe('留空 = 由部署或连接自动写入')
     } finally {
       await unmount(root)
     }
@@ -855,6 +936,625 @@ describe('主机详情：使用这台主机 + 远程部署（状态机如实呈�
     } finally {
       await unmount(root)
       delete (globalThis as { fetch?: unknown }).fetch
+    }
+  })
+
+  /** 把 async 链上的微任务与重渲染冲干净（先例见按钮表那组用例的 flush）。 */
+  async function flush(times = 1): Promise<void> {
+    for (let i = 0; i < times; i += 1) {
+      await act(async () => { await Promise.resolve() })
+    }
+  }
+
+  /** 带已存 SSH 凭据的登记：详情页选点与目标初值的用例都从它出发。 */
+  function registryWithSsh(): HostRegistryPort {
+    const registry = makeRegistry([])
+    ;(registry as unknown as { add: (i: Record<string, unknown>) => unknown }).add({ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081', ssh: SSH_SEED })
+    return registry
+  }
+
+  it('没有选点时已存凭据的目标照旧优先：展开部署区，目标栏是登记里的地址', async () => {
+    stubFetch({})
+    const { container, root } = await mountPanel(registryWithSsh())
+    try {
+      click(container, '[data-host-open="bench"]')
+      click(container, '[data-action="open-deploy"]')
+      const target = q(container, '[data-ssh-deploy] [data-ssh-target]')
+      if (!(target instanceof HTMLInputElement)) throw new Error('ssh target input missing')
+      expect(target.value).toBe(SSH_SEED.target)
+    } finally {
+      await unmount(root)
+      delete (globalThis as { fetch?: unknown }).fetch
+    }
+  })
+
+  it('详情页选点生效：部署区展开并重挂，目标栏是选中的地址而不是已存的旧目标', async () => {
+    stubFetch({})
+    const { container, root } = await mountPanel(registryWithSsh(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
+    try {
+      click(container, '[data-host-open="bench"]')
+      click(container, '[data-action="tailscale-pick"]')
+      await flush(2)
+      click(container, '[data-tailscale-peer="bench.tail-scale.ts.net"]')
+      // 选点本身把部署区打开；目标栏带上这次选中的地址，已存目标不压它。
+      expect(container.querySelector('[data-ssh-deploy]')).not.toBeNull()
+      const target = q(container, '[data-ssh-deploy] [data-ssh-target]')
+      if (!(target instanceof HTMLInputElement)) throw new Error('ssh target input missing')
+      expect(target.value).toBe('100.101.1.7')
+    } finally {
+      await unmount(root)
+      delete (globalThis as { fetch?: unknown }).fetch
+    }
+  })
+
+  it('已存指纹未批准：部署区不把标记当已批准，「只连接」进不去，审批流才是入口', async () => {
+    // 种下未批准标记的凭据，从「填写连接方式」打开部署区：区块过去把标记
+    // 原样种成已批准状态，只连接按钮免检可点，点了照样撞回生英文错误。
+    const { calls } = stubFetch({
+      'host-ssh.connect': { ok: false, error: 'ssh: connect to host mini.tailb6790d.ts.net port 22: Connection refused' },
+    })
+    const withUnapproved = makeRegistry([])
+    ;(withUnapproved as unknown as { add: (i: Record<string, unknown>) => unknown }).add({
+      hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081',
+      ssh: { ...SSH_SEED, hostKeyFingerprint: 'unapproved' },
+    })
+    const { container, root } = await mountPanel(withUnapproved)
+    try {
+      click(container, '[data-host-open="bench"]')
+      click(container, '[data-action="open-deploy"]')
+      const connect = q(container, '[data-action="ssh-connect"]')
+      if (!(connect instanceof HTMLButtonElement)) throw new Error('connect-only button missing')
+      // 标记不算批准：按钮进不去，点了也不发连接。
+      expect(connect.disabled).toBe(true)
+      click(container, '[data-action="ssh-connect"]')
+      expect(container.querySelector('[data-use-error]')).toBeNull()
+      expect(calls.some(call => call.url.includes('host-ssh.connect'))).toBe(false)
+      // 审批流才是入口：检查主机密钥的按钮在场。
+      expect(q(container, '[data-action="ssh-inspect"]')).toBeTruthy()
+    } finally {
+      await unmount(root)
+      delete (globalThis as { fetch?: unknown }).fetch
+    }
+  })
+})
+
+describe('主机行状态词由 hostStatus 推导（事实进、一个词出）', () => {
+  const SSH = {
+    target: 'mini.tailb6790d.ts.net',
+    authMode: 'identityFile' as const,
+    identityFile: '/Users/good/.ssh/id_ed25519',
+    hostKeyFingerprint: 'SHA256:abc',
+  }
+
+  /** 登记一台 bench：add 走真实校验，ssh / remote 读数按需补种。 */
+  function seedHost(extra: Record<string, unknown> = {}): HostRegistryPort {
+    const registry = makeRegistry([])
+    const add = registry as unknown as { add: (input: Record<string, unknown>) => { ok: boolean; error?: { detail: string } } }
+    const result = add.add({ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081', ...extra })
+    if (!result.ok) throw new Error(`seed failed: ${result.error?.detail}`)
+    return registry
+  }
+
+  /** 用真实登记簿的 recordRemote 写一次远端读数（readAt 是必填的解析门槛）。 */
+  function recordRemote(registry: HostRegistryPort, deployment: string, liveness: string): void {
+    const port = registry as unknown as { recordRemote: (hostId: string, report: Record<string, unknown>) => boolean }
+    if (!port.recordRemote('bench', { deployment, liveness, readAt: 1_000 })) throw new Error('recordRemote refused the report')
+  }
+
+  async function rowWord(registry: HostRegistryPort): Promise<string | null> {
+    const { container, root } = await mountPanel(registry)
+    try {
+      return q(container, '[data-host-row="bench"] [data-host-connection]').textContent
+    } finally {
+      await unmount(root)
+    }
+  }
+
+  it('读过说没部署：行显示「未部署」，不是含糊的旧词', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemote(registry, 'undeployed', 'unknown')
+    expect(await rowWord(registry)).toBe('未部署')
+  })
+
+  it('读过说部署了但没在跑：行显示「未启动」', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemote(registry, 'deployed', 'stopped')
+    expect(await rowWord(registry)).toBe('未启动')
+  })
+
+  it('部署了但读不出在不在跑：行显示「未知」，如实说不知道', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemote(registry, 'deployed', 'unknown')
+    expect(await rowWord(registry)).toBe('未知')
+  })
+
+  it('部署在跑但没验证过连通性：行显示「未验证」', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemote(registry, 'deployed', 'running')
+    expect(await rowWord(registry)).toBe('未验证')
+  })
+
+  it('没存凭据的主机读不出部署事实：读数不采信，只按连通性说话（未验证）', async () => {
+    const registry = seedHost()
+    recordRemote(registry, 'deployed', 'running')
+    expect(await rowWord(registry)).toBe('未验证')
+  })
+})
+
+/**
+ * 带原型的假远端读取口：read/start 记下每次调用与实参，读数按构造时的剧本
+ * 给。ssh-deploy 路由层的检查主机密钥（inspect）走 HTTP，测试里用 stub 掉的
+ * fetch 顶上，往同一份 calls 里记 'inspect'，调用次序因此可以被断言。
+ */
+class FakeRemote implements RemotePort {
+  public readonly calls: string[] = []
+  public readonly readInputs: Array<SshConnectionInput & { readonly hostKeyFingerprint: string }> = []
+
+  constructor(
+    private readonly readResult:
+      | { readonly ok: true; readonly report: PeerReport }
+      | { readonly ok: false; readonly error: string },
+    private readonly startResult:
+      | { readonly ok: true; port: number }
+      | { readonly ok: false; readonly error: string } = { ok: true, port: 3081 },
+    private readonly hangRead = false,
+  ) {}
+
+  /** fetch stub 用：把 inspect 的调用记进同一次序。 */
+  note(entry: string): void {
+    this.calls.push(entry)
+  }
+
+  async read(ssh: SshConnectionInput & { readonly hostKeyFingerprint: string }): Promise<{ readonly ok: true; readonly report: PeerReport } | { readonly ok: false; readonly error: string }> {
+    this.calls.push('read')
+    this.readInputs.push(ssh)
+    if (this.hangRead) return new Promise(() => {})
+    return this.readResult.ok ? { ok: true, report: this.readResult.report } : { ok: false, error: this.readResult.error }
+  }
+
+  async start(ssh: SshConnectionInput & { readonly hostKeyFingerprint: string }, port: number): Promise<{ readonly ok: true; readonly port: number } | { readonly ok: false; readonly error: string }> {
+    this.calls.push(`start:${port}`)
+    return this.startResult.ok ? { ok: true, port: this.startResult.port } : { ok: false, error: this.startResult.error }
+  }
+}
+
+/** 一次成功的远端读数：部署了、在跑、回环监听。 */
+const RUNNING_REPORT: PeerReport = {
+  pluginsInstalled: true,
+  listen: 'loopback',
+  port: 3081,
+  launchUrl: 'http://127.0.0.1:3081/?token=t',
+  liveness: 'running',
+}
+
+/**
+ * 按剧本出牌的假远端口：read / start 各自按顺序弹出结果，弹完就重复最后
+ * 一张。先失败后成功的用例（启动失败留痕要在下次启动成功时清掉）用它。
+ */
+class ScriptedRemote implements RemotePort {
+  public readonly calls: string[] = []
+  private readIndex = 0
+  private startIndex = 0
+
+  constructor(
+    private readonly reads: readonly RemoteReadResult[],
+    private readonly starts: readonly RemoteStartResult[],
+  ) {}
+
+  async read(ssh: SshConnectionInput & { readonly hostKeyFingerprint: string }): Promise<RemoteReadResult> {
+    void ssh
+    this.calls.push('read')
+    const result = this.reads[Math.min(this.readIndex, this.reads.length - 1)]!
+    this.readIndex += 1
+    return result
+  }
+
+  async start(ssh: SshConnectionInput & { readonly hostKeyFingerprint: string }, port: number): Promise<RemoteStartResult> {
+    void ssh
+    this.calls.push(`start:${port}`)
+    const result = this.starts[Math.min(this.startIndex, this.starts.length - 1)]!
+    this.startIndex += 1
+    return result
+  }
+}
+
+describe('详情页按钮表与对方状态读取（hostActions 出按钮，remote 口出读数）', () => {
+  const SSH = {
+    target: 'mini.tailb6790d.ts.net',
+    authMode: 'identityFile' as const,
+    identityFile: '/Users/good/.ssh/id_ed25519',
+    hostKeyFingerprint: 'SHA256:abc',
+  }
+
+  /** 登记一台 bench：add 走真实校验，ssh / remote 读数按需补种。 */
+  function seedHost(extra: Record<string, unknown> = {}): HostRegistryPort {
+    const registry = makeRegistry([])
+    const add = registry as unknown as { add: (input: Record<string, unknown>) => { ok: boolean; error?: { detail: string } } }
+    const result = add.add({ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081', ...extra })
+    if (!result.ok) throw new Error(`seed failed: ${result.error?.detail}`)
+    return registry
+  }
+
+  /** 按原始形状写一条远端读数（裁定 1 的用例需要带 livenessNote 的记录）。 */
+  function recordRemoteRaw(registry: HostRegistryPort, report: Record<string, unknown>): void {
+    const port = registry as unknown as { recordRemote: (hostId: string, report: Record<string, unknown>) => boolean }
+    if (!port.recordRemote('bench', report as never)) throw new Error('recordRemote refused the report')
+  }
+
+  /** 把 async 链上的微任务与重渲染冲干净。 */
+  async function flush(times = 1): Promise<void> {
+    for (let i = 0; i < times; i += 1) {
+      await act(async () => { await Promise.resolve() })
+    }
+  }
+
+  it('部署态未部署：详情页状态词是未部署，按钮是部署而不是启动对方', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemoteRaw(registry, { deployment: 'undeployed', liveness: 'unknown', readAt: 1_000 })
+    const { container, root } = await mountPanel(registry)
+    try {
+      click(container, '[data-host-open="bench"]')
+      expect(q(container, '[data-host-connection]').textContent).toContain('未部署')
+      expect(q(container, '[data-host-actions] [data-action="deploy"]')).toBeTruthy()
+      expect(container.querySelector('[data-host-actions] [data-action="start-peer"]')).toBeNull()
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('运行态未启动：详情页是启动对方 DSH 按钮，点了走 remote.start 再重读', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemoteRaw(registry, { deployment: 'deployed', liveness: 'stopped', readAt: 1_000 })
+    // 进入详情页本来就会自动读一次；这里让读取失败，未启动的旧读数才留得住，
+    // 「未启动」这个状态词也因此可断言（读取失败不动旧读数，裁定 6）。
+    const remote = new FakeRemote({ ok: false, error: '读不了' })
+    const { container, root } = await mountPanel(registry, undefined, undefined, undefined, remote)
+    try {
+      click(container, '[data-host-open="bench"]')
+      await flush(3)
+      expect(q(container, '[data-host-connection]').textContent).toContain('未启动')
+      expect(q(container, '[data-host-actions] [data-action="start-peer"]')).toBeTruthy()
+      expect(container.querySelector('[data-host-actions] [data-action="deploy"]')).toBeNull()
+      click(container, '[data-host-actions] [data-action="start-peer"]')
+      await flush(3)
+      expect(remote.calls).toContain('start:3081')
+      // 启动成功后立刻重读一次：按钮给出的不是「应该启动了」，是读回来的事实。
+      expect(remote.calls).toContain('read')
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('隧道在线：详情页是打开页面按钮', async () => {
+    const registry = seedHost()
+    const rollUp = new FakeRollUp([
+      SELF_HOST,
+      { hostId: 'bench', hostTitle: '测试机', lastSeen: 1_000, self: false },
+    ])
+    vi.stubGlobal('fetch', vi.fn(async () => ({ status: 200, json: async () => ({ ok: true, value: {} }) })))
+    try {
+      const { container, root } = await mountPanel(registry, undefined, rollUp)
+      try {
+        click(container, '[data-host-open="bench"]')
+        // 初始未验证：按钮是检查能否打开；探完可达且对方报过数，就是已连接。
+        click(container, '[data-host-actions] [data-action="check-reach"]')
+        await flush(2)
+        expect(q(container, '[data-host-connection]').textContent).toContain('已连接')
+        expect(q(container, '[data-host-actions] [data-action="open-page"]')).toBeTruthy()
+      } finally {
+        await unmount(root)
+      }
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('读失败时保留上次读数：失败原因和上次读到的同时在页面上', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemoteRaw(registry, { deployment: 'deployed', liveness: 'running', readAt: 1_000 })
+    const remote = new FakeRemote({ ok: false, error: 'SSH 读不了' })
+    const { container, root } = await mountPanel(registry, undefined, undefined, undefined, remote)
+    try {
+      click(container, '[data-host-open="bench"]')
+      await flush(3)
+      expect(q(container, '[data-read-failed]').textContent).toContain('这次没读到：SSH 读不了')
+      expect(q(container, '[data-last-read]').textContent).toContain('上次读到的是')
+      expect(q(container, '[data-last-read]').textContent).toContain('已部署')
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('启动失败记在启动名下：不冒充读取失败，两条留痕各说各的', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemoteRaw(registry, { deployment: 'deployed', liveness: 'stopped', readAt: 1_000 })
+    // 自动读取失败留住「未启动」旧读数；随后启动也失败：两条失败必须各归各家。
+    const remote = new FakeRemote({ ok: false, error: 'SSH 读不了' }, { ok: false, error: 'systemd said no' })
+    const { container, root } = await mountPanel(registry, undefined, undefined, undefined, remote)
+    try {
+      click(container, '[data-host-open="bench"]')
+      await flush(3)
+      // 前提：这次真正的读取失败，原因确实记在读取名下。
+      expect(q(container, '[data-read-failed]').textContent).toContain('这次没读到：SSH 读不了')
+      click(container, '[data-host-actions] [data-action="start-peer"]')
+      await flush(3)
+      expect(remote.calls).toContain('start:3081')
+      // 读取失败的话一个字不变，启动的原因一个字也不许塞进去。
+      expect(q(container, '[data-read-failed]').textContent).toContain('这次没读到：SSH 读不了')
+      expect(q(container, '[data-read-failed]').textContent).not.toContain('systemd said no')
+      // 启动的失败用自己的话留在页面上。
+      expect(q(container, '[data-start-failed]').textContent).toContain('这次没能启动：systemd said no')
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('启动成功后，上次启动失败的留痕清掉：页面上不再摆过时的失败', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemoteRaw(registry, { deployment: 'deployed', liveness: 'stopped', readAt: 1_000 })
+    // 第一次读取失败留住旧读数，启动失败一次；再点一次启动成功、跟着的重读也成功。
+    const remote = new ScriptedRemote(
+      [{ ok: false, error: 'SSH 读不了' }, { ok: true, report: RUNNING_REPORT }],
+      [{ ok: false, error: '第一次没起来' }, { ok: true, port: 3081 }],
+    )
+    const { container, root } = await mountPanel(registry, undefined, undefined, undefined, remote)
+    try {
+      click(container, '[data-host-open="bench"]')
+      await flush(3)
+      click(container, '[data-host-actions] [data-action="start-peer"]')
+      await flush(3)
+      expect(q(container, '[data-start-failed]').textContent).toContain('这次没能启动：第一次没起来')
+      click(container, '[data-host-actions] [data-action="start-peer"]')
+      await flush(5)
+      expect(container.querySelector('[data-start-failed]')).toBeNull()
+      // 跟着重读成功落库的是读回来的事实，不是假设。
+      const stored = registry.list().find(entry => entry.hostId === 'bench')?.remote
+      expect(stored?.liveness).toBe('running')
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('点刷新对方状态会用已保存的 SSH 凭据去读：identityFile 与指纹都来自登记', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemoteRaw(registry, { deployment: 'undeployed', liveness: 'unknown', readAt: 1_000 })
+    // 自动读与手动点的读都失败：旧读数留得住，「读一次对方状态」按钮才在。
+    const remote = new FakeRemote({ ok: false, error: '读不了' })
+    const { container, root } = await mountPanel(registry, undefined, undefined, undefined, remote)
+    try {
+      click(container, '[data-host-open="bench"]')
+      await flush(3)
+      click(container, '[data-host-actions] [data-action="read-peer"]')
+      await flush(3)
+      // 进页面的自动读加上点的这一次，每一次都用登记里存的凭据。
+      expect(remote.readInputs.length).toBeGreaterThanOrEqual(2)
+      for (const input of remote.readInputs) {
+        expect(input.identityFile).toBe(SSH.identityFile)
+        expect(input.hostKeyFingerprint).toBe(SSH.hostKeyFingerprint)
+        expect(input.target).toBe(SSH.target)
+      }
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('密码认证的主机明说读不了：给说明文字，不去发起读取', async () => {
+    const registry = seedHost({ ssh: { target: 'mini.tailb6790d.ts.net', authMode: 'password' } })
+    const remote = new FakeRemote({ ok: false, error: '不应被调用' })
+    const { container, root } = await mountPanel(registry, undefined, undefined, undefined, remote)
+    try {
+      click(container, '[data-host-open="bench"]')
+      await flush(2)
+      expect(q(container, '[data-note-password-auth]').textContent).toContain('凭据（密码或粘贴的私钥）不保存')
+      expect(remote.calls).toEqual([])
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('粘贴私钥的主机同样明说读不了：提示不把话说成只有密码', async () => {
+    const registry = seedHost({ ssh: { target: 'mini.tailb6790d.ts.net', authMode: 'identityPem' } })
+    const remote = new FakeRemote({ ok: false, error: '不应被调用' })
+    const { container, root } = await mountPanel(registry, undefined, undefined, undefined, remote)
+    try {
+      click(container, '[data-host-open="bench"]')
+      await flush(2)
+      const note = q(container, '[data-note-password-auth]').textContent
+      expect(note).toContain('凭据')
+      expect(note).toContain('粘贴')
+      expect(note).not.toContain('用密码认证')
+      expect(remote.calls).toEqual([])
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('没批准主机密钥时给的是批准并读取；点它先检查密钥再自动读取', async () => {
+    const registry = seedHost({ ssh: { ...SSH, hostKeyFingerprint: 'unapproved' } })
+    const remote = new FakeRemote({ ok: true, report: RUNNING_REPORT })
+    const approvedKey = { target: 'mini.tailb6790d.ts.net', hostKeyFingerprint: 'SHA256:real', algorithm: 'ssh-ed25519' }
+    vi.stubGlobal('fetch', vi.fn(async (input: unknown) => {
+      if (String(input).includes('host-ssh.inspect')) {
+        remote.note('inspect')
+        return { status: 200, json: async () => ({ ok: true, value: { keys: [approvedKey] } }) }
+      }
+      return { status: 200, json: async () => ({ ok: true, value: {} }) }
+    }))
+    try {
+      const { container, root } = await mountPanel(registry, undefined, undefined, undefined, remote)
+      try {
+        click(container, '[data-host-open="bench"]')
+        await flush(2)
+        expect(q(container, '[data-host-actions] [data-action="approve-and-read"]')).toBeTruthy()
+        expect(container.querySelector('[data-host-actions] [data-action="retry-read"]')).toBeNull()
+        click(container, '[data-host-actions] [data-action="approve-and-read"]')
+        await flush(5)
+        expect(remote.calls).toEqual(['inspect', 'read'])
+        expect(remote.readInputs[0]?.hostKeyFingerprint).toBe('SHA256:real')
+      } finally {
+        await unmount(root)
+      }
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('指纹没批准时，状态是未启动也不给启动按钮：入口只有批准并读取（裁定5）', async () => {
+    const registry = seedHost({ ssh: { ...SSH, hostKeyFingerprint: 'unapproved' } })
+    recordRemoteRaw(registry, { deployment: 'deployed', liveness: 'stopped', readAt: 1_000 })
+    // 自动读取在未批准时不发起（裁定5），旧读数留得住，「未启动」才可断言。
+    const remote = new FakeRemote({ ok: false, error: '不应被调用' })
+    const { container, root } = await mountPanel(registry, undefined, undefined, undefined, remote)
+    try {
+      click(container, '[data-host-open="bench"]')
+      await flush(2)
+      // 状态词确实是未启动：动作表本来会给出启动按钮，健全性前提。
+      expect(q(container, '[data-host-connection]').textContent).toContain('未启动')
+      // 但启动拿不出已批准的凭据，按钮表不给它；入口只有批准并读取。
+      expect(q(container, '[data-host-actions] [data-action="approve-and-read"]')).toBeTruthy()
+      expect(container.querySelector('[data-host-actions] [data-action="start-peer"]')).toBeNull()
+      // 表没被整个清空：重部署仍然在。
+      expect(q(container, '[data-host-actions] [data-action="redeploy"]')).toBeTruthy()
+      expect(remote.calls).toEqual([])
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('指纹没批准时连接路径同样拦下：不给打开页面/连接并打开，原始主机错误到不了失败面（裁定5）', async () => {
+    const registry = seedHost({ ssh: { ...SSH, hostKeyFingerprint: 'unapproved' } })
+    recordRemoteRaw(registry, { deployment: 'deployed', liveness: 'running', readAt: 1_000 })
+    // 没批准也照常进入未检查态：按钮表本来会给出连接并打开（健全性前提靠
+    // 断言反向确认），fetch 全部记名，连接一发就现形。
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (input: unknown) => {
+      calls.push(String(input))
+      return { status: 200, json: async () => ({ ok: true, value: {} }) }
+    }))
+    const remote = new FakeRemote({ ok: false, error: '不应被调用' })
+    try {
+      const { container, root } = await mountPanel(registry, undefined, undefined, undefined, remote)
+      try {
+        click(container, '[data-host-open="bench"]')
+        await flush(2)
+        // 健全性前提：按钮表没被整个清空，使用区块也照常在。
+        expect(q(container, '[data-host-actions] [data-action="check-reach"]')).toBeTruthy()
+        expect(q(container, '[data-use-section]')).toBeTruthy()
+        // 连接一族的按钮一个都不给：点了只会撞回主机端口的原始英文错误。
+        expect(container.querySelector('[data-action="connect-open"]')).toBeNull()
+        expect(container.querySelector('[data-action="open-page"]')).toBeNull()
+        expect(container.querySelector('[data-use-error]')).toBeNull()
+        expect(calls.some(url => url.includes('host-ssh.connect'))).toBe(false)
+        expect(remote.calls).toEqual([])
+      } finally {
+        await unmount(root)
+      }
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('主机行只有状态词：列表行里不出现打开页面/连接并打开/检查能否打开', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemoteRaw(registry, { deployment: 'deployed', liveness: 'running', readAt: 1_000 })
+    const { container, root } = await mountPanel(registry)
+    try {
+      click(container, '[data-host-open="bench"]')
+      // 详情页确实有这些按钮（健全性前提），随后回列表。
+      expect(q(container, '[data-host-actions] [data-action="check-reach"]')).toBeTruthy()
+      click(container, '[data-form-cancel-bottom]')
+      for (const action of ['open-page', 'connect-open', 'check-reach']) {
+        expect(container.querySelector(`[data-host-row] [data-action="${action}"]`)).toBeNull()
+      }
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('带存活附注的读数不说未部署：记录说没装但机器没来得及回答时，按未知呈现（裁定1）', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemoteRaw(registry, { deployment: 'undeployed', liveness: 'unknown', livenessNote: '读取超时', readAt: 1_000 })
+    const { container, root } = await mountPanel(registry)
+    try {
+      // 列表行不说未部署。
+      expect(q(container, '[data-host-row="bench"] [data-host-connection]').textContent).toBe('未知')
+      click(container, '[data-host-open="bench"]')
+      // 详情页也不说未部署——否则操作者会往一台可能已装好的机器上再部署。
+      expect(q(container, '[data-host-connection]').textContent).toContain('未知')
+      expect(container.querySelector('[data-host-actions] [data-action="deploy"]')).toBeNull()
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('降级读取的附注不看写的是什么字：换一串实现里没有的附注，同样不说未部署（裁定1）', async () => {
+    // 附注故意用一串实现与主机侧今天都不会写出的字面值：两道闸只看附注在
+    // 不在，绝不比对附注的文字。谁把判断收窄成「等于某个特定文案」，
+    // 这条用例就红——别把它「整理」回「读取超时」。
+    const registry = seedHost({ ssh: SSH })
+    recordRemoteRaw(registry, { deployment: 'undeployed', liveness: 'unknown', livenessNote: 'deadline-missed-no-answer-9q7', readAt: 1_000 })
+    const { container, root } = await mountPanel(registry)
+    try {
+      expect(q(container, '[data-host-row="bench"] [data-host-connection]').textContent).toBe('未知')
+      click(container, '[data-host-open="bench"]')
+      expect(q(container, '[data-host-connection]').textContent).toContain('未知')
+      expect(container.querySelector('[data-host-actions] [data-action="deploy"]')).toBeNull()
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('带附注的读数走真的读取口落库：remoteRecordOf 把降级读数落成未知而不是未部署', async () => {
+    // 落库这道闸原先没有任何测试盖住：既有用例都从 recordRemoteRaw 绕过它。
+    // 这里从假读取口一路走到登记簿，断言写回去的记录本身——同样只看附注
+    // 在不在，不看附注写的是什么字。
+    const registry = seedHost({ ssh: SSH })
+    const remote = new FakeRemote({ ok: true, report: { pluginsInstalled: false, liveness: 'unknown', livenessNote: 'deadline-missed-no-answer-9q7' } })
+    const { container, root } = await mountPanel(registry, undefined, undefined, undefined, remote)
+    try {
+      click(container, '[data-host-open="bench"]')
+      await flush(3)
+      const stored = registry.list().find(entry => entry.hostId === 'bench')?.remote
+      expect(stored?.deployment).toBe('unknown')
+      expect(stored?.livenessNote).toBe('deadline-missed-no-answer-9q7')
+      expect(stored?.liveness).toBe('unknown')
+      expect(typeof stored?.readAt).toBe('number')
+      // 屏幕上读到的也是落库之后的词。
+      expect(q(container, '[data-host-connection]').textContent).toContain('未知')
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('已部署但存活读不出：重试读取是主按钮（裁定2 的唯一例外）', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemoteRaw(registry, { deployment: 'deployed', liveness: 'unknown', readAt: 1_000 })
+    const { container, root } = await mountPanel(registry)
+    try {
+      click(container, '[data-host-open="bench"]')
+      expect(q(container, '[data-host-connection]').textContent).toContain('未知')
+      const actions = [...q(container, '[data-host-actions]').querySelectorAll('[data-action]')]
+      expect(actions[0]?.getAttribute('data-action')).toBe('retry-read')
+      expect(actions.map(action => action.getAttribute('data-action'))).toContain('fill-ssh')
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('读取在途：行和详情页都说检测中，不抢答', async () => {
+    const registry = seedHost({ ssh: SSH })
+    recordRemoteRaw(registry, { deployment: 'deployed', liveness: 'running', readAt: 1_000 })
+    const remote = new FakeRemote({ ok: true, report: RUNNING_REPORT }, { ok: true, port: 3081 }, true)
+    const { container, root } = await mountPanel(registry, undefined, undefined, undefined, remote)
+    try {
+      click(container, '[data-host-open="bench"]')
+      await flush(2)
+      expect(q(container, '[data-host-connection]').textContent).toContain('检测中')
+      // 回列表：读取还悬着，行同样说检测中，不说旧读数的词。
+      click(container, '[data-form-cancel-bottom]')
+      expect(q(container, '[data-host-row="bench"] [data-host-connection]').textContent).toBe('检测中')
+    } finally {
+      await unmount(root)
     }
   })
 })

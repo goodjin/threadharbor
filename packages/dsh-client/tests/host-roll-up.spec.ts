@@ -20,6 +20,30 @@ describe('rollUpViewWithRegistry（登记簿并入树）', () => {
     expect(view.hosts[0]?.empty).toBe(true)
   })
 
+  it('读数说未部署时行是未部署（即使登记里有 launchUrl —— 装了又卸了）', () => {
+    const reg = registration('mini', { launchUrl: 'http://127.0.0.1:45000/?token=x', remote: { deployment: 'undeployed' } })
+    const view = rollUpViewWithRegistry(emptyRollUp, [reg], new Map())
+    expect(view.hosts[0]?.undeployed).toBe(true)
+  })
+
+  it('读数说已部署时行不是未部署（即使登记里没有 launchUrl —— 装了但还没连过）', () => {
+    const reg = registration('mini', { remote: { deployment: 'deployed' } })
+    const view = rollUpViewWithRegistry(emptyRollUp, [reg], new Map())
+    expect(view.hosts[0]?.undeployed).not.toBe(true)
+  })
+
+  it('没有读数时退回旧启发式（无 launchUrl 即未部署）', () => {
+    const reg = registration('mini', { launchUrl: 'http://127.0.0.1:45000/?token=x' })
+    const view = rollUpViewWithRegistry(emptyRollUp, [reg], new Map())
+    expect(view.hosts[0]?.undeployed).not.toBe(true)
+  })
+
+  it('读数说 unknown：行不带 undeployed，也不退回旧启发式（本例旧启发式会说未部署）', () => {
+    const reg = registration('mini', { remote: { deployment: 'unknown' } })
+    const view = rollUpViewWithRegistry(emptyRollUp, [reg], new Map())
+    expect(view.hosts[0]?.undeployed).toBeUndefined()
+  })
+
   it('部署过且远端有会话：并入项目与会话', () => {
     const reg = registration('mini', { launchUrl: 'http://127.0.0.1:45000/?token=x' })
     const view = rollUpViewWithRegistry(emptyRollUp, [reg], new Map([['mini', [session('s1')]]]))

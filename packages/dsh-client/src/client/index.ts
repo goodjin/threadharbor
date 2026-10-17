@@ -66,7 +66,8 @@ import type { HostStoreChannel, HostStoreDeps, StoreOp } from '../host-store.ts'
 import { startRollUpSection } from '../rollup-section.ts'
 import { startPairingSurface } from '../pairing-panel.ts'
 import { AgentPanel } from '../panel.tsx'
-import type { AgentListPort, AgentPanelBusinessProps, ProbeStarter, TailscalePeersResult, TailscalePort } from '../panel.tsx'
+import type { AgentListPort, AgentPanelBusinessProps, ProbeStarter, RemotePort, TailscalePeersResult, TailscalePort } from '../panel.tsx'
+import { readRemotePeer, startRemotePeer } from '../ssh-deploy.ts'
 import { registerAgentSwitchHandoverSurface } from '../handover-card.ts'
 import { createSwitchProgressStore, startSwitchProgressSurface } from '../switch-progress.ts'
 import { NAMESPACE, en, fallbackT, zh } from '../locales.ts'
@@ -122,7 +123,7 @@ export type { PairingPanelProps, PairingSlotHost, PairingState, PairingStore, Pa
 export { mergeHostRows, heartbeatWord, richSegments } from '../panel.tsx'
 export type { HostListRow, PanelT } from '../panel.tsx'
 export { AgentPanel, AgentRow, runProbe } from '../panel.tsx'
-export type { AgentListPort, AgentPanelBusinessProps, AgentPanelProps, HostRegistryPort, ProbeRunState, ProbeStarter } from '../panel.tsx'
+export type { AgentListPort, AgentPanelBusinessProps, AgentPanelProps, HostRegistryPort, ProbeRunState, ProbeStarter, RemotePort, RemoteReadResult, RemoteStartResult } from '../panel.tsx'
 export {
   registerAgentSwitchHandoverSurface,
   agentSwitchHandoverDefinition,

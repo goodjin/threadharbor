@@ -9,6 +9,11 @@
  * real and narrow: it separates 「地址错了 / 没监听 / 网络不通」 from 「端口上
  * 有东西应答」. It cannot confirm the answer came from DSH, and it cannot check
  * the token — the wording everywhere around this probe says so.
+ *
+ * The wording itself lives in the locale dictionary (`locales.ts`) like every
+ * other piece of product copy; this module cannot call `t` on its own, so the
+ * caller's seat rides in as a parameter, and a failure reason names the
+ * address and port that were actually tried.
  */
 
 import { fallbackT } from './locales.ts'
@@ -22,6 +27,39 @@ export type ReachOutcome =
 
 /** The fetch face this probe needs, so tests can stand one in. */
 export type ReachFetch = (input: string, init: RequestInit) => Promise<unknown>
+
+/**
+ * The target a probe will actually hit, port included. A browser fetch of an
+ * origin without a port lands on the scheme's default — http 80, https 443 —
+ * so the text spells that port out instead of leaving the operator to guess
+ * it. An address whose scheme has no such default (or that cannot be parsed
+ * at all) yields no `defaultPort`: the caller then falls back to the sentence
+ * that asserts no port rather than naming one that would not be hit.
+ * @param address - the origin to ask for.
+ * @returns the target as actually probed, whether the address named a port itself, and the implied default port when there is one.
+ */
+export function describeProbeTarget(address: string): {
+  readonly text: string
+  readonly hasPort: boolean
+  /** 地址没写端口时按 scheme 补的默认端口（http 80、https 443）；说不出默认端口时没有。 */
+  readonly defaultPort: number | undefined
+} {
+  let parsed: URL
+  try {
+    parsed = new URL(address)
+  } catch {
+    // 读不出来的地址说不好默认端口：text 照抄，让原因走不做端口断言的那句话。
+    return { text: address, hasPort: false, defaultPort: undefined }
+  }
+  if (parsed.port !== '') return { text: address, hasPort: true, defaultPort: undefined }
+  const scheme = parsed.protocol.replace(/:$/, '')
+  const defaultPort = scheme === 'http' ? 80 : scheme === 'https' ? 443 : undefined
+  return {
+    text: defaultPort === undefined ? address : `${parsed.protocol}//${parsed.host}:${defaultPort}`,
+    hasPort: false,
+    defaultPort,
+  }
+}
 
 /**
  * Probe one address once.
@@ -54,6 +92,7 @@ export async function probeReach(fetcher: ReachFetch, address: string, timeoutMs
         ? t('panel.reach.networkFailure')
         : t('panel.reach.requestFailed', { name }),
     }
+    return { kind: 'unreachable', reason: t('panel.reach.defaultPort', { url: address, port: target.defaultPort }) }
   } finally {
     clearTimeout(timer)
   }

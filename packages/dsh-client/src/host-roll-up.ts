@@ -58,6 +58,13 @@ export function rollUpViewWithRegistry(
       continue
     }
     if (known.has(registration.hostId)) continue
+    // `undeployed` trusts a real remote read when one exists. Without any read,
+    // fall back to the no-launchUrl guess. A read reporting `unknown` stays
+    // silent: absence of information, not a claim in either direction.
+    const undeployed =
+      registration.remote?.deployment === undefined
+        ? registration.launchUrl === undefined
+        : registration.remote.deployment === 'undeployed'
     hosts.push({
       hostId: registration.hostId,
       hostTitle: registration.hostTitle,
@@ -65,7 +72,7 @@ export function rollUpViewWithRegistry(
       self: false,
       sessions: entry.sessions,
       projects: groupByProject(entry.sessions),
-      ...(registration.launchUrl === undefined ? { undeployed: true } : {}),
+      ...(undeployed ? { undeployed: true } : {}),
       ...(entry.note === undefined ? {} : { note: entry.note }),
     })
     known.add(registration.hostId)

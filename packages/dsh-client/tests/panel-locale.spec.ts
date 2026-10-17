@@ -54,6 +54,14 @@ const PANEL_KEYS: readonly string[] = [
   'panel.button.settings',
   'panel.button.reachTry',
   'panel.button.copyLink',
+  // Detail-page action table (hostActions) and the read flow's buttons.
+  'panel.button.readPeer',
+  'panel.button.startPeer',
+  'panel.button.redeploy',
+  'panel.button.checkReach',
+  'panel.button.retryRead',
+  'panel.button.approveAndRead',
+  'panel.button.keyNotApproved',
   // Status words: the row badge and the detail page's status line.
   'panel.status.self',
   'panel.status.online',
@@ -62,6 +70,10 @@ const PANEL_KEYS: readonly string[] = [
   'panel.status.reachable',
   'panel.status.checking',
   'panel.status.reachableUnsynced',
+  'panel.status.undeployed',
+  'panel.status.stopped',
+  'panel.status.unknown',
+  'panel.status.unchecked',
   // Probe states and the advice fold.
   'panel.probe.idle',
   'panel.probe.running',
@@ -85,6 +97,7 @@ const PANEL_KEYS: readonly string[] = [
   'panel.form.fieldStatus',
   'panel.form.fieldIp',
   'panel.form.ipPlaceholder',
+  'panel.form.addressEmptyNote',
   'panel.form.fieldTitle',
   // Storage posture line (storagePostureLine).
   'panel.posture.host',
@@ -108,11 +121,22 @@ const PANEL_KEYS: readonly string[] = [
   'panel.facts.match',
   'panel.facts.idMismatch',
   'panel.facts.reportedTitle',
+  // The remote-read facts block (labels and the two value words with no status-word reuse).
+  'panel.facts.deployment',
+  'panel.facts.liveness',
+  'panel.facts.deployed',
+  'panel.facts.running',
+  'panel.facts.entry',
+  'panel.facts.reported',
+  'panel.facts.readAt',
   // The remove-registration confirmation and the launch link.
   'panel.registry.removeNote',
   'panel.registry.launchLink',
   // The reach check under the registry actions.
   'panel.reach.probeTimeout',
+  'panel.reach.networkLayer',
+  'panel.reach.defaultPort',
+  'panel.reach.requestFailed',
   // The agent section on the self detail page.
   'panel.agents.loading',
   'panel.agents.failed',
@@ -127,6 +151,11 @@ const PANEL_KEYS: readonly string[] = [
   'panel.notes.selfHeal',
   'panel.notes.onlineMeaning',
   'panel.notes.otherSource',
+  // The read-failure trail and the password-auth gate on the detail page.
+  'panel.notes.readFailed',
+  'panel.notes.startFailed',
+  'panel.notes.lastRead',
+  'panel.notes.passwordAuth',
   // The list page's empty state.
   'panel.list.empty',
   // The ssh-deploy section (inspect / deploy / progress / result).
@@ -193,10 +222,15 @@ const PARAMETERIZED: readonly (readonly [string, readonly string[]])[] = [
   ['panel.facts.heartbeat', ['age']],
   ['panel.facts.reportedTitle', ['name']],
   ['panel.reach.probeTimeout', ['ms']],
+  ['panel.reach.defaultPort', ['url', 'port']],
+  ['panel.reach.requestFailed', ['name']],
   ['panel.agents.failed', ['message']],
   ['panel.tailscale.peerMeta', ['ip', 'status']],
   ['panel.ssh.progressFailed', ['error']],
   ['panel.ssh.registered', ['endpoint']],
+  ['panel.notes.readFailed', ['reason']],
+  ['panel.notes.startFailed', ['reason']],
+  ['panel.notes.lastRead', ['summary', 'at']],
 ]
 
 /** Every `{name}` placeholder a value carries, in order. */
@@ -215,6 +249,11 @@ describe('panel 的 locale 键', () => {
     expect(zh['panel.status.reachable']).toBe('可达')
     expect(zh['panel.status.checking']).toBe('检测中')
     expect(zh['panel.status.reachableUnsynced']).toBe('可达未同步')
+    // hostStatus 九词里新增的四个：zh 文案逐词钉死，en 由 PANEL_KEYS 循环兜底。
+    expect(zh['panel.status.undeployed']).toBe('未部署')
+    expect(zh['panel.status.stopped']).toBe('未启动')
+    expect(zh['panel.status.unknown']).toBe('未知')
+    expect(zh['panel.status.unchecked']).toBe('未验证')
     expect(en['panel.status.connected']).toBeDefined()
     expect(en['panel.status.reachableUnsynced']).toBeDefined()
   })
@@ -247,6 +286,11 @@ describe('panel 的 locale 键', () => {
   it('离线时在线标识列表的分隔符是键，zh 值是「、」', () => {
     expect(zh['panel.facts.onlineIdsSeparator']).toBe('、')
     expect(en['panel.facts.onlineIdsSeparator']).toBeDefined()
+  })
+
+  it('探测超时的文案不在可达性原因改造里被挪动', () => {
+    expect(zh['panel.reach.probeTimeout']).toBe('检测超时（{ms} ms）')
+    expect(en['panel.reach.probeTimeout']).toBe('The check timed out ({ms} ms)')
   })
 })
 
