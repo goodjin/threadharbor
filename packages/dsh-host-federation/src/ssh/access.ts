@@ -36,7 +36,7 @@ export function planConnection(
   if (launchUrl === undefined || launchUrl === '') {
     throw new Error('远端记录里没有带令牌的启动网址；请重新部署（可勾选升级）以刷新记录')
   }
-  if (peer.listen === 'tailscale') {
+  if (peer.listen === 'tailscale' || peer.listen === 'host-ip' || launchReachesByIp(launchUrl)) {
     return { mode: 'direct', remotePort: peer.port ?? defaultPort ?? 0, launchUrl }
   }
   const remotePort = peer.port ?? callerPort ?? defaultPort
@@ -46,17 +46,44 @@ export function planConnection(
   return { mode: 'tunnel', remotePort, launchUrl }
 }
 
-/** Deploy always listens on loopback and is reached through an SSH tunnel. */
+/**
+ * `host-ip` is its own mode. Omitted and the older names stay on the tunnel
+ * so an existing caller that did not choose an address does not suddenly
+ * bind one.
+ */
 export function parseAccessMode(value: unknown): SshAccessMode {
   if (value === 'serve') return 'serve'
-  if (value === undefined || value === null || value === 'tunnel' || value === 'host-ip' || value === 'tailscale' || value === 'custom') {
+  if (value === 'host-ip') return 'host-ip'
+  if (value === undefined || value === null || value === 'tunnel' || value === 'tailscale' || value === 'custom') {
     return 'tunnel'
   }
-  throw new Error('accessMode must be tunnel or serve')
+  throw new Error('accessMode must be host-ip, tunnel, or serve')
+}
+
+/** True for names that are not reachable from another machine. */
+export function isLoopbackBind(host: string): boolean {
+  const bare = host.trim().replace(/^\[|\]$/g, '').toLowerCase()
+  return bare === 'localhost' || bare === '::1' || bare.startsWith('127.')
+}
+
+/** `http://host:port`, with brackets when the host is an IPv6 literal. */
+export function originForBind(host: string, port: number): string {
+  const bare = host.trim().replace(/^\[|\]$/g, '')
+  const authority = bare.includes(':') ? `[${bare}]` : bare
+  return `http://${authority}:${port}`
+}
+
+/** A launch URL whose host is not loopback is already a direct address. */
+function launchReachesByIp(launchUrl: string): boolean {
+  try {
+    return !isLoopbackBind(new URL(launchUrl).hostname)
+  } catch {
+    return false
+  }
 }
 
 export function validateBindHost(input: string): string {
-  const trimmed = input.trim()
+  const trimmed = input.trim().replace(/^\[|\]$/g, '')
   if (trimmed === '') throw new Error('bindHost 不能为空')
   const lower = trimmed.toLowerCase()
   if (FORBIDDEN_BIND.has(lower) || lower.includes('0.0.0.0')) {

@@ -6,6 +6,19 @@ describe('ssh access helpers', () => {
     expect(() => validateBindHost('0.0.0.0')).toThrow()
   })
 
+  it('keeps host-ip as its own mode and leaves an omitted mode on the tunnel', () => {
+    expect(parseAccessMode('host-ip')).toBe('host-ip')
+    expect(parseAccessMode('serve')).toBe('serve')
+    expect(parseAccessMode(undefined)).toBe('tunnel')
+    expect(parseAccessMode('tailscale')).toBe('tunnel')
+    expect(parseAccessMode('custom')).toBe('tunnel')
+    expect(() => parseAccessMode('magic')).toThrow('accessMode must be host-ip, tunnel, or serve')
+  })
+
+  it('strips brackets so --host stays an unbracketed address', () => {
+    expect(validateBindHost('[2001:db8::10]')).toBe('2001:db8::10')
+  })
+
   it('rewrites token onto the local tunnel origin', () => {
     const url = composeLaunchUrl('http://127.0.0.1:45678', 'http://127.0.0.1:3081/?token=abc')
     expect(url).toBe('http://127.0.0.1:45678/?token=abc')
@@ -49,6 +62,28 @@ describe('planConnection — how to reach a deployed peer', () => {
   it('a loopback record without a tokenized URL says redeploy instead of guessing', () => {
     expect(() => planConnection({ pluginsInstalled: true, listen: 'loopback', port: 3081 }, undefined, 3081))
       .toThrow('带令牌的启动网址')
+  })
+
+  it('a host-ip record plans a direct open, no tunnel', () => {
+    const plan = planConnection({
+      pluginsInstalled: true,
+      listen: 'host-ip',
+      port: 3081,
+      bindHost: '192.168.1.10',
+      launchUrl: 'http://192.168.1.10:3081/?token=s',
+    }, undefined, 3081)
+    expect(plan).toEqual({ mode: 'direct', remotePort: 3081, launchUrl: 'http://192.168.1.10:3081/?token=s' })
+  })
+
+  it('a non-loopback launch URL is direct even when the record still says loopback', () => {
+    const plan = planConnection({
+      pluginsInstalled: true,
+      listen: 'loopback',
+      port: 3081,
+      launchUrl: 'http://10.0.0.8:3081/?token=s',
+    }, undefined, 3081)
+    expect(plan.mode).toBe('direct')
+    expect(plan.launchUrl).toBe('http://10.0.0.8:3081/?token=s')
   })
 
   it('a legacy direct-listening peer plans a direct open, no tunnel', () => {

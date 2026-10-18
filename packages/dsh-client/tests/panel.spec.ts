@@ -37,6 +37,7 @@ import {
   applyRegistrationEdit,
   hostPartOfAddress,
   addressFromHostPart,
+  registrationAddress,
   type ProbeRunState,
   type RegistrationEditInput,
 } from '../src/panel.tsx'
@@ -608,6 +609,15 @@ describe('IP 字段与存储地址的互转', () => {
     expect(addressFromHostPart('100.101.1.7:3081')).toBe('http://100.101.1.7:3081')
     expect(addressFromHostPart('http://10.0.0.8:8080')).toBe('http://10.0.0.8:8080')
     expect(addressFromHostPart('  ')).toBe('')
+  })
+
+  it('只填 IP 时只记源；粘贴带 token 的地址时源和打开地址分开存', () => {
+    expect(registrationAddress('192.168.1.10:3081')).toEqual({ address: 'http://192.168.1.10:3081' })
+    expect(registrationAddress('http://192.168.1.10:3081/?token=abc')).toEqual({
+      address: 'http://192.168.1.10:3081',
+      launchUrl: 'http://192.168.1.10:3081/?token=abc',
+    })
+    expect(registrationAddress('')).toEqual({ address: '' })
   })
 })
 

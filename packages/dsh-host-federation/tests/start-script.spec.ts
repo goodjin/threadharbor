@@ -94,6 +94,28 @@ echo "DSH Web did not become healthy" >&2
 exit 1`
     expect(script).toBe(expected)
   })
+
+  it('a reachable bind publishes that IP, trusts it, and records host-ip', () => {
+    const script = buildInstallScript({
+      channel: 'stable',
+      releaseDir: '/srv/threadharbor/release',
+      nodePath: '/usr/bin/node',
+      remotePort: '3081',
+      hostId: 'host-7f3a',
+      hostTitle: 'Build Farm',
+      upgrade: true,
+      installFromGithub: true,
+      remotePlugins: ['@threadharbor/plugin-a'],
+      remoteAgentsPatch: 'agents:\n  - id: demo',
+      bindHost: '192.168.1.10',
+      listen: 'host-ip',
+    })
+    expect(script).toContain("bind_host='192.168.1.10'")
+    expect(script).toContain('--trusted-host $bind_host')
+    expect(script).toContain('--public-url $public_origin/')
+    expect(script).toContain('listen:"host-ip"')
+    expect(script).not.toContain('bind_host="127.0.0.1"')
+  })
 })
 
 describe('buildStartScript', () => {

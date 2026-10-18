@@ -47,8 +47,15 @@ export function buildRemoteEnv(input: {
   readonly releaseDir?: string
   readonly installLines?: readonly string[]
   readonly skipProfileWrites?: boolean
+  /**
+   * Bind address for a directly reachable deploy. Absent keeps the historical
+   * loopback script byte for byte.
+   */
+  readonly bindHost?: string
 }): string {
   const { channel, nodePath, remotePort, hostId, hostTitle, remoteAgentsPatch, releaseDir, installLines, skipProfileWrites } = input
+  const bindHost = input.bindHost ?? '127.0.0.1'
+  const direct = bindHost !== '127.0.0.1'
   return [
     'set -eu',
     `channel=${shellQuote(channel)}`,
@@ -69,12 +76,17 @@ export function buildRemoteEnv(input: {
     'agents_patch="$dsh_home/profiles/web/threadharbor-remote-agents.patch.yml"',
     ...(skipProfileWrites ? [] : ['mkdir -p "$(dirname "$agents_patch")"']),
     ...(skipProfileWrites ? [] : ['printf \'%s\' "$agents_patch_yaml" > "$agents_patch"']),
-    'bind_host="127.0.0.1"',
+    direct ? `bind_host=${shellQuote(bindHost)}` : 'bind_host="127.0.0.1"',
     'identity_file="$dsh_home/profiles/web/threadharbor-identity.env"',
     ...(skipProfileWrites ? [] : ['printf \'DSH_HOST_ID=%s\\nDSH_HOST_TITLE=%s\\n\' "$host_id" "$host_title" > "$identity_file"']),
     'case "$bind_host" in (0.0.0.0|"") echo "refusing wildcard bind" >&2; exit 1;; esac',
     'dsh_bin="$(command -v dsh)"',
-    'dsh_args="--profile web --no-open --port $port --host $bind_host --patch $agents_patch"',
+    direct
+      ? 'case "$bind_host" in *:*) public_origin="http://[$bind_host]:$port";; *) public_origin="http://$bind_host:$port";; esac'
+      : '',
+    direct
+      ? 'dsh_args="--profile web --no-open --port $port --host $bind_host --trusted-host $bind_host --public-url $public_origin/ --patch $agents_patch"'
+      : 'dsh_args="--profile web --no-open --port $port --host $bind_host --patch $agents_patch"',
     'service_name="threadharbor-dsh-web-$channel.service"',
     'service="$HOME/.config/systemd/user/$service_name"',
     'printf \'%s\\n\' \'[Unit]\' "Description=ThreadHarbor DSH Web ($channel)" \'After=network-online.target\' \'\' \'[Service]\' "Environment=PATH=$common_path" "Environment=DSH_HOME=$dsh_home" "EnvironmentFile=-$identity_file" "ExecStart=$dsh_bin $dsh_args" \'Restart=on-failure\' \'RestartSec=2\' \'\' \'[Install]\' \'WantedBy=default.target\' > "$service"',

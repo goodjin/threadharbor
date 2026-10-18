@@ -5,12 +5,12 @@
  * designated manager: whichever host can SSH in reads the same record.
  */
 
-export type PeerListen = 'loopback' | 'tailscale'
+export type PeerListen = 'loopback' | 'tailscale' | 'host-ip'
 
 export type PeerStatus = {
   /** ThreadHarbor's peer file exists and says the bundle was installed. */
   readonly pluginsInstalled: boolean
-  /** `loopback` is the only listen mode new deploys write. `tailscale` is an older record. */
+  /** `loopback` is an SSH tunnel. `host-ip` is a directly reachable address. `tailscale` is an older direct record. */
   readonly listen?: PeerListen
   readonly port?: number
   readonly bindHost?: string
@@ -28,7 +28,7 @@ export function parsePeerStatus(raw: string): PeerStatus {
   }
   if (typeof parsed !== 'object' || parsed === null) return { pluginsInstalled: false }
   const record = parsed as Record<string, unknown>
-  const listen = record['listen'] === 'loopback' || record['listen'] === 'tailscale'
+  const listen = record['listen'] === 'loopback' || record['listen'] === 'tailscale' || record['listen'] === 'host-ip'
     ? record['listen']
     : undefined
   const port = typeof record['port'] === 'number' && Number.isInteger(record['port']) ? record['port'] : undefined

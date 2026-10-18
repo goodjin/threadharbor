@@ -22,4 +22,14 @@ describe('parsePeerStatus', () => {
       launchUrl: 'http://127.0.0.1:3081/?token=abc',
     })
   })
+
+  it('reads a host-ip listen record', () => {
+    expect(parsePeerStatus(JSON.stringify({
+      pluginsInstalled: true,
+      listen: 'host-ip',
+      port: 3081,
+      bindHost: '192.168.1.10',
+      launchUrl: 'http://192.168.1.10:3081/?token=abc',
+    })).listen).toBe('host-ip')
+  })
 })

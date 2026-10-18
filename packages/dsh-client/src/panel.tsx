@@ -508,6 +508,27 @@ export function addressFromHostPart(value: string): string {
 }
 
 /**
+ * Split what the IP field holds into the registry's origin and, when the
+ * operator pasted a running service's `?token=` URL, the launch URL.
+ * The registry drops query strings from the address, so the token has to be
+ * lifted out here or the gateway cannot open the host.
+ * @param value - an IP, host[:port], or a full URL, with or without a token.
+ * @returns the origin to store, plus launchUrl only when a token is present.
+ */
+export function registrationAddress(value: string): { readonly address: string; readonly launchUrl?: string } {
+  const raw = addressFromHostPart(value)
+  if (raw === '') return { address: '' }
+  try {
+    const url = new URL(raw)
+    const token = url.searchParams.get('token')
+    if (token !== null && token !== '') return { address: url.origin, launchUrl: url.toString() }
+    return { address: url.origin }
+  } catch {
+    return { address: raw }
+  }
+}
+
+/**
  * How long since the host was last heard, in words. The wording lives in the
  * locale dictionary; this is a plain function, so the caller's seat rides in.
  * @param lastSeen - the page-clock time of the last announcement.
@@ -530,11 +551,13 @@ export function heartbeatWord(lastSeen: number, now: number = Date.now(), t: Pan
  * 主机标识改名「名称」并兼任显示名（登记时 hostTitle 落库留空，存储层回落
  * 到 hostId，列表显示的就是名称）。The address is the full origin the
  * registry stores; the form's IP field shows it without the scheme
- * （hostPartOfAddress / addressFromHostPart 在边界上互转）.
+ * （hostPartOfAddress / addressFromHostPart 在边界上互转）. A pasted
+ * `?token=` URL also carries launchUrl so the gateway can open it.
  */
 export type HostFormValues = {
   readonly hostId: string
   readonly address: string
+  readonly launchUrl?: string
 }
 
 /**
@@ -902,6 +925,8 @@ function SshDeploySection(props: {
   const [password, setPassword] = useState('')
   const [remoteWebPort, setRemoteWebPort] = useState(props.initial?.remoteWebPort === undefined ? '3081' : String(props.initial.remoteWebPort))
   const [upgrade, setUpgrade] = useState(false)
+  const [accessMode, setAccessMode] = useState<'host-ip' | 'tunnel'>('host-ip')
+  const [bindHost, setBindHost] = useState('')
   const [keys, setKeys] = useState<readonly SshHostKeyCandidate[]>([])
   // 已存的「未批准」标记不是批准：照原样种进来，读取/只连接/部署三个按钮
   // 都靠「指纹非空」放行，操作者没认过指纹就撞上主机端口的生英文错误。
@@ -1071,8 +1096,9 @@ function SshDeploySection(props: {
       ssh: { ...sshPayload(), hostKeyFingerprint: approvedFingerprint },
       ...(remoteWebPort.trim() === '' ? {} : { remoteWebPort: Number(remoteWebPort) }),
       upgrade: options.upgrade ?? upgrade,
-      // 检测清单里的部署走 ts.net 接入：不建 SSH 隧道。
-      accessMode: fromCheck ? 'serve' : 'tunnel',
+      // 检测清单仍走 ts.net。面板默认按可达 IP 直连，不建隧道、不要求 Tailscale。
+      accessMode: fromCheck ? 'serve' : accessMode,
+      ...(!fromCheck && accessMode === 'host-ip' && bindHost.trim() !== '' ? { bindHost: bindHost.trim() } : {}),
       remoteAgents,
     }, props.t).then(started => {
       if (!started.ok) {
@@ -1183,6 +1209,43 @@ function SshDeploySection(props: {
           <input className={styles.input} value={remoteWebPort} onChange={event => { setRemoteWebPort(event.target.value) }} />
         </label>
       </div>
+      <fieldset className={styles.accessModes} data-ssh-access-mode="">
+        <legend className={styles.summary}>{props.t('panel.ssh.accessMode')}</legend>
+        <label className={styles.sshKeyRow}>
+          <input
+            type="radio"
+            name="ssh-access-mode"
+            data-ssh-access="host-ip"
+            checked={accessMode === 'host-ip'}
+            onChange={() => { setAccessMode('host-ip') }}
+          />
+          <span>{richSegments(props.t('panel.ssh.accessHostIp'), 'code')}</span>
+        </label>
+        <label className={styles.sshKeyRow}>
+          <input
+            type="radio"
+            name="ssh-access-mode"
+            data-ssh-access="tunnel"
+            checked={accessMode === 'tunnel'}
+            onChange={() => { setAccessMode('tunnel') }}
+          />
+          <span>{props.t('panel.ssh.accessTunnel')}</span>
+        </label>
+        {accessMode === 'host-ip'
+          ? (
+              <label className={styles.field}>
+                {props.t('panel.ssh.bindHostLabel')}
+                <input
+                  data-ssh-bind-host=""
+                  className={styles.input}
+                  value={bindHost}
+                  onChange={event => { setBindHost(event.target.value) }}
+                  placeholder={props.t('panel.ssh.bindHostPlaceholder')}
+                />
+              </label>
+            )
+          : undefined}
+      </fieldset>
       <label className={styles.sshKeyRow}>
         <input
           type="checkbox"
@@ -1444,7 +1507,12 @@ export function HostFormPage(props: {
   const confirm = (): void => {
     // onConfirm 回 true＝保存成功，页面关掉回列表（列表本身就是保存结果的
     // 反馈：新行以「未连接」出现、名字换成新的）；回 false＝留在本页看错误。
-    const close = props.onConfirm({ hostId: idDraft.trim(), address: addressFromHostPart(ipDraft) })
+    const parsed = registrationAddress(ipDraft)
+    const close = props.onConfirm({
+      hostId: idDraft.trim(),
+      address: parsed.address,
+      ...(parsed.launchUrl === undefined ? {} : { launchUrl: parsed.launchUrl }),
+    })
     if (close) props.onCancel()
   }
   // 自报标识与填写的名称当场比对（跟着输入走），不一致就明说，两边都保留。
@@ -1469,8 +1537,8 @@ export function HostFormPage(props: {
   }
   const pickPeer = (peer: TailscalePeer): void => {
     // 选中只填两处：名称栏填 peer 名，IP 交给面板的 SSH 目标草稿
-    // （onPickedPeer）；地址栏不动——Tailscale 的对端只是 SSH 目标，它的
-    // DSH web 在网上并不直接可达，地址由部署或连接成功后写回（2026-10-15）。
+    // （onPickedPeer）；地址栏不动。Tailscale 在这里只是一条 SSH 路径，
+    // 用来部署插件；打开地址由部署绑到可达 IP 后写回，或由操作者粘贴。
     setIdDraft(peer.name)
     props.onPickedPeer?.(peer)
     setPicker({ open: false })
@@ -1787,7 +1855,12 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   const confirmAdd = (values: HostFormValues): boolean => {
     // 显示名已撤销（2026-10-13）：hostTitle 落库留空，存储层回落到 hostId，
     // 列表显示的就是名称本身。
-    const result = props.registry.add({ hostId: values.hostId, hostTitle: '', address: values.address })
+    const result = props.registry.add({
+      hostId: values.hostId,
+      hostTitle: '',
+      address: values.address,
+      ...(values.launchUrl === undefined ? {} : { launchUrl: values.launchUrl }),
+    })
     // 成功不留在本页：关闭后的列表里那行「未连接」就是结果。只把失败留在页面上。
     if (!result.ok) {
       setFormMessage({ tone: 'bad', text: result.error.detail })
@@ -1799,6 +1872,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
     const result = applyRegistrationEdit(props.registry, previousId, {
       ...(values.hostId === '' || values.hostId === previousId ? {} : { hostId: values.hostId }),
       address: values.address,
+      ...(values.launchUrl === undefined ? {} : { launchUrl: values.launchUrl }),
     })
     if (!result.ok) {
       setFormMessage({ tone: 'bad', text: result.error.detail })
