@@ -10,7 +10,7 @@
 import type { AcpStepResult, StepDecisionLike, StepEndReason, TurnContext } from './dispatch.ts'
 import { UNDELIVERED } from './content-writer.ts'
 import type { UndeliveredAttachment } from './content-writer.ts'
-import { projectToolCallAnnouncement, projectToolCallFrame } from '@threadharbor/dsh-acp-agent'
+import { projectToolCallAnnouncement, projectToolCallFrame, projectToolResultFrame } from '@threadharbor/dsh-acp-agent'
 import type { AcpDialect, AcpFrame, ProjectionEvent } from '@threadharbor/dsh-acp-agent'
 
 /** The JSON-RPC surface this runner needs, kept narrow so it can be stood in for. */
@@ -358,6 +358,8 @@ export class AcpTurnRunner {
     readonly write: TurnContext['write']
     /** Call ids whose opening card already went to the log this turn. */
     readonly written: Set<string>
+    /** Call ids whose result already went to the log this turn. */
+    readonly settled: Set<string>
   } | undefined
 
   private readonly client: AcpClientPort
@@ -380,6 +382,7 @@ export class AcpTurnRunner {
     if (this.aborted) return
     this.turnFrames.push(frame)
     this.writeOpeningCard(frame)
+    this.writeSettledResult(frame)
     const stream = this.stream
     if (stream === undefined) return
     // Held locally so nothing can clear it while this frame is being pushed.
@@ -422,6 +425,44 @@ export class AcpTurnRunner {
       return
     }
     live.written.add(callId)
+  }
+
+  /**
+   * Write a tool's result the moment its terminal frame arrives.
+   *
+   * A card that opens live but waits for the turn end for its output sits
+   * outputless through everything the agent still does — minutes, for a long
+   * external-agent turn. The terminal frame (folded `completed`/`failed`) is
+   * the moment the outcome exists, so this files the shared tool/result right
+   * then, and the id lands in `settled` — the record the turn-end filter reads
+   * to skip a result it would otherwise write a second time.
+   *
+   * The guard is the same discipline the card path obeyed to become legal: a
+   * live result is written ONLY under a card this turn wrote live
+   * (`written.has`), because a result whose call was never announced is an
+   * orphan the log refuses. A card whose live write failed stays unwritten,
+   * and its result waits for the turn end, where call and result land as the
+   * pair. The callId is read off the PROJECTED payload (`message.toolCallId`),
+   * the same folded id the card carried and the turn-end result will carry —
+   * keying all three alike is what keeps "exactly once" holding by
+   * construction. A failed append wrote nothing, so the id stays unsettled
+   * and the turn-end pair covers it; the frame handler, which also drives the
+   * live stream, must never let a write error kill it.
+   */
+  private writeSettledResult(frame: AcpFrame): void {
+    const live = this.liveCards
+    const dialect = this.options.dialect
+    if (live === undefined || dialect === undefined) return
+    const event = projectToolResultFrame(frame, { turn: live.turn, step: live.step, dialect })
+    if (event === undefined) return
+    const callId = resultCallIdOf(event)
+    if (callId === undefined || !live.written.has(callId)) return
+    try {
+      live.write([event])
+    } catch {
+      return
+    }
+    live.settled.add(callId)
   }
 
   /** Feed one frame's text to the live stream. */
@@ -487,6 +528,7 @@ export class AcpTurnRunner {
       step: turn.position.step,
       write: turn.write,
       written: new Set<string>(),
+      settled: new Set<string>(),
     }
     this.liveCards = liveCards
     // Registered before the prompt goes out: the stop lands while the agent is
@@ -595,9 +637,10 @@ export class AcpTurnRunner {
     // Produce after the run, write after that, and only then announce the end:
     // the closing frame carries the message's sequence number, and pointing at
     // a message that is not written yet shows the user text that then vanishes.
-    // Cards already written mid-turn are stripped here, so the log carries
-    // each exactly once; anything the mid-turn writer could not track (a frame
-    // with no call id) still rides the turn-end write as before.
+    // Cards already written mid-turn are stripped here, and so are the results
+    // the terminal frames already filed live; anything the mid-turn writer
+    // could not track (a frame with no call id, a call whose live write
+    // failed) still rides the turn-end write as before.
     const produced = turn.produce(result)
     // The held-back attachments are reported ahead of the turn's own content:
     // the drop happened when the prompt was built, and the writer expands the
@@ -622,6 +665,14 @@ export class AcpTurnRunner {
         ? produced
         : produced.flatMap(event => {
             if (event.type === 'assistant/message') return withoutAnnouncedToolBlocks(event, liveCards.written)
+            if (event.type === 'tool/result') {
+              // A result whose terminal frame already filed it live would be a
+              // second result for one call — skipped. An unsettled id keeps
+              // its result here, which is exactly the fallback the live write
+              // counts on when its own write failed.
+              const toolCallId = resultCallIdOf(event)
+              return toolCallId !== undefined && liveCards.settled.has(toolCallId) ? [] : [event]
+            }
             if (event.type !== 'tool/call') return [event]
             const callId = recordOf(event.payload)['callId']
             return typeof callId === 'string' && liveCards.written.has(callId) ? [] : [event]
@@ -760,6 +811,19 @@ function withDeadline<T>(work: Promise<T>, ms: number, message: string): Promise
       error => { clearTimeout(timer); reject(error) },
     )
   })
+}
+
+/**
+ * The call id a tool/result answers, read off the PROJECTED payload.
+ *
+ * The id lives in `message.toolCallId` — the folded id the card carried and
+ * the end-of-turn result carries, so the live settle and the turn-end strip
+ * key on exactly the same string ("exactly once" by construction).
+ */
+function resultCallIdOf(event: ProjectionEvent): string | undefined {
+  const message = recordOf(recordOf(event.payload)['message'])
+  const callId = message['toolCallId']
+  return typeof callId === 'string' ? callId : undefined
 }
 
 /**

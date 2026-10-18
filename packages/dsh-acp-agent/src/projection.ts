@@ -427,6 +427,32 @@ function announcementEvent(dialect: AcpDialect, call: ToolCall, turn: number, st
   }
 }
 
+/**
+ * The result of one terminal tool frame, for mid-turn writing.
+ *
+ * A card that opens live but stays outputless for the rest of a long
+ * external-agent turn is half a card — the runner calls this as each frame
+ * arrives, so the result lands the moment the terminal frame (folded status
+ * `completed`/`failed`) closes the call, not minutes later with the turn's
+ * answer. Same folding rule as `projectToolCallFrame`: one frame, no carried
+ * state — the runner invokes it only once a call id has a live-written card
+ * to pair with, which is what keeps the emitted result from ever being an
+ * orphan. The payload is the shared tool/result shape, identical to what the
+ * end-of-turn projection emits for the same frame; whether anything is written
+ * at all is the caller's ruling, not this function's.
+ */
+export function projectToolResultFrame(
+  frame: AcpFrame,
+  options: { readonly turn: number; readonly step: number; readonly dialect: AcpDialect },
+): ProjectionEvent | undefined {
+  const update = recordOf(recordOf(frame.params)['update'])
+  const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
+  if (kind !== 'tool_call' && kind !== 'tool_call_update') return undefined
+  const call = options.dialect.foldTool(undefined, update)
+  if (call.status !== 'completed' && call.status !== 'failed') return undefined
+  return toolResultEvent(call, options.turn, options.step)
+}
+
 function accumulate(frames: readonly AcpFrame[], dialect: AcpDialect): Accumulator {
   const thought: string[] = []
   const text: string[] = []

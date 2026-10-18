@@ -18,7 +18,7 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { projectTurnIncremental } from '../src/projection.ts'
+import { projectToolResultFrame, projectTurnIncremental } from '../src/projection.ts'
 import { claudeDialect } from '../src/dialects/claude.ts'
 import { codexDialect } from '../src/dialects/codex.ts'
 import { grokDialect } from '../src/dialects/grok.ts'
@@ -125,5 +125,79 @@ describe('projectTurnIncremental', () => {
     const payload = (events[1]!.payload as { message: { isError: boolean }; error?: unknown }).message
     expect(payload.isError).toBe(true)
     expect(events[1]!.payload as { error?: unknown }).toHaveProperty('error')
+  })
+})
+
+/**
+ * Per-frame result projection.
+ *
+ * The end-of-turn fold carries every result; the runner's live path needs the
+ * result the moment a call's TERMINAL frame arrives — mid-turn, while a long
+ * external-agent turn is still running — instead of minutes later with the
+ * turn's answer. Same folding rule as `projectToolCallFrame`: one frame, no
+ * carried state, the dialect reads the fields. A frame that is not terminal
+ * folds to a call that is neither completed nor failed, and projects nothing.
+ */
+describe('projectToolResultFrame', () => {
+  const live = { turn: 7, step: 3 }
+
+  it('codex 收尾帧投影出 tool/result，输出取 rawOutput.formatted_output', () => {
+    // Real capture: codex has no `content` at all — the result text lives only
+    // in `rawOutput.formatted_output`, the field the end-of-turn fold reads.
+    const frames = captured['codex']!['tool'] as AcpFrame[]
+    const event = projectToolResultFrame(frames[1]!, { ...live, dialect: codexDialect })
+    expect(event?.type).toBe('tool/result')
+    const payload = event!.payload as {
+      turn: number
+      step: number
+      message: { role: string; toolCallId: string; isError: boolean; content: { type: string; text: string }[] }
+    }
+    expect(payload.turn).toBe(7)
+    expect(payload.step).toBe(3)
+    expect(payload.message.role).toBe('tool')
+    expect(payload.message.toolCallId).toBe('exec-d1c91a22-fdf4-49f3-8b82-c901f115da4c')
+    expect(payload.message.isError).toBe(false)
+    expect(payload.message.content).toEqual([{ type: 'text', text: expect.stringContaining('total 544') }])
+  })
+
+  it('claude 收尾帧同样成立', () => {
+    const frames = captured['claude']!['tool'] as AcpFrame[]
+    const event = projectToolResultFrame(frames[3]!, { ...live, dialect: claudeDialect })
+    expect(event?.type).toBe('tool/result')
+    const payload = event!.payload as { message: { toolCallId: string; content: { text: string }[] } }
+    expect(payload.message.toolCallId).toBe('chatcmpl-tool-bf330e1a077781f6')
+    expect(payload.message.content.map(part => part.text).join('')).toContain('total 544')
+  })
+
+  it('grok 收尾帧同样成立', () => {
+    const frames = captured['grok']!['tool'] as AcpFrame[]
+    const event = projectToolResultFrame(frames[4]!, { ...live, dialect: grokDialect })
+    expect(event?.type).toBe('tool/result')
+    const payload = event!.payload as { message: { toolCallId: string; content: { text: string }[] } }
+    expect(payload.message.toolCallId).toBe('call-d0f9391e-a336-4eed-bc3a-81344b79a72f-0')
+    expect(payload.message.content.map(part => part.text).join('')).toContain('THREADHARBOR_TOOL_OK')
+  })
+
+  it('开场帧与 in_progress 帧都不是收尾帧，返回 undefined', () => {
+    // The live writer must not write a result before the agent finished —
+    // the frames before the terminal one carry progress, not an outcome.
+    const codex = captured['codex']!['tool'] as AcpFrame[]
+    expect(projectToolResultFrame(codex[0]!, { ...live, dialect: codexDialect })).toBeUndefined()
+    const claude = captured['claude']!['tool'] as AcpFrame[]
+    // Opening tool_call(pending), the in-progress tick and the toolResponse
+    // tick all fold to a call that has not settled yet.
+    expect(projectToolResultFrame(claude[0]!, { ...live, dialect: claudeDialect })).toBeUndefined()
+    expect(projectToolResultFrame(claude[1]!, { ...live, dialect: claudeDialect })).toBeUndefined()
+    expect(projectToolResultFrame(claude[2]!, { ...live, dialect: claudeDialect })).toBeUndefined()
+    const grok = captured['grok']!['tool'] as AcpFrame[]
+    expect(projectToolResultFrame(grok[2]!, { ...live, dialect: grokDialect })).toBeUndefined()
+  })
+
+  it('failed 收尾帧投影成错误结果，与回合末投影同形', () => {
+    const frame: AcpFrame = { method: 'session/update', params: { update: { sessionUpdate: 'tool_call_update', toolCallId: 't3', status: 'failed', content: [{ type: 'text', text: 'boom' }] } } }
+    const event = projectToolResultFrame(frame, { ...live, dialect: claudeDialect })
+    expect(event?.type).toBe('tool/result')
+    expect((event!.payload as { message: { isError: boolean } }).message.isError).toBe(true)
+    expect(event!.payload as { error?: unknown }).toHaveProperty('error')
   })
 })

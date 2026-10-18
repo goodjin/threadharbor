@@ -1,15 +1,18 @@
 /**
- * Mid-turn tool-card writing.
+ * Mid-turn tool-card and tool-result writing.
  *
  * The turn used to write the session log once, at its end, so even frame-ordered
  * events appeared only when everything was over. Now the runner writes each
  * tool's opening card the moment its first frame arrives — the card exists in
- * the log while the agent is still working — and the turn-end write carries
- * only what is left: the step's message and the results. A card is written
- * exactly once, pre-abort writes are kept (post-abort frames were already
- * dropped by the runner's abort flag), and the payloads are the projection's
- * own, so the writer pairs results to the mid-turn call by the same
- * `turn:callId` key as ever.
+ * the log while the agent is still working — and the terminal frame writes the
+ * result right then too, so a card never sits outputless through a long turn.
+ * The turn-end write carries only what is left: the step's message, and the
+ * pairs the live path could not track. A card is written exactly once, a
+ * result only under a card that went live the same turn (anything else would
+ * be an orphan the log refuses), pre-abort writes are kept (post-abort frames
+ * were already dropped by the runner's abort flag), and the payloads are the
+ * projection's own, so the writer pairs results to the mid-turn call by the
+ * same `turn:callId` key as ever.
  *
  * The claude frames below carry real statuses; the dialect, the projection and
  * the content writer are the real ones, and only the session append and the
@@ -69,9 +72,22 @@ const answerFrame: AcpFrame = {
 /** What the session log received, in arrival order. */
 type Append = { type: string; payload: Record<string, unknown>; intent?: { surfaceOp?: string; sourceEventSeqs?: readonly number[] } }
 
-function recordingWrite(order: string[]): { write: ContentWriter; appends: Append[] } {
+/**
+ * A recording writer whose appends can be made to refuse, once each.
+ *
+ * `failures` is a queue of event types owned by the test: the first append of
+ * a queued type throws instead of recording and consumes the entry, so the
+ * live write fails exactly once and the turn-end retry of the same event goes
+ * through. A refused append grew no seq — the numbering after it is the
+ * numbering that a run without the failure would have produced.
+ */
+function recordingWrite(order: string[], failures: string[] = []): { write: ContentWriter; appends: Append[] } {
   const appends: Append[] = []
   const write = makeContentWriter((type, payload, intent) => {
+    if (failures[0] === type) {
+      failures.shift()
+      throw new Error(`append refused: ${type}`)
+    }
     appends.push({ type, payload: payload as Record<string, unknown>, ...(intent === undefined ? {} : { intent }) })
     order.push(`append:${type}`)
     return { seq: appends.length }
@@ -103,7 +119,7 @@ type Harness = {
  * A runner against an agent whose prompt hangs until `release` — the shape of
  * a real turn, where frames arrive while the agent is still working.
  */
-function harness(options: { dialect?: AcpDialect; abort?: () => AbortSignal }): Harness {
+function harness(options: { dialect?: AcpDialect; abort?: () => AbortSignal; failures?: string[] }): Harness {
   let deliver: ((frame: AcpFrame) => void) | undefined
   let releasePrompt: () => void
   const order: string[] = []
@@ -125,7 +141,7 @@ function harness(options: { dialect?: AcpDialect; abort?: () => AbortSignal }): 
       return {}
     },
   }
-  const { write, appends } = recordingWrite(order)
+  const { write, appends } = recordingWrite(order, options.failures)
   const runner = new AcpTurnRunner(client, {
     cwd: '/tmp',
     ...(options.dialect === undefined ? {} : { dialect: options.dialect }),
@@ -272,9 +288,14 @@ describe('mid-turn tool-card writing', () => {
     expect(calls).toHaveLength(1)
     expect(calls[0]!.payload['callId']).toBe(foldedId)
     expect(calls[0]!.payload['callId']).not.toContain('\n')
-    // Everything else arrives once: the announcement, the card, the answer
-    // message, and the paired result.
-    expect(turn1.appends.map(append => append.type)).toEqual(['assistant/message', 'tool/call', 'assistant/message', 'tool/result'])
+    // Everything else arrives once: the announcement, the card, the result the
+    // terminal frame files live (the folded id settles under it, same as the
+    // card did), and the answer message last.
+    expect(turn1.appends.map(append => append.type)).toEqual(['assistant/message', 'tool/call', 'tool/result', 'assistant/message'])
+    // The live result pairs to the live card, and only that one result exists.
+    const results = turn1.appends.filter(append => append.type === 'tool/result')
+    expect(results).toHaveLength(1)
+    expect(results[0]!.intent?.sourceEventSeqs).toEqual([2])
   })
 
   it('produces a log the session validator admits: every call announced before it, none left open', async () => {
@@ -392,5 +413,78 @@ describe('mid-turn tool-card writing', () => {
     expect(turn1.appends[1]!.payload).toMatchObject({ name: 'async_task', callId: 'task-bg-1' })
     const result = turn1.appends[3]!.payload as { message: { content: { text: string }[] } }
     expect(result.message.content.map(part => part.text).join('')).toBe('watch exited 0')
+  })
+
+  it('writes the result the moment the terminal frame arrives, before the reply resolves', async () => {
+    // The card used to sit outputless until the turn ended — minutes, for a
+    // long external-agent turn. The terminal frame closes the call, so the
+    // result goes to the log right then, paired to the card written before it.
+    const turn1 = harness({ dialect: claudeDialect })
+    await turn1.started()
+    turn1.push([openFrame])
+    expect(turn1.appends.map(append => append.type)).toEqual(['assistant/message', 'tool/call'])
+
+    turn1.push([doneFrame])
+    // The result exists in the log now, with the agent's answer still pending.
+    expect(turn1.order).not.toContain('reply-resolved')
+    expect(turn1.appends.map(append => append.type)).toEqual(['assistant/message', 'tool/call', 'tool/result'])
+    // Paired to the live card, not orphaned: the announcement took seq 1, the
+    // card seq 2 — the same pairing the end-of-turn result has always used.
+    expect(turn1.appends[2]!.intent?.sourceEventSeqs).toEqual([2])
+    const result = turn1.appends[2]!.payload as { message: { toolCallId: string; content: { text: string }[] } }
+    expect(result.message.toolCallId).toBe('t1')
+    expect(result.message.content).toEqual([{ type: 'text', text: 'ok' }])
+  })
+
+  it('the turn end never repeats a result already written live', async () => {
+    const turn1 = harness({ dialect: claudeDialect })
+    await turn1.started()
+    turn1.push([openFrame, doneFrame, answerFrame])
+    turn1.release()
+    await turn1.run()
+
+    const results = turn1.appends.filter(append => append.type === 'tool/result')
+    expect(results).toHaveLength(1)
+    // After the live announcement, card and result, the turn end has nothing
+    // left to write but the answer message — its announcement blocks already
+    // filed, the call already open, the result already closed.
+    expect(turn1.appends.slice(3).map(append => append.type)).toEqual(['assistant/message'])
+  })
+
+  it('a failed live result write falls back to the turn-end pair, without throwing', async () => {
+    // Review Focus 3: the frame handler also drives the live stream, so a
+    // refused append must never kill it — the same catch the opening card
+    // writes under. The result was not filed, so it is not settled: the turn
+    // end writes it after all, paired to the card that did go live.
+    const failures: string[] = []
+    const turn1 = harness({ dialect: claudeDialect, failures })
+    await turn1.started()
+    turn1.push([openFrame])
+    failures.push('tool/result')
+    turn1.push([doneFrame, answerFrame])
+    turn1.release()
+    const result = await turn1.run()
+
+    expect(result.end.kind).toBe('completed')
+    expect(turn1.appends.map(append => append.type)).toEqual(['assistant/message', 'tool/call', 'assistant/message', 'tool/result'])
+    expect(turn1.appends[3]!.intent?.sourceEventSeqs).toEqual([2])
+  })
+
+  it('without a live card binding, a mid-turn terminal frame writes no orphan result', async () => {
+    // A result may only go live under a card that went live the same turn —
+    // an unpaired result is an orphan the log refuses. Without the dialect
+    // there is no card, so the terminal frame writes nothing, and the turn
+    // end produces the pair exactly as it always has.
+    const turn1 = harness({})
+    await turn1.started()
+    turn1.push([openFrame, doneFrame])
+    expect(turn1.appends).toEqual([])
+
+    turn1.push([answerFrame])
+    turn1.release()
+    await turn1.run()
+    expect(turn1.appends.map(append => append.type)).toEqual(['assistant/message', 'tool/call', 'tool/result'])
+    const results = turn1.appends.filter(append => append.type === 'tool/result')
+    expect(results[0]!.intent?.sourceEventSeqs).toEqual([2])
   })
 })
