@@ -79,7 +79,9 @@ export type AcpStepResult = {
   readonly end: StepEndReason
 }
 
-/** How to drive one session's external agent. */
+/**
+ * How to drive one session's external agent.
+ */
 export type AcpPresetBinding = {
   readonly dialect: AcpDialect
   /**
@@ -87,9 +89,30 @@ export type AcpPresetBinding = {
    *
    * The replacement step owns this call, including its failures: anything thrown
    * here reaches the loop's own error handling, which closes the turn as an
-   * error rather than leaving it open.
+   * error rather than leaving it open. The in-place gateway path keeps using
+   * it — one model request occupies one step number there, so segments do not
+   * apply.
    */
   readonly run: (decision: StepDecisionLike, turn: TurnContext) => Promise<AcpStepResult>
+  /**
+   * Runs one external turn one SEGMENT per call, when the binding can.
+   *
+   * The takeover path uses the loop's own multi-step mechanic: a replaced step
+   * returning null makes the loop append the next step's boundaries and call
+   * again. Each call consumes one closed segment of the external turn, projects
+   * it under that call's step position, and returns null to continue; the final
+   * segment (reply settled, aborted, or failed) returns the real end reason.
+   * `first` marks the call that owns the turn-level duties — opening the
+   * external conversation, the handover/replay history, and sending the prompt.
+   *
+   * Optional by contract: a binding without it (a test stub, or a preset not
+   * yet segmented) keeps the single-step `run` behaviour.
+   */
+  readonly runSteps?: (
+    decision: StepDecisionLike,
+    turn: TurnContext,
+    options: { readonly first: boolean },
+  ) => Promise<StepEndReason | null>
 }
 
 /** Where in the loop the current step sits, as the loop itself numbers it. */
