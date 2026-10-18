@@ -4,6 +4,7 @@ export { ActivityBeacon, StdioAcpTransport, WebSocketAcpTransport, GrokServeTran
 export type { AcpTransport, StdioTransportOptions, GrokServeOptions, GrokServeChild, GrokServeSpawn } from './transport.ts'
 export { projectTurn, projectUserMessage, projectStepContent, projectTurnIncremental, projectToolCallFrame, projectToolCallAnnouncement, mapToolName } from './projection.ts'
 export type { ProjectionEvent, StreamRecord } from './projection.ts'
+export { AcpSegmenter } from './segmentation.ts'
 export { claudeDialect } from './dialects/claude.ts'
 export { codexDialect } from './dialects/codex.ts'
 export { cursorDialect } from './dialects/cursor.ts'
