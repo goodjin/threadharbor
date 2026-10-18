@@ -828,6 +828,11 @@ describe('GatewayConversations — 帧静默超时、提示与诊断包', () => 
       // session b60d6fa4：不带 turn 的提示整回合被打死，「本轮运行失败
       // system/message turn must be a non-negative safe integer」）。
       expect(notes[0]?.payload).toMatchObject({ turn: position.turn, step: position.step })
+      // v4 还要求消息带非空 id（2026-10-18 b60d6fa4 第二次报错：
+      // 「format v4 system message id requires a string with content」）。
+      const noted = notes[0]?.payload as { message?: { id?: string } }
+      expect(typeof noted.message?.id).toBe('string')
+      expect(noted.message?.id?.length).toBeGreaterThan(0)
       const text = JSON.stringify(notes[0]?.payload)
       expect(text).toContain('已静默')
       expect(text).toContain('tls handshake eof')

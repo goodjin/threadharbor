@@ -16,6 +16,8 @@
  * would lie about who executed what).
  */
 
+import { randomUUID } from 'node:crypto'
+
 import { planFeed } from './gateway-feed.ts'
 import type { FeedCursor } from './gateway-feed.ts'
 import { makeToolOnlyWriter } from './content-writer.ts'
@@ -556,7 +558,11 @@ export class GatewayConversations {
           append?.('system/message', {
             turn: position.turn,
             step: position.step,
-            message: { role: 'system', content: [{ type: 'text', text: `等待外部 agent——已静默 ${String(Math.round(silentForMs / 1000))}s；agent 最近输出：${last}` }] },
+            message: {
+              id: randomUUID(),
+              role: 'system',
+              content: [{ type: 'text', text: `等待外部 agent——已静默 ${String(Math.round(silentForMs / 1000))}s；agent 最近输出：${last}` }],
+            },
           }, { surfaceOp: 'append' })
         } catch {
           // A failed note must not kill the answer it was trying to explain.
