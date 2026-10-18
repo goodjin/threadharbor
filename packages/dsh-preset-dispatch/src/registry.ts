@@ -103,6 +103,15 @@ export type PresetConfig = { readonly presets: Readonly<Record<string, AcpPreset
 export type AcpSession = {
   run: AcpPresetBinding['run']
   /**
+   * 按段驱动一个外部回合，可选。
+   *
+   * 接管路径一段一次调用：first=true 的调用承担回合级职责（开外部会话、组装
+   * 发送 prompt），返回 null 表示回合未完、原生循环会补上下一步边界再调；末段
+   * 才返回真实结束原因。缺省（自备工厂、旧测试桩）时 binding 回落单发 run，
+   * 把其结束原因当末段返回——对外表现与单步一致。
+   */
+  runSteps?: AcpPresetBinding['runSteps']
+  /**
    * Drop this external conversation.
    *
    * Needed because restarting has to actually let go: a cached client keeps
@@ -258,40 +267,51 @@ export function buildPresetTable(
     // the same preset land in the same external session, so each one's answer
     // shows up in the other's history. The keys are session ids, and a session
     // whose connection dies drops its entry with it (see the onDead hookup).
+    // Open-and-cache is shared by `run` and `runSteps` on purpose: the takeover
+    // path iterates one external turn across several calls, and a reopen
+    // between segments would scatter the conversation's context.
     const opened = new Map<string, AcpSession>()
     sessions.set(presetId, opened)
+    const sessionFor = async (sessionId: string, abort: (() => AbortSignal | undefined) | undefined): Promise<AcpSession> => {
+      let session = opened.get(sessionId)
+      if (session === undefined) {
+        session = await factory.open(presetId, {
+          cwd: cwdForOpen(options.cwdOfSession?.(sessionId)),
+          // Named so the opened client can put the host session on any
+          // question it asks the human — the session host services resolve
+          // an agent by.
+          dshSessionId: sessionId,
+          ...(preset.model === undefined ? {} : { modelId: preset.model }),
+          ...(preset.mode === undefined ? {} : { modeId: preset.mode }),
+          ...(options.primer === undefined ? {} : { primer: options.primer }),
+          ...(options.replay === undefined ? {} : { replay: options.replay }),
+          // The turn's stop signal, as a getter the runner consults per turn,
+          // and only when the dialect claims the capability. The getter
+          // closes over the agent, not over this turn, so the one entry
+          // stored here at open stays correct for every later turn of the
+          // session — each turn's signal is read live, when the turn runs.
+          ...(stopsTurns && abort !== undefined ? { abort } : {}),
+        })
+        session.onDead(reason => {
+          // Drop only this session's entry: another session's connection is
+          // a different socket and stays exactly as alive as it is.
+          if (opened.get(sessionId) === session) opened.delete(sessionId)
+          options.onDropped?.({ presetId, sessionId, reason })
+        })
+        opened.set(sessionId, session)
+      }
+      return session
+    }
     table.set(presetId, {
       dialect,
-      run: async (decision, turn) => {
-        let session = opened.get(turn.sessionId)
-        if (session === undefined) {
-          session = await factory.open(presetId, {
-            cwd: cwdForOpen(options.cwdOfSession?.(turn.sessionId)),
-            // Named so the opened client can put the host session on any
-            // question it asks the human — the session host services resolve
-            // an agent by.
-            dshSessionId: turn.sessionId,
-            ...(preset.model === undefined ? {} : { modelId: preset.model }),
-            ...(preset.mode === undefined ? {} : { modeId: preset.mode }),
-            ...(options.primer === undefined ? {} : { primer: options.primer }),
-            ...(options.replay === undefined ? {} : { replay: options.replay }),
-            // The turn's stop signal, as a getter the runner consults per turn,
-            // and only when the dialect claims the capability. The getter
-            // closes over the agent, not over this turn, so the one entry
-            // stored here at open stays correct for every later turn of the
-            // session — each turn's signal is read live, when the turn runs.
-            ...(stopsTurns && turn.abort !== undefined ? { abort: turn.abort } : {}),
-          })
-          const sessionId = turn.sessionId
-          session.onDead(reason => {
-            // Drop only this session's entry: another session's connection is
-            // a different socket and stays exactly as alive as it is.
-            if (opened.get(sessionId) === session) opened.delete(sessionId)
-            options.onDropped?.({ presetId, sessionId, reason })
-          })
-          opened.set(turn.sessionId, session)
-        }
-        return session.run(decision, turn)
+      run: async (decision, turn) => (await sessionFor(turn.sessionId, turn.abort)).run(decision, turn),
+      runSteps: async (decision, turn, at) => {
+        const session = await sessionFor(turn.sessionId, turn.abort)
+        // 会话对象没带 runSteps（自备工厂、旧测试桩）：回落单发 run——一次调用
+        // 跑完整个回合，其结束原因就是末段的结束原因。
+        return session.runSteps !== undefined
+          ? session.runSteps(decision, turn, at)
+          : (await session.run(decision, turn)).end
       },
     })
   }

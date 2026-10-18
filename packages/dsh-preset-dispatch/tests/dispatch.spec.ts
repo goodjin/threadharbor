@@ -9,7 +9,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { installAcpDispatch, resolvePreset } from '../src/dispatch.ts'
-import type { AcpPresetBinding, StepDecisionLike } from '../src/dispatch.ts'
+import type { AcpPresetBinding, StepDecisionLike, StepEndReason } from '../src/dispatch.ts'
 
 /**
  * A stand-in with the same prototype arrangement as the real agent: `step` lives
@@ -395,5 +395,201 @@ describe('installAcpDispatch', () => {
     })
     expect(ran).toEqual([])
     expect(written).toEqual([])
+  })
+})
+
+describe('installAcpDispatch — runSteps 按段迭代', () => {
+  /**
+   * A binding whose takeover path is the segmented one. `run` must stay unused
+   * when `runSteps` exists — a call into it means the dispatch never switched.
+   */
+  function stepsBinding(runSteps: NonNullable<AcpPresetBinding['runSteps']>): AcpPresetBinding {
+    return {
+      dialect: { id: 'acp' } as AcpPresetBinding['dialect'],
+      run: async () => {
+        throw new Error('the segmented path must not fall back to run')
+      },
+      runSteps,
+    }
+  }
+
+  it('hands first:true to the first segment call, after the turn duties, and returns its result unchanged', async () => {
+    // The takeover path iterates one external turn across several replaced-step
+    // calls. The first call owns the turn-level duties — the model decision and
+    // the user's messages on the log — and must already be past them when the
+    // segment runner is asked for its first segment.
+    const agent = new FakeAgent('acp-grok')
+    const order: string[] = []
+    const firsts: boolean[] = []
+    installAcpDispatch(
+      agent,
+      new Map([['acp-grok', stepsBinding(async (_decision, _turn, at) => {
+        order.push(`steps(first:${at.first})`)
+        firsts.push(at.first)
+        return null
+      })]]),
+      {
+        produce: () => [],
+        write: events => { order.push(`write:${events.map(event => event.type).join(',')}`); return 1 },
+        positionOf: () => ({ turn: 1, step: 1 }),
+        turnModel: () => { order.push('model'); return { kind: 'none' } },
+      },
+    )
+    const host = agent as unknown as { step(d: StepDecisionLike): Promise<StepEndReason | null> }
+    expect(await host.step(DECISION)).toBeNull()
+    expect(firsts).toEqual([true])
+    expect(order).toEqual(['model', 'write:user/message', 'steps(first:true)'])
+  })
+
+  it('calls continuations of the same turn with first:false and skips the turn duties', async () => {
+    // A segment returning null makes the loop call again. The continuation is
+    // not a new turn: the question is already on the log and the model already
+    // decided, and redoing either would put one question in the record twice.
+    const agent = new FakeAgent('acp-grok')
+    const firsts: boolean[] = []
+    let modelAsked = 0
+    let userWrites = 0
+    installAcpDispatch(
+      agent,
+      new Map([['acp-grok', stepsBinding(async (_decision, _turn, at) => {
+        firsts.push(at.first)
+        return null
+      })]]),
+      {
+        produce: () => [],
+        write: events => { userWrites += events.filter(event => event.type === 'user/message').length; return 1 },
+        positionOf: () => ({ turn: 1, step: firsts.length + 1 }),
+        turnModel: () => { modelAsked += 1; return { kind: 'none' } },
+      },
+    )
+    const host = agent as unknown as { step(d: StepDecisionLike): Promise<StepEndReason | null> }
+    await host.step(DECISION)
+    await host.step(DECISION)
+    expect(firsts).toEqual([true, false])
+    expect(userWrites).toBe(1)
+    expect(modelAsked).toBe(1)
+  })
+
+  it('resets the segment state once a segment returns an end reason, so the next turn starts first:true again', async () => {
+    // The end reason is the turn's last word: after it, the next step call is a
+    // NEW external turn and must carry the duties — and the end reason itself
+    // reaches the loop unchanged, as the step's own answer.
+    const agent = new FakeAgent('acp-grok')
+    const firsts: boolean[] = []
+    let modelAsked = 0
+    let userWrites = 0
+    let turnNo = 1
+    installAcpDispatch(
+      agent,
+      new Map([['acp-grok', stepsBinding(async (_decision, _turn, at) => {
+        firsts.push(at.first)
+        return at.first ? null : { kind: 'completed' }
+      })]]),
+      {
+        produce: () => [],
+        write: events => { userWrites += events.filter(event => event.type === 'user/message').length; return 1 },
+        positionOf: () => ({ turn: turnNo, step: 1 }),
+        turnModel: () => { modelAsked += 1; return { kind: 'none' } },
+      },
+    )
+    const host = agent as unknown as { step(d: StepDecisionLike): Promise<StepEndReason | null> }
+    expect(await host.step(DECISION)).toBeNull()
+    expect(await host.step(DECISION)).toEqual({ kind: 'completed' })
+    turnNo = 2
+    expect(await host.step(DECISION)).toBeNull()
+    expect(firsts).toEqual([true, false, true])
+    expect(userWrites).toBe(2)
+    expect(modelAsked).toBe(2)
+  })
+
+  it('reads the position per call, so each segment lands under its own step numbers', async () => {
+    // The loop appends fresh boundaries before every continuation call, and the
+    // view drops content whose numbers match no step — the second segment must
+    // not write under the first one's numbers.
+    const agent = new FakeAgent('acp-grok')
+    const stepPositions: string[] = []
+    const producePositions: string[] = []
+    let stepNo = 0
+    installAcpDispatch(
+      agent,
+      new Map([['acp-grok', stepsBinding(async (_decision, turn) => {
+        const at = turn.position ?? { turn: 0, step: 0 }
+        stepPositions.push(`${at.turn}:${at.step}`)
+        turn.write(turn.produce({ frames: [], end: { kind: 'completed' } }))
+        return null
+      })]]),
+      {
+        positionOf: () => ({ turn: 4, step: ++stepNo }),
+        produce: (_result, position) => {
+          producePositions.push(`${position.turn}:${position.step}`)
+          return []
+        },
+        write: () => 1,
+      },
+    )
+    const host = agent as unknown as { step(d: StepDecisionLike): Promise<StepEndReason | null> }
+    await host.step(DECISION)
+    await host.step(DECISION)
+    expect(stepPositions).toEqual(['4:1', '4:2'])
+    expect(producePositions).toEqual(['4:1', '4:2'])
+  })
+
+  it('keeps the single-step run path for a binding without runSteps', async () => {
+    // A binding that cannot segment (a test stub, a preset not yet segmented)
+    // must behave exactly as before: every step call carries the whole turn.
+    const agent = new FakeAgent('acp-grok')
+    let runs = 0
+    let modelAsked = 0
+    let userWrites = 0
+    installAcpDispatch(
+      agent,
+      new Map([['acp-grok', binding(async () => {
+        runs += 1
+        return { frames: [], end: { kind: 'completed' } }
+      })]]),
+      {
+        produce: () => [],
+        write: events => { userWrites += events.filter(event => event.type === 'user/message').length; return 1 },
+        positionOf: () => ({ turn: 1, step: 1 }),
+        turnModel: () => { modelAsked += 1; return { kind: 'none' } },
+      },
+    )
+    const host = agent as unknown as { step(d: StepDecisionLike): Promise<unknown> }
+    expect(await host.step(DECISION)).toEqual({ kind: 'completed' })
+    expect(await host.step(DECISION)).toEqual({ kind: 'completed' })
+    expect(runs).toBe(2)
+    expect(userWrites).toBe(2)
+    expect(modelAsked).toBe(2)
+  })
+
+  it('resets the segment state when a segment call throws, so the next turn starts first:true again', async () => {
+    // A thrown segment unwinds the turn with it — there is no continuation to
+    // wait for — so the failure must clear the in-turn state the same way an
+    // end reason does, or the next turn would be mistaken for a continuation
+    // and lose its question and model decision.
+    const agent = new FakeAgent('acp-grok')
+    const firsts: boolean[] = []
+    let modelAsked = 0
+    let calls = 0
+    installAcpDispatch(
+      agent,
+      new Map([['acp-grok', stepsBinding(async (_decision, _turn, at) => {
+        firsts.push(at.first)
+        calls += 1
+        if (calls === 1) throw new Error('segment blew up')
+        return { kind: 'completed' }
+      })]]),
+      {
+        produce: () => [],
+        write: () => 1,
+        positionOf: () => ({ turn: 1, step: 1 }),
+        turnModel: () => { modelAsked += 1; return { kind: 'none' } },
+      },
+    )
+    const host = agent as unknown as { step(d: StepDecisionLike): Promise<StepEndReason | null> }
+    await expect(host.step(DECISION)).rejects.toThrow('segment blew up')
+    expect(await host.step(DECISION)).toEqual({ kind: 'completed' })
+    expect(firsts).toEqual([true, true])
+    expect(modelAsked).toBe(2)
   })
 })

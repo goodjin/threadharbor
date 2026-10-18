@@ -364,6 +364,20 @@ const held = new WeakMap<object, AcpPresetBinding>()
 const turnAbortSignals = new WeakMap<object, AbortSignal>()
 
 /**
+ * The loop turn each agent has an external turn open in, when one is in flight.
+ *
+ * The takeover path iterates one external turn across several replaced-step
+ * calls — a segment returning null makes the loop call again — and only the
+ * first call of a turn owns the turn-level duties (the model decision, the
+ * user's messages on the log). Keyed by turn number rather than a bare
+ * "in progress" flag so a turn that never reaches its end cannot leak the
+ * state into the next one: a different number reads as a fresh turn, and the
+ * duties run again instead of the next turn being mistaken for a continuation
+ * and losing its question.
+ */
+const openSegmentTurnOf = new WeakMap<object, number>()
+
+/**
  * Record the live turn's stop signal, if this agent's loop has one.
  *
  * `phase` is TypeScript-private on the loop agent and a plain property at
@@ -471,43 +485,52 @@ export function installAcpDispatch(
       // idempotent. Only an agent with a `cancel` to stop through gets the
       // wiring — the same gate the abort option below rides on.
       if (originalCancel !== undefined) captureTurnAbort(this)
-      // Decided before anything is written. A refusal still leaves the
-      // question on this session's record; a switch must not record it here —
-      // the question is asked, with the whole conversation, in the session the
-      // switch created, and writing it here too would put one question in two
-      // conversations' hands.
-      const model = (await options.turnModel?.(this, decision)) ?? { kind: 'none' as const }
-      if (model.kind === 'refuse') {
-        // The user's claimed messages go on the log before the turn refuses,
-        // the way the native step commits them — a refusal must still leave
-        // the question on the record.
-        options.write(userEvents(decision))
-        throw new Error(model.reason)
-      }
-      if (model.kind === 'redirected') {
-        // The switch succeeded, so the turn ends by naming where the
-        // conversation went — a neutral ending, not a thrown error. Throwing
-        // here is what made the client render this turn as a failure even
-        // though the switch had worked; the loop appends whatever ending the
-        // step returns as the turn's `turn/end` reason verbatim.
-        return {
-          kind: 'agent-switch/handover',
-          target: model.target,
-          sessionId: model.sessionId,
-          note: model.note,
+      // The turn-level duties belong to the turn's first call. The segmented
+      // path (a binding with `runSteps`) iterates one external turn across
+      // several step calls, and a continuation must not redo them — rewriting
+      // the user's messages would put one question on the record twice, and
+      // re-asking the model could answer differently mid-turn. A binding
+      // without `runSteps` (a test stub, a preset not yet segmented) keeps the
+      // single-step behaviour: every call is a whole turn, duties included.
+      const steps = current.runSteps
+      const first = steps === undefined || openSegmentTurnOf.get(this) !== position.turn
+      let model: TurnModelDecision = { kind: 'none' }
+      if (first) {
+        // Decided before anything is written. A refusal still leaves the
+        // question on this session's record; a switch must not record it here —
+        // the question is asked, with the whole conversation, in the session the
+        // switch created, and writing it here too would put one question in two
+        // conversations' hands.
+        model = (await options.turnModel?.(this, decision)) ?? { kind: 'none' as const }
+        if (model.kind === 'refuse') {
+          // The user's claimed messages go on the log before the turn refuses,
+          // the way the native step commits them — a refusal must still leave
+          // the question on the record.
+          options.write(userEvents(decision))
+          throw new Error(model.reason)
         }
+        if (model.kind === 'redirected') {
+          // The switch succeeded, so the turn ends by naming where the
+          // conversation went — a neutral ending, not a thrown error. Throwing
+          // here is what made the client render this turn as a failure even
+          // though the switch had worked; the loop appends whatever ending the
+          // step returns as the turn's `turn/end` reason verbatim.
+          return {
+            kind: 'agent-switch/handover',
+            target: model.target,
+            sessionId: model.sessionId,
+            note: model.note,
+          }
+        }
+        // The user's claimed messages go on the log before the turn runs, the
+        // way the native step commits them — they are the turn's input.
+        options.write(userEvents(decision))
       }
-      // The user's claimed messages go on the log before the turn runs, the
-      // way the native step commits them — they are the turn's input.
-      options.write(userEvents(decision))
-      // Run after the input is committed: the content events describe what the
-      // turn produced, so producing them beforehand would write the previous
-      // turn's remainder. The turn owns its own writing, including the stream's
-      // closing frame: that frame has to follow the durable append, and the
-      // append belongs to this session while the stream belongs to the turn.
-      // Splitting them across two places is what left streaming unwired for so
-      // long.
-      const result = await current.run(decision, {
+      // Built fresh per call: the position is this call's (the loop appends new
+      // boundaries before every continuation), the produce closure carries it,
+      // and the stream is opened per segment — one external turn spans several
+      // step positions and several stream attempts.
+      const turn: TurnContext = {
         sessionId: sessionIdOf(this) ?? '',
         position,
         produce: result => options.produce(result, position),
@@ -517,7 +540,31 @@ export function installAcpDispatch(
           : {}),
         ...(options.openStream === undefined ? {} : { openStream: options.openStream(this, position) }),
         ...(originalCancel === undefined ? {} : { abort: () => turnAbortSignals.get(this) }),
-      })
+      }
+      if (steps !== undefined) {
+        if (first) openSegmentTurnOf.set(this, position.turn)
+        try {
+          // Run after the input is committed: the content events describe what
+          // the turn produced, so producing them beforehand would write the
+          // previous turn's remainder. Null means the external turn goes on —
+          // the loop appends the next step's boundaries and calls again; a real
+          // end reason is the turn's last segment.
+          const end = await steps(decision, turn, { first })
+          if (end !== null) openSegmentTurnOf.delete(this)
+          return end
+        } catch (error) {
+          // A thrown segment unwinds the turn with it — there is no later
+          // segment to close the state — so clear it the same way an end
+          // reason does, or the next turn would be taken for a continuation.
+          openSegmentTurnOf.delete(this)
+          throw error
+        }
+      }
+      // The turn owns its own writing, including the stream's closing frame:
+      // that frame has to follow the durable append, and the append belongs to
+      // this session while the stream belongs to the turn. Splitting them
+      // across two places is what left streaming unwired for so long.
+      const result = await current.run(decision, turn)
       return result.end
     } finally {
       active.delete(this)
