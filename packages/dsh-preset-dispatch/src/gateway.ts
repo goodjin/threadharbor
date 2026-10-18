@@ -541,12 +541,21 @@ export class GatewayConversations {
         if (warned || warnMs <= 0 || warnMs >= timeoutMs) return
         const silentForMs = Date.now() - lastActivityWall
         if (silentForMs < warnMs) return
+        // A message event must carry its turn/step numbers: the host's format
+        // layer validates data.turn on persist, and a note without them killed
+        // the whole turn asynchronously (2026-10-18 session b60d6fa4: 本轮运行
+        // 失败「system/message turn must be a non-negative safe integer」).
+        // With no announced position there is no honest number to write — skip
+        // the note, exactly like the tool writer does.
+        if (position === undefined) return
         warned = true
         const tail = stderrTailNow()
         const rawLast = tail.length === 0 ? '（无输出）' : tail.at(-1) ?? '（无输出）'
         const last = rawLast.length > 160 ? `${rawLast.slice(0, 160)}…` : rawLast
         try {
           append?.('system/message', {
+            turn: position.turn,
+            step: position.step,
             message: { role: 'system', content: [{ type: 'text', text: `等待外部 agent——已静默 ${String(Math.round(silentForMs / 1000))}s；agent 最近输出：${last}` }] },
           }, { surfaceOp: 'append' })
         } catch {
