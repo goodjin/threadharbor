@@ -52,10 +52,12 @@ export type SshDeployProgress = {
 }
 
 /**
- * How a peer reaches the remote DSH: `tunnel` (legacy, local SSH -L) or
- * `serve` (the peer's `tailscale serve` ts.net URL; deploy opens no tunnel).
+ * How this machine reaches the remote DSH after deploy.
+ * `host-ip` binds the remote DSH to an address this machine can open and
+ * does not open a tunnel. `tunnel` keeps the remote on loopback and forwards
+ * a local port over SSH. `serve` is the optional Tailscale HTTPS path.
  */
-export type SshAccessMode = 'tunnel' | 'serve'
+export type SshAccessMode = 'host-ip' | 'tunnel' | 'serve'
 
 /** Per-agent enable flags for remote DSH presets (omit or leave true = deploy). */
 export type RemoteAgentDeploySelection = {
@@ -73,8 +75,13 @@ export type SshDeployRequest = {
   readonly remoteWebPort?: number
   /** When true, replace an existing release and restart the service. */
   readonly upgrade?: boolean
-  /** Remote DSH listens on 127.0.0.1; the connecting peer opens SSH -L. */
+  /** `host-ip` by product default; `tunnel` when that address is not reachable. */
   readonly accessMode?: SshAccessMode
+  /**
+   * Address the remote DSH should bind for `host-ip`.
+   * Empty means the deploy uses the IP this SSH session actually reached.
+   */
+  readonly bindHost?: string
   /** When set, disabled agents are patched off on the remote profile after install. */
   readonly remoteAgents?: RemoteAgentDeploySelection
 }

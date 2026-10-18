@@ -68,8 +68,9 @@ export async function fetchRemoteSessions(launchUrl: string): Promise<RemoteSess
     const { workspaces, archived } = await rpcWorkspaceList(origin, cookie)
     const { byId } = await rpcSessionList(origin, cookie)
     const sessions = mergeRemoteSessions(workspaces, byId, archived)
-    if (sessions.length > 0 || workspaces.length > 0) return { sessions }
-    lastStatus = 'empty payload'
+    // Both lists answered. Zero projects is an empty machine, not a failed fetch —
+    // treating it as failure made a healthy host look broken and wiped its row.
+    return { sessions }
   } catch (error) {
     lastStatus = error instanceof Error ? error.message : 'network error'
   }
@@ -85,7 +86,7 @@ export async function fetchRemoteSessions(launchUrl: string): Promise<RemoteSess
 }
 
 /** GET /?token= → Set-Cookie (DSH only mints auth on the index path). */
-async function exchangeAuthCookie(origin: string, token: string): Promise<string | undefined> {
+export async function exchangeAuthCookie(origin: string, token: string): Promise<string | undefined> {
   const response = await fetch(`${origin}/?token=${encodeURIComponent(token)}`, {
     method: 'GET',
     redirect: 'manual',
@@ -196,6 +197,66 @@ async function rpcSessionList(origin: string, cookie: string): Promise<{
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError ?? 'session/list 失败'))
+}
+
+export type RemoteRpcResult =
+  | { readonly ok: true; readonly value: unknown }
+  | { readonly ok: false; readonly error: string }
+
+const ENDPOINT_PATTERN = /^[A-Za-z0-9_$./-]+$/
+
+/**
+ * One authenticated RPC against the DSH named by a launch URL.
+ *
+ * The browser never talks to that origin itself (cookie and CORS live on the
+ * machine serving this page). Callers pass a fixed endpoint, never a URL.
+ */
+export async function callRemoteDsh(
+  launchUrl: string,
+  endpoint: string,
+  args: Record<string, unknown>,
+): Promise<RemoteRpcResult> {
+  if (!ENDPOINT_PATTERN.test(endpoint) || endpoint.includes('//')) {
+    return { ok: false, error: '远端接口名不合法' }
+  }
+  let parsed: URL
+  try {
+    parsed = new URL(launchUrl.trim())
+  } catch {
+    return { ok: false, error: 'launchUrl 无效' }
+  }
+  const token = parsed.searchParams.get('token')
+  if (token === null || token === '') return { ok: false, error: 'launchUrl 缺少 token' }
+  let cookie: string | undefined
+  try {
+    cookie = await exchangeAuthCookie(parsed.origin, token)
+  } catch (error) {
+    return { ok: false, error: `换取远端登录 cookie 失败：${error instanceof Error ? error.message : String(error)}` }
+  }
+  if (cookie === undefined) return { ok: false, error: '远端没有换出登录 cookie，打开地址可能已失效' }
+  try {
+    const value = await rpcCallWithFallback(parsed.origin, cookie, endpoint, args)
+    return { ok: true, value }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/** Slash form first; a 404 retries the dotted apiproxy name. */
+async function rpcCallWithFallback(
+  origin: string,
+  cookie: string,
+  endpoint: string,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  try {
+    return await rpcCall(origin, cookie, endpoint, args)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const dotted = endpoint.replaceAll('/', '.')
+    if (message === 'HTTP 404' && dotted !== endpoint) return await rpcCall(origin, cookie, dotted, args)
+    throw error
+  }
 }
 
 function parseWorkspaceRows(value: unknown): WorkspaceRow[] {

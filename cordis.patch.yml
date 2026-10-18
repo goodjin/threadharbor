@@ -4,10 +4,10 @@
 # goal, trajectory, deliverables and workflow-run panels consume its
 # uiConversation service and never activate when it is disabled.
 #
-# The hostd gateway is gone (migration phase 6): agents now run as DSH-native
-# ACP plugins on the machine serving the page, so there is no remote host to
-# proxy to and no per-host port to configure. The ACP and preset plugins below
-# replace both, and they run in-process.
+# Agents run as DSH-native ACP plugins on each machine (migration phase 6
+# removed the old hostd proxy and its per-host port settings). Another
+# machine's sessions stay on that machine. threadharbor-host-gateway on the
+# machine serving this page forwards the browser's ordinary DSH calls there.
 #
 # ui-sidebar is deliberately NOT disabled any more. It used to be, because the
 # hostd-backed sidebar replaced it; now that the ACP sessions are ordinary DSH
@@ -31,6 +31,11 @@
       name: '@threadharbor/dsh-host-federation/tailscale'
     - id: threadharbor-ssh-deploy
       name: '@threadharbor/dsh-host-federation/ssh-deploy'
+    # 同源网关：浏览器仍调 DSH 自己的接口，只是路径挂在本机
+    # /threadharbor/gateway/<主机标识>/ 下面，由这台机器转到登记簿里的地址。
+    # 登录 cookie 留在这台机器上，不写进浏览器，也不接收浏览器传来的任意网址。
+    - id: threadharbor-host-gateway
+      name: '@threadharbor/dsh-host-federation/host-gateway'
     # 手机端独立入口（宿主侧）：手机页静态资源 + peers / pair-url 接口。
     - id: threadharbor-mobile-entry
       name: '@threadharbor/dsh-mobile-entry'

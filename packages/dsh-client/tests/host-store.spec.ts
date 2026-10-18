@@ -8,8 +8,8 @@ import type { HostStoreChannel, HostStoreDeps, StoreOp } from '../src/host-store
  * The host registry and this machine's default identity used to live in
  * `window.localStorage`: a new browser context, a new browser, or a cleared
  * cache lost them all. These tests pin the replacement — a write-through
- * mirror over the host-side settings namespace (`isLoopback ? 'host' :
- * 'memory'`, per the design doc) — with the honesty rules that matter on a
+ * mirror over the host-side settings namespace (a settings channel means
+ * `host`, no channel means `memory`) — with the honesty rules that matter on a
  * real page: degradation is visible in the posture, a write that could not
  * reach the machine keeps its value in the page, and data saved before the
  * first read completed is merged with what the machine returns instead of
@@ -99,18 +99,27 @@ function start(deps: Omit<HostStoreDeps, 'listKeys'> & Partial<Pick<HostStoreDep
   })
 }
 
-describe('非本机页面：只放内存', () => {
-  it('页面由远程机器提供时，读写都在本页，从不碰主机通道，姿态如实说明', async () => {
+describe('页面不是从回环地址打开：登记仍写回提供这个页面的机器', () => {
+  it('设置通道在就不看是不是回环地址，读写都落到通道上', async () => {
     const channel = new FakeChannel()
+    channel.doc[REGISTRY_KEY] = '[{"hostId":"bench","hostTitle":"测试机","address":"http://192.168.1.20:3081","createdAt":1}]'
     const store = start({ loopback: () => false, channel, log: () => {} })
     await store.settled()
 
+    expect(store.posture()).toEqual({ kind: 'host' })
+    expect(channel.loaded).toBeGreaterThan(0)
+    expect(store.storage.getItem(REGISTRY_KEY)).toContain('测试机')
+    store.storage.setItem(REGISTRY_KEY, '[{"hostId":"bench"},{"hostId":"lab"}]')
+    await settle()
+    expect(channel.doc[REGISTRY_KEY]).toContain('lab')
+  })
+
+  it('没有设置通道时仍只放本页，并说明原因是通道缺席', async () => {
+    const store = start({ loopback: () => false, channel: undefined, log: () => {} })
+    await store.settled()
     store.storage.setItem(REGISTRY_KEY, '[{"hostId":"bench"}]')
     expect(store.storage.getItem(REGISTRY_KEY)).toBe('[{"hostId":"bench"}]')
-    await settle()
-    expect(channel.loaded).toBe(0)
-    expect(channel.mutations).toHaveLength(0)
-    expect(store.posture()).toEqual({ kind: 'memory', reason: 'remote-page' })
+    expect(store.posture()).toEqual({ kind: 'memory', reason: 'no-channel' })
   })
 })
 

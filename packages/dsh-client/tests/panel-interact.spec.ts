@@ -696,11 +696,31 @@ describe('从 Tailscale 选：表单前面的选择器', () => {
     }
   })
 
-  it('地址栏旁的注记把话说在面上：留空由部署或连接自动写入', async () => {
+  it('粘贴带 token 的地址：登记源和打开地址分开存', async () => {
+    const registry = makeRegistry()
+    const { container, root } = await mountPanel(registry)
+    try {
+      click(container, '[data-action="add-host"]')
+      type(container, '[data-form-field-id]', 'lan-box')
+      type(container, '[data-form-field-address]', 'http://192.168.1.10:3081/?token=abc')
+      click(container, '[data-form-confirm]')
+      expect(registry.list()).toMatchObject([
+        {
+          hostId: 'lan-box',
+          address: 'http://192.168.1.10:3081',
+          launchUrl: 'http://192.168.1.10:3081/?token=abc',
+        },
+      ])
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('地址栏旁的注记把话说在面上：留空由部署写入，已可达的地址可以直接粘贴', async () => {
     const { container, root } = await mountPanel(makeRegistry(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
     try {
       click(container, '[data-action="add-host"]')
-      expect(q(container, '[data-address-empty-note]').textContent).toBe('留空 = 由部署或连接自动写入')
+      expect(q(container, '[data-address-empty-note]').textContent).toBe('留空则由部署写入。IP 已经能访问时，粘贴带 ?token= 的完整地址即可，不需要 Tailscale。')
     } finally {
       await unmount(root)
     }
@@ -867,7 +887,7 @@ describe('主机详情：使用这台主机 + 远程部署（状态机如实呈�
         ssh: { target: SSH_SEED.target, port: 22, user: SSH_SEED.user, identityFile: SSH_SEED.identityFile, hostKeyFingerprint: SSH_SEED.hostKeyFingerprint },
         remoteWebPort: 3081,
       })
-      expect(open).toHaveBeenCalledWith('http://127.0.0.1:45555/?token=neo', '_blank', 'noopener')
+      expect(open).toHaveBeenCalledWith('/threadharbor/gateway/bench/', '_blank', 'noopener')
       const updated = withSsh.list().find(entry => entry.hostId === 'bench')
       expect(updated?.address).toBe('http://127.0.0.1:45555')
       expect(updated?.launchUrl).toBe('http://127.0.0.1:45555/?token=neo')
@@ -919,6 +939,8 @@ describe('主机详情：使用这台主机 + 远程部署（状态机如实呈�
       click(container, '[data-host-open="bench"]')
       click(container, '[data-action="open-deploy"]')
       expect(container.querySelector('[data-ssh-deploy] [data-ssh-hostid]')).toBeNull()
+      expect((q(container, '[data-ssh-access="host-ip"]') as HTMLInputElement).checked).toBe(true)
+      expect(container.querySelector('[data-ssh-bind-host]')).not.toBeNull()
       type(container, '[data-ssh-deploy] [data-ssh-target]', 'mini.tailb6790d.ts.net')
       type(container, '[data-ssh-deploy] [data-ssh-identity-file]', '/Users/good/.ssh/id_ed25519')
       click(container, '[data-action="ssh-inspect"]')

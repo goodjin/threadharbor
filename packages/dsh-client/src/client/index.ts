@@ -55,6 +55,8 @@ import { runSessionProbe } from '../probe.ts'
 import type { ProbeOutcome } from '../probe.ts'
 import { layeredIdentitySettings, IDENTITY_STORAGE_KEY } from '../settings-source.ts'
 import { maybeRegisterSidebarTree } from '../sidebar-tree.ts'
+import { registerRemoteConversation } from '../remote-conversation.tsx'
+import { sharedRemoteConversation } from '../remote-conversation-store.ts'
 import { registerModelSeat } from '../model-seat.ts'
 import { registerSessionIdBar } from '../session-id-bar.ts'
 import { createQuotaPoller, registerQuotaDockPills, routeQuotaFetcher } from '../quota-pill.ts'
@@ -345,10 +347,11 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // fallback reads the dictionary's source text so the ports work unchanged
   // without a locale service.
   const t: RuntimeT = locale?.bind(NAMESPACE) ?? fallbackT
-  // The registry and the default identity follow the machine (2026-10-12
-  // 用户要求：名单当然应该跟着本机的设置走): both go through ONE host-backed
-  // storage — `isLoopback ? 'host' : 'memory'`, per the design doc — so the
-  // two can never drift apart again. This tab's own claim stays in
+  // The registry and the default identity follow the machine that served
+  // this page (2026-10-12 用户要求：名单当然应该跟着本机的设置走): both go
+  // through ONE settings channel whenever that channel exists, including when
+  // the browser opened the page by a Tailscale address. No channel means the
+  // list stays in this page only. This tab's own claim stays in
   // sessionStorage: that per-tab override is what lets two tabs of one DSH
   // claim two hosts, and it is not a bug to fix.
   const hostStoreDepsResult = hostStoreDeps(ctx, message => { log.warn(message) })
@@ -356,6 +359,146 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   const tailscale = tailscalePort(ctx, hostStoreDepsResult.channel, message => { log.warn(message) }, t)
   const settings = layeredIdentitySettings(window.sessionStorage, hostStore.storage)
   const registry = hostRegistry(hostStore.storage)
+  let section = startRollUpSection({
+    settings,
+    setInterval: (handler, ms) => window.setInterval(handler, ms),
+    clearInterval: handle => { window.clearInterval(handle) },
+    report: message => { log.warn(message) },
+    heartbeatMs: HEARTBEAT_MS,
+    staleMs: STALE_MS,
+  })
+  // The heartbeat announces this host for the plugin's lifetime, not just
+  // while the panel is open: a tab that never opens the panel would otherwise
+  // leave its own row empty in every other tab.
+  ctx.effect(() => () => { section.dispose() }, 'threadharbor: roll-up section')
+  // The machine's document lands after mount; the section took its identity
+  // from an empty storage and must take the configured one the moment it
+  // appears (same path as an explicit save).
+  ctx.effect(() => hostStore.subscribe(() => { section.rereadIdentity() }), 'threadharbor: identity re-read on host storage hydration')
+  // Another tab of this host writing the document says so on the settings
+  // channel; re-read so this tab's list and names follow.
+  ctx.effect(() => settingsInvalidation(ctx, () => { hostStore.refresh() }), 'threadharbor: host storage invalidation')
+  // Self-report where settings actually stand once the first read settled.
+  void hostStore.settled().then(() => {
+    log.info(`host store posture: ${JSON.stringify(hostStore.posture())}`)
+  })
+
+  const openGateway = (): GatewayOpening => openSessionGateway(ctx)
+  // A mount-time read, purely for the self-report: what the host provides may
+  // settle later, so absence here is a log line, never a functional gate.
+  const mountOpening = openGateway()
+  if (mountOpening.gateway === undefined) {
+    log.warn(`probe unavailable at mount: missing host services [${mountOpening.missing.join(', ')}] — the panel mounts, opens the gateway per use, and says so on screen`)
+  }
+  const face: AgentPanelBusinessProps = {
+    agents: agentListPort(openGateway, undefined, t),
+    probe: panelProbe(openGateway, t),
+    rollUp: section,
+    registry,
+    hostStore: {
+      posture: () => hostStore.posture(),
+      subscribe: hostStore.subscribe,
+    },
+    tailscale,
+    listenStorage: handler => {
+      window.addEventListener('storage', handler)
+      return () => { window.removeEventListener('storage', handler) }
+    },
+  }
+  registerPanelSlots(ctx.slots, face, () => t('panel.label'))
+
+  // 阶段 L：以更低优先级数值遮蔽原生工作区列表，接管为「主机 → 项目 →
+  // 会话」树（§8.5）。开关 threadharbor.sidebarTree=off 时跳过注册，原生
+  // 列表照常——升级漂移时的一键退路。
+  maybeRegisterSidebarTree(ctx.slots, ctx, registry)
+
+  // 其他主机上的会话仍跑在那台机器上。选中时主区换成这块面板，读写都经本机
+  // 代理打到对方 DSH；点回本机会话时面板让位，原生对话界面回来。
+  ctx.effect(
+    () => registerRemoteConversation(ctx.slots, sharedRemoteConversation()),
+    'threadharbor: remote conversation',
+  )
+
+  // 输入框上的模型入口：同样用更低优先级盖住官方那一份，好让选外部 agent 时
+  // 按钮上看得见是谁在回答。目录、选择提交这些仍是官方的服务，换的只是标签。
+  // 开关 threadharbor.modelSeat=off 时不注册，原生入口照常。
+  //
+  // `ctx.slots` 的 register 是按座位种类分派的一组泛型重载，本地那套手写的结构
+  // 接口表达不了它（种类条件类型在泛型下摊不开），所以这里按调用方给的最小接
+  // 口投影一次——和下面 registerSessionIdBar 同一处境，不是这一行特有的将就。
+  //
+  // 服务经 ctx.get 取，不经 ctx.模型目录：模型目录不在本入口的 inject 声明里，
+  // cordis 会拒绝直接读（cannot get property "modelDirectories" without inject），
+  // 抛错把整个入口打成 failed，页面停在「Failed to load plugins」。ctx.get 不要求
+  // 声明、缺席时给 undefined，而 registerModelSeat 本就按「没有就不注册」处理，
+  // 所以这个座位对模型选择服务是可选的，就该这么取。
+  const seatHost = ctx.slots as never
+  ctx.effect(() => registerModelSeat(seatHost, {
+    modelDirectories: ctx.get('modelDirectories') as never,
+    sessions: ctx.get('sessions') as never,
+  }), 'threadharbor: composer model seat')
+
+  // 会话头工具行：会话编号 + 复制按钮（会话作用域槽位，inject 首参即编号）。
+  registerSessionIdBar(seatHost)
+
+  // 「被打断且无正文」轮次的找回入口（2026-10-16 治本）：挂在轮次结尾的
+  // turnTail 列表座位（折叠范围之外），命中盲区条件时给一个展开过程按钮，
+  // 走聊天存储现成的展开动作。座位由轮次结尾渲染器声明，inject 负责等它。
+  ctx.effect(() => registerInterruptedTurnRecovery(seatHost), 'threadharbor: interrupted turn recovery')
+
+  // GLM 套餐配额胶囊：输入框下方 dock 里、token 用量同一排。配额是账号级
+  // 数字，轮询器全浏览器一份（5 分钟一拍，回到页面再补一拍）；数据走宿主侧
+  // 的 /threadharbor/zcode/quota（密钥不出宿主进程）。只在当前会话选的模型
+  // 是 GLM 时渲染；取不到配额整行不渲染，原因去重后留一条日志。
+  const quotaPoller = createQuotaPoller({
+    fetchQuota: routeQuotaFetcher(),
+    report: message => { log.warn(message) },
+  })
+  quotaPoller.start()
+  ctx.effect(() => () => { quotaPoller.dispose() }, 'threadharbor: zcode quota poller')
+  const refreshQuotaOnVisible = (): void => {
+    if (document.visibilityState === 'visible') void quotaPoller.refresh()
+  }
+  window.addEventListener('visibilitychange', refreshQuotaOnVisible)
+  ctx.effect(
+    () => () => { window.removeEventListener('visibilitychange', refreshQuotaOnVisible) },
+    'threadharbor: zcode quota visibility refresh',
+  )
+  ctx.effect(() => registerQuotaDockPills(seatHost, quotaPoller, {
+    modelDirectories: ctx.get('modelDirectories') as never,
+    sessions: ctx.get('sessions') as never,
+  }), 'threadharbor: zcode quota pills')
+
+  // 手机配对 section：和主机面板同一套侧栏注册面（sidebar.panellist + main），
+  // 数据只有一条同源 GET（pair-url）。带令牌的网址只进面板状态、只画在这台
+  // 已准入会话的屏幕上——log 只收失败原因，一个字都不提网址。
+  const pairing = startPairingSurface({
+    slots: ctx.slots,
+    label: () => t('pairing.label'),
+    log: message => { log.warn(message) },
+  })
+  ctx.effect(() => () => { pairing.dispose() }, 'threadharbor: pairing surface')
+
+  // A switched-away turn ends by naming the session that took over. This is
+  // what turns that ending into the on-page behavior the user asked for: a
+  // neutral notice where the error row used to be, and the view following the
+  // conversation into the new session. The progress surface rides along: the
+  // switch replaces the whole conversation panel, so it says so and loads the
+  // new session's first page before the notice jumps.
+  registerAgentSwitchHandoverSurface(
+    ctx,
+    startSwitchProgressSurface({
+      ctx,
+      store: createSwitchProgressStore(),
+      slots: ctx.slots,
+    }),
+  )
+
+  // Self-report at mount. This panel is easy to mistake for a plugin that
+  // never loaded; these lines are how anyone can tell the difference.
+  const identity = section.identity()
+  log.info(`panel registered: id=${PANEL_ID}, slots=settings.section, order=${PANEL_ORDER}`)
+  log.info(`probe gateway: ${mountOpening.gateway === undefined ? `not open at mount (missing ${mountOpening.missing.join(', ')}); retried per use` : 'open'}`)
   log.info(`roll-up identity: ${identity.hostId}${identity.derived ? ' (derived from page origin; configure it in the panel)' : ''}; session tree: DSH projections + remote pull via launchUrl`)
 }
 

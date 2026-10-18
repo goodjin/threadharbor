@@ -7,7 +7,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { SshConnectionConfig, SshConnectResult, SshDeployProgress, SshDeployRequest, SshDeployResult, SshHostKeyCandidate } from './types.ts'
-import { composeLaunchUrl, latestLaunchUrl, parseAccessMode, parseDeployMarkers, planConnection } from './access.ts'
+import { composeLaunchUrl, isLoopbackBind, latestLaunchUrl, originForBind, parseAccessMode, parseDeployMarkers, planConnection, validateBindHost } from './access.ts'
 import { run, runWithEnv, type RunResult } from './run.ts'
 import { freePort, portListening } from './port.ts'
 import { deploymentChannel, destination, parseSshInput, shellQuote } from './parse.ts'
@@ -298,6 +298,16 @@ export class DshSshManager {
         onProgress({ phase: 'preparing', detail: '将通过 GitHub 地址安装插件，跳过本地上传。' })
       }
 
+      let directBind: string | undefined
+      if (accessMode === 'host-ip') {
+        onProgress({ phase: 'preparing', detail: '正在确认对方哪个 IP 从本机走得通。' })
+        const chosen = request.bindHost?.trim() ?? ''
+        directBind = chosen === '' ? await this.discoverReachableAddress(materialized) : validateBindHost(chosen)
+        if (isLoopbackBind(directBind)) {
+          throw new Error('这个地址是回环，本机直接访问不到。请填写一个本机能访问的 IP，或改用 SSH 隧道。')
+        }
+      }
+
       onProgress({ phase: 'installing', detail: '正在安装 DSH 与 ThreadHarbor 插件。' })
       const remotePlugins = this.options.remotePlugins ?? DEFAULT_REMOTE_DSH_PLUGINS
       const installScript = buildInstallScript({
@@ -311,6 +321,7 @@ export class DshSshManager {
         installFromGithub,
         remotePlugins,
         remoteAgentsPatch: buildRemoteAgentsPatchYaml(request.remoteAgents),
+        ...(directBind === undefined ? {} : { bindHost: directBind, listen: 'host-ip' as const }),
       })
       const install = await this.remoteExec(materialized, installScript, this.options.installTimeoutMs)
       if (install.code !== 0) {
@@ -319,7 +330,7 @@ export class DshSshManager {
       }
       const markers = parseDeployMarkers(install.stdout)
       const alreadyRunning = markers.alreadyRunning
-      const bindHost = '127.0.0.1'
+      const bindHost = accessMode === 'host-ip' ? (markers.bindHost ?? directBind ?? '') : '127.0.0.1'
       const remoteLaunch = markers.launchUrl
       if (remoteLaunch === undefined || remoteLaunch === '') {
         throw new Error('未能从远端日志读取带 ?token= 的 dsh web 启动 URL；请查看远端 dsh-web.log 或勾选升级后重试')
@@ -327,7 +338,30 @@ export class DshSshManager {
 
       onProgress({ phase: 'starting', detail: alreadyRunning ? '远端服务已在运行，已读取现有启动 URL。' : '正在启动远端 DSH Web。' })
 
-      if (request.accessMode === 'serve') {
+      if (accessMode === 'host-ip') {
+        if (bindHost === '' || isLoopbackBind(bindHost)) {
+          throw new Error('部署没有得到对方可访问的 IP。请填写绑定地址，或改用 SSH 隧道。')
+        }
+        const endpoint = originForBind(bindHost, remotePort)
+        const launchUrl = composeLaunchUrl(endpoint, remoteLaunch)
+        onProgress({ phase: 'verifying', detail: `正在从本机访问 ${endpoint}。` })
+        const healthy = await this.waitRemoteHealthy(endpoint)
+        if (!healthy) {
+          throw new Error(`插件已经装上，但本机访问不了 ${endpoint}。这个地址走不通时改用 SSH 隧道，不需要 Tailscale。`)
+        }
+        onProgress({ phase: 'succeeded', detail: '部署完成。' })
+        return {
+          endpoint,
+          launchUrl,
+          accessMode,
+          bindHost,
+          remoteWebPort: remotePort,
+          releaseVersion,
+          alreadyRunning,
+        }
+      }
+
+      if (accessMode === 'serve') {
         // ts.net 接入：对方由 tailscale serve 暴露，安装脚本已在对方本机做过健康检查；
         // 不建 SSH 隧道。endpoint 记对方回环地址，仅作信息，登记由检测清单用 ts.net 完成。
         onProgress({ phase: 'succeeded', detail: '部署完成。' })
@@ -490,6 +524,30 @@ export class DshSshManager {
       await new Promise(resolve => setTimeout(resolve, 400))
     }
     return false
+  }
+
+  /**
+   * The address this SSH session reached on the peer: `SSH_CONNECTION`'s
+   * server IP, else the source address of the peer's default route.
+   * Tailscale is not consulted. A loopback result is refused by the caller.
+   */
+  private async discoverReachableAddress(config: SshConnectionConfig): Promise<string> {
+    const probe = await this.remoteExec(config, [
+      'addr=""',
+      'set -- ${SSH_CONNECTION:-}',
+      'addr="${3:-}"',
+      'case "$addr" in ""|127.*|0.0.0.0|::1|localhost) addr="";; esac',
+      'if [ -z "$addr" ] && command -v ip >/dev/null 2>&1; then',
+      '  addr="$(ip -4 route get 1.1.1.1 2>/dev/null | awk \'{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}\')"',
+      '  case "$addr" in ""|127.*|0.0.0.0) addr="";; esac',
+      'fi',
+      'if [ -z "$addr" ]; then echo NO_REACHABLE_IP; else printf \'%s\\n\' "$addr"; fi',
+    ].join('\n'), this.handshakeBudgetMs())
+    const line = probe.stdout.trim().split(/\r?\n/).at(-1)?.trim() ?? ''
+    if (probe.code !== 0 || line === '' || line === 'NO_REACHABLE_IP') {
+      throw new Error('没有查出对方可从本机访问的 IP。请填写绑定地址，或改用 SSH 隧道。')
+    }
+    return validateBindHost(line)
   }
 
   /**
@@ -758,16 +816,21 @@ export function buildInstallScript(input: {
   readonly installFromGithub: boolean
   readonly remotePlugins: readonly string[]
   readonly remoteAgentsPatch: string
+  /** Present for a directly reachable deploy. Absent keeps the loopback script. */
+  readonly bindHost?: string
+  readonly listen?: 'loopback' | 'host-ip'
 }): string {
   const {
     channel, releaseDir, nodePath, remotePort, hostId, hostTitle, upgrade, installFromGithub, remotePlugins,
     remoteAgentsPatch,
   } = input
+  const listen = input.listen ?? 'loopback'
   const pluginPayload = shellQuote(remotePlugins.join('\n'))
   const agentsPatchPayload = shellQuote(remoteAgentsPatch)
   return [
     buildRemoteEnv({
       channel, nodePath, remotePort, hostId, hostTitle, remoteAgentsPatch, releaseDir,
+      ...(input.bindHost === undefined ? {} : { bindHost: input.bindHost }),
       installLines: [
         'if ! command -v dsh >/dev/null 2>&1; then',
         '  if ! command -v npm >/dev/null 2>&1; then echo "npm not found; install Node npm or place dsh on PATH" >&2; exit 1; fi',
@@ -785,7 +848,7 @@ export function buildInstallScript(input: {
     '  echo "BIND_HOST=$bind_host"',
     '  echo "LAUNCH_URL=$url"',
     '  mkdir -p "$HOME/.local/state/threadharbor"',
-    '  PEER_URL="$url" PEER_BIND="$bind_host" PEER_PORT="$port" "$node" -e \'const fs=require("fs");const os=require("os");const path=require("path");const body={pluginsInstalled:true,listen:"loopback",port:Number(process.env.PEER_PORT),bindHost:process.env.PEER_BIND,launchUrl:process.env.PEER_URL};const file=path.join(os.homedir(),".local/state/threadharbor/peer.json");fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,JSON.stringify(body),{mode:384});\'',
+    `  PEER_URL="$url" PEER_BIND="$bind_host" PEER_PORT="$port" "$node" -e 'const fs=require("fs");const os=require("os");const path=require("path");const body={pluginsInstalled:true,listen:"${listen}",port:Number(process.env.PEER_PORT),bindHost:process.env.PEER_BIND,launchUrl:process.env.PEER_URL};const file=path.join(os.homedir(),".local/state/threadharbor/peer.json");fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,JSON.stringify(body),{mode:384});'`,
     '  exit 0',
     '}',
     'already=0',

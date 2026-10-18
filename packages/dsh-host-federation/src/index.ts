@@ -58,3 +58,4 @@ export type { RollUpView, HostViewRow, ProjectView, SessionView } from './rollup
 export { sessionsFromWorkspaces, UNGROUPED } from './workspace-map.ts'
 export type { WorkspaceLike, SessionLike, WorkspaceSession } from './workspace-map.ts'
 export { fetchRemoteSessions, mergeRemoteSessions } from './host-remote-sessions.ts'
+export { GATEWAY_PREFIX, gatewayPagePath } from './host-gateway-path.ts'

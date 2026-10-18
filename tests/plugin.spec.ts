@@ -39,6 +39,7 @@ describe('remote Web bundle', () => {
     }
     expect(patch).toContain("- id: threadharbor-client\n      name: '@threadharbor/dsh-client'")
     expect(patch).toContain("threadharbor-ssh-deploy")
+    expect(patch).toContain("threadharbor-host-gateway")
     expect(patch).toContain("threadharbor-mobile-relay")
 
     // Phase 6 removed the hostd gateway. Agents run as in-process ACP plugins

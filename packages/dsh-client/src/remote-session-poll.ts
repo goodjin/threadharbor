@@ -13,6 +13,18 @@ export type HostSessionsResult =
   | { readonly sessions: readonly HostSession[] }
   | { readonly failed: string }
 
+/**
+ * A failed pull must not erase a list we already showed. The note rides along
+ * so the row can say why the refresh missed, while the last good sessions stay.
+ */
+export function settleHostFetch(
+  previous: readonly HostSession[] | undefined,
+  result: HostSessionsResult,
+): { readonly sessions: readonly HostSession[]; readonly note?: string } {
+  if ('sessions' in result) return { sessions: result.sessions }
+  return { sessions: previous ?? [], ...(result.failed === '' ? {} : { note: result.failed }) }
+}
+
 export async function fetchHostSessions(launchUrl: string, t: RuntimeT = fallbackT): Promise<HostSessionsResult> {
   try {
     const result = await fetchRemoteHostSessions(launchUrl, t)

@@ -15,11 +15,14 @@ import { createElement, useCallback, useEffect, useMemo, useRef, useState } from
 import type { HostRegistration, HostRoll, HostSession, RollUp } from '@threadharbor/dsh-host-federation'
 import { hostRegistry } from '@threadharbor/dsh-host-federation'
 import { HostSessionTree } from './host-session-tree.tsx'
+import { showNativeConversation, showRemoteSessionPanel } from './remote-conversation.tsx'
+import { sharedRemoteConversation } from './remote-conversation-store.ts'
+import { remoteTreeActions } from './remote-tree-actions.ts'
 import { rollUpViewWithRegistry, groupByProject } from './host-roll-up.ts'
 import { createRemoteSessionStore } from './remote-session-store.ts'
 import { buildHostSessions, currentSessionId, readSessionSources } from './session-source.ts'
 import type { SessionRead } from './session-source.ts'
-import { fetchHostSessions } from './remote-session-poll.ts'
+import { fetchHostSessions, settleHostFetch } from './remote-session-poll.ts'
 import type { HostSessionsResult } from './remote-session-poll.ts'
 import type { RuntimeT } from './locales.ts'
 import { NAMESPACE, fallbackT } from './locales.ts'
@@ -129,11 +132,16 @@ export function ShadowTreeHost({ ctx, registry, t = fallbackT, fetchNow, pollMs 
     refreshRegistrations()
   }, [ctx, refreshRegistrations])
 
+  const pullGeneration = useRef(new Map<string, number>())
   const pull = useCallback(async (launchUrl: string, hostId: string) => {
     const attempt = fetchNow ?? ((url: string) => fetchHostSessions(url, t))
+    const generation = (pullGeneration.current.get(hostId) ?? 0) + 1
+    pullGeneration.current.set(hostId, generation)
     const result = await attempt(launchUrl)
-    if ('sessions' in result) store.set(hostId, result.sessions)
-    else store.set(hostId, [], result.failed)
+    // A slower earlier pull must not overwrite a newer answer.
+    if (pullGeneration.current.get(hostId) !== generation) return
+    const settled = settleHostFetch(store.get(hostId)?.sessions, result)
+    store.set(hostId, settled.sessions, settled.note)
     refreshRegistrations()
   }, [fetchNow, store, t, refreshRegistrations])
 
@@ -176,6 +184,60 @@ export function ShadowTreeHost({ ctx, registry, t = fallbackT, fetchNow, pollMs 
     return () => { window.clearInterval(remoteTimer) }
   }, [pull])
 
+  const launchUrls = useMemo(() => {
+    const map: Record<string, string> = {}
+    for (const row of registrations) {
+      if (row.launchUrl !== undefined && row.launchUrl !== '') map[row.hostId] = row.launchUrl
+    }
+    return map
+  }, [registrations])
+  const conversation = useMemo(() => sharedRemoteConversation(), [])
+  const remoteActions = useMemo(() => {
+    const raw = remoteTreeActions(t)
+    const refresh = async (launchUrl: string): Promise<void> => {
+      const host = registrationsRef.current.find(row => row.launchUrl === launchUrl)
+      if (host !== undefined) await pull(launchUrl, host.hostId)
+    }
+    return {
+      ...raw,
+      startSession: async (launchUrl: string, projectId: string) => {
+        const created = await raw.startSession(launchUrl, projectId)
+        if (created.error === undefined) await refresh(launchUrl)
+        return created
+      },
+      renameWorkspace: async (launchUrl: string, projectId: string, title: string) => {
+        const error = await raw.renameWorkspace(launchUrl, projectId, title)
+        if (error === undefined) await refresh(launchUrl)
+        return error
+      },
+      deleteWorkspace: async (launchUrl: string, projectId: string) => {
+        const error = await raw.deleteWorkspace(launchUrl, projectId)
+        if (error === undefined) await refresh(launchUrl)
+        return error
+      },
+      renameSession: async (launchUrl: string, sessionId: string, title: string) => {
+        const error = await raw.renameSession(launchUrl, sessionId, title)
+        if (error === undefined) await refresh(launchUrl)
+        return error
+      },
+      archiveSession: async (launchUrl: string, sessionId: string) => {
+        const error = await raw.archiveSession(launchUrl, sessionId)
+        if (error === undefined) await refresh(launchUrl)
+        return error
+      },
+      pinSession: async (launchUrl: string, sessionId: string, pinned: boolean) => {
+        const error = await raw.pinSession(launchUrl, sessionId, pinned)
+        if (error === undefined) await refresh(launchUrl)
+        return error
+      },
+      forkSession: async (launchUrl: string, sessionId: string) => {
+        const forked = await raw.forkSession(launchUrl, sessionId)
+        if (forked.error === undefined) await refresh(launchUrl)
+        return forked
+      },
+    }
+  }, [t, pull])
+
   const view = useMemo(() => {
     const selfRoll: HostRoll = selfRead.ok
       ? {
@@ -192,5 +254,20 @@ export function ShadowTreeHost({ ctx, registry, t = fallbackT, fetchNow, pollMs 
     return rollUpViewWithRegistry(rollUp, registrations, store.snapshotWithNotes())
   }, [selfRead, registrations, store, t])
 
-  return createElement(HostSessionTree, { view, ctx, currentSessionId: currentId, t })
+  return createElement(HostSessionTree, {
+    view,
+    ctx,
+    currentSessionId: currentId,
+    t,
+    launchUrls,
+    remoteActions,
+    onLeaveRemote: () => {
+      conversation.close()
+      showNativeConversation(ctx)
+    },
+    onOpenRemote: target => {
+      conversation.open(target)
+      return showRemoteSessionPanel(ctx)
+    },
+  })
 }
