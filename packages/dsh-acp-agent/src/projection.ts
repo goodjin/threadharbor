@@ -585,6 +585,82 @@ function taskCallId(update: Record<string, unknown>): string {
 }
 
 /**
+ * What one frame does to a spawned run's lifecycle, for a caller that tracks
+ * runs across segment boundaries.
+ *
+ * The whole-turn fold (`accumulate`) sees every frame of a turn in one list and
+ * needs no such reading; a segmenting pump does — a spawned run's birth, its
+ * child's streaming output and its terminal frame can land in different
+ * segments, so the pump mirrors `foldSubagentUpdate`'s per-frame effect here
+ * instead of re-folding a frame list it no longer holds. The field rules are
+ * the fold's own, verbatim: a subagent terminal's `output` fills only an empty
+ * accumulated output, an async task's `summary` overwrites, and any terminal
+ * state (completed/failed/stopped) settles.
+ */
+export type SpawnedFrameReading =
+  | { readonly kind: 'spawn'; readonly call: ToolCall }
+  | { readonly kind: 'progress'; readonly callId: string; readonly summary: string | undefined }
+  | {
+    readonly kind: 'state'
+    readonly callId: string
+    readonly settled: boolean
+    readonly status: 'completed' | 'failed' | undefined
+    /** The output text the frame carries, when it names one. */
+    readonly output: string | undefined
+    /** true = only fills an empty accumulated output; false = overwrites it. */
+    readonly fillOnlyEmpty: boolean
+  }
+
+/** Read one frame's spawned-run effect, or undefined for any other frame. */
+export function readSpawnedFrame(
+  dialect: AcpDialect,
+  update: Record<string, unknown>,
+): SpawnedFrameReading | undefined {
+  const spawnedUpdate = subagentUpdateOf(dialect, update)
+  if (spawnedUpdate === undefined) return undefined
+  const kind = typeof spawnedUpdate['sessionUpdate'] === 'string' ? spawnedUpdate['sessionUpdate'] : ''
+  if (kind === 'subagent_spawned' || kind === 'async_task_spawned') {
+    const call = spawnedCallOf(spawnedUpdate)
+    return call === undefined ? undefined : { kind: 'spawn', call }
+  }
+  if (kind === 'subagent_state_update') {
+    return {
+      kind: 'state',
+      callId: typeof spawnedUpdate['subagentSessionId'] === 'string' ? spawnedUpdate['subagentSessionId'] : '',
+      settled: true,
+      status: spawnedUpdate['state'] === 'completed' ? 'completed' : 'failed',
+      output: typeof spawnedUpdate['output'] === 'string' ? spawnedUpdate['output'] : undefined,
+      fillOnlyEmpty: true,
+    }
+  }
+  if (kind === 'async_task_progress') {
+    const summary = typeof spawnedUpdate['summary'] === 'string' ? spawnedUpdate['summary']
+      : typeof spawnedUpdate['description'] === 'string' ? spawnedUpdate['description'] : undefined
+    return { kind: 'progress', callId: taskCallId(spawnedUpdate), summary }
+  }
+  if (kind === 'async_task_state_update') {
+    const state = spawnedUpdate['state']
+    return {
+      kind: 'state',
+      callId: taskCallId(spawnedUpdate),
+      settled: state === 'completed' || state === 'failed' || state === 'stopped',
+      status: state === 'completed' ? 'completed' : state === 'stopped' || state === 'failed' ? 'failed' : undefined,
+      output: typeof spawnedUpdate['summary'] === 'string' ? spawnedUpdate['summary'] : undefined,
+      fillOnlyEmpty: false,
+    }
+  }
+  return undefined
+}
+
+/** The result of one spawned run, for a caller that tracks the run itself. */
+export function projectSpawnedResult(
+  call: ToolCall,
+  options: { readonly turn: number; readonly step: number },
+): ProjectionEvent {
+  return toolResultEvent(call, options.turn, options.step)
+}
+
+/**
  * The synthetic card one spawned-run update opens, or undefined for any other
  * update.
  *
@@ -664,7 +740,7 @@ function contentEvents(
 }
 
 /** The honest result for a run with no terminal state: name the state, keep any visible progress. */
-function stillRunningText(output: string): string {
+export function stillRunningText(output: string): string {
   return output === '' ? STILL_RUNNING : `${STILL_RUNNING} ${output}`
 }
 

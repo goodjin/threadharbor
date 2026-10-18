@@ -10,8 +10,8 @@
 import type { AcpStepResult, StepDecisionLike, StepEndReason, TurnContext, TurnStreamHandle } from './dispatch.ts'
 import { UNDELIVERED } from './content-writer.ts'
 import type { UndeliveredAttachment } from './content-writer.ts'
-import { AcpSegmenter, projectToolCallAnnouncement, projectToolCallFrame, projectToolResultFrame } from '@threadharbor/dsh-acp-agent'
-import type { AcpDialect, AcpFrame, ProjectionEvent } from '@threadharbor/dsh-acp-agent'
+import { AcpSegmenter, projectToolCallAnnouncement, projectToolCallFrame, projectToolResultFrame, projectSpawnedResult, readSpawnedFrame, stillRunningText } from '@threadharbor/dsh-acp-agent'
+import type { AcpDialect, AcpFrame, ProjectionEvent, ToolCall } from '@threadharbor/dsh-acp-agent'
 
 /** The JSON-RPC surface this runner needs, kept narrow so it can be stood in for. */
 export type AcpClientPort = {
@@ -347,6 +347,29 @@ type LiveCards = {
   readonly settled: Set<string>
 }
 
+/**
+ * steps 路径全程持有的一条 spawned 运行（子代理/异步任务）。
+ *
+ * 段落边界由内容帧给出，spawned 卡片不切段——所以一张卡的出生帧、子代输出流
+ * 和收尾帧可以落进三个不同的段。整回合投影靠「所有帧在一个列表里」折叠出这
+ * 条生命周期；分段之后泵必须自己持有它：出生帧建档，子会话帧累积输出，收尾
+ * 帧落定并即时写结果。日志覆盖情况逐项记账，收段时只补缺的那一半。
+ */
+type SpawnedTrack = {
+  readonly callId: string
+  /** 出生帧：补卡时按帧重投影，保证与实时写卡同一 payload。 */
+  readonly frame: AcpFrame
+  /** 折叠中的调用：output 随子会话帧累积，status 随收尾帧落定。 */
+  readonly call: ToolCall
+  settled: boolean
+  /** 卡片是否已在日志（实时写出，或出生段收段补对）。 */
+  cardOnLog: boolean
+  /** 结果是否已在日志（收尾实时写出、出生段补对，或末段合成）。 */
+  resultOnLog: boolean
+  /** 出生帧是否还在当前未收的段里（每次收段清零，出生即置位）。 */
+  openInSegment: boolean
+}
+
 export class AcpTurnRunner {
   private sessionId: string | undefined
   private dshSessionId: string | undefined
@@ -371,6 +394,15 @@ export class AcpTurnRunner {
    * 随 prompt 生命周期重建：段状态（哪些调用还开着）不能跨回合携带。
    */
   private segmenter: AcpSegmenter | undefined
+  /**
+   * spawned 运行（子代理/异步任务）的全程跟踪，仅 steps 路径创建。
+   *
+   * spawned 卡片不参与切段（分段器有意忽略），跨段就归这里管：出生帧建档并
+   * 实时开卡，子会话帧把输出累积进档，收尾帧即时落结果；收段时只补日志上还
+   * 缺的卡/结果，末段才对仍未收尾的合成 [still running]。run() 路径不需要——
+   * 整回合的帧在一个列表里，投影自己折叠得出来。
+   */
+  private spawnedRuns: Map<string, SpawnedTrack> | undefined
   private stream: TurnStreamPort | undefined
   /** Set when this turn's stop signal fired; everything after it is dropped. */
   private aborted = false
@@ -438,25 +470,119 @@ export class AcpTurnRunner {
    */
   private pumpNext(): boolean {
     const frame = this.queue[0]!
-    // 子会话帧（子代理流）不进父泵的流与切段：投影时它们折进子代理卡片的
-    // 结果（accumulate 的既有待遇），泵里对它们没有任何按段动作。判定只有
-    // 一次会话 id 比较；params 不带会话 id 的帧（应答帧）视作父会话。
+    // 子会话帧（子代理流）不进父泵的流与切段：steps 路径把它的文本累积进
+    // spawned 档案（投影时折进子代理卡片的结果），且不归档进段帧——投影与泵
+    // 在此约定一致，子代文本永远不会出现在父段的段消息或流里。run 路径照旧
+    // 归档，整回合投影自会按 childSessions 路由。判定只有一次会话 id 比较；
+    // params 不带会话 id 的帧（应答帧）视作父会话。
     const frameSessionId = recordOf(recordOf(frame)['params'])['sessionId']
     if (typeof frameSessionId === 'string' && frameSessionId !== this.sessionId) {
       this.queue.shift()
+      if (this.spawnedRuns !== undefined) {
+        this.trackChildChunk(frame, frameSessionId)
+        return false
+      }
       this.frames.push(frame)
       return false
     }
-    if (this.segmenter?.observe(frame) === true) return true
+    // 边界只在段里已有帧时成立：分段器的 anySettled 只能来自本段已消费的工具
+    // 帧，空段边界按状态机不可达——防御性兜底按普通帧消费，绝不收一段空的。
+    if (this.segmenter?.observe(frame) === true && this.frames.length > 0) return true
     this.queue.shift()
     this.frames.push(frame)
+    const spawned = this.spawnedRuns === undefined ? undefined : this.trackSpawnedFrame(frame)
     this.writeOpeningCard(frame)
+    if (spawned !== undefined && this.liveCards?.written.has(spawned.callId) === true) spawned.cardOnLog = true
     this.writeSettledResult(frame)
     const stream = this.stream
     if (stream === undefined) return false
     // Held locally so nothing can clear it while this frame is being pushed.
     this.pushToStream(frame, stream)
     return false
+  }
+
+  /** The dialect-gated update a frame carries, the way accumulate reads it. */
+  private frameUpdateOf(frame: AcpFrame): Record<string, unknown> | undefined {
+    const dialect = this.options.dialect
+    if (dialect === undefined) return undefined
+    return dialect.frameUpdate === undefined
+      ? (frame.method === 'session/update' ? recordOf(recordOf(frame.params)['update']) : undefined)
+      : dialect.frameUpdate(frame)
+  }
+
+  /**
+   * spawned 生命周期的逐帧记账（steps 路径）：出生帧建档、进度帧改写可见输出、
+   * 收尾帧落定并即时写结果。返回出生帧的档案（供调用方回填 cardOnLog）。
+   */
+  private trackSpawnedFrame(frame: AcpFrame): SpawnedTrack | undefined {
+    const runs = this.spawnedRuns
+    const dialect = this.options.dialect
+    if (runs === undefined || dialect === undefined) return undefined
+    const update = this.frameUpdateOf(frame)
+    if (update === undefined) return undefined
+    const reading = readSpawnedFrame(dialect, update)
+    if (reading === undefined) return undefined
+    if (reading.kind === 'spawn') {
+      // 同一出生帧只建一次档，与 foldSubagentUpdate 的去重一致。
+      if (runs.has(reading.call.callId)) return undefined
+      const record: SpawnedTrack = {
+        callId: reading.call.callId,
+        frame,
+        call: reading.call,
+        settled: false,
+        cardOnLog: false,
+        resultOnLog: false,
+        openInSegment: true,
+      }
+      runs.set(record.callId, record)
+      return record
+    }
+    const record = runs.get(reading.callId)
+    if (record === undefined) return undefined
+    if (reading.kind === 'progress') {
+      if (reading.summary !== undefined) record.call.output = reading.summary
+      return undefined
+    }
+    if (reading.output !== undefined && (!reading.fillOnlyEmpty || record.call.output === '')) {
+      record.call.output = reading.output
+    }
+    if (reading.settled && !record.settled) {
+      record.settled = true
+      if (reading.status !== undefined) record.call.status = reading.status
+      this.writeSpawnedResult(record)
+    }
+    return undefined
+  }
+
+  /** 子会话帧：文本累积进 spawned 档案的输出（accumulate 的子代路由同款）。 */
+  private trackChildChunk(frame: AcpFrame, childSessionId: string): void {
+    const record = this.spawnedRuns?.get(childSessionId)
+    if (record === undefined) return
+    const update = this.frameUpdateOf(frame)
+    if (update === undefined) return
+    const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
+    if (kind !== 'agent_message_chunk') return
+    const text = textOf(update['content'])
+    if (text.length > 0) record.call.output += text
+  }
+
+  /**
+   * 收尾帧到达即写 spawned 结果：卡片已在日志才配对（实时写或出生段补对），
+   * 否则留给出生段收段时补对——孤儿结果日志不认。写失败不抛：帧处理器还要
+   * 驱动流与切段。
+   */
+  private writeSpawnedResult(record: SpawnedTrack): void {
+    const live = this.liveCards
+    if (live === undefined) return
+    if (!(record.cardOnLog || live.written.has(record.callId))) return
+    if (record.resultOnLog || live.settled.has(record.callId)) return
+    try {
+      live.write([projectSpawnedResult(record.call, { turn: live.turn, step: live.step })])
+    } catch {
+      return
+    }
+    live.settled.add(record.callId)
+    record.resultOnLog = true
   }
 
   /** Wake a runSteps call waiting for segment activity; nobody waiting is a no-op. */
@@ -490,6 +616,7 @@ export class AcpTurnRunner {
     this.segmenter = mode === 'steps' && this.options.dialect !== undefined
       ? new AcpSegmenter(this.options.dialect)
       : undefined
+    this.spawnedRuns = mode === 'steps' && this.options.dialect !== undefined ? new Map() : undefined
     this.aborted = false
     this.promptSettled = false
     this.replyStop = undefined
@@ -872,7 +999,7 @@ export class AcpTurnRunner {
             // 边界帧属于新段：留在队首，下一次调用在它自己的段里处理。
             // 中间段的 end 只是类型占位——投影只读 frames/stream，回合的真实
             // 结束原因只随末段返回。
-            this.closeSegment(turn, stream, liveCards, { kind: 'completed' })
+            this.closeSegment(turn, stream, liveCards, { kind: 'completed' }, this.spawnedCloseBookkeeping(turn, false))
             return null
           }
         }
@@ -884,12 +1011,12 @@ export class AcpTurnRunner {
             return end
           }
           // 空末段：上一次闭合之后、应答/中止之前什么都没到——没有事件可写，
-          // 结束原因走返回值（公告待写时不算空，见 noticePending）。
-          if (this.frames.length === 0 && !this.noticePending()) {
+          // 结束原因走返回值（公告或 spawned 收尾待写时不算空，见下）。
+          if (this.frames.length === 0 && !this.noticePending() && !this.spawnedTailPending()) {
             stream?.abandon()
             return end
           }
-          this.closeSegment(turn, stream, liveCards, end)
+          this.closeSegment(turn, stream, liveCards, end, this.spawnedCloseBookkeeping(turn, true))
           return end
         }
         // 段未闭合、应答未落定：等下一帧、中止或应答（observe / watchStop /
@@ -900,6 +1027,16 @@ export class AcpTurnRunner {
       this.liveCards = undefined
       this.stream = undefined
     }
+  }
+
+  /** 末段收尾时是否还有 spawned 运行等着合成结果（空末段也要写它再收）。 */
+  private spawnedTailPending(): boolean {
+    const runs = this.spawnedRuns
+    if (runs === undefined) return false
+    for (const record of runs.values()) {
+      if (!record.resultOnLog) return true
+    }
+    return false
   }
 
   /** 首段的未送达公告是否还没落盘：公告待写时，空段也要写一次再收。 */
@@ -929,6 +1066,62 @@ export class AcpTurnRunner {
   }
 
   /**
+   * 段收尾的 spawned 侧账：给 closeSegment 的剥离名单，加上日志上还缺的
+   * 卡/结果补写事件。
+   *
+   * - 出生段补对：卡片不在日志上（实时写失败）且出生帧在本段——收段时按档案
+   *   补 卡+此刻结果（已收尾给真输出，未收尾给 still running）。投影自身的
+   *   spawned 事件已被剥离，不会双写。
+   * - 末段收尾：对结果仍不在日志上的运行合成收尾——已收尾的给档案里的真输出，
+   *   仍未收尾的合成 [still running]（此刻才允许，回合都要收场了）。卡不在
+   *   日志时连卡一起补（防御：正常路径出生段已补过）。
+   */
+  private spawnedCloseBookkeeping(turn: TurnContext, final: boolean): { readonly ids: ReadonlySet<string>; readonly tail: readonly ProjectionEvent[] } | undefined {
+    const runs = this.spawnedRuns
+    if (runs === undefined) return undefined
+    const position = turn.position
+    const tail: ProjectionEvent[] = []
+    if (position !== undefined) {
+      for (const record of runs.values()) {
+        if (!record.openInSegment || record.cardOnLog) continue
+        tail.push(...this.spawnedBirthPair(record, position))
+        record.cardOnLog = true
+        record.resultOnLog = true
+      }
+      if (final) {
+        for (const record of runs.values()) {
+          if (record.resultOnLog) continue
+          if (!record.cardOnLog) {
+            tail.push(...this.spawnedBirthPair(record, position))
+            record.cardOnLog = true
+          }
+          tail.push(projectSpawnedResult(
+            record.settled ? record.call : { ...record.call, output: stillRunningText(record.call.output) },
+            { turn: position.turn, step: position.step },
+          ))
+          record.resultOnLog = true
+        }
+      }
+    }
+    for (const record of runs.values()) record.openInSegment = false
+    return { ids: new Set(runs.keys()), tail }
+  }
+
+  /** 出生段收段时的补对：卡 + 此刻结果。公告由段消息自带的那块承担——未实时写的 id 的块会留在段消息里，且先于补卡。 */
+  private spawnedBirthPair(record: SpawnedTrack, position: { readonly turn: number; readonly step: number }): readonly ProjectionEvent[] {
+    const dialect = this.options.dialect
+    if (dialect === undefined) return []
+    const options = { turn: position.turn, step: position.step, dialect }
+    const card = projectToolCallFrame(record.frame, options)
+    if (card === undefined) return []
+    const result = projectSpawnedResult(
+      record.settled ? record.call : { ...record.call, output: stillRunningText(record.call.output) },
+      position,
+    )
+    return [card, result]
+  }
+
+  /**
    * 收段：投影、落盘、收流。
    *
    * 投影先于写、写先于收流：闭合帧携带消息的序号，指向一条还没写的消息会让
@@ -936,9 +1129,16 @@ export class AcpTurnRunner {
    * 落盘（它在段事件之前展开，永不触碰消息的序号）。收完段帧清空——下一段
    * 从空段开始。run 路径的回合末也走这里：无条件 produce+write，回合末残余
    * 的补写语义保持现状；「空段不产事件」是 steps 路径末段的规则，由调用方
-   * 在此之前把守。
+   * 在此之前把守。steps 路径传入 spawned 剥离名单时，投影自身的 spawned
+   * 事件一律剥离——spawned 生命周期归泵持有，缺什么由泵的补写事件给出。
    */
-  private closeSegment(turn: TurnContext, stream: TurnStreamHandle | undefined, liveCards: LiveCards | undefined, end: StepEndReason): void {
+  private closeSegment(
+    turn: TurnContext,
+    stream: TurnStreamHandle | undefined,
+    liveCards: LiveCards | undefined,
+    end: StepEndReason,
+    spawned?: { readonly ids: ReadonlySet<string>; readonly tail: readonly ProjectionEvent[] },
+  ): void {
     const position = turn.position
     const notice = !this.noticeWritten && this.undelivered.length > 0 && position !== undefined
       ? [{
@@ -957,9 +1157,11 @@ export class AcpTurnRunner {
       ...(stream === undefined ? {} : { stream: stream.records() }),
     }
     const produced = turn.produce(result)
+    const filtered = liveCards === undefined ? produced : withoutLiveWritten(produced, liveCards)
     const events = [
       ...notice,
-      ...(liveCards === undefined ? produced : withoutLiveWritten(produced, liveCards)),
+      ...(spawned === undefined ? filtered : withoutSpawnedRuns(filtered, spawned.ids)),
+      ...(spawned?.tail ?? []),
     ]
     const seq = turn.write(events)
     if (stream === undefined) return
@@ -1138,6 +1340,29 @@ function withoutLiveWritten(produced: readonly ProjectionEvent[], liveCards: Liv
     if (event.type !== 'tool/call') return [event]
     const callId = recordOf(event.payload)['callId']
     return typeof callId === 'string' && liveCards.written.has(callId) ? [] : [event]
+  })
+}
+
+/**
+ * steps 路径：spawned 运行的投影事件一律剥离。
+ *
+ * spawned 生命周期归泵全程持有——卡片实时写、收尾实时落结果、缺什么收段时由
+ * 泵的补写事件给出。投影自身的 spawned 循环以「本段帧里有出生帧」为前提，跨
+ * 段后它既看不见收尾帧也看不见子代输出，留下的只能是错误的 [still running]
+ * 或凭空蒸发的结果——所以不管写没写过，一律剥离、由泵说了算。
+ */
+function withoutSpawnedRuns(events: readonly ProjectionEvent[], ids: ReadonlySet<string>): readonly ProjectionEvent[] {
+  if (ids.size === 0) return events
+  return events.filter(event => {
+    if (event.type === 'tool/call') {
+      const callId = recordOf(event.payload)['callId']
+      return !(typeof callId === 'string' && ids.has(callId))
+    }
+    if (event.type === 'tool/result') {
+      const callId = resultCallIdOf(event)
+      return callId === undefined || !ids.has(callId)
+    }
+    return true
   })
 }
 

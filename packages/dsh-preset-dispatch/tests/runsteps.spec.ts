@@ -96,10 +96,17 @@ function fakePromptClient() {
 
 type Append = { type: string; payload: Record<string, unknown>; intent?: { surfaceOp?: string; sourceEventSeqs?: readonly number[] } }
 
-/** 记录每次 append 的写入器，形状同 mid-turn-tools 的 recordingWrite。 */
-function recordingWrite(): { write: ContentWriter; appends: Append[] } {
+/**
+ * 记录每次 append 的写入器，形状同 mid-turn-tools 的 recordingWrite；`failures`
+ * 队列让指定类型的第一次 append 抛错（实时写失败的回退路径用）。
+ */
+function recordingWrite(failures: string[] = []): { write: ContentWriter; appends: Append[] } {
   const appends: Append[] = []
   const write = makeContentWriter((type, payload, intent) => {
+    if (failures[0] === type) {
+      failures.shift()
+      throw new Error(`append refused: ${type}`)
+    }
     appends.push({ type, payload: payload as Record<string, unknown>, ...(intent === undefined ? {} : { intent }) })
     return { seq: appends.length }
   })
@@ -145,9 +152,9 @@ type Harness = {
 }
 
 /** 真投影（claude 方言、真 projectStepContent）+ 记录写入器 + 记录流句柄。 */
-function segmentHarness(options: { abort?: () => AbortSignal; primer?: RunnerOptions['primer'] } = {}): Harness {
+function segmentHarness(options: { abort?: () => AbortSignal; primer?: RunnerOptions['primer']; failures?: string[] } = {}): Harness {
   const fake = fakePromptClient()
-  const { write, appends } = recordingWrite()
+  const { write, appends } = recordingWrite(options.failures)
   const streams: ReturnType<typeof recordingStream>[] = []
   const runner = new AcpTurnRunner(fake.client, {
     cwd: '/tmp',
@@ -378,7 +385,7 @@ describe('runSteps — 段落推进', () => {
 })
 
 describe('runSteps — 泵内两条裁定', () => {
-  it('子会话帧不闭父段也不进父流：只在投影时折进子代理结果（裁定 1）', async () => {
+  it('子会话帧不闭父段也不进父流：输出折进子代理卡片结果（裁定 1）', async () => {
     const h = segmentHarness()
     let settled = false
     const first = h.runner.runSteps(DECISION, h.turnOf(1), { first: true }).then(end => { settled = true; return end })
@@ -396,15 +403,17 @@ describe('runSteps — 泵内两条裁定', () => {
     // 闭合只发生在父会话自己的新内容帧上。
     h.deliver(textFrame('b'))
     expect(await first).toBeNull()
-    // 子代文本不进父流；子代理卡片实时开卡，结果在段末成对补写。
+    // 子代文本不进父流；子代理卡片实时开卡，收尾帧到达即实时落结果（跨段修复
+    // 后泵全程持有 spawned 生命周期——结果不再等段投影）。
     expect(h.streams[0]!.log.deltas).toEqual(['a'])
     expect(h.appends.map(append => append.type)).toEqual([
-      'assistant/message', 'tool/call', 'tool/result', 'assistant/message', 'tool/call', 'assistant/message', 'tool/result',
+      'assistant/message', 'tool/call', 'tool/result', 'assistant/message', 'tool/call', 'tool/result', 'assistant/message',
     ])
-    const childResult = h.appends.at(-1)!
+    const childResult = h.appends[5]!
     expect((childResult.payload as { message: { content: { text: string }[] } }).message.content)
       .toEqual([{ type: 'text', text: 'child reply' }])
     expect(childResult.intent?.sourceEventSeqs).toEqual([5])
+    expect(childResult.payload['step']).toBe(1)
   })
 
   it('同一 callId 的第二个收尾帧不再重复实时写结果（裁定 2）', async () => {
@@ -422,5 +431,138 @@ describe('runSteps — 泵内两条裁定', () => {
     expect(results).toHaveLength(1)
     expect((results[0]!.payload as { message: { content: { text: string }[] } }).message.content)
       .toEqual([{ type: 'text', text: 'ok' }])
+  })
+})
+
+describe('runSteps — spawned 跨段生命周期', () => {
+  it('spawned 卡跨段：出生段实时开卡，收尾帧在第二段实时落结果，无 still running，子代文本不进父段', async () => {
+    const h = segmentHarness()
+    const first = h.runner.runSteps(DECISION, h.turnOf(1), { first: true })
+    await h.started()
+    h.deliver(textFrame('a'))
+    h.deliver(toolOpen('t1'))
+    h.deliver(toolDone('t1', 'ok'))
+    h.deliver(spawnFrame('child-1'))
+    h.deliver(childChunk('child-1', 'child reply'))
+    h.deliver(textFrame('b'))
+    expect(await first).toBeNull()
+
+    // 出生段：两张卡都实时写出，但 spawned 的结果不等在段投影里——它归收尾帧。
+    expect(h.appends.map(append => append.type)).toEqual([
+      'assistant/message', 'tool/call', 'tool/result', 'assistant/message', 'tool/call', 'assistant/message',
+    ])
+
+    // 收尾帧落在第二段：结果实时写出，挂第二段的步骤号，带档案里累积的子代输出。
+    h.deliver(childSettled('child-1'))
+    const second = h.runner.runSteps(DECISION, h.turnOf(2), { first: false })
+    h.deliver(replyFrame())
+    h.resolvePrompt()
+    expect(await second).toEqual({ kind: 'completed' })
+
+    expect(JSON.stringify(h.appends)).not.toContain('[still running]')
+    const childResults = h.appends.filter(
+      append => append.type === 'tool/result' && (append.payload as { message?: { toolCallId?: string } }).message?.toolCallId === 'child-1',
+    )
+    expect(childResults).toHaveLength(1)
+    expect(childResults[0]!.payload['step']).toBe(2)
+    expect((childResults[0]!.payload as { message: { content: { text: string }[] } }).message.content)
+      .toEqual([{ type: 'text', text: 'child reply' }])
+    // 子代文本不出现在任何父段消息或流增量里——泵与投影在「子代帧不入段」上一致。
+    const messageTexts = h.appends
+      .filter(append => append.type === 'assistant/message')
+      .flatMap(append => (append.payload as { message: { content: { type: string; text?: string }[] } }).message.content)
+      .map(block => block.text ?? '')
+    expect(messageTexts.join('|')).not.toContain('child reply')
+    expect(h.streams[0]!.log.deltas).toEqual(['a'])
+    expect(h.streams[1]!.log.deltas).toEqual(['b'])
+  })
+
+  it('run 从不收尾：[still running] 只在末段合成一次，挂末段步骤号，带子代已到输出', async () => {
+    const h = segmentHarness()
+    const first = h.runner.runSteps(DECISION, h.turnOf(1), { first: true })
+    await h.started()
+    h.deliver(textFrame('a'))
+    h.deliver(toolOpen('t1'))
+    h.deliver(toolDone('t1', 'ok'))
+    h.deliver(spawnFrame('child-1'))
+    h.deliver(childChunk('child-1', 'child reply'))
+    h.deliver(textFrame('b'))
+    expect(await first).toBeNull()
+
+    // 中间段收段绝不写 still running——回合规约没结束，卡还在等收尾帧。
+    expect(h.appends.filter(append => append.type === 'tool/result' && (append.payload as { message?: { toolCallId?: string } }).message?.toolCallId === 'child-1')).toHaveLength(0)
+
+    h.deliver(replyFrame())
+    h.resolvePrompt()
+    expect(await h.runner.runSteps(DECISION, h.turnOf(2), { first: false })).toEqual({ kind: 'completed' })
+
+    const still = h.appends.filter(append => JSON.stringify(append.payload).includes('[still running]'))
+    expect(still).toHaveLength(1)
+    expect(still[0]!.payload['step']).toBe(2)
+    expect((still[0]!.payload as { message: { content: { text: string }[] } }).message.content)
+      .toEqual([{ type: 'text', text: '[still running] child reply' }])
+  })
+
+  it('spawned 实时开卡写失败：出生段收段按档案补对卡+结果，不重不漏', async () => {
+    const failures: string[] = []
+    const h = segmentHarness({ failures })
+    const first = h.runner.runSteps(DECISION, h.turnOf(1), { first: true })
+    await h.started()
+    h.deliver(textFrame('a'))
+    h.deliver(toolOpen('t1'))
+    h.deliver(toolDone('t1', 'ok'))
+    await flush()
+    h.deliver(spawnFrame('child-1'))
+    h.deliver(childChunk('child-1', 'child reply'))
+    // 泵还没排空这一批：写失败先入队，卡在出生帧上被拒。
+    failures.push('tool/call')
+    h.deliver(childSettled('child-1'))
+    h.deliver(textFrame('b'))
+    expect(await first).toBeNull()
+
+    // 公告随实时写进了日志、卡被拒：出生段收段按档案补 卡+结果（输出取累积），
+    // 不 orphan 也不双写。
+    const childCalls = h.appends.filter(append => append.type === 'tool/call' && append.payload['callId'] === 'child-1')
+    expect(childCalls).toHaveLength(1)
+    expect(childCalls[0]!.payload['step']).toBe(1)
+    const childResults = h.appends.filter(
+      append => append.type === 'tool/result' && (append.payload as { message?: { toolCallId?: string } }).message?.toolCallId === 'child-1',
+    )
+    expect(childResults).toHaveLength(1)
+    expect((childResults[0]!.payload as { message: { content: { text: string }[] } }).message.content)
+      .toEqual([{ type: 'text', text: 'child reply' }])
+    expect(JSON.stringify(h.appends)).not.toContain('[still running]')
+
+    h.deliver(replyFrame())
+    h.resolvePrompt()
+    expect(await h.runner.runSteps(DECISION, h.turnOf(2), { first: false })).toEqual({ kind: 'completed' })
+    expect(h.appends.filter(
+      append => append.type === 'tool/result' && (append.payload as { message?: { toolCallId?: string } }).message?.toolCallId === 'child-1',
+    )).toHaveLength(1)
+  })
+
+  it('run() 路径同样不把子会话 chunk 灌进答案流（泵 guard 两路共用）', async () => {
+    const h = segmentHarness()
+    const deltas: string[] = []
+    const turn: TurnContext = {
+      ...h.turnOf(1),
+      openStream: () => ({
+        start: () => {},
+        textDelta: text => { deltas.push(text) },
+        reasoningDelta: () => {},
+        records: () => [],
+        settle: () => {},
+        abandon: () => {},
+      }),
+    }
+    const running = h.runner.run(DECISION, turn)
+    await h.started()
+    h.deliver(textFrame('a'))
+    h.deliver(spawnFrame('child-1'))
+    h.deliver(childChunk('child-1', 'child reply'))
+    h.deliver(replyFrame())
+    h.resolvePrompt()
+    await running
+    expect(deltas).toEqual(['a'])
   })
 })
