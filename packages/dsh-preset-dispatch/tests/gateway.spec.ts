@@ -824,6 +824,10 @@ describe('GatewayConversations — 帧静默超时、提示与诊断包', () => 
       await Promise.race([answering.then(() => 'done'), vi.advanceTimersByTimeAsync(200).then(() => 't1100')])
       const notes = append.written.filter(w => w.type === 'system/message')
       expect(notes).toHaveLength(1)
+      // 消息事件必须带回合编号：宿主在落盘层校验 data.turn（2026-10-18
+      // session b60d6fa4：不带 turn 的提示整回合被打死，「本轮运行失败
+      // system/message turn must be a non-negative safe integer」）。
+      expect(notes[0]?.payload).toMatchObject({ turn: position.turn, step: position.step })
       const text = JSON.stringify(notes[0]?.payload)
       expect(text).toContain('已静默')
       expect(text).toContain('tls handshake eof')
