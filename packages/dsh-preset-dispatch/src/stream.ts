@@ -49,7 +49,16 @@ export type StreamOptions = {
 export class AcpAssistantStream {
   readonly attemptId: string
   private readonly runs: MutableRun[] = []
-  private readonly blockIndexes = new Map<'text-chunks' | 'reasoning-chunks', number>()
+  /**
+   * Next block number to hand out. Blocks are allocated on kind switches, not
+   * per kind: the live view folds streamed chunks into one block per index, so
+   * per-kind slots drew a mid-turn thought back at the text's original index —
+   * above text already on screen — and mashed separate text bursts into one
+   * block. Native model streams open a new block whenever reasoning and text
+   * switch; same-kind deltas keep writing the current one.
+   */
+  private nextBlockIndex = 0
+  /** Position the attempt's next chunk frame takes; also the end frame's index. */
   private index = 0
   private ended = false
 
@@ -132,31 +141,18 @@ export class AcpAssistantStream {
     })
   }
 
-  /**
-   * The block index one kind of delta streams into.
-   *
-   * The conversation view folds streamed chunks into one block per index, so
-   * reasoning and text must not share a slot — a text delta at the reasoning's
-   * index would visibly erase the thought it lands on. Kinds keep the index of
-   * their first appearance, assigned in arrival order.
-   */
-  private blockIndexOf(kind: 'text-chunks' | 'reasoning-chunks'): number {
-    const known = this.blockIndexes.get(kind)
-    if (known !== undefined) return known
-    const fresh = this.blockIndexes.size
-    this.blockIndexes.set(kind, fresh)
-    return fresh
-  }
-
   private pushDelta(type: 'text-chunks' | 'reasoning-chunks', text: string): void {
     if (this.ended) {
       // A delta after settlement would land in a stream the UI already closed.
       throw new Error('acp stream: attempt already ended')
     }
     const time = this.options.now?.() ?? Date.now()
-    const index = this.blockIndexOf(type)
     const previous = this.runs.at(-1)
-    if (previous !== undefined && previous.type === type && previous.index === index && time >= previous.lastTime) {
+    // Same kind keeps writing the current block; a reasoning↔text switch takes
+    // the next number. So a matching index always implies a matching kind —
+    // which is the whole run-merge condition below, next to the time guard.
+    const index = previous !== undefined && previous.type === type ? previous.index : this.nextBlockIndex++
+    if (previous !== undefined && previous.index === index && time >= previous.lastTime) {
       previous.dt.push(time - previous.lastTime)
       previous.texts.push(text)
       previous.lastTime = time
