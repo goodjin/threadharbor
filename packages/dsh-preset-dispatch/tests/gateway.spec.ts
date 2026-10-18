@@ -123,6 +123,45 @@ describe('GatewayChunkStream — the native loop’s chunk vocabulary', () => {
     expect(chunks.filter(c => c.type === 'block-end').map(c => 'block' in c ? c.block.type : '')).toEqual(['reasoning', 'text'])
   })
 
+  it('numbers interleaved blocks 0,1,2 as the kinds switch', () => {
+    const chunks: GatewayChunk[] = []
+    const stream = new GatewayChunkStream({ chunk: c => { chunks.push(c) } })
+    const port = stream.port()
+    port.reasoningDelta('思')
+    port.textDelta('答')
+    port.reasoningDelta('再想')
+
+    // 换向即开新块：回到思考取下一个号，而不是回到它最早那块——
+    // 按类占槽会把这个 mid-turn 的思考按 index 折回正文上方。
+    const starts = chunks.filter(c => c.type === 'block-start')
+    expect(starts.map(c => c.index)).toEqual([0, 1, 2])
+    expect(starts.map(c => c.blockType)).toEqual(['reasoning', 'text', 'reasoning'])
+  })
+
+  it('emits block-start once per switch, then closes every block in order at finish', () => {
+    const chunks: GatewayChunk[] = []
+    const stream = new GatewayChunkStream({ chunk: c => { chunks.push(c) } })
+    const port = stream.port()
+    port.textDelta('你')
+    port.textDelta('好')
+    port.reasoningDelta('思')
+    port.reasoningDelta('考')
+    stream.finish({ kind: 'completed' })
+
+    // 同类连续增量续写当前块：block-start 只在换向处出现，一次。
+    const starts = chunks.filter(c => c.type === 'block-start')
+    expect(starts.map(c => c.index)).toEqual([0, 1])
+    expect(starts.map(c => c.blockType)).toEqual(['text', 'reasoning'])
+    const deltas = chunks.filter(c => c.type === 'text-delta' || c.type === 'reasoning-delta')
+    expect(deltas.map(c => c.index)).toEqual([0, 0, 1, 1])
+    // finish 按块序收尾，同类增量并成一整段。
+    expect(chunks.filter(c => c.type === 'block-end').map(c => 'block' in c ? c.block : undefined)).toEqual([
+      { type: 'text', text: '你好' },
+      { type: 'reasoning', text: '思考' },
+    ])
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+  })
+
   it('maps the step endings onto finish reasons', () => {
     for (const [end, reason] of [
       [{ kind: 'completed' }, { kind: 'stop' }],
