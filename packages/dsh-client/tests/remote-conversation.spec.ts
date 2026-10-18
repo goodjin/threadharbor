@@ -1,5 +1,5 @@
 /**
- * 主区里看另一台主机上的会话：读记录、发一条、停一下。
+ * 主区打开另一台主机时，加载的是本机网关上的那台机器自己的界面。
  *
  * @vitest-environment jsdom
  */
@@ -18,8 +18,7 @@ function zhT(key: string, params?: Record<string, unknown>): string {
 }
 
 describe('RemoteConversationPanel', () => {
-  it('打开后读出对方的记录，发送把文字交给那台主机', async () => {
-    const calls: Array<Record<string, unknown>> = []
+  it('选中主机后，主区指向本机网关上的那台机器', async () => {
     const store = createRemoteConversationStore()
     store.open({
       hostId: 'mini',
@@ -33,35 +32,17 @@ describe('RemoteConversationPanel', () => {
     document.body.appendChild(container)
     const root = createRoot(container)
     await act(async () => {
-      root.render(createElement(RemoteConversationPanel, {
-        remoteSessions: store,
-        t: zhT,
-        call: async body => {
-          calls.push(body)
-          if (body['op'] === 'transcript') {
-            return { ok: true as const, value: { turns: [{ role: 'user', text: '你好' }], hasMore: false } }
-          }
-          return { ok: true as const, value: { accepted: true } }
-        },
-      }))
+      root.render(createElement(RemoteConversationPanel, { remoteSessions: store, t: zhT }))
     })
     try {
-      expect(container.querySelector('[data-remote-title]')?.textContent).toBe('远端会话')
+      const frame = container.querySelector('iframe')
+      expect(frame?.getAttribute('src')).toBe('/threadharbor/gateway/mini/')
+      expect(frame?.getAttribute('data-remote-gateway')).toBe('mini')
       expect(container.textContent).toContain('迷你主机')
-      expect(container.querySelector('[data-remote-turn="user"]')?.textContent).toBe('你好')
-      const input = container.querySelector<HTMLInputElement>('[data-remote-input]')
-      if (input === null) throw new Error('input missing')
-      await act(async () => {
-        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, '接着说')
-        input.dispatchEvent(new Event('input', { bubbles: true }))
-      })
-      await act(async () => {
-        container.querySelector<HTMLButtonElement>('[data-action="remote-send"]')?.click()
-        await Promise.resolve()
-      })
-      expect(calls.some(body => body['op'] === 'prompt' && body['text'] === '接着说' && body['sessionId'] === 'r1')).toBe(true)
+      expect(container.querySelector('[data-remote-input]')).toBeNull()
     } finally {
       await act(async () => { root.unmount() })
+      container.remove()
     }
   })
 })

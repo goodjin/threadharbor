@@ -86,7 +86,7 @@ export async function fetchRemoteSessions(launchUrl: string): Promise<RemoteSess
 }
 
 /** GET /?token= → Set-Cookie (DSH only mints auth on the index path). */
-async function exchangeAuthCookie(origin: string, token: string): Promise<string | undefined> {
+export async function exchangeAuthCookie(origin: string, token: string): Promise<string | undefined> {
   const response = await fetch(`${origin}/?token=${encodeURIComponent(token)}`, {
     method: 'GET',
     redirect: 'manual',

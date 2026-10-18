@@ -21,7 +21,7 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 agent 接进 
 - 主机侧的 agent 探测（发一条真实小任务看是否回应）与重启已实现，但目前没有界面入口。
 - 云主机中转通道（核对时间 2026-10-16）：`@threadharbor/dsh-mobile-relay` 让手机只经公网 HTTPS 连一台云主机、不装 Tailscale，即可切换多台机器——数据面是 SSH 本地隧道，tailnet 只做在线发现。入口 `dsh.agentlab.fun`（灰云 DNS + Let's Encrypt + nginx 反代 + 一层 HTTP 口令），机器清单、会话转发、审批按机器归属与事件汇流都在这个包里；配置片段由 `scripts/relay-setup.sh` 生成（只打印，不改文件）。
 - 手机通道（核对时间 2026-10-15）：`@threadharbor/dsh-mobile-entry` 在 DSH Web 上挂 `/threadharbor/mobile/` 手机页——主机清单（tailnet 名单 + 各机 DSH 探测）、看会话、发消息、批权限、停止回合——以及先过官方准入的 `peers` / `pair-url` 两个接口。桌面侧栏「手机配对」面板出二维码（需配置 `mobileOrigin`，只收 https 源），手机扫码经官方授权入口把令牌换成 cookie 完成配对。可达性由 `tailscale serve --bg` 提供，dsh 启动须带 `--trusted-host`；`scripts/mobile-setup.sh <dsh端口>` 一键完成发布并打印两步配置，详见 [docs/mobile-client.zh.md](docs/mobile-client.zh.md)。
-- 同一窗口管理多台主机的会话（核对时间 2026-10-17）：左侧树列出本机和其他已登记主机的项目与会话。点其他主机上的会话，就在这个窗口里看记录、发消息、停止、新建、改名、归档、置顶、分叉；会话仍跑在那台主机自己的 DSH 上，本机只做转发。审批和逐字流式还没接上，打开后大约每 4 秒刷新一次记录。
+- 同一窗口管理多台主机（核对时间 2026-10-18）：左侧树列出本机和其他已登记主机的项目与会话。点其他主机，主区通过本机网关打开那台机器自己的 DSH 界面，浏览器调的还是那套接口，只是地址换成了登记簿里的那台；审批、流式、模型选择和上传都在这个界面里。会话仍跑在那台主机上。登录 cookie 留在本机网关，不写进浏览器。
 - 原生 dsh preset 的行为不受影响：组合行只认得自己 presetId 下的会话，其余一律不接管。
 - 各 agent 的端到端活测（建会话 → 提问 → 收到回答 → 工具调用正确投影、权限批准后回合继续）默认跳过，带 `THREADHARBOR_LIVE_ACP=1` 运行；见下文「真机活测」。
 - ACP 四家的委派看得见（核对时间 2026-10-20）：握手声明 [ACP 子代理草案](https://github.com/agentclientprotocol/agent-client-protocol/pull/1992)的 `subagents` 能力后，codex 与 claude 的子代理委派、claude 的后台任务以原生帧（`subagent_spawned` 等）到达，实时投成 `subagent` / `async_task` 卡片，子会话内容不漏进父回答（单测照真实抓包钉死投影行为；codex / claude / grok 三家帧级真机验收均已通过，2026-10-20）；grok 不实现草案但发自己的一套子代理帧（私有方法名＋蛇形字段，经方言归一化后同样投成卡片，真机抓包已钉死）；cursor 忽略该字段。帧表与投影规则见 [docs/agent-acp/README.md](docs/agent-acp/README.md)。
@@ -74,8 +74,8 @@ THREADHARBOR_LIVE_ACP=1 npx vitest run packages/dsh-acp-agent/tests/live.spec.ts
 ```text
 packages/dsh-acp-agent/        通用 ACP 接入层：客户端、传输、三家方言、投影、终端/文件子协议
 packages/dsh-preset-dispatch/  preset 组合行（宿主加载入口 entry.ts）：分流、回合驱动、写回、流式
-packages/dsh-client/           浏览器插件：左侧主机树（本机与其他主机的会话在同一窗口里看、发、停；会话仍跑在各自主机上）、「各主机」设置栏目与「手机配对」二维码面板
-packages/dsh-host-federation/  跨主机汇总的库：主机身份、跨标签页通道、分组视图、按主机设置
+packages/dsh-client/           浏览器插件：左侧主机树（点其他主机就在主区打开那台机器自己的界面）、「各主机」设置栏目与「手机配对」二维码面板
+packages/dsh-host-federation/  跨主机汇总的库：主机身份、跨标签页通道、分组视图、按主机设置，以及把浏览器请求转到已登记主机的同源网关
 packages/dsh-mobile-entry/     手机端入口（宿主侧）：/threadharbor/mobile/ 手机页、peers / pair-url 接口
 tests/wiring.spec.ts           「代码对」与「代码跑得到」分开检查；到不了的模块登记在 KNOWN_UNWIRED
 cordis.patch.yml               安装到 DSH Web profile 的标准 bundle patch（只插浏览器插件）
