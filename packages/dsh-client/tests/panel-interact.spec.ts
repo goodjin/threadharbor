@@ -867,7 +867,7 @@ describe('主机详情：使用这台主机 + 远程部署（状态机如实呈�
         ssh: { target: SSH_SEED.target, port: 22, user: SSH_SEED.user, identityFile: SSH_SEED.identityFile, hostKeyFingerprint: SSH_SEED.hostKeyFingerprint },
         remoteWebPort: 3081,
       })
-      expect(open).toHaveBeenCalledWith('http://127.0.0.1:45555/?token=neo', '_blank', 'noopener')
+      expect(open).toHaveBeenCalledWith('/threadharbor/gateway/bench/', '_blank', 'noopener')
       const updated = withSsh.list().find(entry => entry.hostId === 'bench')
       expect(updated?.address).toBe('http://127.0.0.1:45555')
       expect(updated?.launchUrl).toBe('http://127.0.0.1:45555/?token=neo')

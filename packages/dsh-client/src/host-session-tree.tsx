@@ -167,14 +167,15 @@ function readViewOptions(): { orderBy: OrderBy; filterBy: FilterBy } {
   }
 }
 
-/** A session that lives on another host, named well enough to open it here. */
+/** A host, or one session on it, named well enough to open it here. */
 export type RemoteTarget = {
   readonly hostId: string
   readonly hostTitle: string
   readonly launchUrl: string
-  readonly sessionId: string
-  readonly title: string
-  readonly projectId: string
+  /** Absent when the click was the host row, not a session row. */
+  readonly sessionId?: string
+  readonly title?: string
+  readonly projectId?: string
 }
 
 /** Row actions that must run on the host that owns the session, not this page. */
@@ -520,7 +521,18 @@ export function HostSessionTree({ view, ctx, initialExpanded, currentSessionId, 
               onClick={() => {
                 // An undeployed host has nothing to expand; the note under it
                 // says where the deploy flow lives (设置 → 各主机).
-                if (host.undeployed !== true) toggle(host.hostId)
+                if (host.undeployed === true) return
+                toggle(host.hostId)
+                if (host.self) return
+                const launchUrl = launchUrls?.[host.hostId]
+                if (launchUrl === undefined || onOpenRemote === undefined) return
+                const opened = onOpenRemote({
+                  hostId: host.hostId,
+                  hostTitle: host.label,
+                  launchUrl,
+                  title: host.label,
+                })
+                if (!opened) setActionError(t('panel.tree.remoteOpenFailed'))
               }}
             >
               <span className={styles.hostDot} data-host-online={host.self || host.empty === false ? 'true' : 'false'} />

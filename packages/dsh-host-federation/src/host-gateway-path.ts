@@ -203,7 +203,12 @@ export function rewriteCss(css: string, hostId: string): string {
 
 export function rewriteJs(js: string, hostId: string): string {
   const root = gatewayPagePath(hostId)
-  return js.replace(/(['"`])\/assets\//g, (_match, quote: string) => `${quote}${root}assets/`)
+  return js
+    .replace(/(['"`])\/assets\//g, (_match, quote: string) => `${quote}${root}assets/`)
+    // The remote app's context is not a window global. Stash `uiWorkspace`
+    // the moment a plugin reads it, so the frame can open the clicked session.
+    .replace(/ctx\.get\((['"])uiWorkspace\1\)/g, '(window.__thUiWorkspace=ctx.get($1uiWorkspace$1))')
+    .replace(/ctx\.uiWorkspace\b/g, '(window.__thUiWorkspace=ctx.uiWorkspace)')
 }
 
 /**
@@ -302,6 +307,53 @@ else super(wsUrl(url),protocols);
 }
 }
 window.WebSocket=WrappedWS;
+function wantedSession(){
+var hash=location.hash||"";
+var mark="thSession=";
+var at=hash.indexOf(mark);
+if(at<0)return "";
+var raw=hash.slice(at+mark.length);
+var amp=raw.indexOf("&");
+if(amp>=0)raw=raw.slice(0,amp);
+try{return decodeURIComponent(raw);}catch(e){return "";}
+}
+var opened="";
+function workspaceOf(){
+var ui=window.__thUiWorkspace;
+if(ui&&typeof ui.openSession==="function")return ui;
+var names=["__DSH_CTX__","ctx"];
+for(var i=0;i<names.length;i++){
+var root=window[names[i]];
+if(!root||typeof root.get!=="function")continue;
+try{
+var got=root.get("uiWorkspace");
+if(got&&typeof got.openSession==="function")return got;
+}catch(e){}
+}
+return null;
+}
+function tryOpen(){
+var id=wantedSession();
+if(!id||id===opened)return;
+var ui=workspaceOf();
+if(!ui)return;
+try{ui.openSession(id);opened=id;}catch(e){}
+}
+var timer=0;
+function arm(){
+if(!wantedSession())return;
+if(timer)return;
+var tries=0;
+tryOpen();
+if(opened)return;
+timer=setInterval(function(){
+tries+=1;
+tryOpen();
+if(opened||tries>80){clearInterval(timer);timer=0;}
+},250);
+}
+window.addEventListener("hashchange",function(){opened="";arm();});
+arm();
 })();`
 }
 

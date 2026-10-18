@@ -347,10 +347,11 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // fallback reads the dictionary's source text so the ports work unchanged
   // without a locale service.
   const t: RuntimeT = locale?.bind(NAMESPACE) ?? fallbackT
-  // The registry and the default identity follow the machine (2026-10-12
-  // 用户要求：名单当然应该跟着本机的设置走): both go through ONE host-backed
-  // storage — `isLoopback ? 'host' : 'memory'`, per the design doc — so the
-  // two can never drift apart again. This tab's own claim stays in
+  // The registry and the default identity follow the machine that served
+  // this page (2026-10-12 用户要求：名单当然应该跟着本机的设置走): both go
+  // through ONE settings channel whenever that channel exists, including when
+  // the browser opened the page by a Tailscale address. No channel means the
+  // list stays in this page only. This tab's own claim stays in
   // sessionStorage: that per-tab override is what lets two tabs of one DSH
   // claim two hosts, and it is not a bug to fix.
   const hostStoreDepsResult = hostStoreDeps(ctx, message => { log.warn(message) })

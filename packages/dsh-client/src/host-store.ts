@@ -5,11 +5,11 @@
  * `window.localStorage`: one browser context later they were gone. This module
  * is the replacement the design settled on
  * (docs/design/dsh-multi-host-migration.md, the persistence note near line
- * 343): when the page is served by the machine in front of the user
- * (`isLoopback`), settings persist **on that machine** through DSH's settings
- * channel; when it is served by some other machine, they stay in this page's
- * memory only — writing them to the serving machine would store the user's
- * list on the wrong computer.
+ * 343): whenever this page has a settings channel, the registry is written
+ * through that channel onto the machine that served the page. That machine is
+ * the gateway, including when the browser reached it by a Tailscale address
+ * (`isLoopback` is false). A page with no settings channel keeps the list in
+ * memory only and says so.
  *
  * The face is deliberately the same two-method Web Storage shape the registry
  * and the identity settings already speak, so both swap to it together — the
@@ -74,7 +74,12 @@ export type ListKeyDescriptor = {
 }
 
 export type HostStoreDeps = {
-  /** Whether the page is served by the machine in front of the user. */
+  /**
+   * Whether the browser's Host is a loopback address.
+   * Persistence does not depend on this: a Tailscale address still talks to
+   * the machine that served the page, and that machine is the one that must
+   * hold the registry for the gateway.
+   */
   loopback(): boolean
   /** The settings channel; undefined means this host offers none at all. */
   channel: HostStoreChannel | undefined
@@ -118,7 +123,7 @@ export function startHostStore(deps: HostStoreDeps, t: RuntimeT = fallbackT): Ho
   let flushing = false
   const listDescriptors = new Map<string, ListKeyDescriptor>((deps.listKeys ?? []).map(descriptor => [descriptor.key, descriptor]))
 
-  const isHostMode = (): boolean => deps.loopback() && deps.channel !== undefined
+  const isHostMode = (): boolean => deps.channel !== undefined
 
   const setPosture = (next: HostStorePosture): void => {
     const changed = JSON.stringify(posture) !== JSON.stringify(next)
@@ -134,13 +139,10 @@ export function startHostStore(deps: HostStoreDeps, t: RuntimeT = fallbackT): Ho
   const firstRead = new Promise<void>(resolve => { settleFirstRead = resolve })
 
   if (!isHostMode()) {
-    const reason = deps.loopback() ? 'no-channel' : 'remote-page'
     // Said here AND in the posture: a list that quietly stops surviving
     // browsers is exactly the silent downgrade this panel must never do.
-    deps.log(reason === 'remote-page'
-      ? 'host store: page served by a remote machine; the registry and default identity stay in this page only and are lost when it closes'
-      : 'host store: this host offers no settings channel; the registry and default identity stay in this page only and are lost when it closes')
-    setPosture({ kind: 'memory', reason })
+    deps.log('host store: this host offers no settings channel; the registry and default identity stay in this page only and are lost when it closes')
+    setPosture({ kind: 'memory', reason: 'no-channel' })
     markReady()
     settleFirstRead()
   } else {

@@ -38,7 +38,7 @@ import type { ReachOutcome } from './reach.ts'
 import { hostActions, hostStatus } from './host-state.ts'
 import type { HostAction, HostFacts, HostReach, HostStatus, RemoteDeployment, RemoteLiveness } from './host-state.ts'
 import type { HostIdentity, HostRegistration, HostSshInfo, PeerReport, PeerStatus, RegistrationResult, RemoteAgentDeploySelection, RemoteReport, SshConnectionInput, SshDeployResult, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
-import { REMOTE_DEPLOY_AGENT_SPECS } from '@threadharbor/dsh-host-federation'
+import { REMOTE_DEPLOY_AGENT_SPECS, gatewayPagePath } from '@threadharbor/dsh-host-federation'
 import type { HostSnapshot } from '@threadharbor/dsh-host-federation'
 import type { HostStorePosture } from './host-store.ts'
 import {
@@ -1301,7 +1301,7 @@ function SshDeploySection(props: {
               <code className={styles.launchUrlText}>{deployed.launchUrl}</code>
               <div className={styles.formActions}>
                 <button type="button" className={styles.action} data-action="copy-launch-url" onClick={copyLaunchUrl}>{props.t('panel.button.copyLink')}</button>
-                <a className={styles.actionPrimary} data-action="open-launch-url" href={deployed.launchUrl} target="_blank" rel="noreferrer">{props.t('panel.ssh.open')}</a>
+                <a className={styles.actionPrimary} data-action="open-launch-url" href={gatewayPagePath(effectiveHostId())} target="_blank" rel="noreferrer">{props.t('panel.ssh.open')}</a>
               </div>
             </div>
           )
@@ -1330,6 +1330,7 @@ function SshDeploySection(props: {
  * 密码/粘贴私钥无法免输入重连，如实说明并指到部署区块。
  */
 function HostUseSection(props: {
+  readonly hostId: string
   readonly sshInfo: HostSshInfo | undefined
   readonly launchUrl: string | undefined
   readonly tunnel: 'unknown' | 'checking' | 'online' | 'offline'
@@ -1363,7 +1364,7 @@ function HostUseSection(props: {
               <p data-use-tunnel={props.tunnel} className={styles.stateLine}>{tunnelWord}</p>
               <div className={styles.formActions}>
                 {launchUrl !== undefined
-                  ? <a className={styles.action} data-action="open-page" href={launchUrl} target="_blank" rel="noreferrer">{props.t('panel.use.open')}</a>
+                  ? <a className={styles.action} data-action="open-page" href={gatewayPagePath(props.hostId)} target="_blank" rel="noreferrer">{props.t('panel.use.open')}</a>
                   : undefined}
                 {/* 「检查隧道」并进了详情页按钮表的 check-reach（都问登记里
                     那个地址）；这里只留状态行与打开/连接两个动作。 */}
@@ -2001,7 +2002,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
         ...(facts === undefined ? {} : { ssh: facts }),
       })
       if (edit.ok) setRegistryRevision(revision => revision + 1)
-      window.open(result.value.launchUrl, '_blank', 'noopener')
+      window.open(gatewayPagePath(registration.hostId), '_blank', 'noopener')
     })
   }
 
@@ -2201,7 +2202,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                       {registration.launchUrl !== undefined
                         ? (
                             <p data-registry-launch="" className={styles.stateLine}>
-                              <a className={styles.actionPrimary} href={registration.launchUrl} target="_blank" rel="noreferrer">{props.t('panel.registry.launchLink')}</a>
+                              <a className={styles.actionPrimary} data-action="open-registry" href={gatewayPagePath(registration.hostId)} target="_blank" rel="noreferrer">{props.t('panel.registry.launchLink')}</a>
                               <button
                                 type="button"
                                 className={styles.action}
@@ -2279,6 +2280,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                     {!row.self
                       ? (
                           <HostUseSection
+                            hostId={registration.hostId}
                             sshInfo={registration.ssh}
                             launchUrl={registration.launchUrl}
                             tunnel={tunnelChecks.get(row.hostId) ?? 'unknown'}

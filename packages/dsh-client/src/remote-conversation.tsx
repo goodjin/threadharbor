@@ -58,6 +58,13 @@ export type RemoteConversationProps = {
   readonly t?: RuntimeT
 } & Partial<PropsLocale<typeof NAMESPACE>>
 
+/** Gateway page for this host, with the clicked session in the hash when there is one. */
+export function gatewayFrameSrc(hostId: string, sessionId: string | undefined): string {
+  const page = gatewayPagePath(hostId)
+  if (sessionId === undefined || sessionId === '') return page
+  return `${page}#thSession=${encodeURIComponent(sessionId)}`
+}
+
 export function RemoteConversationPanel({ remoteSessions, t = fallbackT }: RemoteConversationProps) {
   const selection = useSyncExternalStore(remoteSessions.subscribe, remoteSessions.getSnapshot, remoteSessions.getSnapshot)
   if (selection === null) {
@@ -71,9 +78,10 @@ export function RemoteConversationPanel({ remoteSessions, t = fallbackT }: Remot
     <div className={styles.panel} data-remote-conversation data-remote-session={selection.sessionId}>
       <p className={styles.host}>{t('remoteSession.runningOn', { host: selection.hostTitle })}</p>
       <iframe
+        key={`${selection.hostId}:${selection.sessionId ?? ''}`}
         className={styles.frame}
         title={selection.hostTitle}
-        src={gatewayPagePath(selection.hostId)}
+        src={gatewayFrameSrc(selection.hostId, selection.sessionId)}
         data-remote-gateway={selection.hostId}
       />
     </div>

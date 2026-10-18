@@ -9,9 +9,10 @@ export type RemoteSelection = {
   readonly hostId: string
   readonly hostTitle: string
   readonly launchUrl: string
-  readonly sessionId: string
-  readonly title: string
-  readonly projectId: string
+  /** Absent when the person opened the host itself, not one of its sessions. */
+  readonly sessionId?: string
+  readonly title?: string
+  readonly projectId?: string
 }
 
 export type RemoteConversationStore = {

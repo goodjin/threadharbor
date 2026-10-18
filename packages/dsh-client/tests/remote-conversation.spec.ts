@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest'
 import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
-import { RemoteConversationPanel } from '../src/remote-conversation.tsx'
+import { RemoteConversationPanel, gatewayFrameSrc } from '../src/remote-conversation.tsx'
 import { createRemoteConversationStore } from '../src/remote-conversation-store.ts'
 import { zh } from '../src/locales.ts'
 
@@ -36,7 +36,8 @@ describe('RemoteConversationPanel', () => {
     })
     try {
       const frame = container.querySelector('iframe')
-      expect(frame?.getAttribute('src')).toBe('/threadharbor/gateway/mini/')
+      expect(frame?.getAttribute('src')).toBe('/threadharbor/gateway/mini/#thSession=r1')
+      expect(gatewayFrameSrc('mini', undefined)).toBe('/threadharbor/gateway/mini/')
       expect(frame?.getAttribute('data-remote-gateway')).toBe('mini')
       expect(container.textContent).toContain('迷你主机')
       expect(container.querySelector('[data-remote-input]')).toBeNull()

@@ -175,8 +175,8 @@ export const zh = {
   'panel.facts.readAt': '读到的时刻',
   /** 删除登记的确认句。 */
   'panel.registry.removeNote': '只从这台机器的登记列表里移除，不动远端那台机器。确定？',
-  /** 详情页登记区：打开含 token 页面的链接。 */
-  'panel.registry.launchLink': '连接（打开含 token 的页面）',
+  /** 详情页登记区：经本机网关打开那台主机自己的界面。 */
+  'panel.registry.launchLink': '在这里打开这台主机',
   /** 详情页的可达性复查；`{ms}` 是超时毫秒数。 */
   'panel.reach.probeTimeout': '检测超时（{ms} ms）',
   /** 不可探测的两种原因（reach.ts 的探针产出，面板原样显示在状态行）。 */
@@ -546,7 +546,7 @@ export const en = {
   'panel.facts.reported': 'Peer reporting in',
   'panel.facts.readAt': 'Read at',
   'panel.registry.removeNote': "Removes it from this machine's registration list only; the remote machine is untouched. Delete?",
-  'panel.registry.launchLink': 'Connect (opens the page that carries the token)',
+  'panel.registry.launchLink': 'Open this host here',
   'panel.reach.probeTimeout': 'The check timed out ({ms} ms)',
   // The two unreachable reasons the reach probe produces; the panel shows
   // them verbatim in the status line.

@@ -13,6 +13,7 @@ import {
   parseGatewayUpgrade,
   resolveLaunch,
   rewriteHtml,
+  rewriteJs,
 } from '../src/host-gateway-path.ts'
 
 type Seen = {
@@ -66,6 +67,13 @@ describe('网关路径', () => {
     expect(html).not.toContain('src="/assets/app.js"')
     expect(() => { new Function(gatewayClientScript('mini')) }).not.toThrow()
     expect(gatewayClientScript('mini')).toContain('/threadharbor/gateway-ws')
+    expect(gatewayClientScript('mini')).toContain('thSession=')
+    expect(gatewayClientScript('mini')).toContain('openSession')
+    expect(gatewayClientScript('mini')).not.toContain('</script')
+    const rewritten = rewriteJs('ctx.get("uiWorkspace");ctx.uiWorkspace.openSession(id);import("/assets/app.js")', 'mini')
+    expect(rewritten).toContain('(window.__thUiWorkspace=ctx.get("uiWorkspace"))')
+    expect(rewritten).toContain('(window.__thUiWorkspace=ctx.uiWorkspace).openSession(id)')
+    expect(rewritten).toContain('/threadharbor/gateway/mini/assets/app.js')
   })
 })
 
