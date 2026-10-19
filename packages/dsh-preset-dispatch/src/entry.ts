@@ -79,7 +79,9 @@ export const Config: Schema<Config> = Schema.object({
    * Replaces the spawn arguments the factory would default to. Omitted keeps
    * the default that makes this agent speak ACP at all.
    */
-  args: Schema.array(Schema.string()),
+  // Array schemas default omitted input to []; the optional union preserves
+  // omission so it cannot erase the factory's agent-specific ACP arguments.
+  args: Schema.union([Schema.array(Schema.string())]),
   model: Schema.string(),
   mode: Schema.string(),
   cwd: Schema.string(),

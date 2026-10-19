@@ -291,7 +291,7 @@ export function projectTurnIncremental(
     const id = typeof update['toolCallId'] === 'string' ? update['toolCallId'] : undefined
     const carried = id === undefined ? undefined : tools.get(id)
     const call = dialect.foldTool(carried, update)
-    tools.set(call.callId, call)
+    tools.set(typeof update['toolCallId'] === 'string' ? update['toolCallId'] : call.callId, call)
     if (!opened.has(call.callId)) {
       opened.add(call.callId)
       events.push(toolCallEvent(dialect, call, turn, step))
@@ -359,12 +359,12 @@ function toolResultEvent(tool: ToolCall, turn: number, step: number): Projection
  * for a call id's first frame, where nothing is carried yet, exactly like the
  * first frame in `projectTurnIncremental`. The payload is the shared tool/call
  * shape, identical to what the end-of-turn projection emits for the same
- * frame; the result still comes from that end-of-turn run, which the caller's
- * already-written record keeps from doubling the card.
+ * frame; the caller also writes terminal results live and deduplicates both
+ * against the final projection.
  */
 export function projectToolCallFrame(
   frame: AcpFrame,
-  options: { readonly turn: number; readonly step: number; readonly dialect: AcpDialect },
+  options: { readonly turn: number; readonly step: number; readonly dialect: AcpDialect; readonly carried?: ToolCall },
 ): ProjectionEvent | undefined {
   const update = recordOf(recordOf(frame.params)['update'])
   const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
@@ -375,7 +375,7 @@ export function projectToolCallFrame(
     const spawned = spawnedCallOf(update)
     return spawned === undefined ? undefined : toolCallEvent(options.dialect, spawned, options.turn, options.step)
   }
-  const call = options.dialect.foldTool(undefined, update)
+  const call = options.dialect.foldTool(options.carried, update)
   return toolCallEvent(options.dialect, call, options.turn, options.step)
 }
 
@@ -392,7 +392,7 @@ export function projectToolCallFrame(
  */
 export function projectToolCallAnnouncement(
   frame: AcpFrame,
-  options: { readonly turn: number; readonly step: number; readonly dialect: AcpDialect },
+  options: { readonly turn: number; readonly step: number; readonly dialect: AcpDialect; readonly carried?: ToolCall },
 ): ProjectionEvent | undefined {
   const update = recordOf(recordOf(frame.params)['update'])
   const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
@@ -400,8 +400,21 @@ export function projectToolCallAnnouncement(
     const spawned = spawnedCallOf(update)
     return spawned === undefined ? undefined : announcementEvent(options.dialect, spawned, options.turn, options.step)
   }
-  const call = options.dialect.foldTool(undefined, update)
+  const call = options.dialect.foldTool(options.carried, update)
   return announcementEvent(options.dialect, call, options.turn, options.step)
+}
+
+/** Project a completed/failed tool frame immediately, retaining earlier arguments and output. */
+export function projectToolResultFrame(
+  frame: AcpFrame,
+  options: { readonly turn: number; readonly step: number; readonly dialect: AcpDialect; readonly carried?: ToolCall },
+): ProjectionEvent | undefined {
+  if (frame.method !== 'session/update') return undefined
+  const update = recordOf(recordOf(frame.params)['update'])
+  if (update['sessionUpdate'] !== 'tool_call' && update['sessionUpdate'] !== 'tool_call_update') return undefined
+  const call = options.dialect.foldTool(options.carried, update)
+  return call.status === 'completed' || call.status === 'failed'
+    ? toolResultEvent(call, options.turn, options.step) : undefined
 }
 
 /** The one-block announcement message that admits a call's card. */
@@ -469,7 +482,7 @@ function accumulate(frames: readonly AcpFrame[], dialect: AcpDialect): Accumulat
     else if (kind === 'tool_call' || kind === 'tool_call_update') {
       const carried = typeof update['toolCallId'] === 'string' ? tools.get(update['toolCallId']) : undefined
       const call = dialect.foldTool(carried, update)
-      tools.set(call.callId, call)
+      tools.set(typeof update['toolCallId'] === 'string' ? update['toolCallId'] : call.callId, call)
     } else if (subagentUpdateOf(dialect, update) !== undefined) {
       // A spawned-run lifecycle update: one of the draft's own kinds, or a
       // vendor vocabulary the dialect normalized onto them (grok's).

@@ -6,9 +6,8 @@
  * custom methods the other three do not. The frame-reading differences from
  * codex (the closest of the three):
  *
- *   - **Tool output is at `rawOutput.stdout`**, not `formatted_output`. Cursor
- *     reports `{exitCode, stdout, stderr}`; reading the codex field yields empty
- *     output for every cursor tool call.
+ *   - Commands return `rawOutput.stdout`/stderr; reads return rawOutput.content;
+ *     edits return ACP diff blocks in content (measured 2026-10-18).
  *   - **The tool name is `kind`** ("execute"), the same as codex — there is no
  *     `name` field on `toolCall`.
  *   - **`toolCallId` can contain a literal newline** (it concatenates two ids).
@@ -113,8 +112,28 @@ export const cursorDialect: AcpDialect = {
   },
 }
 
-/** Cursor puts the result at `rawOutput.stdout`, never in `content`. */
+/** Commands return stdout; reads return rawOutput.content; edits return ACP diff content. */
 function outputFrom(update: Record<string, unknown>): string {
   const raw = record(update['rawOutput'])
-  return typeof raw['stdout'] === 'string' ? raw['stdout'] : ''
+  if (typeof raw['stdout'] === 'string') {
+    const stderr = typeof raw['stderr'] === 'string' ? raw['stderr'] : ''
+    return [raw['stdout'], stderr].filter(Boolean).join('\n')
+  }
+  if (typeof raw['content'] === 'string') return raw['content']
+  const content = update['content']
+  if (Array.isArray(content)) {
+    const text = content.map(record).map(part => {
+      if (part['type'] === 'diff') {
+        const path = typeof part['path'] === 'string' ? part['path'] : ''
+        const before = typeof part['oldText'] === 'string' ? part['oldText'] : ''
+        const after = typeof part['newText'] === 'string' ? part['newText'] : ''
+        const lines = (value: string, prefix: string) => value.replace(/\n$/, '').split('\n').map(line => prefix + line).join('\n')
+        return `--- ${path}\n+++ ${path}\n${lines(before, '-')}\n${lines(after, '+')}`
+      }
+      const block = part['type'] === 'content' ? record(part['content']) : part
+      return typeof block['text'] === 'string' ? block['text'] : ''
+    }).filter(Boolean).join('\n')
+    if (text) return text
+  }
+  return Object.keys(raw).length > 0 ? JSON.stringify(raw) : ''
 }

@@ -411,6 +411,12 @@ export class GatewayConversations {
     let totalTimer: ReturnType<typeof setTimeout> | undefined
     let pollTimer: ReturnType<typeof setInterval> | undefined
     let settled = false
+    // Set the moment the answer settles: the loop then closes the step, and a
+    // write arriving after it lands outside every open step — the runner's
+    // floating run may still try its turn-end write long after a watchdog or a
+    // user stop ended the turn. Those writes are refused here; the cards'
+    // closing results are the stop listener's job, written before this.
+    let answerEnded = false
     let warned = false
     let lastActivityWall = Date.now()
     let lastSeenFrameAt = entry.session?.diagnostics().lastFrameAt ?? Date.now()
@@ -454,6 +460,7 @@ export class GatewayConversations {
       if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
       if (totalTimer !== undefined) clearTimeout(totalTimer)
       if (pollTimer !== undefined) clearInterval(pollTimer)
+      answerEnded = true
       settle(value)
     }
     const noteActivity = (): void => {
@@ -475,14 +482,29 @@ export class GatewayConversations {
     // write, so this answers without tool events and says so.
     const position = this.positionOf?.(sessionId) ?? request.position
     const append = this.sessionAppend?.(sessionId)
+    // The turn-end projector, resolved once here: a card written live is a
+    // promise its result follows at produce time, and without a projector the
+    // produce below can only answer []. Cards that can never close must not
+    // open — 2026-10-18 session 928fbb8e turns 19-22 wrote 119 of them and
+    // made the log permanently unloadable ("step/end leaves unresolved tool
+    // call"), because a long-running host was still on the code whose produce
+    // was a stub. The transcript keeps the answer either way; only the cards
+    // depend on this gate.
+    const projector = this.produceOf?.(presetId)
+    if (append !== undefined && position !== undefined && projector === undefined) {
+      this.report(`acp gateway: preset ${presetId} has no turn-end projector — tool cards stay out of the log for this answer`)
+    }
     // Tool writes are activity too: a turn can be mid-tool for a long stretch
     // with no text stream at all, and those cards prove the agent is alive.
-    const toolWriter = append === undefined || position === undefined ? undefined : makeToolOnlyWriter(append)
+    const toolWriter = append === undefined || position === undefined || projector === undefined
+      ? undefined
+      : makeToolOnlyWriter(append)
     // Any write call is activity, even the no-op path (no session append, no
     // position): it means the runner just handled a frame, which is liveness
     // even when the card itself has nowhere to go.
     const writingTools = (events: readonly { type: string; payload: unknown }[]): number | undefined => {
       noteActivity()
+      if (answerEnded) return undefined
       return toolWriter === undefined ? 1 : toolWriter(events)
     }
     if (position === undefined) {
@@ -562,6 +584,14 @@ export class GatewayConversations {
               id: randomUUID(),
               role: 'system',
               content: [{ type: 'text', text: `等待外部 agent——已静默 ${String(Math.round(silentForMs / 1000))}s；agent 最近输出：${last}` }],
+              // v4 admits a durable message only with a producer-owned
+              // source: an object whose kind is a nonempty string other than
+              // the retired 'plugin'. This note burned session b60d6fa4 three
+              // times — turn/step, then id, then this — each time because one
+              // more admission rule had not been read. The full checklist
+              // lives in `expectV4SystemNote` (tests) and in the host's
+              // session-format-v3-to-v4 admission sources.
+              source: { kind: 'acp-gateway' },
             },
           }, { surfaceOp: 'append' })
         } catch {

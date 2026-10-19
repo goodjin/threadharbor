@@ -10,8 +10,9 @@
 import type { AcpStepResult, StepDecisionLike, StepEndReason, TurnContext } from './dispatch.ts'
 import { UNDELIVERED } from './content-writer.ts'
 import type { UndeliveredAttachment } from './content-writer.ts'
-import { projectToolCallAnnouncement, projectToolCallFrame } from '@threadharbor/dsh-acp-agent'
-import type { AcpDialect, AcpFrame, ProjectionEvent } from '@threadharbor/dsh-acp-agent'
+import { projectToolCallAnnouncement, projectToolCallFrame, projectToolResultFrame } from '@threadharbor/dsh-acp-agent'
+import type { AcpDialect, AcpFrame, ToolCall, ProjectionEvent } from '@threadharbor/dsh-acp-agent'
+import { randomUUID } from 'node:crypto'
 
 /** The JSON-RPC surface this runner needs, kept narrow so it can be stood in for. */
 export type AcpClientPort = {
@@ -358,6 +359,8 @@ export class AcpTurnRunner {
     readonly write: TurnContext['write']
     /** Call ids whose opening card already went to the log this turn. */
     readonly written: Set<string>
+    readonly settled: Set<string>
+    readonly tools: Map<string, ToolCall>
   } | undefined
 
   private readonly client: AcpClientPort
@@ -379,7 +382,7 @@ export class AcpTurnRunner {
     // projecting them would resurrect text under a turn that ended aborted.
     if (this.aborted) return
     this.turnFrames.push(frame)
-    this.writeOpeningCard(frame)
+    this.writeToolFrame(frame)
     const stream = this.stream
     if (stream === undefined) return
     // Held locally so nothing can clear it while this frame is being pushed.
@@ -387,41 +390,52 @@ export class AcpTurnRunner {
   }
 
   /**
-   * Write a tool's opening card the moment its first frame arrives.
-   *
-   * The card is the projection's own tool/call — the exact payload the
-   * turn-end write would have produced — so the session writer files it under
-   * the same `turn:callId` key it pairs results with. Only the first frame for
-   * an id writes; the turn-end write strips these and carries the results.
-   * The written-set is keyed on the PROJECTED card's callId, not the raw
-   * frame's `toolCallId`: a dialect may sanitize the id when it folds (cursor
-   * collapses a newline it joins two ids with), and the turn-end strip reads
-   * the same folded payload — keying both ends alike is what makes "exactly
-   * once" hold by construction rather than by agreement.
-   * A failed append wrote nothing (the session validates before it commits),
-   * so the id is left unwritten and the card falls to the turn-end write as
-   * always — and the frame handler, which also drives the live stream, must
-   * never let a write error kill it.
+   * Commit one opening announcement/card, then its terminal result as it arrives.
+   * Raw wire ids retain partial-frame state; normalized ids deduplicate durable
+   * events. Failed appends remain eligible for the final projection to retry.
    */
-  private writeOpeningCard(frame: AcpFrame): void {
+  private writeToolFrame(frame: AcpFrame): void {
     const live = this.liveCards
     const dialect = this.options.dialect
     if (live === undefined || dialect === undefined) return
-    const event = projectToolCallFrame(frame, { turn: live.turn, step: live.step, dialect })
+    const update = recordOf(recordOf(frame.params)['update'])
+    const rawId = update['toolCallId']
+    const isTool = frame.method === 'session/update'
+      && (update['sessionUpdate'] === 'tool_call' || update['sessionUpdate'] === 'tool_call_update')
+    const carried = isTool && typeof rawId === 'string' ? live.tools.get(rawId) : undefined
+    if (isTool && typeof rawId === 'string') {
+      const folded = dialect.foldTool(carried, update)
+      live.tools.set(rawId, folded)
+      // Cursor's pending placeholder arrives before its file path/search input.
+      // The immutable announcement must wait for that next frame's arguments.
+      if (dialect.id === 'cursor' && folded.status === 'pending'
+        && Object.keys(recordOf(folded.arguments)).length === 0) return
+    }
+    const options = { turn: live.turn, step: live.step, dialect, ...(carried === undefined ? {} : { carried }) }
+    const event = projectToolCallFrame(frame, options)
     if (event === undefined) return
     const callId = recordOf(event.payload)['callId']
-    if (typeof callId !== 'string' || live.written.has(callId)) return
-    // Announce the call before its card: the log admits a `tool/call` only
-    // after an `assistant/message` carried a matching `tool-call` block, and
-    // the end-of-turn message is written after this card. The declaration is
-    // filed live with the card, so the validator finds it in order.
-    const announcement = projectToolCallAnnouncement(frame, { turn: live.turn, step: live.step, dialect })
+    if (typeof callId !== 'string') return
+    if (!live.written.has(callId)) {
+      const announcement = projectToolCallAnnouncement(frame, options)
+      try {
+        live.write(announcement === undefined ? [event] : [announcement, event])
+      } catch {
+        // A rejected append stays eligible for the turn-end projection.
+        return
+      }
+      live.written.add(callId)
+    }
+    if (live.settled.has(callId)) return
+    const result = projectToolResultFrame(frame, options)
+    if (result === undefined) return
     try {
-      live.write(announcement === undefined ? [event] : [announcement, event])
+      live.write([result])
     } catch {
+      // Retry through the turn-end projection if this result was not committed.
       return
     }
-    live.written.add(callId)
+    live.settled.add(callId)
   }
 
   /** Feed one frame's text to the live stream. */
@@ -487,6 +501,8 @@ export class AcpTurnRunner {
       step: turn.position.step,
       write: turn.write,
       written: new Set<string>(),
+      settled: new Set<string>(),
+      tools: new Map<string, ToolCall>(),
     }
     this.liveCards = liveCards
     // Registered before the prompt goes out: the stop lands while the agent is
@@ -622,6 +638,10 @@ export class AcpTurnRunner {
         ? produced
         : produced.flatMap(event => {
             if (event.type === 'assistant/message') return withoutAnnouncedToolBlocks(event, liveCards.written)
+            if (event.type === 'tool/result') {
+              const callId = recordOf(recordOf(event.payload)['message'])['toolCallId']
+              return typeof callId === 'string' && liveCards.settled.has(callId) ? [] : [event]
+            }
             if (event.type !== 'tool/call') return [event]
             const callId = recordOf(event.payload)['callId']
             return typeof callId === 'string' && liveCards.written.has(callId) ? [] : [event]
@@ -656,12 +676,58 @@ export class AcpTurnRunner {
         // A connection that died under the stop cannot be told; the turn
         // still ends aborted, and the next turn opens a fresh session.
       }
+      this.closeOpenCards()
     }
     // Stopped before we listened: a turn opened onto a signal that had
     // already fired counts as stopped from its first moment.
     if (signal.aborted) onStop()
     else signal.addEventListener('abort', onStop, { once: true })
     return () => { signal.removeEventListener('abort', onStop) }
+  }
+
+  /**
+   * Close every live card the stop leaves open, now, from the stop handler.
+   *
+   * The turn's final write is the other candidate for this job, but it runs
+   * only when the prompt settles — and the stop's owner may end the turn
+   * without the run: the in-place gateway settles its chunk stream from its
+   * own watchdog, the loop closes the step, and a result arriving after that
+   * boundary is either refused or lands outside every open step. The abort
+   * listener runs synchronously before any of that, so this is the one place
+   * guaranteed to still be inside the step. Results written here are marked
+   * settled, which the turn-end strip already knows to honor.
+   */
+  private closeOpenCards(): void {
+    const live = this.liveCards
+    if (live === undefined) return
+    const events: ProjectionEvent[] = []
+    for (const callId of live.written) {
+      if (live.settled.has(callId)) continue
+      live.settled.add(callId)
+      events.push({
+        type: 'tool/result',
+        payload: {
+          turn: live.turn,
+          step: live.step,
+          message: {
+            id: randomUUID(),
+            role: 'tool',
+            content: [{ type: 'text', text: '外部 agent 回合被中止，这个调用没有等到结果。' }],
+            source: { kind: 'tool', callId },
+            toolCallId: callId,
+            isError: true,
+          },
+          error: { name: 'tool', code: 'aborted', reason: 'the turn was stopped before the call reported an end' },
+        },
+      })
+    }
+    if (events.length === 0) return
+    try {
+      live.write(events)
+    } catch {
+      // The log refused the closing writes; the turn-end strip still marks
+      // them settled, and the frames after the stop never reach the log.
+    }
   }
 
   /**
@@ -689,10 +755,12 @@ export class AcpTurnRunner {
   private openingNow(): Promise<string> {
     if (this.sessionId !== undefined) return Promise.resolve(this.sessionId)
     const ms = this.options.openTimeoutMs ?? DEFAULT_OPEN_TIMEOUT_MS
+    let stage = 'initialize'
     this.opening ??= withDeadline(
-      this.doOpen(),
+      this.doOpen(value => { stage = value }),
       ms,
-      `acp agent did not answer within ${String(ms)}ms`,
+      () => `acp agent did not answer within ${String(ms)}ms（等待 ${stage}）`
+        + (stage === 'authenticate' ? '；请检查外部 agent 的登录状态' : ''),
     ).then(
       sessionId => { this.sessionId = sessionId; this.opening = undefined; return sessionId },
       error => { this.opening = undefined; throw error },
@@ -700,7 +768,7 @@ export class AcpTurnRunner {
     return this.opening
   }
 
-  private async doOpen(): Promise<string> {
+  private async doOpen(onStage: (stage: string) => void): Promise<string> {
     await this.client.request('initialize', {
       protocolVersion: 1,
       // `subagents` opts into the ACP subagent draft (#1992): adapters that
@@ -725,7 +793,11 @@ export class AcpTurnRunner {
     })
     this.client.notify('initialized', {})
     // Cursor authenticates here; the other agents have no such step.
-    if (this.client.authenticate !== undefined) await this.client.authenticate()
+    if (this.client.authenticate !== undefined) {
+      onStage('authenticate')
+      await this.client.authenticate()
+    }
+    onStage('session/new')
     const reply = (await this.client.request('session/new', {
       cwd: this.options.cwd,
       mcpServers: [],
@@ -740,6 +812,7 @@ export class AcpTurnRunner {
       this.options.onModels(this.options.dialect.readModels(reply))
     }
     if (this.options.modeId !== undefined) {
+      onStage('session/set_mode')
       await this.client.request('session/set_mode', { sessionId: reply.sessionId, modeId: this.options.modeId })
     }
     return reply.sessionId
@@ -752,9 +825,9 @@ export class AcpTurnRunner {
  * The timer is cleared on whichever side wins, so a turn that finished normally
  * does not leave a pending rejection behind to surface in an unrelated place.
  */
-function withDeadline<T>(work: Promise<T>, ms: number, message: string): Promise<T> {
+function withDeadline<T>(work: Promise<T>, ms: number, message: () => string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => { reject(new Error(message)) }, ms)
+    const timer = setTimeout(() => { reject(new Error(message())) }, ms)
     work.then(
       value => { clearTimeout(timer); resolve(value) },
       error => { clearTimeout(timer); reject(error) },

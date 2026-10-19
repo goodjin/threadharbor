@@ -5,7 +5,7 @@
  * events appeared only when everything was over. Now the runner writes each
  * tool's opening card the moment its first frame arrives — the card exists in
  * the log while the agent is still working — and the turn-end write carries
- * only what is left: the step's message and the results. A card is written
+ * only what is left: the step's message and results not already committed. A card is written
  * exactly once, pre-abort writes are kept (post-abort frames were already
  * dropped by the runner's abort flag), and the payloads are the projection's
  * own, so the writer pairs results to the mid-turn call by the same
@@ -19,6 +19,7 @@
 import type { AcpDialect, AcpFrame } from '@threadharbor/dsh-acp-agent'
 import { claudeDialect, cursorDialect, projectStepContent } from '@threadharbor/dsh-acp-agent'
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
 import type { StepDecisionLike, TurnContext } from '../src/dispatch.ts'
 import { makeContentWriter } from '../src/content-writer.ts'
 import type { ContentWriter } from '../src/content-writer.ts'
@@ -145,6 +146,18 @@ function harness(options: { dialect?: AcpDialect; abort?: () => AbortSignal }): 
 }
 
 describe('mid-turn tool-card writing', () => {
+  it('失败结果立即关闭卡片，回合结束不再追加同一个结果', async () => {
+    const h = harness({ dialect: claudeDialect })
+    await h.started()
+    h.push([openFrame, { ...doneFrame, params: update({ sessionUpdate: 'tool_call_update', toolCallId: 't1', status: 'failed', content: [{ type: 'text', text: 'failed edit' }] }) }])
+    const results = h.appends.filter(a => a.type === 'tool/result')
+    expect(results).toHaveLength(1)
+    expect(results[0]!.payload).toMatchObject({ message: { isError: true } })
+    h.release()
+    await h.run()
+    expect(h.appends.filter(a => a.type === 'tool/result')).toHaveLength(1)
+  })
+
   it('writes the opening card while the agent is still working, before the reply resolves', async () => {
     const turn1 = harness({ dialect: claudeDialect })
     await turn1.started()
@@ -192,18 +205,23 @@ describe('mid-turn tool-card writing', () => {
     // The user stops: the still-running call stays (it was real), the late
     // completion and the next call never reach the log.
     abort.abort()
+    // The open card closes at the stop itself, not at the turn end: whatever
+    // ends the turn next (a gateway watchdog settling the stream without the
+    // run) may close the step before this runner's final write, and a card
+    // left open there makes the whole session unloadable.
+    expect(turn1.appends.map(append => append.type)).toEqual(['assistant/message', 'tool/call', 'tool/result'])
+    const closed = turn1.appends[2]!.payload as { message?: { isError?: boolean; toolCallId?: string } }
+    expect(closed.message?.toolCallId).toBe('t1')
+    expect(closed.message?.isError).toBe(true)
+
     turn1.push([doneFrame, secondFrame])
     turn1.release()
     const result = await turn1.run()
 
     expect(result.end.kind).toBe('aborted')
-    // The announcement and card stayed (mid-turn, before the stop); the turn
-    // end adds only the result the end-of-turn projection has always written
-    // for a kept call — empty, since the completion frame arrived after the
-    // stop and was dropped. The post-abort call and the completion itself
-    // reached nothing.
+    // Exactly one result for the kept call — the interrupt write — and the
+    // post-abort call and the completion frame reached nothing.
     expect(turn1.appends.map(append => append.type)).toEqual(['assistant/message', 'tool/call', 'tool/result'])
-    // The announcement carries neither id key; the card and its paired result do.
     const ids = turn1.appends.map(append => append.payload['callId'] ?? (append.payload as { message?: { toolCallId?: string } }).message?.toolCallId)
     expect(ids.filter((id): id is string => id !== undefined)).toEqual(['t1', 't1'])
     expect(turn1.appends.some(append => append.payload['callId'] === 't2')).toBe(false)
@@ -272,9 +290,8 @@ describe('mid-turn tool-card writing', () => {
     expect(calls).toHaveLength(1)
     expect(calls[0]!.payload['callId']).toBe(foldedId)
     expect(calls[0]!.payload['callId']).not.toContain('\n')
-    // Everything else arrives once: the announcement, the card, the answer
-    // message, and the paired result.
-    expect(turn1.appends.map(append => append.type)).toEqual(['assistant/message', 'tool/call', 'assistant/message', 'tool/result'])
+    // The result is committed before the final answer, exactly once.
+    expect(turn1.appends.map(append => append.type)).toEqual(['assistant/message', 'tool/call', 'tool/result', 'assistant/message'])
   })
 
   it('produces a log the session validator admits: every call announced before it, none left open', async () => {
@@ -392,5 +409,48 @@ describe('mid-turn tool-card writing', () => {
     expect(turn1.appends[1]!.payload).toMatchObject({ name: 'async_task', callId: 'task-bg-1' })
     const result = turn1.appends[3]!.payload as { message: { content: { text: string }[] } }
     expect(result.message.content.map(part => part.text).join('')).toBe('watch exited 0')
+  })
+})
+
+
+describe('Cursor 的编辑过程使用真实帧', () => {
+  const frames = JSON.parse(readFileSync(new URL('../../dsh-acp-agent/tests/fixtures/captured-frames.cursor-edit.json', import.meta.url), 'utf8')) as AcpFrame[]
+  const edits = frames.filter(frame => (frame.params as { update: { toolCallId: string } }).update.toolCallId === 'edit-call\n1')
+
+  it('等待编辑文件路径到达再登记卡片，完成帧到达就落结果，不等整轮结束', async () => {
+    const h = harness({ dialect: cursorDialect })
+    await h.started()
+    h.push(edits.slice(0, 1))
+    expect(h.appends).toEqual([])
+    h.push(edits.slice(1, 3))
+    const call = h.appends.find(a => a.type === 'tool/call')!
+    expect(call.payload).toMatchObject({ name: 'edit', arguments: JSON.stringify({ path: '/tmp/cursor-fixture/sample.txt' }) })
+    h.push(edits.slice(3))
+    const results = h.appends.filter(a => a.type === 'tool/result')
+    expect(results).toHaveLength(1)
+    expect(JSON.stringify(results[0]!.payload)).toContain('before')
+    expect(JSON.stringify(results[0]!.payload)).toContain('after')
+    expect(results[0]!.intent?.sourceEventSeqs).toEqual([2])
+    expect(h.order).not.toContain('reply-resolved')
+    h.push(edits.slice(3))
+    h.release()
+    await h.run()
+    expect(h.appends.filter(a => a.type === 'tool/result')).toHaveLength(1)
+  })
+
+  it('完整投影按原始带换行的编号累积参数，保留编辑名称与路径', () => {
+    const events = projectStepContent(edits, { turn: 1, step: 1, dialect: cursorDialect })
+    expect(events.find(e => e.type === 'tool/call')?.payload).toMatchObject({ name: 'edit', arguments: JSON.stringify({ path: '/tmp/cursor-fixture/sample.txt' }) })
+    expect(events.filter(e => e.type === 'tool/result')).toHaveLength(1)
+  })
+
+  it('文件读取的结果在整轮仍运行时可见', async () => {
+    const h = harness({ dialect: cursorDialect })
+    await h.started()
+    h.push(frames.filter(frame => (frame.params as { update: { toolCallId: string } }).update.toolCallId === 'read-call\n1'))
+    expect(h.appends.filter(a => a.type === 'tool/result')).toHaveLength(1)
+    expect(JSON.stringify(h.appends)).toContain('before')
+    h.release()
+    await h.run()
   })
 })

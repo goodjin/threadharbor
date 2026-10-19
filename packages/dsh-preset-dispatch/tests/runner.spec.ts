@@ -314,6 +314,22 @@ describe('AcpTurnRunner', () => {
 })
 
 describe('AcpTurnRunner handshake', () => {
+  it.each(['initialize', 'authenticate', 'session/new', 'session/set_mode'])(
+    'names the stalled handshake operation: %s', async stage => {
+      const client = fakeClient()
+      const request = client.request
+      client.request = (method, params) => method === stage
+        ? new Promise(() => {}) : request(method, params)
+      client.authenticate = () => stage === 'authenticate' ? new Promise(() => {}) : Promise.resolve({})
+      const runner = new AcpTurnRunner(client, { cwd: '/tmp', modeId: 'agent', openTimeoutMs: 20 })
+      const result = await runner.run(DECISION,
+        { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
+      expect(result.end).toMatchObject({ kind: 'error', error: {
+        code: 'ACP_CONNECTION', message: expect.stringContaining(`等待 ${stage}`),
+      } })
+    },
+  )
+
   it('gives up on an agent that never answers', async () => {
     // An external agent that accepts the connection and then says nothing would
     // otherwise hold the session open forever with nothing on screen. The turn

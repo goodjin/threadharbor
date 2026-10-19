@@ -1,0 +1,181 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "cursor-fixture",
+      "update": {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "search-call\n1",
+        "title": "Find",
+        "kind": "search",
+        "status": "pending",
+        "rawInput": {}
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "cursor-fixture",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "search-call\n1",
+        "title": "Find `sample.txt`",
+        "rawInput": {
+          "pattern": "sample.txt"
+        },
+        "locations": [
+          {
+            "path": "/tmp/cursor-fixture"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "cursor-fixture",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "search-call\n1",
+        "status": "in_progress"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "cursor-fixture",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "search-call\n1",
+        "status": "completed",
+        "rawOutput": {
+          "totalFiles": 1,
+          "truncated": false
+        }
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "cursor-fixture",
+      "update": {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "read-call\n1",
+        "title": "Read /tmp/cursor-fixture/sample.txt",
+        "kind": "read",
+        "status": "pending",
+        "rawInput": {
+          "path": "/tmp/cursor-fixture/sample.txt"
+        },
+        "locations": [
+          {
+            "path": "/tmp/cursor-fixture/sample.txt"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "cursor-fixture",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "read-call\n1",
+        "status": "in_progress"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "cursor-fixture",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "read-call\n1",
+        "status": "completed",
+        "rawOutput": {
+          "content": "before\n"
+        }
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "cursor-fixture",
+      "update": {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "edit-call\n1",
+        "title": "Edit File",
+        "kind": "edit",
+        "status": "pending",
+        "rawInput": {}
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "cursor-fixture",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "edit-call\n1",
+        "title": "Edit `/tmp/cursor-fixture/sample.txt`",
+        "rawInput": {
+          "path": "/tmp/cursor-fixture/sample.txt"
+        },
+        "locations": [
+          {
+            "path": "/tmp/cursor-fixture/sample.txt"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "cursor-fixture",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "edit-call\n1",
+        "status": "in_progress"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "cursor-fixture",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "edit-call\n1",
+        "status": "completed",
+        "content": [
+          {
+            "type": "diff",
+            "path": "/tmp/cursor-fixture/sample.txt",
+            "oldText": "before\n",
+            "newText": "after\n"
+          }
+        ]
+      }
+    }
+  }
+]

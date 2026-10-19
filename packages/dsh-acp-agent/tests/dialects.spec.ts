@@ -177,3 +177,15 @@ describe('cursor dialect', () => {
     expect(cursorDialect.isContent({ sessionUpdate: 'session_info_update' })).toBe(false)
   })
 })
+
+describe('Cursor 文件工具的真实记录', () => {
+  const frames = JSON.parse(readFileSync(new URL('./fixtures/captured-frames.cursor-edit.json', import.meta.url), 'utf8')) as { params: { update: Record<string, unknown> } }[]
+  it('编辑完成帧保留 diff，读取完成帧保留正文', () => {
+    const done = frames.map(f => f.params.update).filter(u => u['status'] === 'completed')
+    expect(cursorDialect.toolOutput(done.find(u => u['toolCallId'] === 'read-call\n1')!)).toContain('before')
+    const diff = cursorDialect.toolOutput(done.find(u => u['toolCallId'] === 'edit-call\n1')!)
+    expect(diff).toContain('sample.txt')
+    expect(diff).toContain('before')
+    expect(diff).toContain('after')
+  })
+})

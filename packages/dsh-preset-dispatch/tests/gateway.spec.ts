@@ -39,6 +39,47 @@ function recordingAppend(): {
 }
 
 /**
+ * The complete v4 admission contract for one gateway-written system/message row.
+ *
+ * Mirrored from the host's own checks, all of which run when the session is
+ * next opened — a row that passes append but fails any of these makes the
+ * whole session unloadable (`stored log is corrupt`). Sources, verified
+ * against reference/deepseek-harness:
+ * - `session-format-v3-to-v4/src/system-message.ts` `assertV4SystemMessageFields`:
+ *   positive turn/step, nonempty id, role 'system', content blocks;
+ * - `session-format-v3-to-v4/src/message-sources.ts` `assertV4MessageSources`:
+ *   every durable message carries `source` with a nonempty kind that is not
+ *   the retired 'plugin' wrapper (2026-10-18 session b60d6fa4, third strike);
+ * - `session-format-v3-to-v4/src/relationships.ts` `foldSurface`: the append
+ *   carries a surface intent.
+ */
+function expectV4SystemNote(
+  row: { type: string; payload: unknown; intent: unknown } | undefined,
+  at: { turn: number; step: number },
+): void {
+  expect(row).toBeDefined()
+  expect(row?.type).toBe('system/message')
+  expect(row?.intent).toMatchObject({ surfaceOp: 'append' })
+  const data = row?.payload as { turn?: unknown; step?: unknown; message?: Record<string, unknown> }
+  expect(data.turn).toBe(at.turn)
+  expect(data.step).toBe(at.step)
+  const message = data.message
+  expect(typeof message?.id).toBe('string')
+  expect((message?.id as string).length).toBeGreaterThan(0)
+  expect(message?.role).toBe('system')
+  expect(Array.isArray(message?.content)).toBe(true)
+  for (const block of message?.content as { type?: unknown; text?: unknown }[]) {
+    expect(typeof block.type).toBe('string')
+    if (block.type === 'text') expect(typeof block.text).toBe('string')
+  }
+  const source = message?.source as { kind?: unknown } | undefined
+  expect(source).toBeDefined()
+  expect(typeof source?.kind).toBe('string')
+  expect((source?.kind as string).length).toBeGreaterThan(0)
+  expect(source?.kind).not.toBe('plugin')
+}
+
+/**
  * A session stand-in: records each run's turn context, and answers through
  * whatever the turn's openStream handed back — the same handle production
  * uses, so emitted deltas reach the real chunk stream under test.
@@ -220,6 +261,11 @@ describe('GatewayConversations — one external conversation per session', () =>
       async () => fake.session,
       () => {},
       sessionId => (sessionId === 's1' ? append : undefined),
+      undefined,
+      undefined,
+      // 实时卡只有配上回合末投影器才允许落盘：结果只能从 produce 的投影来，
+      // 没有投影器的卡注定在 step/end 处悬空（见「没有回合末投影器就不写实时卡」）。
+      () => (_result: unknown, _at: { turn: number; step: number }) => [],
     )
     await gate.answer('s1', 'acp-codex', { messages: [user('跑个命令')], position }, { chunk: () => {} })
 
@@ -248,6 +294,8 @@ describe('GatewayConversations — one external conversation per session', () =>
       () => {},
       sessionId => (sessionId === 's1' ? append : undefined),
       sessionId => (sessionId === 's1' ? { turn: 11, step: 1 } : undefined),
+      undefined,
+      () => (_result: unknown, _at: { turn: number; step: number }) => [],
     )
     await gate.answer('s1', 'acp-codex', { messages: [user('跑个命令')], position }, { chunk: () => {} })
 
@@ -824,15 +872,10 @@ describe('GatewayConversations — 帧静默超时、提示与诊断包', () => 
       await Promise.race([answering.then(() => 'done'), vi.advanceTimersByTimeAsync(200).then(() => 't1100')])
       const notes = append.written.filter(w => w.type === 'system/message')
       expect(notes).toHaveLength(1)
-      // 消息事件必须带回合编号：宿主在落盘层校验 data.turn（2026-10-18
-      // session b60d6fa4：不带 turn 的提示整回合被打死，「本轮运行失败
-      // system/message turn must be a non-negative safe integer」）。
-      expect(notes[0]?.payload).toMatchObject({ turn: position.turn, step: position.step })
-      // v4 还要求消息带非空 id（2026-10-18 b60d6fa4 第二次报错：
-      // 「format v4 system message id requires a string with content」）。
-      const noted = notes[0]?.payload as { message?: { id?: string } }
-      expect(typeof noted.message?.id).toBe('string')
-      expect(noted.message?.id?.length).toBeGreaterThan(0)
+      // v4 对 system/message 的准入一次查全，不再一个字段一个字段地炸
+      // （同一条提示已连伤 b60d6fa4 两次：先 turn/step，后 id，第三次是
+      // source——「format v4 message requires a producer-owned source kind」）。
+      expectV4SystemNote(notes[0], position)
       const text = JSON.stringify(notes[0]?.payload)
       expect(text).toContain('已静默')
       expect(text).toContain('tls handshake eof')
@@ -1027,5 +1070,78 @@ describe('GatewayConversations — 停止宽限窗口内的新请求', () => {
     const types = append.written.map(w => w.type)
     expect(types).toContain('tool/call')
     expect(types).toContain('tool/result')
+  })
+
+  it('收场后到达的迟到写入不再落盘：步子已关，落了就是坏账', async () => {
+    // 停止/看门狗先行收场后，漂浮的 run 迟早结算并想做回合末写入——
+    // 但循环已经随流结束闭了步，迟到的结果要么被拒、要么落在任何开着的
+    // 步之外，两种都是坏账。收场之后，写入端必须闭嘴（卡的中止结果由
+    // runner 的停止监听在收场前同步补齐，见 mid-turn-tools.spec.ts）。
+    vi.useFakeTimers()
+    try {
+      const append = recordingAppend()
+      let settleRun: ((end: GatewayStepEnd) => void) | undefined
+      let held: { write?: (events: readonly { type: string; payload: unknown }[]) => number | undefined } | undefined
+      const fake = fakeSession()
+      fake.answerWith(turn => {
+        held = turn as unknown as typeof held
+        return new Promise<GatewayStepEnd>(resolve => { settleRun = resolve })
+      })
+      const gate = new GatewayConversations(
+        async () => fake.session,
+        () => {},
+        sessionId => (sessionId === 's1' ? append : undefined),
+        undefined,
+        undefined,
+        () => (_result: unknown, _at: { turn: number; step: number }) => [],
+      )
+      const controller = new AbortController()
+      const answering = gate.answer('s1', 'acp-codex', {
+        messages: [user('停下来')],
+        position,
+        signal: controller.signal,
+      }, { chunk: () => {} })
+      await vi.advanceTimersByTimeAsync(1)
+      controller.abort()
+      await answering // 立即以 aborted 收场；run 仍漂浮
+      const before = append.written.length
+
+      held?.write?.([{
+        type: 'tool/result',
+        payload: { turn: position.turn, step: position.step, message: { role: 'tool', toolCallId: 'c1', content: [{ type: 'text', text: 'late' }] } },
+      }] as never)
+      settleRun?.({ kind: 'aborted' })
+      await vi.advanceTimersByTimeAsync(10)
+      expect(append.written.length).toBe(before)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('没有回合末投影器就不写实时卡：注定悬空的调用一开始就不落盘', async () => {
+    // 上一测试的反面：produceOf 缺席时 produce 只能返回空数组，结果永远
+    // 追不上实时卡。卡一旦写下，step/end 闭步必留未解调用，会话从此加载
+    // 必炸——2026-10-18 桌面 session 928fbb8e turn 19-22（14+96+9 张卡，
+    // 零结果）就是旧代码这么写坏的。没有投影器，实时写入端就不该存在。
+    const append = recordingAppend()
+    const fake = fakeSession()
+    fake.answerWith(async turn => {
+      turn.write?.([
+        { type: 'assistant/message', payload: { turn: 11, step: 1, message: { id: 'm1', role: 'assistant', content: [{ type: 'tool-call', id: 'c1', tool: 'grep', arguments: '{}' }] } } },
+        { type: 'tool/call', payload: { turn: 11, step: 1, callId: 'c1', name: 'grep', arguments: '{}' } },
+      ] as never)
+      return { kind: 'completed' }
+    })
+    // 五参构造：produceOf 故意缺席。
+    const gate = new GatewayConversations(
+      async () => fake.session,
+      () => {},
+      sessionId => (sessionId === 's1' ? append : undefined),
+      sessionId => (sessionId === 's1' ? { turn: 11, step: 1 } : undefined),
+    )
+    await gate.answer('s1', 'acp-grok', { messages: [user('查一下')] }, { chunk: () => {} })
+    const types = append.written.map(w => w.type)
+    expect(types).not.toContain('tool/call')
+    expect(types).not.toContain('assistant/message')
   })
 })

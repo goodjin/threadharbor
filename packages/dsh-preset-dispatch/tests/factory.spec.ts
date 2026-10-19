@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { claudeDialect, codexDialect, grokDialect } from '@threadharbor/dsh-acp-agent'
 import { makeSessionFactory } from '../src/factory.ts'
+import { Config as EntryConfig } from '../src/entry.ts'
 import type { AcpTransport } from '@threadharbor/dsh-acp-agent'
 import type { PresetConfig } from '../src/registry.ts'
 
@@ -242,6 +243,17 @@ function recordingCwd(): { command: string; cwd: () => string } {
 }
 
 describe('拉起外部 agent 时补齐 ACP 所需的参数', () => {
+  it('经过宿主配置校验后，省略参数仍使用 Cursor 的 ACP 默认参数', async () => {
+    const preset = EntryConfig({ presetId: 'acp-cursor', agent: 'cursor' })
+    expect(await spawnArgvOf({ presets: { 'acp-cursor': preset } }, 'acp-cursor'))
+      .toEqual(['acp', '--trust'])
+  })
+
+  it.each([{ args: [] }, { args: ['acp', '--trust'] }])('配置校验保留显式参数 $args', async ({ args }) => {
+    const preset = EntryConfig({ presetId: 'acp-cursor', agent: 'cursor', args })
+    expect(await spawnArgvOf({ presets: { 'acp-cursor': preset } }, 'acp-cursor')).toEqual(args)
+  })
+
   it('cursor 带上 acp 子命令：裸 agent 是交互式 CLI，不会应答 JSON-RPC', async () => {
     // Cursor 的官方文档：`agent acp` 才是 stdio 上的 ACP 服务。少了这个子
     // 命令，进程活着却一个字节不回，握手只能等超时——而超时说的是「没应答」，
