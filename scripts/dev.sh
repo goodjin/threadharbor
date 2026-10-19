@@ -42,7 +42,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # ---- defaults / overrides ---------------------------------------------------
 channel="${THREADHARBOR_CHANNEL:-test}"
 web_port="${THREADHARBOR_WEB_PORT:-3081}"
-dsh_home="${THREADHARBOR_DSH_HOME:-$HOME/.dsh-threadharbor-$channel}"
+dsh_home="${THREADHARBOR_DSH_HOME:-$([ "$channel" = test ] && printf %s "$HOME/.dsh-web" || printf %s "$HOME/.dsh-threadharbor-$channel")}"
 web_log="${THREADHARBOR_WEB_LOG:-$dsh_home/threadharbor-runtime/web.log}"
 web_pid="${THREADHARBOR_WEB_PID:-$dsh_home/threadharbor-runtime/web.pid}"
 frame_log=0
