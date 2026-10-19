@@ -11,7 +11,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import Schema from '@deepseek-ai/schemastery'
-import { assertMobileOrigin, MOBILE_ORIGIN_PATTERN } from '@threadharbor/dsh-mobile-entry/pair-url'
+import { assertMobileOrigin, MOBILE_ORIGIN_PATTERN, registerMobileRoutes, registerPairUrlRoute, registerPeersRoute, type MobileRouteContext } from '@threadharbor/dsh-mobile-entry'
 import { HostRegistry, RELAY_HOSTS_PATH, type HostRegistryDeps, type RelayHost } from './hosts.ts'
 import { Relay, RELAY_ANSWER_PATH, RELAY_EVENTS_PATH, RELAY_SESSIONS_PATH } from './relay.ts'
 import { RelayClientPool } from './client-pool.ts'
@@ -98,10 +98,14 @@ export type RelayAdmission = { readonly peer: unknown } | { readonly rejection: 
 
 /**
  * 本插件用到的官方 connection 服务面：hosts 清单是运维数据，与官方 /api
- * 同一准入面。成员是官方 HostConnectionService 的最小投影，后续任务按需加。
+ * 同一准入面；中转自己出手机页后，还要用官方 connection 的 index 令牌交换
+ * （authorizeIndex）与带令牌网址铸造（authenticatedUrl）。成员是官方
+ * HostConnectionService 的最小投影，后续任务按需加。
  */
 export interface RelayConnection {
   admit(request: { readonly headers: Readonly<Record<string, string | readonly string[] | undefined>> }): RelayAdmission
+  authorizeIndex(request: unknown, response: unknown): boolean
+  authenticatedUrl(baseUrl: string): string
 }
 
 export interface RelayRouteContext {
@@ -126,26 +130,31 @@ export interface RelayRouteContext {
 /**
  * 配置字段：mobileOrigin 是中转站对外服务的源；sshKnownHostsPath 用于校验
  * 各机主机指纹；statePath 是凭据与端口分配的家目录文件；machines 是隧道
- * 目标清单。装载期两道门沿用 dsh-mobile-entry 的做法：形状（origin 的
- * https/无路径、hostId/target 非空无空白、remotePort 1–65535 整数）钉在
- * schema 上；URL 语法（assertMobileOrigin）与 hostId 的语义（大写/尾点/
- * 重复）由 apply 补第二道。坏值装载即失败，不做静默回退。
+ * 目标清单。装载期语义：四项**全都不在 schema 上标 required**——本机 bundle
+ * 常驻注册这一行却不给它 config（本机不是中转站），schema 若坚持必填，Cordis
+ * 在 apply 之前就用 ValidationError 把它挡下，宿主启动每次打「1 entry did not
+ * activate」。所以缺配置一律放行到 apply，由 apply 决定「整段没配＝默认停用」
+ * 与「动了这行却漏配＝报错」（理由见 apply）。
+ *
+ * schema 只管**present 值的形状**（origin 的 https/无路径、hostId/target 非空
+ * 无空白、remotePort 1–65535 整数）；「字段在不在」的强校验交给 apply，两档
+ * 语义分开，谁在哪道门报错一目了然。
  */
 export const Config: Schema = Schema.object({
-  mobileOrigin: Schema.string().pattern(MOBILE_ORIGIN_PATTERN).required().description('中转站对外服务的源（如 https://relay.example.com）'),
-  sshKnownHostsPath: Schema.string().pattern(/.+/).required().description('SSH known_hosts 路径（校验各机主机指纹）'),
-  statePath: Schema.string().pattern(/.+/).required().description('凭据与端口分配的家目录文件路径'),
+  mobileOrigin: Schema.string().pattern(MOBILE_ORIGIN_PATTERN).description('中转站对外服务的源（如 https://relay.example.com）；缺省＝本机不当中转站'),
+  sshKnownHostsPath: Schema.string().pattern(/.+/).description('SSH known_hosts 路径（校验各机主机指纹）'),
+  statePath: Schema.string().pattern(/.+/).description('凭据与端口分配的家目录文件路径'),
   machines: Schema.array(
     Schema.object({
-      hostId: Schema.string().pattern(/^\S+$/).required().description('tailnet DNS 名（如 gooddemacbook-pro）'),
-      target: Schema.string().pattern(/^\S+$/).required().description('SSH 目标（IP 或名字）'),
+      hostId: Schema.string().pattern(/^\S+$/).description('tailnet DNS 名（如 gooddemacbook-pro）'),
+      target: Schema.string().pattern(/^\S+$/).description('SSH 目标（IP 或名字）'),
       port: Schema.number().min(1).max(65535).step(1).description('SSH 端口，缺省 22'),
       user: Schema.string().description('SSH 用户'),
       identityFile: Schema.string().description('私钥绝对路径'),
-      remotePort: Schema.number().min(1).max(65535).step(1).required().description('该机 DSH 的回环端口（如 3081）'),
-      logPath: Schema.string().pattern(/^\S+$/).required().description('该机 DSH 的启动日志路径（追加写、含 LAUNCH_URL= 标记）'),
+      remotePort: Schema.number().min(1).max(65535).step(1).description('该机 DSH 的回环端口（如 3081）'),
+      logPath: Schema.string().pattern(/^\S+$/).description('该机 DSH 的启动日志路径（追加写、含 LAUNCH_URL= 标记）'),
     }),
-  ).required().description('各台机器的隧道目标清单'),
+  ).description('各台机器的隧道目标清单；缺省＝空清单'),
 })
 
 /**
@@ -247,19 +256,37 @@ const LIST_TIMEOUT_MS = 10_000
  */
 export function apply(ctx: RelayRouteContext, config?: MobileRelayConfig, deps: RelayAssemblyDeps = {}): void {
   // 语义校验先于任何注册：坏配置装载即失败，不留下半挂的路由。
-  // null 也在这里挡住：`typeof null === 'object'`，漏了它会以「访问 undefined 的
-  // hostKeyFingerprint」这种天书报错收场，而不是告诉运维缺配置。
+  //
+  // 两档语义，分开处理：
+  //  1. **整段没配**（undefined / null / 非对象 / 空对象）→ **默认停用**：直接
+  //     返回，不注册任何路由、不报错。本机 bundle 常驻注册这一行却不给它
+  //     config（本机不是中转站）；这条目只跑在云主机上。老代码在这里抛「缺
+  //     配置」，Cordis 又先于 apply 用 schema 卡一道，结果本机每次启动都打
+  //     「1 entry did not activate」——那行警告其实是「本机正确地没当中转站」，
+  //     不该当成故障报出来。
+  //  2. **动了这行却漏配**（配了某些字段、缺另一些）→ 报错说清缺哪个。一旦运维
+  //     改了这行，就是打算当中转站用；此时漏项必须显式挡下，否则「云主机上
+  //     少配一项」会被伪装成「这台机器本来就没接进中转」，那台机器在清单上永远
+  //     不可达且看不出原因。
   if (config === undefined || config === null || typeof config !== 'object') {
-    // 组合行没给 config 块时宿主传什么（undefined 还是空对象）我们没在真机上量过，
-    // 与其为它赌一种形状，不如两种都挡住并说清缺什么——装载失败时人要看得懂
-    // 缺的是哪个字段，而不是看一个 `dirname(undefined)` 的 TypeError。
-    throw new Error('threadharbor-mobile-relay 缺配置：中转站必须声明 mobileOrigin / sshKnownHostsPath / statePath / machines')
+    return
+  }
+  // 整段没配 = schema 归一后只剩 `machines: []`、三项关键字段（中转站身份与落盘）
+  // 全缺。这三项是「当中转站」的充要条件：mobileOrigin 决定对外源与 origin 绑定，
+  // sshKnownHostsPath/statePath 是它自己的落盘家。三者全无 = 本机这行只是常驻
+  // 占位、并不打算当中转站 → 默认停用。任一存在就按「配了」走下面的漏配检查。
+  const identityKeys = ['mobileOrigin', 'sshKnownHostsPath', 'statePath'] as const
+  const anyIdentity = identityKeys.some(key => config[key] !== undefined)
+  if (!anyIdentity) {
+    return
+  }
+  const missing = ['mobileOrigin', 'sshKnownHostsPath', 'statePath', 'machines'].find(
+    key => config[key as keyof MobileRelayConfig] === undefined,
+  )
+  if (missing !== undefined) {
+    throw new Error(`threadharbor-mobile-relay 缺配置字段 ${missing}：动了这行就四项都要配齐（mobileOrigin / sshKnownHostsPath / statePath / machines），整段不配则默认停用`)
   }
   const { mobileOrigin, sshKnownHostsPath, statePath, machines } = config
-  if (mobileOrigin === undefined || sshKnownHostsPath === undefined || statePath === undefined || machines === undefined) {
-    const missing = [mobileOrigin, sshKnownHostsPath, statePath, machines].findIndex(value => value === undefined)
-    throw new Error(`threadharbor-mobile-relay 缺配置字段 ${['mobileOrigin', 'sshKnownHostsPath', 'statePath', 'machines'][missing]}：四项全部必填`)
-  }
   if (mobileOrigin === '') {
     // 没有 origin 就没法做 origin 绑定（请求 Host 对不上也放行等于门户大开），
     // 而一个说不清自己对外源的中转站本来也不该上线——拒装载，不给默认值兜。
@@ -312,6 +339,15 @@ export function apply(ctx: RelayRouteContext, config?: MobileRelayConfig, deps: 
         },
   )
   if (relay !== undefined) registerHubRoutes(ctx, relay, new URL(mobileOrigin).hostname)
+  // 手机页与配对接口由中转自己出（不再依赖独立的 mobile-entry 入口）：手机页
+  // 只有中转模式，直连交给各机原生 DSH web。页面壳、hello、pair-url、peers 与
+  // 中转 API 同源，手机上看到整套体验都归中转这一个插件。ctx 的 connection
+  // 投影（admit / authorizeIndex / authenticatedUrl）与 webServer 登记面与
+  // mobile-entry 的 MobileRouteContext 对齐，直接传入。
+  // 手机页只有中转模式：页面壳 + pair-url + peers 与中转 API 同源，全挂上。
+  registerMobileRoutes(ctx as MobileRouteContext)
+  registerPairUrlRoute(ctx as MobileRouteContext, mobileOrigin)
+  registerPeersRoute(ctx as MobileRouteContext)
   if (runtime !== undefined) {
     // 停机收尾：把 SSH 隧道与各机连接都收掉。
     //

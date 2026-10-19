@@ -214,7 +214,7 @@ export function createHubBackend(opts = {}) {
           socket = new WebSocketCtor(`${protocol}//${host}${EVENTS_PATH}`)
         } catch (error) {
           // 构造期抛错（混合内容、URL 非法）也要落到「连不上」而不是把异常
-          // 顺着 boot() 一路炸出去——直连分支有 makeSocketFactory 专管这一档。
+          // 顺着 boot() 一路炸出去——本层就地接住，不让异常外逃。
           socket = null
           handlers.onStatus?.('offline', error instanceof Error ? error.message : String(error))
           return

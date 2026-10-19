@@ -18,17 +18,17 @@ export const name = 'threadharbor-mobile-entry'
 /** webServer 挂路由；connection 做准入（admit / authorizeIndex）。 */
 export const inject = ['webServer', 'connection']
 
+// 手机页的对外 serve API 从包根导出：中转插件（dsh-mobile-relay）直接调用它们
+// 出页面，自己不再作为独立入口被装载。直连模式取消后，本包只剩这套「出页面 +
+// pair-url + peers」的库能力；name/inject/Config/apply 四件套保留但不再注册。
+export { registerMobileRoutes, MOBILE_PREFIX, HELLO_PATH } from './static-serve.ts'
+export type { MobileRouteContext, MobileRoute, MobileAsset } from './static-serve.ts'
+export { registerPairUrlRoute, PAIR_URL_PATH, assertMobileOrigin, MOBILE_ORIGIN_PATTERN } from './pair-url.ts'
+export { registerPeersRoute, PEERS_PATH } from './peers.ts'
+
 /** apply 收到的组合配置形状（Config 的解析结果）；mobileOrigin 缺省时 pair-url 应答 500。 */
 export interface MobileEntryConfig {
   mobileOrigin?: string
-  /**
-   * 手机页模式：machine=直连本机（缺省），hub=连中转站。
-   *
-   * 它属于**本包**而不是中转包：中转包压根不碰手机页的路由，注入发生在本包
-   * 返回页面时。写在中转包那一行不会报错、也不生效（没人读），手机页会静默
-   * 停在直连模式——整个中转界面根本不出现。
-   */
-  readonly mode?: 'machine' | 'hub'
 }
 
 /**
@@ -39,11 +39,7 @@ export interface MobileEntryConfig {
  */
 export const Config: Schema = Schema.object({
   mobileOrigin: Schema.string().pattern(MOBILE_ORIGIN_PATTERN).description('手机端根网址的源（如 https://mac1.example.ts.net）'),
-  // 不加 required() 就是「可缺省」（本仓库其余可选字段同款）。值用 pattern 限死
-  // 两个词：这个 schemastery 版本没有 literal，而枚举外的值必须**装载即拒**——
-  // 静默当成 machine 的后果是手机页停在直连模式，看起来像「配了没用」。
-  mode: Schema.string().pattern(/^(machine|hub)$/)
-    .description('手机页模式：machine=直连本机（缺省），hub=连中转站。中转模式下要在这**一行**加 mode: hub'),
+  // 不加 required() 就是「可缺省」（本仓库其余可选字段同款）。
 })
 
 /**
@@ -55,7 +51,7 @@ export const Config: Schema = Schema.object({
 export function apply(ctx: MobileRouteContext, config?: MobileEntryConfig): void {
   // 语法校验先于任何注册：坏配置装载即失败，不留下半挂的路由。
   if (config?.mobileOrigin !== undefined) assertMobileOrigin(config.mobileOrigin)
-  registerMobileRoutes(ctx, config)
+  registerMobileRoutes(ctx)
   registerPairUrlRoute(ctx, config?.mobileOrigin)
   registerPeersRoute(ctx)
 }

@@ -167,11 +167,12 @@ describe('脚本给的那段配置，装得上、也开得起来中转模式', (
     expect((snippet.match(/logPath:/g) ?? []).length).toBe(machines)
   })
 
-  it('片段里给了手机页包那一行且带 mode: hub（不加这行手机页停在直连模式）', () => {
+  it('片段只出中转一行，不再单独给手机页入口（页面由中转自出，直连已取消）', () => {
     const out = run(['--host', 'japan01', '--target', '100.96.208.116', '--remote-port', '3080']).stdout
-    expect(out).toContain('- id: threadharbor-mobile-entry')
-    const entryBlock = out.slice(out.indexOf('- id: threadharbor-mobile-entry'), out.indexOf('机器侧还要做'))
-    expect(entryBlock).toContain('mode: hub')
+    expect(out).toContain('- id: threadharbor-mobile-relay')
+    // 直连那套取消后，中转是唯一一行：不该再出现独立的手机页入口，也不该有 mode。
+    expect(out).not.toContain('threadharbor-mobile-entry')
+    expect(out).not.toContain('mode: hub')
   })
 })
 

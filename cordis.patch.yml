@@ -36,12 +36,10 @@
     # 登录 cookie 留在这台机器上，不写进浏览器，也不接收浏览器传来的任意网址。
     - id: threadharbor-host-gateway
       name: '@threadharbor/dsh-host-federation/host-gateway'
-    # 手机端独立入口（宿主侧）：手机页静态资源 + peers / pair-url 接口。
-    - id: threadharbor-mobile-entry
-      name: '@threadharbor/dsh-mobile-entry'
-    # 手机中转（云主机侧）：公网 HTTPS 入口，由它经 SSH 隧道代理到各机的
-    # DSH。骨架任务只挂 /threadharbor/relay/hosts 占位路由；隧道数据面、
-    # tailnet 发现与静态壳由后续任务接上。
+    # 手机中转（云主机侧，独立部署）：公网 HTTPS 入口，由它经 SSH 隧道代理到各机的
+    # DSH。**它自己也出手机页**（hub 模式：页面壳 + pair-url + peers + 中转 API 同源），
+    # 所以这是中转唯一的插件——直连那套已取消，要直连某台机器就用那台机器自己的
+    # 原生 DSH web，不再单独挂 mobile-entry 入口。本机不配中转时它默认停用、不注册。
     - id: threadharbor-mobile-relay
       name: '@threadharbor/dsh-mobile-relay'
     # 名册过滤器不点名。每个要藏起的 preset 在自己的 binding 上打

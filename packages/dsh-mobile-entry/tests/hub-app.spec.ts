@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest'
-import { bootApp, lastSeenTextOf } from '../mobile/app.js'
+import { bootApp, lastSeenTextOf, nextScrollTop } from '../mobile/app.js'
 import { createHubBackend, EVENTS_PATH } from '../mobile/backend-hub.js'
 
 interface Deferred<T> {
@@ -211,11 +211,12 @@ describe('中转模式：机器维度', () => {
 })
 
 describe('中转模式：后端抽象', () => {
-  it('不注入后端时用直连那套，行为与今天一致', async () => {
-    const fetchLike = vi.fn(async () => new Response('{"items":[]}', { status: 200, headers: { 'content-type': 'application/json' } }))
+  it('不注入后端时造真的中转站客户端，首屏去拉机器清单', async () => {
+    const fetchLike = vi.fn(async () => new Response('{"hosts":[]}', { status: 200, headers: { 'content-type': 'application/json' } }))
     const root = host()
     await bootApp(root, { fetchLike, WebSocketCtor: class {} as never })
     await settle(8)
+    expect(fetchLike).toHaveBeenCalledWith('/threadharbor/relay/hosts')
     expect(root.textContent).toContain('ThreadHarbor 手机端')
   })
 })
@@ -966,6 +967,141 @@ describe('中转在用的时候断了（网络抖动、反代重启）', () => {
     stop!.click()
     await settle(12)
     expect(root.innerHTML).toContain('连不上中转站')
+  })
+})
+
+describe('滚动位置保留（nextScrollTop 纯决策 + 渲染接线）', () => {
+  const scrollHeights = new WeakMap<Element, number>()
+  const scrollTops = new WeakMap<Element, number>()
+  let defaultListHeight = 0
+  let savedDescriptors: Array<{ owner: object, key: string, descriptor: PropertyDescriptor }> = []
+
+  function installScrollStubs(): void {
+    savedDescriptors = []
+    for (const key of ['scrollHeight', 'scrollTop'] as const) {
+      let owner: object | null = HTMLElement.prototype
+      while (owner !== null && Object.getOwnPropertyDescriptor(owner, key) === undefined) {
+        owner = Object.getPrototypeOf(owner)
+      }
+      if (owner !== null && Object.getOwnPropertyDescriptor(owner, key) !== undefined) {
+        savedDescriptors.push({ owner, key, descriptor: Object.getOwnPropertyDescriptor(owner, key)! })
+      }
+      Object.defineProperty(HTMLElement.prototype, key, {
+        configurable: true,
+        ...(key === 'scrollHeight'
+          ? {
+              get(this: HTMLElement) {
+                const own = scrollHeights.get(this)
+                if (own !== undefined) return own
+                return this.classList?.contains('msg-list') === true ? defaultListHeight : 0
+              },
+            }
+          : {
+              get(this: HTMLElement) {
+                return scrollTops.get(this) ?? 0
+              },
+              set(this: HTMLElement, value: number) {
+                scrollTops.set(this, value)
+              },
+            }),
+      })
+    }
+  }
+
+  function uninstallScrollStubs(): void {
+    for (const { owner, key, descriptor } of savedDescriptors.reverse()) {
+      Object.defineProperty(owner, key, descriptor)
+    }
+    savedDescriptors = []
+    defaultListHeight = 0
+  }
+
+  it('nextScrollTop：restore 按高度差补偿锚点，keep 原样，bottom 贴新高，负值钳到 0', () => {
+    expect(nextScrollTop('restore', { top: 400, height: 800 }, 1200)).toBe(800)
+    expect(nextScrollTop('restore', { top: 400, height: 800 }, 0)).toBe(0)
+    expect(nextScrollTop('keep', { top: 400, height: 800 }, 1200)).toBe(400)
+    expect(nextScrollTop('bottom', { top: 400, height: 800 }, 1200)).toBe(1200)
+    expect(nextScrollTop('keep', null, 1200)).toBe(1200)
+  })
+
+  it('接线：首开贴底；无关重渲染（横幅）保持阅读位；加载更早按锚点补偿', async () => {
+    installScrollStubs()
+    try {
+      const root = host()
+      const sessions = deferred<{ items: unknown[] } | { error: string }>()
+      const olderPage = deferred<{ conv: unknown } | { error: string }>()
+      const events: { emit: ((hostId: string, type: string, value: unknown) => void) | null } = { emit: null }
+      const backend = {
+        mode: 'hub' as const,
+        async listHosts() {
+          return { hosts: [{ hostId: HOST_A, name: 'MacBook', running: true, reachable: true, online: true }] }
+        },
+        async listSessions() { return await sessions.promise },
+        async pageMessages(_hostId: string, _sessionId: string, throughSeq: number) {
+          if (throughSeq > 1000) return { error: 'session page request past cursor 17' }
+          if (throughSeq < 17) return await olderPage.promise
+          return {
+            conv: {
+              records: [
+                { type: 'event', event: { type: 'user/message', seq: 16, time: 1, data: { content: [{ type: 'text', text: '手机上见' }], source: { kind: 'user' } } } },
+                { type: 'event', event: { type: 'assistant/message', seq: 17, time: 2, data: { message: { content: [{ type: 'text', text: '好的' }] } } } },
+              ],
+              hasMore: true,
+            },
+          }
+        },
+        async prompt() { return { ok: true } },
+        async cancel() { return { ok: true } },
+        async answer() { return { ok: true } },
+        connectEvents(handlers: { onEvent: (hostId: string, type: string, value: unknown) => void }) {
+          events.emit = handlers.onEvent
+          return { close() {} }
+        },
+      }
+      defaultListHeight = 500
+      await bootApp(root, { backend })
+      await settle()
+      sessions.resolve({ items: [{ sessionId: 'session-ccc', projections: { values: { title: '会话' } } }] })
+      clickText(root, `[data-machine-id="${HOST_A}"]`)
+      await settle(8)
+      clickText(root, '[data-session-id="session-ccc"]')
+      await settle(6)
+
+      const firstList = root.querySelector('.msg-list')!
+      expect(scrollTops.get(firstList)).toBe(500) // 首开：贴底（= 新高度）
+
+      // 用户上滑到 400；一条 waterfall 横幅触发无关重渲染 → 位置保持。
+      scrollTops.set(firstList, 400)
+      events.emit?.(HOST_A, 'waterfall', { event: 'approval/request', eventId: 'evt-12', request: { toolName: 'bash' } })
+      const afterBanner = root.querySelector('.msg-list')!
+      expect(afterBanner).not.toBe(firstList)
+      expect(scrollTops.get(afterBanner)).toBe(400)
+
+      // 「加载更早」：点击后先等 olderLoading 渲染落地（列表又重建一次），
+      // 在「将作为锚点」的列表上补上阅读位与高度，再让倒页应答兑现。
+      scrollHeights.set(afterBanner, 800)
+      defaultListHeight = 1200
+      clickText(root, '[data-action="load-older"]')
+      await settle(4)
+      const loadingList = root.querySelector('.msg-list')!
+      expect(loadingList).not.toBe(afterBanner)
+      scrollHeights.set(loadingList, 800)
+      scrollTops.set(loadingList, 400)
+      olderPage.resolve({
+        conv: {
+          records: [
+            { type: 'event', event: { type: 'user/message', seq: 15, time: 0, data: { content: [{ type: 'text', text: '更早的消息' }], source: { kind: 'user' } } } },
+          ],
+          hasMore: false,
+        },
+      })
+      await settle(4)
+      const afterOlder = root.querySelector('.msg-list')!
+      expect(root.innerHTML).toContain('更早的消息')
+      expect(scrollTops.get(afterOlder)).toBe(800)
+    } finally {
+      uninstallScrollStubs()
+    }
   })
 })
 

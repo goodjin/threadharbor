@@ -175,13 +175,9 @@ cat <<EOF
           logPath: ${MACHINE_LOG_PATH}
 $(if [ -n "$USER_NAME" ]; then echo "          user: ${USER_NAME}"; fi)$(if [ -n "$IDENTITY" ]; then echo "          identityFile: ${IDENTITY}"; fi)
 
-  - id: threadharbor-mobile-entry
-    config:
-      # 上面那个 origin，同一个源。手机页的配对链接要用它。
-      mobileOrigin: https://dsh.agentlab.fun
-      # 中转模式：手机连中转站而不是直连单机。**这一行加在中转包那一行没用**——
-      # 中转包不碰手机页路由，写在那里没人读，手机页会静默停在直连模式。
-      mode: hub
+# 中转是唯一一行：它自己出手机页（hub 模式：页面壳 + pair-url + peers + 中转 API
+# 同源），所以不再单独挂 mobile-entry。直连那套已取消——要直连某台机器就用那台
+# 机器自己的原生 DSH web。
 
 机器侧还要做的三件事：
 

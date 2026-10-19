@@ -50,10 +50,10 @@ describe('pairingGuideView（配对引导，R2：只有两支）', () => {
     expect(html).toContain('重新扫码')
   })
 
-  it('untrusted 指向信任主机配置（tailscale serve --trusted-host）', () => {
+  it('untrusted 指向中转站信任配置（HTTP 403）', () => {
     const html = pairingGuideView('untrusted')
+    expect(html).toContain('中转站')
     expect(html).toContain('信任')
-    expect(html).toContain('tailscale serve')
   })
 
   it('两支文案不同，不共用一屏', () => {

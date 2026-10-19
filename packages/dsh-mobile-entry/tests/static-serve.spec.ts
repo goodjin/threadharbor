@@ -8,7 +8,6 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   CONTENT_TYPES,
   HELLO_PATH,
-  injectMobileConfig,
   MOBILE_PREFIX,
   registerMobileRoutes,
   resolveMobileAsset,
@@ -204,7 +203,7 @@ describe('CONTENT_TYPES（静态资源登记表）', () => {
 describe('registerMobileRoutes（路由注册与 hello 标记）', () => {
   it('注册 prefix 静态路由与 exact hello 路由，路径与常量一致', () => {
     const { routes, ctx } = captureRoutes()
-    registerMobileRoutes(ctx, {})
+    registerMobileRoutes(ctx)
     expect(routes).toHaveLength(2)
     const prefix = routes.find(route => route.kind === 'prefix')
     const exact = routes.find(route => route.kind === 'exact')
@@ -216,7 +215,7 @@ describe('registerMobileRoutes（路由注册与 hello 标记）', () => {
 
   it('hello 对 GET 返回固定 JSON 形状，无准入', () => {
     const { routes, ctx } = captureRoutes()
-    registerMobileRoutes(ctx, {})
+    registerMobileRoutes(ctx)
     const hello = routes.find(route => route.path === '/threadharbor/mobile/hello')
     const state = call(hello!.handler, { method: 'GET', url: HELLO_PATH })
     expect(state.status).toBe(200)
@@ -227,14 +226,14 @@ describe('registerMobileRoutes（路由注册与 hello 标记）', () => {
 
   it('hello 拒绝非 GET 请求', () => {
     const { routes, ctx } = captureRoutes()
-    registerMobileRoutes(ctx, {})
+    registerMobileRoutes(ctx)
     const hello = routes.find(route => route.path === '/threadharbor/mobile/hello')
     expect(call(hello!.handler, { method: 'POST', url: HELLO_PATH }).status).toBe(405)
   })
 
   it('prefix 路由按解析结果回包：命中 200，未命中 404', () => {
     const { routes, ctx } = captureRoutes()
-    registerMobileRoutes(ctx, {})
+    registerMobileRoutes(ctx)
     const serve = routes.find(route => route.kind === 'prefix')!
     const hit = call(serve.handler, { method: 'GET', url: '/threadharbor/mobile/' })
     expect(hit.status).toBe(200)
@@ -247,7 +246,7 @@ describe('registerMobileRoutes（路由注册与 hello 标记）', () => {
 describe('prefix 路由的 index 准入（带令牌经官方 authorizeIndex 换 cookie）', () => {
   it('带令牌的 index 到访：委托官方换 cookie（303 到 ./），不再回应用壳', () => {
     const { routes, ctx, connection } = captureRoutes()
-    registerMobileRoutes(ctx, {})
+    registerMobileRoutes(ctx)
     const serve = routes.find(route => route.kind === 'prefix')!
     for (const url of ['/threadharbor/mobile/?token=abc123', '/threadharbor/mobile?token=abc123']) {
       const state = call(serve.handler, { method: 'GET', url })
@@ -264,7 +263,7 @@ describe('prefix 路由的 index 准入（带令牌经官方 authorizeIndex 换 
 
   it('无令牌的 index 到访：照旧服务应用壳，connection 不被触碰', () => {
     const { routes, ctx, connection } = captureRoutes()
-    registerMobileRoutes(ctx, {})
+    registerMobileRoutes(ctx)
     const serve = routes.find(route => route.kind === 'prefix')!
     const state = call(serve.handler, { method: 'GET', url: '/threadharbor/mobile/' })
     expect(state.status).toBe(200)
@@ -277,7 +276,7 @@ describe('prefix 路由的 index 准入（带令牌经官方 authorizeIndex 换 
     // 这里用不存在的资源：断言点在「带令牌也不触发委托」，不在资源本身。
     // （Task 8 起 app.js 已真实存在，占位用例改用确实没有的资源名。）
     const { routes, ctx, connection } = captureRoutes()
-    registerMobileRoutes(ctx, {})
+    registerMobileRoutes(ctx)
     const serve = routes.find(route => route.kind === 'prefix')!
     const state = call(serve.handler, { method: 'GET', url: '/threadharbor/mobile/nope.js?token=abc123' })
     expect(state.status).toBe(404)
@@ -285,81 +284,14 @@ describe('prefix 路由的 index 准入（带令牌经官方 authorizeIndex 换 
   })
 })
 
-describe('index.html 的模式注入', () => {
-  it('hub 模式：注入 {"mode":"hub"}，页面据此连中转站', async () => {
-    const { resolveMobileAsset } = await import('../src/static-serve.ts')
-    const asset = resolveMobileAsset('/threadharbor/mobile', undefined, 'hub')
-    expect(asset.status).toBe(200)
-    if (asset.status !== 200) return
-    expect(asset.body).toContain('window.__THREADHARBOR_MOBILE__ = {"mode":"hub"}')
-    expect(asset.body).not.toContain('__MOBILE_CONFIG__')
-  })
-
-  it('缺省是直连：注入 {"mode":"machine"}', async () => {
+describe('页面只有中转模式：静态资源原样返回，不再注入任何配置', () => {
+  it('served 的 index.html 不含模式占位，也不含注入脚本', async () => {
     const { resolveMobileAsset } = await import('../src/static-serve.ts')
     const asset = resolveMobileAsset('/threadharbor/mobile')
     expect(asset.status).toBe(200)
     if (asset.status !== 200) return
-    expect(asset.body).toContain('window.__THREADHARBOR_MOBILE__ = {"mode":"machine"}')
-  })
-
-  it('非 index 文件不做注入', async () => {
-    const { injectMobileConfig } = await import('../src/static-serve.ts')
-    const line = 'window.__THREADHARBOR_MOBILE__ = __MOBILE_CONFIG__'
-    expect(injectMobileConfig(line, 'app.js', 'hub')).toBe(line)
-  })
-
-  it('模式取值不是那两种之一时按 machine 处置（不把任意内容塞进 HTML）', async () => {
-    const { injectMobileConfig } = await import('../src/static-serve.ts')
-    const out = injectMobileConfig('<script>window.__THREADHARBOR_MOBILE__ = __MOBILE_CONFIG__</script>', 'index.html', '</script>' as never)
-    expect(out).toBe('<script>window.__THREADHARBOR_MOBILE__ = {"mode":"machine"}</script>')
+    expect(asset.body).not.toContain('__MOBILE_CONFIG__')
+    expect(asset.body).not.toContain('__THREADHARBOR_MOBILE__')
   })
 })
 
-describe('mode 由本包的 Config 决定（写在中转包那一行没人读，手机页会静默停在直连模式）', () => {
-  /** 手机页 index.html 里那行注入的实际内容。 */
-  function injectedLine(html: string, mode?: 'machine' | 'hub'): string {
-    return injectMobileConfig(html, 'index.html', mode === 'hub' ? 'hub' : 'machine')
-  }
-
-  it('Config 声明了 mode：运维加这一行不会因未知字段被拒', async () => {
-    const { Config } = await import('../src/index.ts')
-    expect(() => Config({ mobileOrigin: 'https://relay.example.com', mode: 'hub' })).not.toThrow()
-  })
-
-  it('mode: hub 真的能流到注入的那一行（装配层实测，不只测 schema）', async () => {
-    const { apply } = await import('../src/index.ts')
-    const dir = mkdtempSync(join(tmpdir(), 'dsh-mobile-entry-mode-'))
-    tempDirs.push(dir)
-    // 真实的 index.html 里那行占位：服务端就是替换它的右侧。
-    writeFileSync(join(dir, 'index.html'), REAL_INDEX_HTML, 'utf8')
-    const registered: { path: string, handler: (req: unknown, res: unknown) => void }[] = []
-    const ctx = {
-      // 处置器工厂要真的跑一遍，否则什么都不会被登记——那种假件会让用例空转。
-      effect: (fn: () => unknown) => fn(),
-      webServer: {
-        register: (route: { path: string, handler: (req: unknown, res: unknown) => void }) => {
-          registered.push(route)
-          return () => {}
-        },
-      },
-      connection: { authorizeMobileIndex: async (_req: unknown, serve: () => Promise<unknown>) => await serve() },
-    }
-    apply(ctx as never, { mobileOrigin: 'https://relay.example.com', mode: 'hub' })
-    const page = registered.find(route => route.path === MOBILE_PREFIX)
-    expect(page).toBeDefined()
-    const chunks: string[] = []
-    await page!.handler(
-      { method: 'GET', url: '/threadharbor/mobile/', headers: { host: 'relay.example.com' } },
-      { writeHead() {}, end(chunk?: string) { chunks.push(chunk ?? '') } },
-    )
-    // 只看**注入的那一行**。整页里到处都有 "mode":"hub" 这几个字（页面自举
-    // 注释里就写着），断言整篇会永远通过——那种假绿正是这里要防的。
-    const injected = /window\.__THREADHARBOR_MOBILE__\s*=\s*([^<]+)/.exec(chunks.join(''))?.[1] ?? ''
-    expect(injected.trim()).toBe('{"mode":"hub"}')
-  })
-
-  it('不给就是直连（缺省不变，旧配置不受影响）', () => {
-    expect(injectedLine(REAL_INDEX_HTML)).toContain('"mode":"machine"')
-  })
-})

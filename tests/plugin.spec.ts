@@ -41,6 +41,10 @@ describe('remote Web bundle', () => {
     expect(patch).toContain("threadharbor-ssh-deploy")
     expect(patch).toContain("threadharbor-host-gateway")
     expect(patch).toContain("threadharbor-mobile-relay")
+    // 手机页不再作为独立入口挂进 bundle：直连那套取消后，页面由中转自出（hub），
+    // 普通机器要直连就用各自的原生 DSH web。残留的 mobile-entry 入口会让本机又
+    // 去注册一个没配置的直连页——正是「1 entry did not activate」的来源。
+    expect(patch).not.toContain('threadharbor-mobile-entry')
 
     // Phase 6 removed the hostd gateway. Agents run as in-process ACP plugins
     // on the machine serving the page, so there is no remote host to proxy to

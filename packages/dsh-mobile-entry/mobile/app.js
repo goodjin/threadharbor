@@ -1,41 +1,24 @@
 /**
- * 手机页应用挂接层：只做 DOM 挂接与调用编排。
+ * 手机页应用挂接层：只做 DOM 挂接与调用编排。只有中转模式。
  *
  * 分工铁律（无构建链的原生 ESM）：HTML 与全部用户可见文案出自 views.js 纯
- * 函数；本文件不拼用户可见字符串，只持状态、调 wire.js、把视图串塞进 DOM、
- * 在根部做一次事件委托。协议事实（端点、信封、帧形、throughSeq 语义）全部
- * 来自 Task 6 线上探针（docs/research/2026-10-15-mobile-wire.md）。
+ * 函数；本文件不拼用户可见字符串，只持状态、调后端、把视图串塞进 DOM、
+ * 在根部做一次事件委托。协议事实在后端那一层（backend-hub.js）。
  *
- * 入口流程（spec §5）：先 rpcCall session/list 探测配对状态再渲染首页——
- * 401（unpaired）与 403（untrusted）各给一支配对引导（R2：没有第三支，
- * 无效令牌由官方交换的 401 页接管，探针只会看到这两类）；其余失败给错误屏。
- * 配对正常时首屏是主机清单（peers 仅展示，v1 不跨域连接），「会话」页签里
- * 是会话列表，点开经 session/page 取最新页。
+ * 入口流程：首屏是机器清单（中转登记的各台机），选定机器后进「会话」页签；
+ * 点开会话经后端 pageMessages 取最新页。
  *
- * 会话内容没有 follow 流可开（wire.js 的 MuxConnection 只订阅 $events），
- * v1 的做法：进会话先用「游标探测」取最新页——session/page 的 throughSeq
- * 故意超界，宿主按实测报 `… past cursor N`，N 就是日志末端（空日志为 -1）；
- * 再用 throughSeq=N 倒页 PAGE_SIZE 条。之后靠 $events 的 api-session/* 广播
- * 触发整页补拉（spec §7「第一版整页级补齐」），assistant-stream 的归并在
- * stateFold 里就位，等将来开了 follow 流即可接上。
+ * 会话内容没有 follow 流可开，v1 的做法：进会话先用「游标探测」取最新页——
+ * pageMessages 的 throughSeq 故意超界，宿主按实测报 `… past cursor N`，N 就是
+ * 日志末端（空日志为 -1）；再用 throughSeq=N 倒页 PAGE_SIZE 条。之后靠事件
+ * 汇流的 api-session/* 广播触发整页补拉（spec §7「第一版整页级补齐」），
+ * assistant-stream 的归并在 stateFold 里就位，等将来开了 follow 流即可接上。
  *
- * 事件通道：MuxConnection 经 makeSocketFactory 适配真 WebSocket。构造失败
- * 在工厂内就地吞掉（返回立即断开的死 socket，界面显示未连接）——绝不让它
- * 逃进 MuxConnection 的重连定时器回调，否则退避循环会永久卡死。
+ * 事件通道：backend-hub.js 的 connectEvents 经真 WebSocket 订阅 $events，
+ * 断线自动重连。构造失败在后端内就地落到「未连接」，不向上传染。
  */
 
-import { createMachineBackend } from './backend-machine.js'
 import { createHubBackend } from './backend-hub.js'
-import {
-  MUX_PATH,
-  MuxConnection,
-  SESSION_CANCEL_ENDPOINT,
-  SESSION_HISTORY_ENDPOINT,
-  SESSION_LIST_ENDPOINT,
-  SESSION_PROMPT_ENDPOINT,
-  PEERS_PATH,
-  rpcCall,
-} from './wire.js'
 import {
   guidanceReasonForKind,
   pairingGuideView,
@@ -58,62 +41,8 @@ const SESSIONS_BATCH = 20
 /** api-session/* 广播触发刷新的防抖窗口（毫秒）。 */
 const REFRESH_DEBOUNCE_MS = 500
 
-/**
- * 造一个 socketFactory（carryover#3 的落点）：真 WebSocket 构造失败（坏地址、
- * 升级被拒等）在工厂内就地吞掉——返回一只「立即断开」的死 socket 并把错误
- * 交给 onNotice 显示，绝不向调用方抛，也就不会逃进 MuxConnection 的重连
- * 定时器回调把退避循环永久打死。
- */
-export function makeSocketFactory(onNotice, WebSocketCtor = globalThis.WebSocket) {
-  return function socketFactory(url) {
-    let ws
-    try {
-      ws = new WebSocketCtor(url)
-    } catch (error) {
-      // 构造失败不外逃：死 socket 的 onclose 异步触发，让 MuxConnection 走
-      // 正常的断线退避路径；错误原文交给界面显示。
-      const message = error instanceof Error ? error.message : String(error)
-      const dead = { send() {}, close() {}, onopen: null, onmessage: null, onclose: null }
-      queueMicrotask(() => {
-        onNotice({ kind: 'construct-error', message })
-        dead.onclose?.()
-      })
-      return dead
-    }
-    return {
-      send: data => ws.send(data),
-      close: () => ws.close(),
-      get onopen() { return ws.onopen },
-      set onopen(value) { ws.onopen = value },
-      get onmessage() { return ws.onmessage },
-      set onmessage(value) { ws.onmessage = value },
-      set onclose(value) {
-        // 包一层：断线事实先报给界面（未连接状态），再交给连接的恢复逻辑。
-        ws.onclose = value === null ? null : () => {
-          onNotice({ kind: 'socket-closed' })
-          value()
-        }
-      },
-      get onclose() { return ws.onclose },
-    }
-  }
-}
-
 function messageOf(error) {
   return error instanceof Error ? error.message : String(error)
-}
-
-function makeRequestId(rpcSeq) {
-  const uuid = globalThis.crypto?.randomUUID?.()
-  return typeof uuid === 'string' ? uuid : `req-${Date.now()}-${rpcSeq}`
-}
-
-function clientTimeZone() {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone ?? 'UTC'
-  } catch {
-    return 'UTC'
-  }
 }
 
 function seqOf(record) {
@@ -144,23 +73,14 @@ export function nextScrollTop(mode, anchor, newHeight) {
  */
 export async function bootApp(root, deps = {}) {
   const fetchLike = deps.fetchLike ?? ((...args) => globalThis.fetch(...args))
-  // 服务端在 index.html 里注入的模式（{"mode":"hub"}）。注入的 config 优先，
-  // 其次看 window 上的全局（页面直开时没有），都没有就是直连。
-  const injectedMode = deps.mode
-    ?? (typeof globalThis.__THREADHARBOR_MOBILE__ === 'object' && globalThis.__THREADHARBOR_MOBILE__ !== null
-      ? globalThis.__THREADHARBOR_MOBILE__.mode
-      : undefined)
-  if (injectedMode === 'hub' && deps.backend === undefined) {
+  // 页面只有中转模式：后端是中转站客户端，会话按 hostId 取、事件是汇流。
+  // 测试可注入替身后端；不注入时造一个真的。
+  if (deps.backend === undefined) {
     deps = { ...deps, backend: createHubBackend({ fetchLike, WebSocketCtor: deps.WebSocketCtor }) }
   }
-  const WebSocketCtor = deps.WebSocketCtor ?? globalThis.WebSocket
-  // 后端是「数据从哪来」的唯一出处。不注入时用直连那套，且它的每个方法都只是
-  // 转交下面这些既有调用——直连行为不是靠两套代码保持一致，而是没有第二套。
-  const isHub = deps.backend !== undefined && deps.backend.mode === 'hub'
   const eventsHolder = { handle: null }
 
   let rpcSeq = 0
-  let connection = null
   let refreshTimer = null
   let refreshingSessions = false
   // 会话代际：每次打开会话/返回/重boot 都递增。会话内容的一切在途应答在
@@ -251,7 +171,7 @@ export async function bootApp(root, deps = {}) {
     const chip = root.querySelector('#mux-state')
     if (chip !== null) {
       chip.textContent = muxStateText()
-      chip.hidden = !(state.screen === 'hosts' || state.screen === 'machines' || state.screen === 'sessions' || state.screen === 'conversation')
+      chip.hidden = !(state.screen === 'machines' || state.screen === 'sessions' || state.screen === 'conversation')
       chip.className = `mux-state mux-${state.mux}`
     }
     const banners = root.querySelector('#banners')
@@ -276,7 +196,7 @@ export async function bootApp(root, deps = {}) {
         tabbar.innerHTML = ''
         break
       case 'guide':
-        main.innerHTML = pairingGuideView(state.guideReason, isHub ? 'hub' : 'machine')
+        main.innerHTML = pairingGuideView(state.guideReason)
         tabbar.innerHTML = ''
         break
       case 'error':
@@ -291,12 +211,8 @@ export async function bootApp(root, deps = {}) {
         })
         tabbar.innerHTML = ''
         break
-      case 'hosts':
-        main.innerHTML = renderHostList(state.hosts)
-        tabbar.innerHTML = tabbarHtml('hosts')
-        break
       case 'sessions':
-        main.innerHTML = (isHub && state.machineId !== null
+        main.innerHTML = (state.machineId !== null
           ? '<button type="button" class="ghost" data-action="back-to-machines">← 换机器</button>'
           : '')
         + renderSessionList({
@@ -353,7 +269,7 @@ export async function bootApp(root, deps = {}) {
 
   function tabbarHtml(activeTab) {
     return [
-      `<button type="button" class="tab${activeTab === 'hosts' ? ' tab-active' : ''}" data-action="tab" data-tab="hosts">主机</button>`,
+      `<button type="button" class="tab${activeTab === 'machines' ? ' tab-active' : ''}" data-action="tab" data-tab="machines">主机</button>`,
       `<button type="button" class="tab${activeTab === 'sessions' ? ' tab-active' : ''}" data-action="tab" data-tab="sessions">会话</button>`,
     ].join('')
   }
@@ -361,9 +277,10 @@ export async function bootApp(root, deps = {}) {
   // ---------- 入口流程 ----------
 
   async function boot() {
-    if (connection !== null) {
-      connection.close()
-      connection = null
+    // 重 boot：先收掉上轮的事件流，再作废一切在途会话应答。
+    if (eventsHolder.handle !== null) {
+      eventsHolder.handle.close()
+      eventsHolder.handle = null
     }
     convGeneration += 1 // 重 boot 使一切在途会话应答过期
     state.approvals.clear()
@@ -372,47 +289,11 @@ export async function bootApp(root, deps = {}) {
     state.muxDetail = ''
     state.screen = 'boot'
     render()
-    if (isHub) {
-      // 中转模式：首屏就是机器清单，选定机器之后才去取那台机的会话。
-      // 放在直连那步之前——它自己不走本机的 RPC 通道。
-      state.screen = 'machines'
-      render()
-      await loadMachines()
-      openHubEvents()
-      return
-    }
-    let outcome
-    try {
-      outcome = await rpcCall(fetchLike, SESSION_LIST_ENDPOINT, { _request: {} }, `boot-${++rpcSeq}`)
-    } catch (error) {
-      state.screen = 'error'
-      state.errorMessage = `无法连接主机：${messageOf(error)}`
-      render()
-      return
-    }
-    if (outcome.ok !== true) {
-      applyFailureKind(outcome)
-      render()
-      return
-    }
-    state.sessions = Array.isArray(outcome.result?.items) ? outcome.result.items : []
-    state.sessionsShown = SESSIONS_BATCH
-    state.screen = 'hosts'
+    // 首屏就是机器清单，选定机器之后才去取那台机的会话。
+    state.screen = 'machines'
     render()
-    openConnection()
-    void loadHosts()
-  }
-
-  /** RPC 失败种类落屏：401/403 → 对应配对引导（R2），其余 → 错误屏。 */
-  function applyFailureKind(outcome) {
-    const reason = guidanceReasonForKind(outcome.kind)
-    if (reason !== null) {
-      state.screen = 'guide'
-      state.guideReason = reason
-      return
-    }
-    state.screen = 'error'
-    state.errorMessage = outcome.message
+    await loadMachines()
+    openHubEvents()
   }
 
   // ---------- 机器清单（中转模式） ----------
@@ -515,72 +396,34 @@ export async function bootApp(root, deps = {}) {
     })
   }
 
-  // ---------- 主机清单 ----------
-
-  async function loadHosts() {
-    state.hosts = { peers: [], error: undefined, loading: true }
-    if (state.screen === 'hosts') render()
-    try {
-      const response = await fetchLike(PEERS_PATH)
-      if (response.status !== 200) {
-        state.hosts = { peers: [], error: `主机清单请求失败：HTTP ${response.status}` }
-      } else {
-        const body = JSON.parse(await response.text())
-        state.hosts = {
-          peers: Array.isArray(body?.peers) ? body.peers : [],
-          error: typeof body?.error === 'string' ? body.error : undefined,
-        }
-      }
-    } catch (error) {
-      state.hosts = { peers: [], error: messageOf(error) }
-    }
-    if (state.screen === 'hosts') render()
-  }
-
   // ---------- 会话列表 ----------
 
   async function refreshSessions() {
     if (refreshingSessions) return
     refreshingSessions = true
     try {
-      if (isHub) {
-        if (state.machineId === null) return
-        const body = await state.backend.listSessions(state.machineId)
-        if (typeof body?.error === 'string') {
-          // 手机与中转站的连接断了：进配对引导，与直连同一支路。少了这一步，
-          // 列表页只会写一句「与中转站的连接已过期」，操作者不知道该做什么。
-          const guide = guidanceReasonForKind(body.kind)
-          if (guide !== null) {
-            state.sessions = []
-            state.sessionsError = undefined
-            state.screen = 'guide'
-            state.guideReason = guide
-            render()
-            return
-          }
+      if (state.machineId === null) return
+      const body = await state.backend.listSessions(state.machineId)
+      if (typeof body?.error === 'string') {
+        // 手机与中转站的连接断了：进配对引导。少了这一步，列表页只会写一句
+        // 「与中转站的连接已过期」，操作者不知道该做什么。
+        const guide = guidanceReasonForKind(body.kind)
+        if (guide !== null) {
           state.sessions = []
-          state.sessionsError = body.error
+          state.sessionsError = undefined
+          state.screen = 'guide'
+          state.guideReason = guide
           render()
           return
         }
-        state.sessionsError = undefined
-        state.sessions = Array.isArray(body?.items) ? body.items : []
-        if (state.screen === 'sessions' || state.screen === 'conversation') render()
+        state.sessions = []
+        state.sessionsError = body.error
+        render()
         return
       }
-      const outcome = await rpcCall(fetchLike, SESSION_LIST_ENDPOINT, { _request: {} }, `sessions-${++rpcSeq}`)
-      if (outcome.ok === true) {
-        state.sessions = Array.isArray(outcome.result?.items) ? outcome.result.items : []
-        if (state.screen === 'sessions' || state.screen === 'conversation') render()
-      } else {
-        // 凭据过期（401）→ 回配对引导屏（spec §5）；其余失败保留旧清单。
-        const reason = guidanceReasonForKind(outcome.kind)
-        if (reason !== null) {
-          state.guideReason = reason
-          state.screen = 'guide'
-          render()
-        }
-      }
+      state.sessionsError = undefined
+      state.sessions = Array.isArray(body?.items) ? body.items : []
+      if (state.screen === 'sessions' || state.screen === 'conversation') render()
     } catch {
       // 传输抖动：保留旧清单，等下一次广播/页签切换再试。
     } finally {
@@ -602,16 +445,12 @@ export async function bootApp(root, deps = {}) {
   // ---------- 会话内容 ----------
 
   async function rpcSessionPage(sessionId, throughSeq, maxMessages, label) {
-    if (isHub && state.machineId !== null) {
-      const body = await state.backend.pageMessages(state.machineId, sessionId, throughSeq, maxMessages)
-      // 手机自己的连接断了走配对引导；那台机器在重连就只是这次没拿到内容。
-      if (typeof body?.error === 'string') return { ok: false, kind: body.kind ?? 'rpc-error', message: body.error }
-      if (body?.conv === undefined) return { ok: false, kind: 'rpc-error', message: '那台机器没有返回会话内容' }
-      return { ok: true, result: body.conv }
-    }
-    return rpcCall(fetchLike, SESSION_HISTORY_ENDPOINT, {
-      request: { address: { kind: 'session', sessionId }, throughSeq, maxMessages },
-    }, `${label}-${++rpcSeq}`)
+    if (state.machineId === null) return { ok: false, kind: 'rpc-error', message: '还没选定机器' }
+    const body = await state.backend.pageMessages(state.machineId, sessionId, throughSeq, maxMessages)
+    // 手机自己的连接断了走配对引导；那台机器在重连就只是这次没拿到内容。
+    if (typeof body?.error === 'string') return { ok: false, kind: body.kind ?? 'rpc-error', message: body.error }
+    if (body?.conv === undefined) return { ok: false, kind: 'rpc-error', message: '那台机器没有返回会话内容' }
+    return { ok: true, result: body.conv }
   }
 
   /**
@@ -764,73 +603,28 @@ export async function bootApp(root, deps = {}) {
 
   async function sendPrompt(text) {
     if (state.sessionId === null) return
-    if (isHub && state.machineId !== null) {
-      const result = await state.backend.prompt(state.machineId, state.sessionId, text)
-      if (result.ok === true) {
-        state.draft = ''
-        state.noticeError = undefined
-        void refreshConversation()
-      } else {
-        // 放常驻那一句而不是会话那一格：草稿还留着，操作者随时可能自己再点一次，
-        // 得让他知道刚才那条没出去。放会话那格会被下一次成功刷新顶掉。
-        state.noticeError = result.message
-      }
-      render()
-      return
-    }
-    const outcome = await rpcCall(fetchLike, SESSION_PROMPT_ENDPOINT, {
-      request: {
-        requestId: makeRequestId(rpcSeq),
-        sessionId: state.sessionId,
-        mode: 'queue',
-        content: [{ type: 'text', text }],
-        clientTimeZone: clientTimeZone(),
-      },
-    }, `prompt-${++rpcSeq}`)
-    if (outcome.ok === true) {
+    const result = await state.backend.prompt(state.machineId, state.sessionId, text)
+    if (result.ok === true) {
       state.draft = ''
+      state.noticeError = undefined
       void refreshConversation()
     } else {
-      const reason = guidanceReasonForKind(outcome.kind)
-      if (reason !== null) {
-        state.guideReason = reason
-        state.screen = 'guide'
-      } else {
-        state.convError = outcome.message
-      }
+      // 放常驻那一句而不是会话那一格：草稿还留着，操作者随时可能自己再点一次，
+      // 得让他知道刚才那条没出去。放会话那格会被下一次成功刷新顶掉。
+      state.noticeError = result.message
     }
     render()
   }
 
   async function stopSession() {
     if (state.sessionId === null) return
-    if (isHub && state.machineId !== null) {
-      const result = await state.backend.cancel(state.machineId, state.sessionId)
-      if (result.ok !== true) {
-        // 这里必须用常驻那一句：紧接着的 refreshConversation 一成功，会话那格就被
-        // 清掉，停止失败的话一个字都不剩——按了跟没按一样。
-        state.noticeError = result.message
-      } else {
-        state.noticeError = undefined
-      }
-      await refreshSessions()
-      await refreshConversation()
-      render()
-      return
-    }
-    const outcome = await rpcCall(fetchLike, SESSION_CANCEL_ENDPOINT, {
-      request: { sessionId: state.sessionId },
-    }, `cancel-${++rpcSeq}`)
-    if (outcome.ok !== true) {
-      const reason = guidanceReasonForKind(outcome.kind)
-      if (reason !== null) {
-        state.guideReason = reason
-        state.screen = 'guide'
-      } else {
-        state.convError = outcome.message
-      }
-      render()
-      return
+    const result = await state.backend.cancel(state.machineId, state.sessionId)
+    if (result.ok !== true) {
+      // 这里必须用常驻那一句：紧接着的 refreshConversation 一成功，会话那格就被
+      // 清掉，停止失败的话一个字都不剩——按了跟没按一样。
+      state.noticeError = result.message
+    } else {
+      state.noticeError = undefined
     }
     await refreshSessions()
     await refreshConversation()
@@ -838,51 +632,11 @@ export async function bootApp(root, deps = {}) {
 
   // ---------- 事件通道 ----------
 
-  function onSocketNotice(notice) {
-    if (notice.kind === 'socket-closed') {
-      state.mux = 'offline'
-    } else {
-      state.mux = 'offline'
-      state.muxDetail = notice.message ?? ''
-    }
-    render()
-  }
-
-  function openConnection() {
-    const protocol = globalThis.location?.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host = globalThis.location?.host ?? ''
-    try {
-      connection = new MuxConnection(
-        () => `${protocol}//${host}${MUX_PATH}`,
-        makeSocketFactory(onSocketNotice, WebSocketCtor),
-        fetchLike,
-      )
-    } catch (error) {
-      state.mux = 'offline'
-      state.muxDetail = messageOf(error)
-      render()
-      return
-    }
-    connection.onEvent('ready', () => {
-      state.mux = 'online'
-      state.muxDetail = ''
-      render()
-    })
-    connection.onEvent('waterfall', onWaterfall)
-    connection.onEvent('cancel', onCancelFrame)
-    connection.onEvent('emit', onEmit)
-    connection.onEvent('error', value => {
-      state.muxDetail = typeof value?.message === 'string' ? value.message : '事件流错误'
-      render()
-    })
-  }
-
   /**
    * waterfall 事件：v1 只接 approval/request，进顶部横幅。
    *
-   * machineLabel 只有中转模式会传：那边两台机器可能同时有待批事项，不标明来源
-   * 操作者只能靠猜。直连是本机、没有「来自哪台」这回事，不传时 DOM 与改之前
-   * 逐字相同。
+   * machineLabel 标明待批来自哪台机器：两台机器可能同时有待批事项，不标明
+   * 来源操作者只能靠猜。它由事件流带来的 hostId 决定。
    */
   function onWaterfall(value, machineLabel) {
     if (value?.event !== 'approval/request' || typeof value.eventId !== 'string') return
@@ -912,54 +666,34 @@ export async function bootApp(root, deps = {}) {
 
   async function answerApproval(eventId, approve) {
     if (state.pendingAnswers.has(eventId)) return
-    if (isHub) {
-      // 归属靠事件带来的 hostId：应答必须回到发起它的那台机器，不能按「当前
-      // 在看哪台」猜——操作者可能正看着 B，A 的待批却先弹出来。
-      const hostId = state.approvalHosts.get(eventId)
-      if (hostId === undefined) return
-      state.pendingAnswers.add(eventId)
-      render()
-      const outcome = await state.backend.answer(hostId, eventId, {
-        kind: 'result',
-        value: approve ? 'allowed-once' : 'rejected',
-      })
-      state.pendingAnswers.delete(eventId)
-      if (outcome.ok === true) {
-        state.approvals.delete(eventId)
-        state.approvalHosts.delete(eventId)
-        state.noticeError = undefined
-        render()
-        return
-      }
-      // 手机与中转站的连接断了：进配对引导。只往顶栏塞一句文案的话，操作者
-      // 看到的只是一次「答不上」，横幅还挂在那里，重试多少次都一样。
-      const guide = guidanceReasonForKind(outcome.kind)
-      if (guide !== null) {
-        state.screen = 'guide'
-        state.guideReason = guide
-        render()
-        return
-      }
-      state.noticeError = outcome.message
-      render()
-      return
-    }
-    if (connection === null) return
-    // 在途标记：横幅按钮渲染成 disabled（UI 不邀双击），重复派发在此拦下。
+    // 归属靠事件带来的 hostId：应答必须回到发起它的那台机器，不能按「当前
+    // 在看哪台」猜——操作者可能正看着 B，A 的待批却先弹出来。
+    const hostId = state.approvalHosts.get(eventId)
+    if (hostId === undefined) return
     state.pendingAnswers.add(eventId)
     render()
-    const outcome = await connection.answer(eventId, {
+    const outcome = await state.backend.answer(hostId, eventId, {
       kind: 'result',
       value: approve ? 'allowed-once' : 'rejected',
     })
     state.pendingAnswers.delete(eventId)
     if (outcome.ok === true) {
       state.approvals.delete(eventId)
-    } else {
-      // 首答已生效时宿主报迟到，error 是良性的——cancel 帧会来收卡；真失败
-      // 保留横幅让操作者重试。
-      state.muxDetail = outcome.message
+      state.approvalHosts.delete(eventId)
+      state.noticeError = undefined
+      render()
+      return
     }
+    // 手机与中转站的连接断了：进配对引导。只往顶栏塞一句文案的话，操作者
+    // 看到的只是一次「答不上」，横幅还挂在那里，重试多少次都一样。
+    const guide = guidanceReasonForKind(outcome.kind)
+    if (guide !== null) {
+      state.screen = 'guide'
+      state.guideReason = guide
+      render()
+      return
+    }
+    state.noticeError = outcome.message
     render()
   }
 
@@ -972,9 +706,10 @@ export async function bootApp(root, deps = {}) {
       case 'retry-boot': void boot(); break
       case 'tab': {
         const tab = target.getAttribute('data-tab')
-        if (tab === 'hosts' || tab === 'sessions') {
+        if (tab === 'machines' || tab === 'sessions') {
           state.screen = tab
           if (tab === 'sessions') void refreshSessions()
+          if (tab === 'machines') void loadMachines()
           render()
         }
         break
@@ -985,7 +720,7 @@ export async function bootApp(root, deps = {}) {
         break
       }
       case 'back-to-machines': backToMachines(); break
-      case 'refresh-hosts': void (isHub ? loadMachines() : loadHosts()); break
+      case 'refresh-hosts': void loadMachines(); break
       case 'load-more-sessions':
         state.sessionsShown += SESSIONS_BATCH
         render()
@@ -1030,49 +765,8 @@ export async function bootApp(root, deps = {}) {
     }
   }
 
-  // 直连后端：每个方法都转交既有调用，行为与今天逐字一致。
-  state.backend = deps.backend ?? createMachineBackend({
-    listSessions: async () => {
-      const outcome = await rpcCall(fetchLike, SESSION_LIST_ENDPOINT, { _request: {} }, `sessions-${++rpcSeq}`)
-      return outcome.ok === true ? { items: outcome.result?.items ?? [] } : { error: outcome.message }
-    },
-    pageMessages: (sessionId, throughSeq, maxMessages) => rpcSessionPage(sessionId, throughSeq, maxMessages, 'page'),
-    prompt: async (sessionId, text) => {
-      const outcome = await rpcCall(fetchLike, SESSION_PROMPT_ENDPOINT, {
-        request: {
-          requestId: makeRequestId(rpcSeq),
-          sessionId,
-          mode: 'queue',
-          content: [{ type: 'text', text }],
-          clientTimeZone: clientTimeZone(),
-        },
-      }, `prompt-${++rpcSeq}`)
-      return outcome.ok === true ? { ok: true } : { ok: false, message: outcome.message }
-    },
-    cancel: async sessionId => {
-      const outcome = await rpcCall(fetchLike, SESSION_CANCEL_ENDPOINT, { request: { sessionId } }, `cancel-${++rpcSeq}`)
-      return outcome.ok === true ? { ok: true } : { ok: false, message: outcome.message }
-    },
-    answer: async (eventId, outcome) => {
-      if (connection === null) return { ok: false, message: '事件通道还没连上' }
-      return await connection.answer(eventId, outcome)
-    },
-    connectEvents: handlers => {
-      openConnection(handlers)
-      return {
-        close() {
-          if (connection !== null) connection.close()
-          connection = null
-        },
-      }
-    },
-    listHosts: async () => {
-      const response = await fetchLike(PEERS_PATH)
-      if (response.status !== 200) return { peers: [], error: `主机清单请求失败：HTTP ${response.status}` }
-      const body = JSON.parse(await response.text())
-      return { peers: Array.isArray(body?.peers) ? body.peers : [], error: typeof body?.error === 'string' ? body.error : undefined }
-    },
-  })
+  // 后端是唯一数据源：测试注入替身，否则 bootApp 开头造的中转站客户端。
+  state.backend = deps.backend
 
   shell()
   await boot()

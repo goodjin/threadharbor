@@ -63,16 +63,15 @@ export function renderErrorScreen(message) {
  * - unpaired：没有本机凭据或凭据已失效——从桌面端的二维码入口重新扫码；
  * - untrusted：主机 403——域名不在 tailscale serve 的信任名单，查安装配置。
  */
-export function pairingGuideView(reason, mode = 'machine') {
-  // 中转模式下这两段文案必须换：凭据是对**中转站**的，不是对本机的，照直连那套
-  // 一步步做下来会拿自己电脑上的二维码去扫——扫完手机配到那台机器上，页面变成
-  // 直连模式，中转这条链路整个白走一遍，而且看上去「配对了」，最难查。
-  if (mode === 'hub') {
-    return [
-      '<section class="guide">',
-      reason === 'untrusted'
-        ? '<h1>中转站还没信任你</h1>'
-        : '<h1>还没跟中转站配对</h1>',
+export function pairingGuideView(reason) {
+  // 凭据是对**中转站**的，不是对本机的：照本机那套一步步做会拿自己电脑上的
+  // 二维码去扫——扫完手机配到那台机器上，中转这条链路整个白走一遍，而且看上去
+  // 「配对了」，最难查。
+  return [
+    '<section class="guide">',
+    reason === 'untrusted'
+      ? '<h1>中转站还没信任你</h1>'
+      : '<h1>还没跟中转站配对</h1>',
       '<p>这台手机页与<strong>中转站</strong>的凭据已经失效，'
         + (reason === 'untrusted'
           ? '或者中转站拒绝了这次访问（HTTP 403）。'
@@ -90,34 +89,6 @@ export function pairingGuideView(reason, mode = 'machine') {
       '<button type="button" data-action="retry-boot">重新检测</button>',
       '</section>',
     ].join('')
-  }
-  return pairingGuideMachine(reason)
-}
-
-/** 直连模式的引导文案：中转分支抽走后剩下的原文，保持逐字不变。 */
-function pairingGuideMachine(reason) {
-  if (reason === 'untrusted') {
-    return [
-      '<section class="guide">',
-      '<h1>这台主机还没信任你</h1>',
-      '<p>主机拒绝了这次访问（HTTP 403）：当前域名不在它的信任名单里。</p>',
-      '<p>请在主机上核对 <code>tailscale serve</code> 的 <code>--trusted-host</code> 配置（见安装文档），改好后回来重试。</p>',
-      '<button type="button" data-action="retry-boot">重新检测</button>',
-      '</section>',
-    ].join('')
-  }
-  return [
-    '<section class="guide">',
-    '<h1>还没配对</h1>',
-    '<p>这台页面没有本机 DSH 的访问凭据，或者凭据已经失效（HTTP 401）。</p>',
-    '<ol>',
-    '<li>在电脑上打开 ThreadHarbor 桌面端；</li>',
-    '<li>点开「手机配对」面板，出示二维码；</li>',
-    '<li>用手机<strong>重新扫码</strong>打开本页——首次配对、换手机、凭据过期都走这一步。</li>',
-    '</ol>',
-    '<button type="button" data-action="retry-boot">重新检测</button>',
-    '</section>',
-  ].join('')
 }
 
 /**
@@ -126,13 +97,10 @@ function pairingGuideMachine(reason) {
  * 查询失败时 error 带原文，清单区提示不可用，其余功能不受影响。
  */
 /**
- * 主机清单。两种模式共用这一个视图：
- * - 直连：`peers` 是本机 tailnet 里的发现结果（今天的行为，一字未改）；
- * - 中转：`machines` 是中转登记的机器清单，每行带 `hostId` 与机器名，
- *   离线的行点不动（没有会话可看）。
+ * 主机清单。`machines` 是中转登记的机器清单，每行带 `hostId` 与机器名，
+ * 离线的行点不动（没有会话可看）。
  *
- * `machineLabel` / `lastSeenText` 是可选的：缺省不渲染，保证直连模式的 DOM
- * 与改之前逐字相同。
+ * `machineLabel` / `lastSeenText` 是可选的：缺省不渲染。
  */
 /**
  * 机器行上那半句「为什么进不去」。只认中转给的两条真实取值：

@@ -33,8 +33,8 @@ function importNatively(moduleFile: string): { ok: true } | { ok: false; message
 }
 
 describe('手机页的模块图（原生 ESM 规则）', () => {
-  it('app.js / backend-machine.js / backend-hub.js 都能被真浏览器实例化', () => {
-    for (const file of ['app.js', 'backend-machine.js', 'backend-hub.js']) {
+  it('app.js / backend-hub.js 都能被真浏览器实例化', () => {
+    for (const file of ['app.js', 'backend-hub.js']) {
       const result = importNatively(`file://${join(MOBILE_DIR, file)}`)
       expect(result.ok, `${file} 在原生 ESM 下导入失败：${result.ok ? '' : result.message}`).toBe(true)
     }
@@ -45,7 +45,7 @@ describe('手机页的模块图（原生 ESM 规则）', () => {
     // 从 wire.js 导入的每个名字都真的导出。
     const wire = readFileSync(join(MOBILE_DIR, 'wire.js'), 'utf8')
     const exported = new Set([...wire.matchAll(/^export (?:const|function|class|async function) (\w+)/gm)].map(m => m[1]))
-    for (const file of ['app.js', 'backend-machine.js', 'backend-hub.js']) {
+    for (const file of ['app.js', 'backend-hub.js']) {
       const source = readFileSync(join(MOBILE_DIR, file), 'utf8')
       for (const block of source.matchAll(/import \{([^}]+)\} from '\.\/wire\.js'/g)) {
         for (const raw of (block[1] ?? '').split(',')) {

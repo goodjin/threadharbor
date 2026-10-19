@@ -144,8 +144,10 @@ const VALID_CONFIG: MobileRelayConfig = {
 }
 
 describe('apply 的装载行为', () => {
-  it('导出名与注入面和组合行对齐；合法配置挂三条路由（清单 / 会话 prefix / 应答）', () => {
+  it('导出名与注入面和组合行对齐；合法配置挂中转 API 三条 + 手机页四条', () => {
     // 挂几条是接线契约的一部分：少一条是功能缺失，多一条是有人复制粘贴。
+    // 中转既出 API（清单 / 会话 prefix / 应答）又出自己那套手机页（页面壳 /
+    // hello / pair-url / peers）——直连模式取消后，页面与 API 同源都归中转。
     const { run, routes } = captureAppliedRoutes(VALID_CONFIG)
     run()
     expect(routes.map(route => `${route.kind} ${route.path}`)).toEqual([
@@ -154,6 +156,11 @@ describe('apply 的装载行为', () => {
       // 斜杠会让任何请求都不命中（登记形状错的症状是「清单 200、转发全 404」）。
       'prefix /threadharbor/relay/hosts',
       'exact /threadharbor/relay/answer',
+      // 手机页（中转自出，不再依赖独立 mobile-entry 入口）。
+      'prefix /threadharbor/mobile',
+      'exact /threadharbor/mobile/hello',
+      'exact /threadharbor/mobile/pair-url',
+      'exact /threadharbor/mobile/peers',
     ])
   })
 
@@ -193,23 +200,45 @@ describe('apply 的装载行为', () => {
   })
 
   it.each(['sshKnownHostsPath', 'statePath', 'machines'] as const)(
-    '%s 缺省：装载抛错说清缺哪个字段，且一条路由都不注册',
+    '部分配置（配了其余、缺 %s）：当「配错」处理，装载抛错且一条路由都不注册',
     key => {
-      // 缺 statePath 时旧代码是「装载成功、之后每拍在 dirname(undefined) 处炸、
-      // 被 allSettled 吃掉」——方向是静默的：全机永远不可达且清单里没有 error。
+      // 与「整段缺失＝默认停用」区分开：一旦运维动了这行（配了别项）却漏了某
+      // 一项，这是抄配置抄漏了，必须报出来——静默停用会把「云主机上少配一项」
+      // 伪装成「这台机器本来就没当中转」，那台机器在清单上永远不可达且看不出原因。
       const { run, routes } = captureAppliedRoutes({ ...VALID_CONFIG, [key]: undefined } as MobileRelayConfig)
       expect(run).toThrow(new RegExp(key))
       expect(routes).toHaveLength(0)
     },
   )
 
-  it('配置块整个没给：装载抛错并说清缺配置，而不是一个 dirname(undefined)', () => {
+  // 真机背景：中转条目是本机 bundle 常驻注册的一行，但它只跑在云主机上。本机
+  // 不给它 config 时，Cordis 先用 Config schema 校验（apply 之前那道门），四项
+  // 必填的 schema 直接抛 ValidationError → 宿主启动打「1 entry did not activate」。
+  // 期望：缺配置 = 默认停用（不抛、不注册路由），而不是每次都报错。
+  it('配置块整个没给：默认停用（不抛、一条路由都不注册）', () => {
     const { run, routes } = captureAppliedRoutes(undefined)
-    expect(run).toThrow(/缺配置/)
+    expect(run).not.toThrow()
     expect(routes).toHaveLength(0)
     const { run: runNull, routes: routesNull } = captureAppliedRoutes(null as unknown as MobileRelayConfig)
-    expect(runNull).toThrow(/缺配置/)
+    expect(runNull).not.toThrow()
     expect(routesNull).toHaveLength(0)
+    const { run: runEmpty, routes: routesEmpty } = captureAppliedRoutes({} as MobileRelayConfig)
+    expect(runEmpty).not.toThrow()
+    expect(routesEmpty).toHaveLength(0)
+  })
+
+  it('schema 归一后的空配置（只剩 machines:[]）也默认停用——这是本机 bundle 那行经 Cordis 校验后 apply 真实收到的形状', () => {
+    // Cordis 先跑 Config schema，缺省 machines 被补成 []，于是 apply 收到的是
+    // { machines: [] } 而非 {}。三项身份字段全无 = 没当中转站的意图，必须停用。
+    const normalized = Config({}) as MobileRelayConfig
+    const { run, routes } = captureAppliedRoutes(normalized)
+    expect(run).not.toThrow()
+    expect(routes).toHaveLength(0)
+  })
+
+  it('整段缺失时 schema 放行（本机 bundle 那行不带 config，schema 不能先把它卡死）', () => {
+    // 空对象不再抛 ValidationError；schemastery 把缺省 machines 补成 []，属正常归一。
+    expect(Config({})).toEqual({ machines: [] })
   })
 
   it.each([
@@ -240,21 +269,20 @@ describe('apply 的装载行为', () => {
     ).toThrow()
   })
 
-  it.each(['sshKnownHostsPath', 'statePath', 'machines'] as const)('顶层 %s 缺省：形状门就拒', key => {
-    expect(() =>
-      Config({ mobileOrigin: 'https://relay.example.com', sshKnownHostsPath: '/k', statePath: '/s', machines: [], [key]: undefined }),
-    ).toThrow()
+  // schema 现在对「整段/字段缺失」放行（好让本机那行不带 config 时能默认停用），
+  // 所以「动了这行却漏配」的强校验由 apply 兜：见下面 apply 的抛错用例。这里只
+  // 确认 schema 不再自己卡——缺失即通过，交给 apply 决定停用还是报错。
+  it.each(['sshKnownHostsPath', 'statePath', 'machines'] as const)('顶层 %s 缺省：schema 放行，交由 apply 判停用/报错', key => {
+    expect(Config({ mobileOrigin: 'https://relay.example.com', sshKnownHostsPath: '/k', statePath: '/s', machines: [], [key]: undefined })).toBeTruthy()
   })
 
-  it('logPath 缺省：形状门就拒（每台的启动日志路径不统一，不给默认值猜）', () => {
-    expect(() =>
-      Config({
-        mobileOrigin: 'https://relay.example.com',
-        sshKnownHostsPath: '/k',
-        statePath: '/s',
-        machines: [{ hostId: 'gooddemacbook-pro', target: '100.64.0.2', remotePort: 3081 }],
-      }),
-    ).toThrow()
+  it('logPath 缺省：schema 放行，交由 apply 报错（每台的启动日志路径不统一，不给默认值猜）', () => {
+    expect(Config({
+      mobileOrigin: 'https://relay.example.com',
+      sshKnownHostsPath: '/k',
+      statePath: '/s',
+      machines: [{ hostId: 'gooddemacbook-pro', target: '100.64.0.2', remotePort: 3081 }],
+    })).toBeTruthy()
   })
 
   it('sshKnownHostsPath 含 shell 元字符：装载抛错', () => {
