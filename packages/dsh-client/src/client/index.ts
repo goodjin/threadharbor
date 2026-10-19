@@ -73,7 +73,6 @@ import { AgentPanel } from '../panel.tsx'
 import type { AgentListPort, AgentPanelBusinessProps, ProbeStarter, RemotePort, TailscalePeersResult, TailscalePort } from '../panel.tsx'
 import { readRemotePeer, startRemotePeer } from '../ssh-deploy.ts'
 import { registerAgentSwitchHandoverSurface } from '../handover-card.ts'
-import { installRawOutputSurface } from '../raw-output-card.ts'
 import { createSwitchProgressStore, startSwitchProgressSurface } from '../switch-progress.ts'
 import { NAMESPACE, en, fallbackT, zh } from '../locales.ts'
 import type { ClientLocaleKey, RuntimeT } from '../locales.ts'
@@ -496,10 +495,6 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
       slots: ctx.slots,
     }),
   )
-
-  // 未映射帧的折叠条：投影看不懂的帧由宿主聚成 acp/raw-output 事件，这里把它
-  // 画成「默认收起、点开看原文」的一行。缺 uiConversation 时只记一条警告。
-  installRawOutputSurface(ctx)
 
   // Self-report at mount. This panel is easy to mistake for a plugin that
   // never loaded; these lines are how anyone can tell the difference.
