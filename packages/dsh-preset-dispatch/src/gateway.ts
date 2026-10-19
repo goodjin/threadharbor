@@ -586,14 +586,14 @@ export class GatewayConversations {
               id: randomUUID(),
               role: 'system',
               content: [{ type: 'text', text: `等待外部 agent——已静默 ${String(Math.round(silentForMs / 1000))}s；agent 最近输出：${last}` }],
-              // v4 admits a durable message only with a producer-owned
-              // source: an object whose kind is a nonempty string other than
-              // the retired 'plugin'. This note burned session b60d6fa4 three
-              // times — turn/step, then id, then this — each time because one
-              // more admission rule had not been read. The full checklist
-              // lives in `expectV4SystemNote` (tests) and in the host's
-              // session-format-v3-to-v4 admission sources.
-              source: { kind: 'acp-gateway' },
+              // 落盘层对 system/message 的 source 有专用规则：kind 必须恰好是
+              // 'system-prompt'（reference packages/core/session/src/index.ts:
+              // 363-366）。这条提示已在 b60d6fa4 上炸过三次——turn/step、id、
+              // 再到「任何非空 source kind」——每次都只修了最新那句报错，没有
+              // 一次把 system/message 的准入规则整条读下来；第四次的代价是
+              // session-3575e031 整份日志永久加载不了。完整清单在
+              // `expectV4SystemNote`（tests）里，改动前先读它。
+              source: { kind: 'system-prompt' },
             },
           }, { surfaceOp: 'append' })
         } catch {

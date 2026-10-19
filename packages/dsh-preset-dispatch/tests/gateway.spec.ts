@@ -74,9 +74,11 @@ function expectV4SystemNote(
   }
   const source = message?.source as { kind?: unknown } | undefined
   expect(source).toBeDefined()
-  expect(typeof source?.kind).toBe('string')
-  expect((source?.kind as string).length).toBeGreaterThan(0)
-  expect(source?.kind).not.toBe('plugin')
+  // 落盘层对 system/message 的 source 有专用规则：kind 必须恰好是
+  // 'system-prompt'（reference/deepseek-harness packages/core/session/src/index.ts:363-366
+  // 「message must have system-prompt source」）。会话加载时校验，写错一次整份
+  // 日志就永久加载不了——session-3575e031 的 seq 203 就是这么坏的。
+  expect(source).toEqual({ kind: 'system-prompt' })
 }
 
 /**
