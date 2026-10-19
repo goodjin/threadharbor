@@ -35,6 +35,14 @@ export type SourceSession = {
   readonly pendingInteraction?: 'approval' | 'plan-review' | 'question'
 }
 
+/** One sidebar row as the roll-up section renders it: the four fields it keeps. */
+export type SectionSession = {
+  readonly projectId: string
+  readonly sessionId: string
+  readonly title: string
+  readonly projectTitle: string
+}
+
 /** What one read produced: rows, or the reason there are none. */
 export type SessionRead =
   | { readonly ok: true; readonly sessions: readonly SourceSession[] }

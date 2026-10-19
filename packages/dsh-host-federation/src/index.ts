@@ -42,6 +42,7 @@ export type {
   SshHostKeyCandidate,
 } from './ssh/types.ts'
 export type { PeerListen, PeerStatus } from './ssh/peer-status.ts'
+export type { PeerReport } from './ssh/liveness.ts'
 export type {
   PeerCheckAction,
   PeerCheckFacts,

@@ -908,6 +908,13 @@ function SshDeploySection(props: {
   /** When provided, a connect-without-redeploy button joins the actions. */
   readonly onConnect?: ((ssh: SshConnectionInput & { readonly hostKeyFingerprint: string }, facts: SshSeedFacts) => void) | undefined
   /**
+   * 批准并读取路径的后半段：认下一把主机密钥后，把带该指纹的凭据交回
+   * 详情页接着读（approve-and-read 的「读取」就发生在这次回调里）。
+   */
+  readonly onApproved?: ((ssh: SshConnectionInput & { readonly hostKeyFingerprint: string }) => void) | undefined
+  /** 打开区块即自动检查一次主机密钥（approve-and-read 的前半段，挂载时一次性）。 */
+  readonly autoInspect?: boolean | undefined
+  /**
    * When provided, the peer status checklist (tailscale serve flow) is shown
    * and its save button hands back the ts.net launch URL plus the host id to use.
    */
@@ -980,9 +987,10 @@ function SshDeploySection(props: {
       setKeys(result.value.keys)
       const only = result.value.keys[0]
       if (result.value.keys.length === 1 && only !== undefined) {
-        setApprovedFingerprint(only.hostKeyFingerprint)
-        // 只有一把主机密钥时直接进入逐项检测，不再多点一步。
-        if (props.onServeReady !== undefined) runCheck(only.hostKeyFingerprint)
+        // 只有一把主机密钥时自动走下一步：approve-and-read 优先——认指纹
+        // 交回详情页接着读；没有该流程时才是 serve 流程的逐项检测。
+        if (props.onApproved !== undefined) approve(only.hostKeyFingerprint)
+        else if (props.onServeReady !== undefined) runCheck(only.hostKeyFingerprint)
       }
     })
   }

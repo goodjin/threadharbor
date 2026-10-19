@@ -35,6 +35,7 @@ export const ROUTE_CONNECT = '/api/threadharbor.host-ssh.connect'
 export const ROUTE_CHECK = '/api/threadharbor.host-ssh.check'
 export const ROUTE_SERVE = '/api/threadharbor.host-ssh.serve'
 export const ROUTE_SERVICE = '/api/threadharbor.host-ssh.service'
+export const ROUTE_START = '/api/threadharbor.host-ssh.start'
 
 export type Config = {
   knownHostsPath?: string
@@ -201,6 +202,17 @@ export function apply(ctx: unknown, config: Config = {}): void {
     const done = await manager.controlService(ssh, verb, port)
     log.info('dsh service', { target: ssh.target, verb, scope: done.scope })
     return { report: await manager.checkPeer(ssh, port) }
+  })
+
+  register(ROUTE_START, async body => {
+    const record = body as Record<string, unknown>
+    const ssh = manager.parseApprovedConfig(record['ssh'])
+    const port = typeof record['port'] === 'number' ? record['port'] : undefined
+    if (port === undefined) throw new Error('port 必填')
+    const started = await manager.startPeer(ssh, port)
+    if (!started.ok) throw new Error(started.reason)
+    log.info('ssh peer started', { target: ssh.target, port: started.port })
+    return { port: started.port }
   })
 
   register(ROUTE_INSPECT, async body => {

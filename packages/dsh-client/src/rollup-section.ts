@@ -16,6 +16,8 @@
 import { HostFederation, browserChannel, resolveHostIdentity } from '@threadharbor/dsh-host-federation'
 import type { FederationBus, HostIdentity, HostSnapshot } from '@threadharbor/dsh-host-federation'
 import type { ConfiguredIdentity, IdentitySettings } from './settings-source.ts'
+import { fallbackT } from './locales.ts'
+import type { RuntimeT } from './locales.ts'
 
 /** Everything the section needs from the page around it. */
 export type RollUpSectionDeps = {
@@ -29,6 +31,8 @@ export type RollUpSectionDeps = {
   report(message: string): void
   heartbeatMs: number
   staleMs: number
+  /** Reads the section's notes in the active language; absent falls back to zh. */
+  readonly t?: RuntimeT
 }
 
 /** The host list, as the panel renders it. */
@@ -48,6 +52,10 @@ export type RollUpSection = {
    * moment it appears, retiring the derived one it started with.
    */
   rereadIdentity(): void
+  /** The section's rendered rows; rebuilt per call from the live host list. */
+  element(): HTMLElement
+  /** Standing notes under the list. */
+  notices(): readonly string[]
   /** Stop the heartbeat and say goodbye. */
   dispose(): void
 }
@@ -118,10 +126,35 @@ export function startRollUpSection(deps: RollUpSectionDeps): RollUpSection {
     return bus
   }
 
+  const say = (key: 'panel.rollup.emptySessions' | 'panel.rollup.crossSourceNote'): string =>
+    deps.t !== undefined ? deps.t(key) : fallbackT(key)
+
   return {
     identity: () => identity,
     hosts: () => federation.hosts(),
     onlineHostIds: () => federation.hosts().map(host => host.hostId),
+    /**
+     * The section's rendered rows, rebuilt per call from the live list: a
+     * foreign host that has not reported sessions yet carries the
+     * 「还没有会话数据」 note on its row (`[data-host-note]`).
+     */
+    element: () => {
+      const root = document.createElement('div')
+      for (const host of federation.hosts()) {
+        const row = document.createElement('div')
+        row.setAttribute('data-host-row', host.hostId)
+        if (!host.self) {
+          const note = document.createElement('span')
+          note.setAttribute('data-host-note', '')
+          note.textContent = say('panel.rollup.emptySessions')
+          row.append(note)
+        }
+        root.append(row)
+      }
+      return root
+    },
+    /** Standing notes under the list; today only the cross-source boundary. */
+    notices: () => [say('panel.rollup.crossSourceNote')],
     setIdentity: value => {
       deps.settings.write(value)
       applyIdentity()

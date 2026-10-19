@@ -66,6 +66,8 @@ import type { TailscalePeer } from '@threadharbor/dsh-host-federation'
 import { startHostStore } from '../host-store.ts'
 import type { HostStoreChannel, HostStoreDeps, StoreOp } from '../host-store.ts'
 import { startRollUpSection } from '../rollup-section.ts'
+import { buildHostSessions, readSessionSources } from '../session-source.ts'
+import type { SectionSession, SessionRead } from '../session-source.ts'
 import { startPairingSurface } from '../pairing-panel.ts'
 import { AgentPanel } from '../panel.tsx'
 import type { AgentListPort, AgentPanelBusinessProps, ProbeStarter, RemotePort, TailscalePeersResult, TailscalePort } from '../panel.tsx'
@@ -515,8 +517,8 @@ export function hostSessionSource(ctx: ClientPanelContext, t?: RuntimeT): {
   let lastRead: SessionRead | undefined
   const read = (): SessionRead => {
     const { workspaces, sessions } = readSessionSources({
-      workspaces: safeContextService(ctx, 'workspaces'),
-      sessions: safeContextService(ctx, 'sessions'),
+      workspaces: readService(ctx, 'workspaces'),
+      sessions: readService(ctx, 'sessions'),
     })
     return buildHostSessions(workspaces, sessions, t)
   }

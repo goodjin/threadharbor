@@ -11,6 +11,9 @@ export default defineConfig({
     },
   },
   test: {
+    // ui-primitives ships .css side-imports; node's loader refuses them
+    // unless vitest transforms the package itself.
+    server: { deps: { inline: [/@deepseek-ai\/dsh-client-ui-primitives/] } },
     include: ['packages/*/tests/**/*.spec.ts', 'tests/**/*.spec.ts'],
     // Node everywhere except the one file that needs a browser-like `window`:
     // the panel mount test touches window/sessionStorage/localStorage and the

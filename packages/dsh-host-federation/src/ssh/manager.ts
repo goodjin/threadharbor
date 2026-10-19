@@ -221,7 +221,7 @@ export class DshSshManager {
    * Never throws for a missing marker, an unreadable log, or a nonzero
    * exit: those all mean "no URL to show yet" and return undefined.
    */
-  async readLaunchUrl(config: SshConnectionConfig, logPath: string): Promise<string | undefined> {
+  async readLaunchUrl(config: SshConnectionConfig, logPath: string, timeoutMs?: number): Promise<string | undefined> {
     const materialized = await this.materializeAuth(config)
     try {
       // The log path joins the script UNQUOTED on purpose: a `~/...` path
@@ -230,7 +230,7 @@ export class DshSshManager {
       const record = await this.remoteExec(
         materialized,
         `grep -hE '^(LAUNCH_URL=|dsh web: )' ${logPath} 2>/dev/null | tail -1`,
-        this.handshakeBudgetMs() + 10_000,
+        timeoutMs ?? this.handshakeBudgetMs() + 10_000,
       )
       if (record.code !== 0) return undefined
       const last = record.stdout.split('\n').filter(line => line !== '').at(-1) ?? ''
