@@ -73,6 +73,7 @@ import { AgentPanel } from '../panel.tsx'
 import type { AgentListPort, AgentPanelBusinessProps, ProbeStarter, RemotePort, TailscalePeersResult, TailscalePort } from '../panel.tsx'
 import { readRemotePeer, startRemotePeer } from '../ssh-deploy.ts'
 import { registerAgentSwitchHandoverSurface } from '../handover-card.ts'
+import { registerLostInputSurface } from '../lost-input.ts'
 import { createSwitchProgressStore, startSwitchProgressSurface } from '../switch-progress.ts'
 import { NAMESPACE, en, fallbackT, zh } from '../locales.ts'
 import type { ClientLocaleKey, RuntimeT } from '../locales.ts'
@@ -495,6 +496,11 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
       slots: ctx.slots,
     }),
   )
+
+  // 失败回合的恢复行：回合在 claim 之后、user/message 落盘之前失败时，请求
+  // 只留在 inbox splice 事件里。沿 DSH 自己的会话事件回放折叠出这个组合，在
+  // 那条错误旁把原文留下，给复制与直接重发（服务缺席时只复制）。
+  registerLostInputSurface(ctx)
 
   // Self-report at mount. This panel is easy to mistake for a plugin that
   // never loaded; these lines are how anyone can tell the difference.

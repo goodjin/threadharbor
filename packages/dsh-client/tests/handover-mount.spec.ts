@@ -59,15 +59,17 @@ function shellWith(core: SlotCore): void {
   )
 }
 
-function slotHost(core: SlotCore) {
+function slotHost(core: SlotCore, sink?: Array<{ options: Record<string, unknown>; component: unknown }>) {
   return {
     inject: (key: string, callback: () => unknown) => {
       if (core.spec(key) === undefined) throw new Error(`slot ${key} is not declared`)
       callback()
       return () => {}
     },
-    register: (options: Parameters<SlotCore['register']>[0], component: Parameters<SlotCore['register']>[1]) =>
-      core.register(options, component),
+    register: (options: Parameters<SlotCore['register']>[0], component: Parameters<SlotCore['register']>[1]) => {
+      sink?.push({ options: options as Record<string, unknown>, component })
+      return core.register(options, component)
+    },
   }
 }
 
@@ -89,11 +91,25 @@ class FakeWorkspace {
   }
 }
 
+/** Prototype-bearing stand-in for the session object layer, used by the lost-input row. */
+class FakeSessions {
+  scoped: string[] = []
+  scope(sessionId: string) {
+    this.scoped.push(sessionId)
+    return {
+      get: (name: string) => name === 'conversation'
+        ? { send: async () => {} }
+        : undefined,
+    }
+  }
+}
+
 describe('客户端入口在完整槽位下的 apply', () => {
   it('注册面板与切换交接面，全程不炸', () => {
     const core = new SlotCore()
     shellWith(core)
     const errors: string[] = []
+    const registrations: Array<{ options: Record<string, unknown>; component: unknown }> = []
     const registry = new FakeEventRegistry()
     const ctx = {
       logger: () => ({ info: () => {}, warn: message => { errors.push(message) } }),
@@ -102,18 +118,26 @@ describe('客户端入口在完整槽位下的 apply', () => {
         const services: Record<string, unknown> = {
           uiWorkspace: new FakeWorkspace(),
           uiConversation: { events: registry },
+          sessions: new FakeSessions(),
           remote: { $on: () => () => {} },
         }
         // 服务缺席给 undefined，与 cordis 一致：可选服务（模型目录那类）缺席时
         // 入口该安静不注册，而不是在这里被测试专有的抛错打死。
         return services[name]
       },
-      slots: slotHost(core),
+      slots: slotHost(core, registrations),
     }
     expect(() => { apply(ctx as never) }).not.toThrow()
     expect(registry.registered.map(kind => (kind as { kind: string }).kind)).toContain('agent-switch-handover')
+    expect(registry.registered.map(kind => (kind as { kind: string }).kind)).toContain('threadharbor-lost-input-state')
+    expect(registry.registered.map(kind => (kind as { kind: string }).kind)).toContain('threadharbor-lost-input')
     const keys = core.entriesOfSlot('conversation.chat.node').map(entry => entry.options.key)
     expect(keys).toContain('agent-switch-handover')
+    expect(keys).toContain('threadharbor-lost-input')
+    const lost = registrations.find(entry => entry.options['key'] === 'threadharbor-lost-input')
+    const injected = (lost!.options['inject'] as (sessionId: string) => { sessionId?: string; resend?: unknown })('session-1')
+    expect(injected.sessionId).toBe('session-1')
+    expect(typeof injected.resend).toBe('function')
     expect(errors.filter(message => message.includes('agent-switch'))).toEqual([])
   })
 
