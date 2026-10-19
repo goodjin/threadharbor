@@ -117,7 +117,7 @@ export class DshSshManager {
         record = await this.remoteExec(
           materialized,
           'cat "$HOME/.local/state/threadharbor/peer.json" 2>/dev/null || true',
-          this.peerReadBudgetMs(),
+          this.handshakeBudgetMs() + 10_000,
         )
       } catch (error) {
         if (readTimedOut(error)) return { pluginsInstalled: false, liveness: 'unknown', livenessNote: '读取超时' }
@@ -210,6 +210,37 @@ export class DshSshManager {
       const markers = parseDeployMarkers(result.stdout)
       const scope = /SERVICE_SCOPE=(\w+)/.exec(result.stdout)?.[1] ?? 'user'
       return { launchUrl: markers.launchUrl ?? '', scope }
+    } finally {
+      this.cleanupTempKeys()
+    }
+  }
+
+  /**
+   * Read the peer's current launch URL from its dsh-web log — the deploy
+   * side rewrites the marker on every service start, so the LAST one wins.
+   * Never throws for a missing marker, an unreadable log, or a nonzero
+   * exit: those all mean "no URL to show yet" and return undefined.
+   */
+  async readLaunchUrl(config: SshConnectionConfig, logPath: string): Promise<string | undefined> {
+    const materialized = await this.materializeAuth(config)
+    try {
+      // The log path joins the script UNQUOTED on purpose: a `~/...` path
+      // must reach the remote shell so IT expands the tilde — a quoted ~
+      // stays literal (measured; see the launch-url spec's shell case).
+      const record = await this.remoteExec(
+        materialized,
+        `grep -hE '^(LAUNCH_URL=|dsh web: )' ${logPath} 2>/dev/null | tail -1`,
+        this.handshakeBudgetMs() + 10_000,
+      )
+      if (record.code !== 0) return undefined
+      const last = record.stdout.split('\n').filter(line => line !== '').at(-1) ?? ''
+      // Two log shapes: the deploy's LAUNCH_URL= marker, and a hand-started
+      // `dsh web: http://…` banner — a log may hold either, and the last
+      // entry is the newest start either way.
+      const marked = /^LAUNCH_URL=(.*)$/.exec(last)?.[1]?.trim()
+      const banner = /^dsh web: (\S.*)$/.exec(last)?.[1]?.trim()
+      const url = marked ?? banner
+      return url === '' || url === undefined ? undefined : url
     } finally {
       this.cleanupTempKeys()
     }
