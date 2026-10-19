@@ -27,6 +27,7 @@ import { hostname } from 'node:os'
 import { applyAcpPlugin } from './plugin.ts'
 import { installAcpDispatch, presetOfState } from './dispatch.ts'
 import type { AgentLike, AcpPresetBinding, ContentEvent, StepPosition, TurnModelDecision, TurnStreamHandle } from './dispatch.ts'
+import type { ChildSessionLike, SubagentSessionHost } from './subagent-sessions.ts'
 import { positionOfSessionEvents, rememberPreStepPayload, stepPositionOf } from './step-position.ts'
 import { makeApprovalBridge } from './approval-bridge.ts'
 import { makeQuestionBridge } from './question-bridge.ts'
@@ -178,6 +179,8 @@ export function apply(ctx: unknown, config: Config): void {
      * `agentPresets`) through the mounted plugin.
      */
     get?(key: string): unknown
+    /** 宿主事件总线：子代理影子会话的实时流从这里发（`agent/assistant-stream`）。 */
+    emit?(event: string, payload: unknown): unknown
     logger?: { info(message: string): void; warn(message: string): void }
   }
 
@@ -350,6 +353,7 @@ export function apply(ctx: unknown, config: Config): void {
     ...(sessionPositionOf === undefined ? {} : { sessionPositionOf }),
     ...(ask === undefined ? {} : { answerPermission: ask }),
     ...(questionBridge === undefined ? {} : { answerAskQuestion: questionBridge }),
+    subagents: makeSubagentSessionHost(host),
     report: message => {
       host.logger?.warn(message)
       process.stderr.write(`[threadharbor] ${message}\n`)
@@ -423,6 +427,58 @@ function appendOf(agent: { readonly session?: unknown }): ((type: string, payloa
  * @param host - the plugin context, to read the store from.
  * @returns a resolver, or undefined when the host has no session store.
  */
+/**
+ * 外部子代理的影子子会话端口：宿主有会话服务与子代理能力包时可用。
+ *
+ * 只展示、不执行：子会话是真实 DSH 会话（带父会话血缘、登记进后代目录），
+ * 内容来自 ACP 帧；实时帧用最小代理形状（`{session}`）发进流通道。
+ * 宿主缺会话创建能力或子代理能力包时 `available:false`，泵内一切子会话动作归零。
+ */
+function makeSubagentSessionHost(host: {
+  get?(key: string): unknown
+  emit?(event: string, payload: unknown): unknown
+  logger?: { warn(message: string): void }
+}): SubagentSessionHost {
+  type SessionStoreLike = {
+    get?(id: string): unknown
+    create?(id: string, options: { meta: { cwd: string; parentSession: string; origin: 'subagent'; delegationDepth: number } }): unknown
+  }
+  const store = host.get?.('sessions') as SessionStoreLike | undefined
+  const service = host.get?.('subagent')
+  const available = service !== undefined && service !== null
+    && store !== undefined && typeof store.create === 'function' && typeof store.get === 'function'
+  return {
+    available,
+    openChild(parentSessionId, childId) {
+      if (!available || store?.create === undefined) return undefined
+      const parent = store.get?.(parentSessionId) as {
+        header?: { cwd?: string; delegationDepth?: number }
+      } | undefined
+      try {
+        return store.create(childId, {
+          meta: {
+            cwd: parent?.header?.cwd ?? process.cwd(),
+            parentSession: parentSessionId,
+            origin: 'subagent',
+            delegationDepth: (parent?.header?.delegationDepth ?? 0) + 1,
+          },
+        }) as ChildSessionLike
+      } catch (error: unknown) {
+        host.logger?.warn(`acp subagent session: could not create ${childId}: ${String(error)}`)
+        return undefined
+      }
+    },
+    appendParent(parentSessionId, type, payload) {
+      const session = store?.get?.(parentSessionId) as { append?: (t: string, p: unknown) => unknown } | undefined
+      session?.append?.(type, payload)
+    },
+    emitChildStream(child, frame) {
+      // 最小代理形状：流通道按 `agent.session.id/seq` 记账，空壳会话已经满足。
+      host.emit?.('agent/assistant-stream', { agent: { session: child }, frame })
+    },
+  }
+}
+
 function readSessionAppend(host: { get?(key: string): unknown }): GatewaySessionAppend | undefined {
   const store = sessionStoreOf(host)
   if (store === undefined) return undefined

@@ -30,6 +30,7 @@ import { cwdForOpen } from './registry.ts'
 import type { AcpPresetConfig, AcpSession, AcpSessionFactory, PresetConfig } from './registry.ts'
 import { AcpTurnRunner } from './runner.ts'
 import type { AcpClientPort } from './runner.ts'
+import type { SubagentSessionHost } from './subagent-sessions.ts'
 
 export type FactoryDeps = {
   /** Answer an agent-initiated permission request. */
@@ -58,6 +59,12 @@ export type FactoryDeps = {
    * a caller without a catalog to feed skips the wiring and nothing changes.
    */
   onRuntimeModels?(presetId: string, models: readonly { id: string; name: string; description?: string }[]): void
+  /**
+   * 外部子代理的影子子会话端口。
+   *
+   * 缺席（或 `available:false`）时泵内子会话动作归零：只留父会话卡片。
+   */
+  subagents?: SubagentSessionHost
 }
 
 /** Which frame dialect an agent speaks. Unknown agents are not ours. */
@@ -199,6 +206,7 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
         cwd,
         dialect,
         ...(deps.onRuntimeModels === undefined ? {} : { onModels: models => { deps.onRuntimeModels!(presetId, models) } }),
+        ...(deps.subagents === undefined ? {} : { subagents: deps.subagents }),
       })
       return {
         run: async (decision, turn) => await runner.run(decision, turn),

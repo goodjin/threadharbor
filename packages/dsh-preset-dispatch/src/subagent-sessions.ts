@@ -98,6 +98,9 @@ export class SubagentSessions {
     )
     if (state === undefined) return
     this.pending = undefined
+    // 收尾之后迟到的增量（子代理先报终态、帧后到）：流已关闭，丢弃即可——
+    // 往已结束的流里推增量会抛，帧处理器不能被一条晚到帧打死。
+    if (state.settled || state.stream.finished) return
     if (kind === 'thought') state.thought.push(text)
     else state.text.push(text)
     if (kind === 'thought') state.stream.reasoningDelta(text)

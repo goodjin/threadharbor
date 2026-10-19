@@ -11,6 +11,8 @@ import type { AcpStepResult, StepDecisionLike, StepEndReason, TurnContext, TurnS
 import { UNDELIVERED } from './content-writer.ts'
 import type { UndeliveredAttachment } from './content-writer.ts'
 import { AcpSegmenter, projectToolCallAnnouncement, projectToolCallFrame, projectToolResultFrame, projectSpawnedResult, readSpawnedFrame, stillRunningText } from '@threadharbor/dsh-acp-agent'
+import { SubagentSessions } from './subagent-sessions.ts'
+import type { SubagentSessionHost } from './subagent-sessions.ts'
 import type { AcpDialect, AcpFrame, ProjectionEvent, ToolCall } from '@threadharbor/dsh-acp-agent'
 import { randomUUID } from 'node:crypto'
 
@@ -76,6 +78,13 @@ export type RunnerOptions = {
    * single) the turn writes everything at its end, exactly as before.
    */
   readonly dialect?: AcpDialect
+  /**
+   * 外部子代理的影子子会话（只展示、不执行）。
+   *
+   * 宿主没组合子代理能力包时端口缺席或 `available:false`，泵内所有子会话
+   * 动作归零——写一条宿主不认的目录事件会让会话日志加载不了。
+   */
+  readonly subagents?: SubagentSessionHost
   /**
    * A conversation handed over from another session, keyed by session.
    *
@@ -433,12 +442,20 @@ export class AcpTurnRunner {
    */
   private liveCards: LiveCards | undefined
 
+  /** 子代理影子会话：端口缺席时整个能力不存在（零写入）。 */
+  private readonly subagents: SubagentSessions | undefined
+  /** 当前外部回合对应的 DSH 会话 id（子会话目录事件写在它名下）。 */
+  private parentSessionId: string | undefined
+
   private readonly client: AcpClientPort
   private readonly options: RunnerOptions
 
   constructor(client: AcpClientPort, options: RunnerOptions) {
     this.client = client
     this.options = options
+    this.subagents = options.subagents !== undefined && options.dialect !== undefined
+      ? new SubagentSessions(options.subagents, options.dialect)
+      : undefined
     // Registered once, here, rather than at the start of each turn: a frame
     // arriving between turns must not be dropped, and a handler installed
     // mid-turn misses whatever arrived before it.
@@ -481,6 +498,8 @@ export class AcpTurnRunner {
     const frameSessionId = recordOf(recordOf(frame)['params'])['sessionId']
     if (typeof frameSessionId === 'string' && frameSessionId !== this.sessionId) {
       this.queue.shift()
+      // 影子子会话：子会话帧的正文/思考增量进它的实时流（两条路径都走这里）。
+      this.routeChildSubagent(frame, frameSessionId)
       if (this.spawnedRuns !== undefined) {
         this.trackChildChunk(frame, frameSessionId)
         return false
@@ -493,6 +512,8 @@ export class AcpTurnRunner {
     if (this.segmenter?.observe(frame) === true && this.frames.length > 0) return true
     this.queue.shift()
     this.frames.push(frame)
+    // 出生帧建影子子会话、终态帧收尾；与 spawned 卡片记账互不干扰。
+    this.routeSubagentFrame(frame)
     const spawned = this.spawnedRuns === undefined ? undefined : this.trackSpawnedFrame(frame)
     this.writeToolFrame(frame)
     if (spawned !== undefined && this.liveCards?.written.has(spawned.callId) === true) spawned.cardOnLog = true
@@ -510,6 +531,53 @@ export class AcpTurnRunner {
     return dialect.frameUpdate === undefined
       ? (frame.method === 'session/update' ? recordOf(recordOf(frame.params)['update']) : undefined)
       : dialect.frameUpdate(frame)
+  }
+
+  /**
+   * 子代理出生帧/终态帧 → 影子子会话。
+   *
+   * 出生帧没有子会话 id 时（grok 实测）也要把标签记下来：首次子会话帧再建
+   * 会话。终态只认 `subagent_state_update` 的 settled 帧——`async_task` 不建
+   * 子会话（规格明确）。
+   */
+  private routeSubagentFrame(frame: AcpFrame): void {
+    const sessions = this.subagents
+    const parentId = this.parentSessionId
+    const dialect = this.options.dialect
+    if (sessions === undefined || parentId === undefined || dialect === undefined) return
+    const update = this.frameUpdateOf(frame)
+    if (update === undefined) return
+    const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
+    if (kind === 'subagent_spawned') {
+      const id = typeof update['subagentSessionId'] === 'string' ? update['subagentSessionId'] : undefined
+      const task = typeof update['task'] === 'string' ? update['task'] : ''
+      const firstLine = task.split('\n')[0]?.trim() ?? ''
+      const label = typeof update['name'] === 'string' ? update['name']
+        : firstLine !== '' ? firstLine
+          : typeof update['description'] === 'string' ? update['description']
+            : id ?? ''
+      sessions.spawn(parentId, id, label, task)
+      return
+    }
+    if (kind === 'subagent_state_update') {
+      const reading = readSpawnedFrame(dialect, update)
+      if (reading === undefined || reading.kind !== 'state' || !reading.settled) return
+      sessions.terminal(parentId, reading.callId, reading.status ?? 'failed', reading.output)
+    }
+  }
+
+  /** 子会话帧的正文/思考增量 → 影子子会话的实时流。 */
+  private routeChildSubagent(frame: AcpFrame, childSessionId: string): void {
+    const sessions = this.subagents
+    const parentId = this.parentSessionId
+    if (sessions === undefined || parentId === undefined) return
+    const update = this.frameUpdateOf(frame)
+    if (update === undefined) return
+    const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
+    if (kind !== 'agent_message_chunk' && kind !== 'agent_thought_chunk') return
+    const text = textOf(update['content'])
+    if (text.length === 0) return
+    sessions.chunk(parentId, childSessionId, kind === 'agent_thought_chunk' ? 'thought' : 'message', text)
   }
 
   /**
@@ -724,6 +792,7 @@ export class AcpTurnRunner {
     // 网关路径整回合一个 prompt：清残余、按 run 模式重建（无分段器）。observe
     // 从此入队即泵空，帧的实时处理与旧的逐帧 observe 相同。
     this.beginPrompt('run')
+    this.parentSessionId = turn.sessionId
     // Bound before the prompt goes out: a tool frame only arrives once the
     // agent has the question, but the binding must not be able to lose the
     // race with it. Held in a local too — the field is cleared the moment the
@@ -859,6 +928,8 @@ export class AcpTurnRunner {
     // failed) still rides the turn-end write as before. Same tail the segment
     // path closes every segment with — one projection, one write, one settle.
     this.closeSegment(turn, stream, liveCards, end)
+    // 父回合结束：子代理会话只放弃实时流，保持开放等它自己的真实终态。
+    this.subagents?.parentTurnEnd(turn.sessionId)
     return {
       frames,
       end,
@@ -896,6 +967,7 @@ export class AcpTurnRunner {
         return failureEndOf(error)
       }
       this.beginPrompt('steps')
+    this.parentSessionId = turn.sessionId
       // Registered before the prompt goes out: the stop lands while the agent
       // is still working, and a listener added afterwards would never hear it.
       // 解除随应答落定（成功或失败），不得跨段存活。
@@ -982,15 +1054,18 @@ export class AcpTurnRunner {
           if (this.promptFailure !== undefined && this.replayRode && !this.aborted) {
             // 历史回灌被拒：与 run() 同款——流作废、不落任何事件。
             stream?.abandon()
+            this.subagents?.parentTurnEnd(turn.sessionId)
             return end
           }
           // 空末段：上一次闭合之后、应答/中止之前什么都没到——没有事件可写，
           // 结束原因走返回值（公告或 spawned 收尾待写时不算空，见下）。
           if (this.frames.length === 0 && !this.noticePending() && !this.spawnedTailPending()) {
             stream?.abandon()
+            this.subagents?.parentTurnEnd(turn.sessionId)
             return end
           }
           this.closeSegment(turn, stream, liveCards, end, this.spawnedCloseBookkeeping(turn, true))
+          this.subagents?.parentTurnEnd(turn.sessionId)
           return end
         }
         // 段未闭合、应答未落定：等下一帧、中止或应答（observe / watchStop /
