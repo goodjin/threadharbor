@@ -21,6 +21,7 @@ import { describe, expect, it } from 'vitest'
 import { AcpClient, TerminalService, StdioAcpTransport } from '@threadharbor/dsh-acp-agent'
 import type { AcpDialect, AcpTransport } from '@threadharbor/dsh-acp-agent'
 import { AcpTurnRunner } from '../src/runner.ts'
+import type { ChildSessionLike, SubagentSessionHost } from '../src/subagent-sessions.ts'
 import type { AcpClientPort } from '../src/runner.ts'
 import { adaptClient } from '../src/factory.ts'
 import { AcpAssistantStream } from '../src/stream.ts'
@@ -130,7 +131,7 @@ type SegmentedTurn = {
  * resolved, and the reply result itself. The client is closed before the
  * assertions run; they read only what this collected.
  */
-async function runStepsLive(prompt: string): Promise<SegmentedTurn> {
+async function runStepsLive(prompt: string, options?: { subagents?: SubagentSessionHost }): Promise<SegmentedTurn> {
   const cwd = await mkdtemp(join(tmpdir(), 'th-acp-runsteps-'))
   const transport = new StdioAcpTransport({ command: CODEX_ACP, cwd, onDiagnostic: () => {} })
   const client = new AcpClient(transport, codexDialect)
@@ -160,7 +161,11 @@ async function runStepsLive(prompt: string): Promise<SegmentedTurn> {
   }
   // The dialect rides the runner options — without it there is no segmenter
   // and no live-card binding, and every assertion below would pass vacuously.
-  const runner = new AcpTurnRunner(port, { cwd, dialect: codexDialect })
+  const runner = new AcpTurnRunner(port, {
+    cwd,
+    dialect: codexDialect,
+    ...(options?.subagents === undefined ? {} : { subagents: options.subagents }),
+  })
 
   let activeStep = 0
   const write = makeContentWriter((type, payload) => ({
@@ -384,6 +389,57 @@ describe.skipIf(!LIVE)('dispatch stack against real agents', () => {
       if (last !== undefined) {
         expect(last.payload['usage']).toMatchObject(usage)
       }
+    }
+  }, 300_000)
+
+  /**
+   * 外部子代理 → 影子子会话（真实 codex 回合）。
+   *
+   * 条件断言：是否真的派子代理由模型决定——没有出生帧就只断言回合正常收尾
+   * （测试不替模型打包票）；有出生帧就必须看到会话创建（`acp-sub-` 前缀）、
+   * 父会话目录事件、任务用户消息；子会话只在其真实终态到达时收尾。
+   */
+  it('codex: a real subagent turn becomes a shadow child session', async () => {
+    const children: { id: string; appends: { type: string; payload: unknown }[] }[] = []
+    const parentEvents: { type: string; payload: unknown }[] = []
+    const host: SubagentSessionHost = {
+      available: true,
+      openChild(_parent, childId) {
+        const appends: { type: string; payload: unknown }[] = []
+        children.push({ id: childId, appends })
+        let seq = 0
+        const child: ChildSessionLike = {
+          id: childId,
+          header: { createdAt: 1 },
+          get seq() { return seq },
+          append: (type, payload) => { seq += 1; appends.push({ type, payload }); return { seq } },
+        }
+        return child
+      },
+      appendParent(_parent, type, payload) { parentEvents.push({ type, payload }) },
+      emitChildStream() {},
+    }
+    const { calls } = await runStepsLive(
+      'Use your subagent/spawn-agent tool to delegate computing 6*7 to a child agent, wait for the child result, then reply with the number.',
+      { subagents: host },
+    )
+    // No delegation happened: the turn still completes, and nothing else is claimed.
+    if (parentEvents.length === 0) {
+      expect(children).toEqual([])
+      expect(calls.at(-1)).toEqual({ kind: 'completed' })
+      return
+    }
+    expect(children.length).toBeGreaterThanOrEqual(1)
+    expect(children[0]!.id.startsWith('acp-sub-')).toBe(true)
+    expect(parentEvents.some(event => event.type === 'subagent/catalog')).toBe(true)
+    expect(parentEvents[0]!.type).toBe('subagent/catalog')
+    const types = children[0]!.appends.map(entry => entry.type)
+    expect(types).toContain('turn/start')
+    expect(types).toContain('user/message')
+    // 等真实终态：收到终态才写收尾消息；父回合先结束时它保持开放（用户选择的语义）。
+    if (types.includes('turn/end')) {
+      expect(types).toContain('assistant/message')
+      expect(types.at(-1)).toBe('turn/end')
     }
   }, 300_000)
 

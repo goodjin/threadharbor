@@ -76,6 +76,22 @@ const USER = 'user/message'
 export const UNDELIVERED = 'acp/undelivered'
 
 /**
+ * The runner's marker for one aggregated run of unmapped frames.
+ *
+ * Same shape as UNDELIVERED: an internal event, expanded here into the
+ * `assistant/message` announcement the log demands plus the `tool/call` and
+ * `tool/result` pair that carries the text. A plugin event of its own cannot be
+ * used — the log refuses event types its readers do not know unless the
+ * envelope marks them ignorable, which `append` does not accept — and the
+ * client's generic command card already renders exactly the collapsed-then-
+ * expandable disclosure this content needs.
+ */
+export const RAW_OUTPUT = 'acp/raw-output'
+
+/** The tool name the unknown-output card carries; the client shows it verbatim. */
+const RAW_OUTPUT_TOOL = '外部输出'
+
+/**
  * One attachment the external agent did not receive, as the runner records it.
  *
  * Every block the prompt cannot carry lands here: an image when the agent's
@@ -89,6 +105,52 @@ export type UndeliveredAttachment = {
 
 /** The name the undelivered row's call card carries; the client shows it verbatim on a generic card. */
 const UNDELIVERED_TOOL = '附件未送达'
+
+/** Expand one raw-output marker into its announcement, call, and result. */
+function rawOutputEvents(payload: unknown): ContentEvent[] {
+  const record = (typeof payload === 'object' && payload !== null ? payload : {}) as Record<string, unknown>
+  const turn = typeof record['turn'] === 'number' ? record['turn'] : 0
+  const step = typeof record['step'] === 'number' ? record['step'] : 0
+  const kind = typeof record['kind'] === 'string' ? record['kind'] : 'unknown'
+  const content = typeof record['content'] === 'string' ? record['content'] : ''
+  const format = typeof record['format'] === 'string' ? record['format'] : 'json'
+  const count = typeof record['count'] === 'number' ? record['count'] : 1
+  const callId = randomUUID()
+  const name = `${RAW_OUTPUT_TOOL} · ${kind}`
+  const args = JSON.stringify({ format, count })
+  return [
+    {
+      type: MESSAGE,
+      payload: {
+        turn,
+        step,
+        message: {
+          id: randomUUID(),
+          role: 'assistant',
+          content: [{ type: 'tool-call', id: callId, name, arguments: args }],
+          source: { kind: 'model', provider: 'acp-raw-output', model: 'acp-raw-output' },
+        },
+        stream: [],
+      },
+    },
+    { type: CALL, payload: { turn, step, callId, name, arguments: args } },
+    {
+      type: RESULT,
+      payload: {
+        turn,
+        step,
+        message: {
+          id: randomUUID(),
+          role: 'tool',
+          content: [{ type: 'text', text: content }],
+          source: { kind: 'tool', callId },
+          toolCallId: callId,
+          isError: false,
+        },
+      },
+    },
+  ]
+}
 
 /** Expand one marker into the call and the error result that pair with it. */
 function undeliveredEvents(payload: unknown): ContentEvent[] {
@@ -162,6 +224,10 @@ export function makeContentWriter(append: SessionAppend, onOrphan?: (callId: str
       const event = queue.shift()!
       if (event.type === UNDELIVERED) {
         queue.unshift(...undeliveredEvents(event.payload))
+        continue
+      }
+      if (event.type === RAW_OUTPUT) {
+        queue.unshift(...rawOutputEvents(event.payload))
         continue
       }
       if (event.type === CALL) {

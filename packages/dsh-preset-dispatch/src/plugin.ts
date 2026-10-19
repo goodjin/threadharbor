@@ -99,6 +99,12 @@ export type AcpPluginDeps = {
    */
   report?(message: string): void
   /**
+   * 外部子代理的影子子会话端口（宿主有会话存储与子代理能力包时提供）。
+   *
+   * 缺席时只留父会话卡片，泵内不写任何子会话事件。
+   */
+  subagents?: import('./subagent-sessions.ts').SubagentSessionHost
+  /**
    * Read a DSH session's open turn and step straight from its session log.
    *
    * The row's context is scoped to the agents mounted with it, so sessions the
@@ -199,6 +205,7 @@ export function applyAcpPlugin(
     ...(deps.answerAskQuestion === undefined ? {} : { answerAskQuestion: deps.answerAskQuestion }),
     ...(deps.transport === undefined ? {} : { transport: deps.transport }),
     onRuntimeModels: (reportedPresetId, models) => { runtimeModelReports.record(reportedPresetId, models) },
+    ...(deps.subagents === undefined ? {} : { subagents: deps.subagents }),
   })
   const dialect = factory.dialectFor(presetId, config)
   // zcode is a model inside the native loop: it still registers, and it does
