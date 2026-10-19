@@ -13,7 +13,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { AcpDialect } from '@threadharbor/dsh-acp-agent'
+import type { AcpDialect, AcpFrame, RawOutputBlock } from '@threadharbor/dsh-acp-agent'
 import { RawOutputAggregator } from '@threadharbor/dsh-acp-agent'
 import { AcpAssistantStream } from './stream.ts'
 
@@ -156,6 +156,63 @@ export class SubagentSessions {
   /** 该子会话的未知块聚合器（子会话帧里未映射的内容走它）。 */
   rawOutputOf(childSessionId: string): RawOutputAggregator | undefined {
     return this.stateOf(childSessionId)?.aggregator
+  }
+
+  /**
+   * 子会话的一帧未映射内容 → 子会话自己的未知块。
+   *
+   * 块写进子会话的日志（不串到父会话）；收尾之后的迟到帧不再写——那个会话的
+   * 回合已经结束，往里塞 tool 事件会让日志校验拒绝。
+   */
+  rawOutputFrame(parentSessionId: string, childSessionId: string, frame: AcpFrame): void {
+    if (!this.host.available) return
+    const pending = this.pending
+    const state = this.ensure(parentSessionId, childSessionId, pending?.label ?? childSessionId, pending?.task ?? '')
+    if (state === undefined || state.settled) return
+    this.pending = undefined
+    const block = state.aggregator.observe(frame, { turn: TURN, step: STEP }, { childSession: true })
+    if (block !== undefined) this.writeRawBlock(state, block)
+  }
+
+  /** 把一块未知输出按「公告 + 卡片 + 结果」写进子会话（与父会话同一形状）。 */
+  private writeRawBlock(state: ChildState, block: RawOutputBlock): void {
+    const name = `外部输出 · ${block.kind}`
+    const args = JSON.stringify({ format: block.format, count: block.count })
+    const callId = randomUUID()
+    try {
+      state.child.append('assistant/message', {
+        turn: TURN,
+        step: STEP,
+        message: {
+          id: randomUUID(),
+          role: 'assistant',
+          content: [{ type: 'tool-call', id: callId, name, arguments: args }],
+          source: { kind: 'model', provider: PROVIDER, model: this.dialect.id },
+        },
+        stream: [],
+      }, { surfaceOp: 'append' })
+      const callSeq = state.child.append('tool/call', {
+        turn: TURN,
+        step: STEP,
+        callId,
+        name,
+        arguments: args,
+      }).seq
+      state.child.append('tool/result', {
+        turn: TURN,
+        step: STEP,
+        message: {
+          id: randomUUID(),
+          role: 'tool',
+          content: [{ type: 'text', text: block.content }],
+          source: { kind: 'tool', callId },
+          toolCallId: callId,
+          isError: false,
+        },
+      }, { surfaceOp: 'append', sourceEventSeqs: [callSeq] })
+    } catch {
+      // 写失败不打断帧流：这条块丢了，其余内容照旧。
+    }
   }
 
   private stateOf(rawOrPrefixed: string): ChildState | undefined {

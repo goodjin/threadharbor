@@ -8,7 +8,9 @@
  */
 
 import type { AcpStepResult, StepDecisionLike, StepEndReason, TurnContext, TurnStreamHandle } from './dispatch.ts'
-import { UNDELIVERED } from './content-writer.ts'
+import { RAW_OUTPUT, UNDELIVERED } from './content-writer.ts'
+import { RawOutputAggregator } from '@threadharbor/dsh-acp-agent'
+import type { RawOutputBlock } from '@threadharbor/dsh-acp-agent'
 import type { UndeliveredAttachment } from './content-writer.ts'
 import { AcpSegmenter, projectToolCallAnnouncement, projectToolCallFrame, projectToolResultFrame, projectSpawnedResult, readSpawnedFrame, stillRunningText } from '@threadharbor/dsh-acp-agent'
 import { SubagentSessions } from './subagent-sessions.ts'
@@ -446,6 +448,8 @@ export class AcpTurnRunner {
   private readonly subagents: SubagentSessions | undefined
   /** 当前外部回合对应的 DSH 会话 id（子会话目录事件写在它名下）。 */
   private parentSessionId: string | undefined
+  /** 未映射帧的连续段聚合器（每个 prompt 重建）。 */
+  private rawOutput: RawOutputAggregator | undefined
 
   private readonly client: AcpClientPort
   private readonly options: RunnerOptions
@@ -512,6 +516,8 @@ export class AcpTurnRunner {
     if (this.segmenter?.observe(frame) === true && this.frames.length > 0) return true
     this.queue.shift()
     this.frames.push(frame)
+    // 未映射帧先归聚合器：它返回的块必须在本帧自己的写入之前落盘，顺序才对。
+    this.observeRawOutput(frame)
     // 出生帧建影子子会话、终态帧收尾；与 spawned 卡片记账互不干扰。
     this.routeSubagentFrame(frame)
     const spawned = this.spawnedRuns === undefined ? undefined : this.trackSpawnedFrame(frame)
@@ -531,6 +537,26 @@ export class AcpTurnRunner {
     return dialect.frameUpdate === undefined
       ? (frame.method === 'session/update' ? recordOf(recordOf(frame.params)['update']) : undefined)
       : dialect.frameUpdate(frame)
+  }
+
+  /** 喂一帧给未知输出聚合器；段被打断时先把闭合块写掉。 */
+  private observeRawOutput(frame: AcpFrame): void {
+    const aggregator = this.rawOutput
+    const live = this.liveCards
+    if (aggregator === undefined || live === undefined) return
+    const block = aggregator.observe(frame, { turn: live.turn, step: live.step }, { childSession: false })
+    if (block !== undefined) this.writeRawOutput(block)
+  }
+
+  /** 写一块未知输出：经内容写入器展开成公告+卡片+结果（写失败不打死帧处理器）。 */
+  private writeRawOutput(block: RawOutputBlock): void {
+    const live = this.liveCards
+    if (live === undefined) return
+    try {
+      live.write([{ type: RAW_OUTPUT, payload: block }])
+    } catch {
+      // 日志拒绝这一块时丢弃它；帧流与回合不能因此中断。
+    }
   }
 
   /**
@@ -566,11 +592,13 @@ export class AcpTurnRunner {
     }
   }
 
-  /** 子会话帧的正文/思考增量 → 影子子会话的实时流。 */
+  /** 子会话帧：未映射的进子会话未知块，正文/思考增量进实时流。 */
   private routeChildSubagent(frame: AcpFrame, childSessionId: string): void {
     const sessions = this.subagents
     const parentId = this.parentSessionId
     if (sessions === undefined || parentId === undefined) return
+    // 未映射内容先归子会话自己的聚合器（写进子会话日志，不串到父会话）。
+    sessions.rawOutputFrame(parentId, childSessionId, frame)
     const update = this.frameUpdateOf(frame)
     if (update === undefined) return
     const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
@@ -694,6 +722,8 @@ export class AcpTurnRunner {
     this.replayRode = false
     this.undelivered = []
     this.noticeWritten = false
+    // 未映射帧的连续段从空开始：每次 prompt 一段新记录，块不跨回合。
+    this.rawOutput = new RawOutputAggregator()
   }
 
   /**
@@ -1189,6 +1219,20 @@ export class AcpTurnRunner {
     spawned?: { readonly ids: ReadonlySet<string>; readonly tail: readonly ProjectionEvent[] },
   ): void {
     const position = turn.position
+    // 段结束先封未知块：块不跨步骤，且必须排在段消息之前（消息是这一步的
+    // 最后一条 assistant 消息，视图只保留它）。这里直接走 turn.write：run() 的
+    // finally 在本调用之前已清空 liveCards，块不能依赖那个绑定。
+    const live = liveCards
+    if (live !== undefined) {
+      const flushed = this.rawOutput?.flush({ turn: live.turn, step: live.step })
+      if (flushed !== undefined) {
+        try {
+          turn.write([{ type: RAW_OUTPUT, payload: flushed }])
+        } catch {
+          // 日志拒绝这一块时丢弃它；段自己的写入与收流不受影响。
+        }
+      }
+    }
     const notice = !this.noticeWritten && this.undelivered.length > 0 && position !== undefined
       ? [{
         type: UNDELIVERED,
