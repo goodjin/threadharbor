@@ -39,6 +39,9 @@ export const zh = {
   /** 交接卡：被切走的回合显示的中性行。 */
   'handover.title': '已切换到 {target}，对话已移到新会话',
   'handover.open': '打开新会话',
+  'rawOutput.title': '外部输出 · {kind}（{count} 帧）',
+  'rawOutput.expand': '展开原始内容',
+  'rawOutput.collapse': '收起原始内容',
   /** 手机配对 section：侧栏行名与面板三种状态。 */
   'pairing.label': '手机配对',
   'pairing.loading': '正在获取配对网址…',
@@ -432,6 +435,9 @@ export const en = {
   'progress.loading': 'Reading the new session’s history · {target}',
   'progress.ready': 'New session ready, switching · {target}',
   'handover.title': 'Switched to {target}; the conversation moved to the new session',
+  'rawOutput.title': 'External output · {kind} ({count} frames)',
+  'rawOutput.expand': 'Show raw output',
+  'rawOutput.collapse': 'Hide raw output',
   'handover.open': 'Open the new session',
   'pairing.label': 'Mobile pairing',
   'pairing.loading': 'Fetching the pairing URL…',
