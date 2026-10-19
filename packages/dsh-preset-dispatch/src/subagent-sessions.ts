@@ -120,6 +120,10 @@ export class SubagentSessions {
     if (state === undefined || state.settled) return
     this.pending = undefined
     state.settled = true
+    // 收尾前先封这块里未闭合的未知输出：终态之后就写不进去了（子会话回合关闭，
+    // tool 事件会被日志拒绝），所以它是这块未知内容的最后一次落盘机会。
+    const tail = state.aggregator.flush({ turn: TURN, step: STEP })
+    if (tail !== undefined) this.writeRawBlock(state, tail)
     const content = [
       ...(state.thought.length > 0 ? [{ type: 'reasoning' as const, text: state.thought.join('') }] : []),
       ...(state.text.length > 0 ? [{ type: 'text' as const, text: state.text.join('') }] : []),

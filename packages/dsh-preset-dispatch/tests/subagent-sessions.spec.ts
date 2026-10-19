@@ -169,6 +169,21 @@ describe('SubagentSessions', () => {
     expect(written).toEqual([])
   })
 
+  it('收尾前未闭合的未知块在终态时先落盘，排在收尾消息之前', () => {
+    const { host, children } = fakeHost()
+    const sessions = new SubagentSessions(host, codexDialect)
+    sessions.spawn('parent', 'child-1', 'Calc', 'task')
+    sessions.rawOutputFrame('parent', 'child-1', { method: 'session/update', params: { sessionId: 'child-1', update: { sessionUpdate: 'session_info_update', a: 1 } } })
+    sessions.terminal('parent', 'child-1', 'completed', undefined)
+    const types = children.get('acp-sub-child-1')!.appends.map(entry => entry.type)
+    const messageAt = types.lastIndexOf('assistant/message')
+    const callAt = types.indexOf('tool/call')
+    expect(callAt).toBeGreaterThanOrEqual(0)
+    expect(callAt).toBeLessThan(messageAt)
+    expect(types.indexOf('tool/result')).toBeGreaterThan(callAt)
+    expect(messageAt).toBeLessThan(types.indexOf('step/end'))
+  })
+
   it('两个子会话交错增量互不串写', () => {
     const { host, emitted, children } = fakeHost()
     const sessions = new SubagentSessions(host, codexDialect)
