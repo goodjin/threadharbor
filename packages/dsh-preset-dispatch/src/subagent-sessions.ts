@@ -14,7 +14,9 @@
 
 import { randomUUID } from 'node:crypto'
 import type { AcpDialect, AcpFrame, RawOutputBlock } from '@threadharbor/dsh-acp-agent'
-import { RawOutputAggregator } from '@threadharbor/dsh-acp-agent'
+import {
+  RawOutputAggregator, assistantMessageEvent, toolCallAnnouncementEvent, toolCallEvent, toolResultMessageEvent, userMessageEvent,
+} from '@threadharbor/dsh-acp-agent'
 import { AcpAssistantStream } from './stream.ts'
 
 /** 子会话 id 前缀：与 DSH 自身 minted 的会话 id 区分开，且来源一眼可见。 */
@@ -130,17 +132,15 @@ export class SubagentSessions {
       ...(state.thought.length > 0 ? [{ type: 'reasoning' as const, text: state.thought.join('') }] : []),
       ...(state.text.length > 0 ? [{ type: 'text' as const, text: state.text.join('') }] : []),
     ]
-    const messageSeq = state.child.append('assistant/message', {
+    const message = assistantMessageEvent({
       turn: TURN,
       step: STEP,
-      message: {
-        id: randomUUID(),
-        role: 'assistant',
-        content,
-        source: { kind: 'model', provider: PROVIDER, model: this.dialect.id },
-      },
+      content,
+      provider: PROVIDER,
+      model: this.dialect.id,
       stream: state.stream.records(),
-    }, { surfaceOp: 'append' }).seq
+    })
+    const messageSeq = state.child.append(message.type, message.payload, { surfaceOp: 'append' }).seq
     state.child.append('step/end', { turn: TURN, step: STEP })
     state.child.append('turn/end', {
       turn: TURN,
@@ -186,36 +186,14 @@ export class SubagentSessions {
     const args = JSON.stringify({ format: block.format, count: block.count })
     const callId = randomUUID()
     try {
-      state.child.append('assistant/message', {
-        turn: TURN,
-        step: STEP,
-        message: {
-          id: randomUUID(),
-          role: 'assistant',
-          content: [{ type: 'tool-call', id: callId, name, arguments: args }],
-          source: { kind: 'model', provider: PROVIDER, model: this.dialect.id },
-        },
-        stream: [],
-      }, { surfaceOp: 'append' })
-      const callSeq = state.child.append('tool/call', {
-        turn: TURN,
-        step: STEP,
-        callId,
-        name,
-        arguments: args,
-      }).seq
-      state.child.append('tool/result', {
-        turn: TURN,
-        step: STEP,
-        message: {
-          id: randomUUID(),
-          role: 'tool',
-          content: [{ type: 'text', text: block.content }],
-          source: { kind: 'tool', callId },
-          toolCallId: callId,
-          isError: false,
-        },
-      }, { surfaceOp: 'append', sourceEventSeqs: [callSeq] })
+      const announcement = toolCallAnnouncementEvent({
+        turn: TURN, step: STEP, callId, name, arguments: args, provider: PROVIDER, model: this.dialect.id,
+      })
+      state.child.append(announcement.type, announcement.payload, { surfaceOp: 'append' })
+      const call = toolCallEvent({ turn: TURN, step: STEP, callId, name, arguments: args })
+      const callSeq = state.child.append(call.type, call.payload).seq
+      const result = toolResultMessageEvent({ turn: TURN, step: STEP, callId, text: block.content, isError: false })
+      state.child.append(result.type, result.payload, { surfaceOp: 'append', sourceEventSeqs: [callSeq] })
     } catch {
       // 写失败不打断帧流：这条块丢了，其余内容照旧。
     }
@@ -235,15 +213,8 @@ export class SubagentSessions {
     child.append('step/start', { turn: TURN, step: STEP })
     const prompt = task !== '' ? task : label
     if (prompt !== '') {
-      child.append('user/message', {
-        turn: TURN,
-        message: {
-          id: randomUUID(),
-          role: 'user',
-          content: [{ type: 'text', text: prompt }],
-          source: { kind: 'user' },
-        },
-      }, { surfaceOp: 'append' })
+      const message = userMessageEvent(TURN, prompt)
+      child.append(message.type, message.payload, { surfaceOp: 'append' })
     }
     this.host.appendParent(parentSessionId, 'subagent/catalog', {
       version: CATALOG_VERSION,

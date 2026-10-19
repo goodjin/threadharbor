@@ -39,6 +39,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { toolCallAnnouncementEvent, toolCallEvent, toolResultMessageEvent } from '@threadharbor/dsh-acp-agent'
 
 import type { ContentEvent } from './dispatch.ts'
 
@@ -119,36 +120,9 @@ function rawOutputEvents(payload: unknown): ContentEvent[] {
   const name = `${RAW_OUTPUT_TOOL} · ${kind}`
   const args = JSON.stringify({ format, count })
   return [
-    {
-      type: MESSAGE,
-      payload: {
-        turn,
-        step,
-        message: {
-          id: randomUUID(),
-          role: 'assistant',
-          content: [{ type: 'tool-call', id: callId, name, arguments: args }],
-          source: { kind: 'model', provider: 'acp-raw-output', model: 'acp-raw-output' },
-        },
-        stream: [],
-      },
-    },
-    { type: CALL, payload: { turn, step, callId, name, arguments: args } },
-    {
-      type: RESULT,
-      payload: {
-        turn,
-        step,
-        message: {
-          id: randomUUID(),
-          role: 'tool',
-          content: [{ type: 'text', text: content }],
-          source: { kind: 'tool', callId },
-          toolCallId: callId,
-          isError: false,
-        },
-      },
-    },
+    toolCallAnnouncementEvent({ turn, step, callId, name, arguments: args, provider: 'acp-raw-output', model: 'acp-raw-output' }),
+    toolCallEvent({ turn, step, callId, name, arguments: args }),
+    toolResultMessageEvent({ turn, step, callId, text: content, isError: false }),
   ]
 }
 
@@ -161,32 +135,15 @@ function undeliveredEvents(payload: unknown): ContentEvent[] {
   const callId = randomUUID()
   const notice = noticeText(attachments)
   return [
-    {
-      type: CALL,
-      payload: {
-        turn,
-        step,
-        callId,
-        name: UNDELIVERED_TOOL,
-        arguments: JSON.stringify({ attachments }),
-      },
-    },
-    {
-      type: RESULT,
-      payload: {
-        turn,
-        step,
-        message: {
-          id: randomUUID(),
-          role: 'tool',
-          content: [{ type: 'text', text: notice }],
-          source: { kind: 'tool', callId },
-          toolCallId: callId,
-          isError: true,
-        },
-        error: { name: 'acp', code: 'attachment-undelivered', reason: notice },
-      },
-    },
+    toolCallEvent({ turn, step, callId, name: UNDELIVERED_TOOL, arguments: JSON.stringify({ attachments }) }),
+    toolResultMessageEvent({
+      turn,
+      step,
+      callId,
+      text: notice,
+      isError: true,
+      error: { name: 'acp', code: 'attachment-undelivered', reason: notice },
+    }),
   ]
 }
 

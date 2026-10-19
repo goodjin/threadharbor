@@ -7,9 +7,9 @@
  * tokens. What lives here is the shape of a DSH turn, which is fixed.
  */
 
-import { randomUUID } from 'node:crypto'
 import type { AcpFrame } from './acp-client.ts'
 import type { AcpDialect, ToolCall, TurnUsage } from './dialects/types.ts'
+import { assistantMessageEvent, toolCallAnnouncementEvent, toolResultMessageEvent, userMessageEvent } from './message-events.ts'
 
 /**
  * One packed run of deltas, as the durable message embeds it.
@@ -95,24 +95,18 @@ function assistantEvent(
   // history load of the session fail. Optional buckets ride along only
   // when the agent reported them; a missing report is never written as 0.
   const usage = writableUsage(acc.usage)
-  return {
-    type: 'assistant/message',
-    payload: withoutNonFinite({
-      turn,
-      step,
-      message: {
-        id: randomUUID(),
-        role: 'assistant',
-        content,
-        // The host's own replay validation (core/session `assertMessageEventShape`)
-        // requires a model source: `kind: 'model'` plus provider and model. A
-        // source without `kind` appends fine but fails the session at fork time.
-        source: { kind: 'model', provider: `acp-${dialect.id}`, model: dialect.id },
-      },
-      stream: acc.stream ?? [],
-      ...(usage === undefined ? {} : { usage }),
-    }),
-  }
+  // 形状由 message-events 的构造器保证（model 来源 + provider/model），这里只
+  // 负责把非有限数挡在事件之外。
+  const event = assistantMessageEvent({
+    turn,
+    step,
+    content,
+    provider: `acp-${dialect.id}`,
+    model: dialect.id,
+    stream: acc.stream ?? [],
+    ...(usage === undefined ? {} : { usage }),
+  })
+  return { ...event, payload: withoutNonFinite(event.payload) }
 }
 
 /**
@@ -332,22 +326,17 @@ function toolCallEvent(dialect: AcpDialect, tool: ToolCall, turn: number, step: 
 /** The result message answering a call — identical from both projections. */
 function toolResultEvent(tool: ToolCall, turn: number, step: number): ProjectionEvent {
   const isError = tool.status === 'failed'
-  return {
-    type: 'tool/result',
-    payload: withoutNonFinite({
-      turn,
-      step,
-      message: {
-        id: randomUUID(),
-        role: 'tool',
-        content: tool.output.length > 0 ? [{ type: 'text', text: tool.output }] : [],
-        source: { kind: 'tool', callId: tool.callId },
-        toolCallId: tool.callId,
-        isError,
-      },
-      ...(isError ? { error: { name: 'tool', code: tool.status ?? 'failed', reason: tool.title } } : {}),
-    }),
-  }
+  const event = toolResultMessageEvent({
+    turn,
+    step,
+    callId: tool.callId,
+    text: tool.output,
+    isError,
+    ...(isError
+      ? { error: { name: 'tool', code: tool.status ?? 'failed', ...(tool.title === undefined ? {} : { reason: tool.title }) } }
+      : {}),
+  })
+  return { ...event, payload: withoutNonFinite(event.payload) }
 }
 
 /**
@@ -419,25 +408,16 @@ export function projectToolResultFrame(
 
 /** The one-block announcement message that admits a call's card. */
 function announcementEvent(dialect: AcpDialect, call: ToolCall, turn: number, step: number): ProjectionEvent {
-  return {
-    type: 'assistant/message',
-    payload: withoutNonFinite({
-      turn,
-      step,
-      message: {
-        id: randomUUID(),
-        role: 'assistant',
-        content: [{
-          type: 'tool-call',
-          id: call.callId,
-          name: mapToolName(dialect, call.name),
-          arguments: JSON.stringify(call.arguments),
-        }],
-        source: { kind: 'model', provider: `acp-${dialect.id}`, model: dialect.id },
-      },
-      stream: [],
-    }),
-  }
+  const event = toolCallAnnouncementEvent({
+    turn,
+    step,
+    callId: call.callId,
+    name: mapToolName(dialect, call.name),
+    arguments: JSON.stringify(call.arguments),
+    provider: `acp-${dialect.id}`,
+    model: dialect.id,
+  })
+  return { ...event, payload: withoutNonFinite(event.payload) }
 }
 
 function accumulate(frames: readonly AcpFrame[], dialect: AcpDialect): Accumulator {
@@ -735,8 +715,9 @@ export function stillRunningText(output: string): string {
 
 /** The user turn's own event, appended before the agent starts work. */
 export function projectUserMessage(text: string, turn: number): ProjectionEvent[] {
+  const message = userMessageEvent(turn, text)
   return [
-    { type: 'user/message', payload: withoutNonFinite({ turn, message: { id: randomUUID(), role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } } }) },
+    { ...message, payload: withoutNonFinite(message.payload) },
     { type: 'turn/start', payload: { turn } },
   ]
 }

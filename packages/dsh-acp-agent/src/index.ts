@@ -17,3 +17,7 @@ export type { ApprovalRequester, DshApprovalOutcome } from './approval.ts'
 export type { AcpFrame, AcpModel, AcpSession } from './acp-client.ts'
 export { RawOutputAggregator, classifyRawOutput } from './raw-output.ts'
 export type { RawOutputBlock, RawOutputClassification } from './raw-output.ts'
+export {
+  assistantMessageEvent, systemNoteEvent, toolCallAnnouncementEvent, toolCallEvent, toolResultMessageEvent, userMessageEvent,
+} from './message-events.ts'
+export type { MessageEvent, ReasoningBlock, TextBlock, ToolCallBlock } from './message-events.ts'

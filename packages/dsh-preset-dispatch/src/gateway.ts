@@ -24,6 +24,7 @@ import { makeToolOnlyWriter } from './content-writer.ts'
 import type { SessionAppend } from './content-writer.ts'
 import type { AcpSession } from './registry.ts'
 import type { TurnContext, StepDecisionLike, StepPosition, TurnStreamHandle, AcpStepResult, ContentEvent } from './dispatch.ts'
+import { systemNoteEvent } from '@threadharbor/dsh-acp-agent'
 
 /** The step endings that reach the gateway, as the runner reports them. */
 export type GatewayStepEnd =
@@ -579,23 +580,10 @@ export class GatewayConversations {
         const rawLast = tail.length === 0 ? '（无输出）' : tail.at(-1) ?? '（无输出）'
         const last = rawLast.length > 160 ? `${rawLast.slice(0, 160)}…` : rawLast
         try {
-          append?.('system/message', {
-            turn: position.turn,
-            step: position.step,
-            message: {
-              id: randomUUID(),
-              role: 'system',
-              content: [{ type: 'text', text: `等待外部 agent——已静默 ${String(Math.round(silentForMs / 1000))}s；agent 最近输出：${last}` }],
-              // 落盘层对 system/message 的 source 有专用规则：kind 必须恰好是
-              // 'system-prompt'（reference packages/core/session/src/index.ts:
-              // 363-366）。这条提示已在 b60d6fa4 上炸过三次——turn/step、id、
-              // 再到「任何非空 source kind」——每次都只修了最新那句报错，没有
-              // 一次把 system/message 的准入规则整条读下来；第四次的代价是
-              // session-3575e031 整份日志永久加载不了。完整清单在
-              // `expectV4SystemNote`（tests）里，改动前先读它。
-              source: { kind: 'system-prompt' },
-            },
-          }, { surfaceOp: 'append' })
+          // 形状由构造器保证：system/message 的 source 必须是 system-prompt，
+          // 写错一次整份日志就永久加载不了（session-3575e031 的 seq 203）。
+          const note = systemNoteEvent(position.turn, position.step, `等待外部 agent——已静默 ${String(Math.round(silentForMs / 1000))}s；agent 最近输出：${last}`)
+          append?.(note.type, note.payload, { surfaceOp: 'append' })
         } catch {
           // A failed note must not kill the answer it was trying to explain.
         }
