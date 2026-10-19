@@ -173,7 +173,7 @@ describe('SubagentSessions', () => {
     const { host, children } = fakeHost()
     const sessions = new SubagentSessions(host, codexDialect)
     sessions.spawn('parent', 'child-1', 'Calc', 'task')
-    sessions.rawOutputFrame('parent', 'child-1', { method: 'session/update', params: { sessionId: 'child-1', update: { sessionUpdate: 'session_info_update', a: 1 } } })
+    sessions.rawOutputFrame('parent', 'child-1', { method: 'session/update', params: { sessionId: 'child-1', update: { sessionUpdate: 'plan', a: 1 } } })
     sessions.terminal('parent', 'child-1', 'completed', undefined)
     const types = children.get('acp-sub-child-1')!.appends.map(entry => entry.type)
     const messageAt = types.lastIndexOf('assistant/message')
@@ -182,6 +182,23 @@ describe('SubagentSessions', () => {
     expect(callAt).toBeLessThan(messageAt)
     expect(types.indexOf('tool/result')).toBeGreaterThan(callAt)
     expect(messageAt).toBeLessThan(types.indexOf('step/end'))
+  })
+
+  it('子会话遥测帧不在中途出块，终态前按种类汇总', () => {
+    const { host, children } = fakeHost()
+    const sessions = new SubagentSessions(host, codexDialect)
+    sessions.spawn('parent', 'child-1', 'Calc', 'task')
+    sessions.rawOutputFrame('parent', 'child-1', { method: 'session/update', params: { sessionId: 'child-1', update: { sessionUpdate: 'usage_update', a: 1 } } })
+    sessions.rawOutputFrame('parent', 'child-1', { method: 'session/update', params: { sessionId: 'child-1', update: { sessionUpdate: 'usage_update', a: 2 } } })
+    // 中途没有任何遥测卡
+    expect(children.get('acp-sub-child-1')!.appends.filter(e => e.type === 'tool/call')).toHaveLength(0)
+    sessions.terminal('parent', 'child-1', 'completed', undefined)
+    const appends = children.get('acp-sub-child-1')!.appends
+    const cards = appends.filter(e => e.type === 'tool/call')
+    expect(cards).toHaveLength(1)
+    expect((cards[0]!.payload as { name: string }).name).toContain('usage_update')
+    const messageAt = appends.map(e => e.type).lastIndexOf('assistant/message')
+    expect(appends.indexOf(cards[0]!)).toBeLessThan(messageAt)
   })
 
   it('两个子会话交错增量互不串写', () => {

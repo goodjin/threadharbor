@@ -69,16 +69,16 @@ describe('未知输出块接线（run）', () => {
     const running = runner.run(DECISION, turn as never)
     await new Promise(resolve => { setTimeout(resolve, 0) })
 
-    client.deliver(parentUpdate({ sessionUpdate: 'session_info_update', a: 1 }))
-    client.deliver(parentUpdate({ sessionUpdate: 'session_info_update', a: 2 }))
+    client.deliver(parentUpdate({ sessionUpdate: 'plan', a: 1 }))
+    client.deliver(parentUpdate({ sessionUpdate: 'plan', a: 2 }))
     client.deliver(parentUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '正文' } }))
-    client.deliver(parentUpdate({ sessionUpdate: 'session_info_update', a: 3 }))
+    client.deliver(parentUpdate({ sessionUpdate: 'plan', a: 3 }))
     client.releaseReply()
     await running
 
     const blocks = rawBlocks(writes)
     expect(blocks.map(block => block.count)).toEqual([2, 1])
-    expect(blocks[0]!.kind).toBe('session_info_update')
+    expect(blocks[0]!.kind).toBe('plan')
   })
 
   it('应答与审批帧夹在中间不闭段', async () => {
@@ -114,9 +114,37 @@ describe('未知输出块接线（run）', () => {
     const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: codexDialect })
     const running = runner.run(DECISION, turn as never)
     await new Promise(resolve => { setTimeout(resolve, 0) })
-    client.deliver(parentUpdate({ sessionUpdate: 'session_info_update', a: 1 }))
+    client.deliver(parentUpdate({ sessionUpdate: 'plan', a: 1 }))
     client.releaseReply()
     await expect(running).resolves.toMatchObject({ end: { kind: 'completed' } })
+  })
+})
+
+describe('未知输出块接线（遥测汇总）', () => {
+  it('遥测帧不在中途出块，回合末按种类汇总', async () => {
+    const client = fakeClient()
+    const { turn, writes } = turnOf()
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: codexDialect })
+    const running = runner.run(DECISION, turn as never)
+    await new Promise(resolve => { setTimeout(resolve, 0) })
+
+    client.deliver(parentUpdate({ sessionUpdate: 'usage_update', a: 1 }))
+    client.deliver(parentUpdate({ sessionUpdate: 'session_info_update', t: 'x' }))
+    client.deliver(parentUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '答案' } }))
+    client.deliver(parentUpdate({ sessionUpdate: 'usage_update', a: 2 }))
+    client.releaseReply()
+    await running
+
+    const blocks = rawBlocks(writes)
+    expect(blocks.map(block => [block.kind, block.count])).toEqual([
+      ['usage_update', 2],
+      ['session_info_update', 1],
+    ])
+    // 汇总批在回合最后才出现：最后一个含遥测块的写入晚于正文帧到达之后。
+    const lastBlockIndex = writes.findIndex((batch, index) =>
+      batch.some(event => event.type === 'acp/raw-output')
+      && index === writes.length - 2)
+    expect(lastBlockIndex).toBeGreaterThanOrEqual(0)
   })
 })
 
@@ -147,8 +175,8 @@ describe('未知输出块接线（子会话）', () => {
     await new Promise(resolve => { setTimeout(resolve, 0) })
 
     client.deliver(parentUpdate({ sessionUpdate: 'subagent_spawned', subagentSessionId: 'c1', name: 'Calc', task: 't' }))
-    client.deliver(childUpdate({ sessionUpdate: 'session_info_update', x: 1 }))
-    client.deliver(childUpdate({ sessionUpdate: 'session_info_update', x: 2 }))
+    client.deliver(childUpdate({ sessionUpdate: 'plan', x: 1 }))
+    client.deliver(childUpdate({ sessionUpdate: 'plan', x: 2 }))
     client.deliver(childUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hi' } }))
     client.releaseReply()
     await running
@@ -158,7 +186,7 @@ describe('未知输出块接线（子会话）', () => {
     expect(types).toContain('tool/call')
     expect(types).toContain('tool/result')
     const card = childAppends.find(entry => entry.type === 'tool/call')!.payload as { name: string }
-    expect(card.name).toContain('session_info_update')
+    expect(card.name).toContain('plan')
     const result = childAppends.find(entry => entry.type === 'tool/result')!.payload as { message: { content: { text: string }[] } }
     expect(result.message.content[0]!.text).toContain('（2 帧）')
     expect(emitted.some(entry => entry.type === 'chunk')).toBe(true)

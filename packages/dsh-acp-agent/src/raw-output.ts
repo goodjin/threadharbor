@@ -48,6 +48,14 @@ const DEDICATED_METHODS = new Set(['session/request_permission', 'cursor/ask_que
 /** 默认单块上限：超过就在同一连续段内切块，转录不会被一行巨物撑爆。 */
 const DEFAULT_MAX_BYTES = 8192
 
+/**
+ * 协议记账帧：原生从不展示它们，实时铺在过程区只会把转录淹掉。
+ *
+ * 它们仍会被保存——但按种类汇总到回合末尾，一块一行种类名；这样「所有输出都
+ * 可见」和「过程区保持原生观感」同时成立。
+ */
+const TELEMETRY_KINDS = new Set(['usage_update', 'session_info_update', 'available_commands_update'])
+
 function recordOf(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {}
 }
@@ -96,6 +104,8 @@ type Run = {
 export class RawOutputAggregator {
   private readonly maxBytes: number
   private run: Run | undefined
+  /** 遥测帧按种类攒到回合末：种类 → 段起点 + 行。 */
+  private readonly telemetry = new Map<string, { position: { readonly turn: number; readonly step: number }; lines: string[]; bytes: number }>()
 
   constructor(options?: { readonly maxBytes?: number }) {
     this.maxBytes = options?.maxBytes ?? DEFAULT_MAX_BYTES
@@ -115,6 +125,17 @@ export class RawOutputAggregator {
     const classified = classifyRawOutput(frame, context)
     if (classified === undefined) return undefined
     if (classified === 'mapped') return this.close()
+    // 遥测帧：不进实时段、也不打断别人的连续段，只攒到回合末汇总。
+    if (TELEMETRY_KINDS.has(classified.kind)) {
+      const tally = this.telemetry.get(classified.kind)
+      if (tally === undefined) {
+        this.telemetry.set(classified.kind, { position, lines: [classified.line], bytes: Buffer.byteLength(classified.line) })
+      } else {
+        tally.lines.push(classified.line)
+        tally.bytes += Buffer.byteLength(classified.line)
+      }
+      return undefined
+    }
     if (this.run !== undefined && this.run.kind !== classified.kind) {
       const closed = this.close()
       this.start(classified, position)
@@ -139,6 +160,27 @@ export class RawOutputAggregator {
   flush(position: { readonly turn: number; readonly step: number }): RawOutputBlock | undefined {
     void position
     return this.close()
+  }
+
+  /**
+   * 回合末汇总：每种遥测帧一块，按首次出现的顺序。
+   *
+   * 调用后清空汇总（一个回合只发一次），位置取该种类第一次出现的位置。
+   */
+  summary(): readonly RawOutputBlock[] {
+    const blocks: RawOutputBlock[] = []
+    for (const [kind, tally] of this.telemetry) {
+      blocks.push({
+        turn: tally.position.turn,
+        step: tally.position.step,
+        kind,
+        format: 'json',
+        content: [`（${String(tally.lines.length)} 帧）`, ...tally.lines].join('\n'),
+        count: tally.lines.length,
+      })
+    }
+    this.telemetry.clear()
+    return blocks
   }
 
   private start(classified: { kind: string; format: 'json' | 'text'; line: string }, position: { turn: number; step: number }): void {

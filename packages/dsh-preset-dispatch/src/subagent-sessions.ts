@@ -124,6 +124,8 @@ export class SubagentSessions {
     // tool 事件会被日志拒绝），所以它是这块未知内容的最后一次落盘机会。
     const tail = state.aggregator.flush({ turn: TURN, step: STEP })
     if (tail !== undefined) this.writeRawBlock(state, tail)
+    // 遥测帧按种类在终态前汇总：子会话也是「回合末」才把它们摆出来。
+    for (const block of state.aggregator.summary()) this.writeRawBlock(state, block)
     const content = [
       ...(state.thought.length > 0 ? [{ type: 'reasoning' as const, text: state.thought.join('') }] : []),
       ...(state.text.length > 0 ? [{ type: 'text' as const, text: state.text.join('') }] : []),

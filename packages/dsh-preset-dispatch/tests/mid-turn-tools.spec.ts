@@ -42,7 +42,7 @@ const update = (fields: Record<string, unknown>): AcpFrame['params'] => ({
 const openFrame: AcpFrame = {
   jsonrpc: '2.0',
   method: 'session/update',
-  params: update({ sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Bash', status: 'in_progress' }),
+  params: update({ sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Bash', kind: 'execute', status: 'in_progress', rawInput: { command: 'ls -la' } }),
 }
 const tickFrame: AcpFrame = {
   jsonrpc: '2.0',
@@ -57,7 +57,7 @@ const doneFrame: AcpFrame = {
 const secondFrame: AcpFrame = {
   jsonrpc: '2.0',
   method: 'session/update',
-  params: update({ sessionUpdate: 'tool_call', toolCallId: 't2', title: 'Read', status: 'in_progress' }),
+  params: update({ sessionUpdate: 'tool_call', toolCallId: 't2', title: 'Read', status: 'in_progress', rawInput: { path: '/tmp/x' } }),
 }
 const secondDoneFrame: AcpFrame = {
   jsonrpc: '2.0',
@@ -507,6 +507,52 @@ describe('mid-turn tool-card writing', () => {
   })
 })
 
+
+describe('空参数占位帧', () => {
+  const placeholder: AcpFrame = {
+    method: 'session/update',
+    params: update({ sessionUpdate: 'tool_call', toolCallId: 'r1', title: 'read', kind: 'read', status: 'pending' }),
+  }
+  const withArgs: AcpFrame = {
+    method: 'session/update',
+    params: update({ sessionUpdate: 'tool_call_update', toolCallId: 'r1', status: 'in_progress', rawInput: { path: '/tmp/x' } }),
+  }
+  const terminalNoArgs: AcpFrame = {
+    method: 'session/update',
+    params: update({ sessionUpdate: 'tool_call_update', toolCallId: 'r2', status: 'completed', rawOutput: { formatted_output: 'ok' } }),
+  }
+  const placeholderTwo: AcpFrame = {
+    method: 'session/update',
+    params: update({ sessionUpdate: 'tool_call', toolCallId: 'r2', title: 'read', kind: 'read', status: 'pending' }),
+  }
+
+  it('占位帧没有参数时不建卡，参数到齐才建（非 cursor 方言同样）', async () => {
+    const { codexDialect } = await import('@threadharbor/dsh-acp-agent')
+    const h = harness({ dialect: codexDialect })
+    await h.started()
+    h.push([placeholder])
+    expect(h.appends).toEqual([])
+    h.push([withArgs])
+    const call = h.appends.find(append => append.type === 'tool/call')!
+    expect(call.payload).toMatchObject({ name: 'read', arguments: JSON.stringify({ path: '/tmp/x' }) })
+    h.release()
+    await h.run()
+  })
+
+  it('终态帧自己到达时（始终没有参数）也建卡，不留无卡孤结果', async () => {
+    const { codexDialect } = await import('@threadharbor/dsh-acp-agent')
+    const h = harness({ dialect: codexDialect })
+    await h.started()
+    h.push([placeholderTwo, terminalNoArgs])
+    const card = h.appends.find(append => append.type === 'tool/call')
+    expect(card, 'terminal frame must still file its card').toBeDefined()
+    const results = h.appends.filter(append => append.type === 'tool/result')
+    expect(results).toHaveLength(1)
+    expect(results[0]!.intent?.sourceEventSeqs).toEqual([2])
+    h.release()
+    await h.run()
+  })
+})
 
 describe('Cursor 的编辑过程使用真实帧', () => {
   const frames = JSON.parse(readFileSync(new URL('../../dsh-acp-agent/tests/fixtures/captured-frames.cursor-edit.json', import.meta.url), 'utf8')) as AcpFrame[]

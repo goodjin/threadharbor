@@ -559,6 +559,18 @@ export class AcpTurnRunner {
     }
   }
 
+  /** 回合末把遥测帧按种类汇总成块写掉（每回合一次）。 */
+  private writeRawSummary(turn: TurnContext): void {
+    const blocks = this.rawOutput?.summary() ?? []
+    for (const block of blocks) {
+      try {
+        turn.write([{ type: RAW_OUTPUT, payload: block }])
+      } catch {
+        // 写失败只丢这一块；回合收尾不受影响。
+      }
+    }
+  }
+
   /**
    * 子代理出生帧/终态帧 → 影子子会话。
    *
@@ -743,9 +755,12 @@ export class AcpTurnRunner {
     if (isTool && typeof rawId === 'string') {
       const folded = dialect.foldTool(carried, update)
       live.tools.set(rawId, folded)
-      // Cursor's pending placeholder arrives before its file path/search input.
-      // The immutable announcement must wait for that next frame's arguments.
-      if (dialect.id === 'cursor' && folded.status === 'pending'
+      // A placeholder frame announces the call before its arguments exist
+      // (cursor's pending edit, codex's read). The card is immutable, so
+      // writing it now would freeze `{}` in place of the real input. Wait for
+      // the frame that carries them; the terminal frame always qualifies, so
+      // a call that genuinely has no arguments still gets its card.
+      if (folded.status !== 'completed' && folded.status !== 'failed'
         && Object.keys(recordOf(folded.arguments)).length === 0) return
     }
     const options = { turn: live.turn, step: live.step, dialect, ...(carried === undefined ? {} : { carried }) }
@@ -957,7 +972,7 @@ export class AcpTurnRunner {
     // could not track (a frame with no call id, a call whose live write
     // failed) still rides the turn-end write as before. Same tail the segment
     // path closes every segment with — one projection, one write, one settle.
-    this.closeSegment(turn, stream, liveCards, end)
+    this.closeSegment(turn, stream, liveCards, end, undefined, true)
     // 父回合结束：子代理会话只放弃实时流，保持开放等它自己的真实终态。
     this.subagents?.parentTurnEnd(turn.sessionId)
     return {
@@ -1091,10 +1106,11 @@ export class AcpTurnRunner {
           // 结束原因走返回值（公告或 spawned 收尾待写时不算空，见下）。
           if (this.frames.length === 0 && !this.noticePending() && !this.spawnedTailPending()) {
             stream?.abandon()
+            this.writeRawSummary(turn)
             this.subagents?.parentTurnEnd(turn.sessionId)
             return end
           }
-          this.closeSegment(turn, stream, liveCards, end, this.spawnedCloseBookkeeping(turn, true))
+          this.closeSegment(turn, stream, liveCards, end, this.spawnedCloseBookkeeping(turn, true), true)
           this.subagents?.parentTurnEnd(turn.sessionId)
           return end
         }
@@ -1217,6 +1233,7 @@ export class AcpTurnRunner {
     liveCards: LiveCards | undefined,
     end: StepEndReason,
     spawned?: { readonly ids: ReadonlySet<string>; readonly tail: readonly ProjectionEvent[] },
+    final = false,
   ): void {
     const position = turn.position
     // 段结束先封未知块：块不跨步骤，且必须排在段消息之前（消息是这一步的
@@ -1233,6 +1250,9 @@ export class AcpTurnRunner {
         }
       }
     }
+    // 遥测汇总只在回合末写：中途闭段就倒出来会把过程区重新弄脏，而且卡片必须
+    // 排在段消息之前（消息是这一步的最后一条 assistant 消息，视图只保留它）。
+    if (final) this.writeRawSummary(turn)
     const notice = !this.noticeWritten && this.undelivered.length > 0 && position !== undefined
       ? [{
         type: UNDELIVERED,

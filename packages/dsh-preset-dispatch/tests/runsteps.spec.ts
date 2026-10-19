@@ -281,7 +281,9 @@ describe('runSteps — 段落推进', () => {
     // notify 里只有握手 initialized 和给外部 agent 的取消：中止必须发 session/cancel。
     expect(h.notifications.filter(notification => notification.method !== 'initialized'))
       .toEqual([{ method: 'session/cancel', params: { sessionId: 'ext' } }])
-    expect(h.appends.map(append => append.type)).toEqual(['assistant/message', 'tool/call', 'assistant/message', 'tool/result'])
+        // 无参占位帧不再实时开卡：段消息自己携带 tool-call 块作为公告，卡片与结果
+    // 由末段成对写出（实时的只有带参数的帧）。
+    expect(h.appends.map(append => append.type)).toEqual(['assistant/message', 'tool/call', 'tool/result'])
     const texts = h.appends
       .filter(append => append.type === 'assistant/message')
       .map(append => (append.payload as { message: { content: { text?: string }[] } }).message.content)
