@@ -11,7 +11,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 let closed = 0
 beforeEach(() => { closed = 0 })
 import { buildPresetTable, cwdForOpen, sessionsRegistry } from '../src/registry.ts'
-import type { AcpSessionFactory } from '../src/registry.ts'
+import type { AcpSessionFactory, AcpSession } from '../src/registry.ts'
 import type { AcpDialect } from '@threadharbor/dsh-acp-agent'
 
 /** A dialect is only ever read as an opaque handle by the registry. */
@@ -220,5 +220,50 @@ describe('连接死亡后的自愈', () => {
     factory.sessions[0]!.die('process exited between turns')
     await binding.run(decision, turnOf('s1'))
     expect(factory.built).toEqual(['acp-grok', 'acp-grok'])
+  })
+})
+
+describe('buildPresetTable — runSteps 透传', () => {
+  const decision = { kind: 'enter' as const, messages: [] }
+  const turnOf = (sessionId: string) => ({ sessionId, position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
+
+  /** 在 killable 工厂开出的会话上补一段可断言的 runSteps，其余接线照旧。 */
+  function factoryWithRunSteps(runSteps: NonNullable<AcpSession['runSteps']>): AcpSessionFactory & { built: string[] } {
+    const base = killableFactory()
+    return {
+      ...base,
+      open: (presetId, options) => base.open(presetId, options).then(session => ({ ...session, runSteps })),
+    }
+  }
+
+  it('binding 带出会话的 runSteps，first 原样透传，段与段之间复用同一条连接', async () => {
+    // 接管路径一段一次调用；段之间重开连接，外部会话的上下文就散了——开连接
+    // 的记账必须由 run 与 runSteps 共用，first 标记不得在半路丢失或改写。
+    const firsts: boolean[] = []
+    const factory = factoryWithRunSteps(async (_decision, _turn, at) => {
+      firsts.push(at.first)
+      return at.first ? null : { kind: 'completed' as const }
+    })
+    const table = buildPresetTable(CONFIG, factory, sessionsRegistry(), inProject)
+    const binding = table.get('acp-grok')!
+    expect(binding.runSteps).toBeTypeOf('function')
+
+    expect(await binding.runSteps!(decision, turnOf('s1'), { first: true })).toBeNull()
+    expect(await binding.runSteps!(decision, turnOf('s1'), { first: false })).toEqual({ kind: 'completed' })
+    expect(firsts).toEqual([true, false])
+    expect(factory.built).toEqual(['acp-grok'])
+  })
+
+  it('会话没带 runSteps 时回落单发 run，把真实结束原因当末段返回', async () => {
+    // 自备工厂（或旧测试桩）的会话只有 run。binding 仍要接得住接管路径的按段
+    // 调用：一次调用跑完整个回合，结束原因从 run 的结果里来——对外表现与单步
+    // 路径一致。
+    const factory = killableFactory()
+    const table = buildPresetTable(CONFIG, factory, sessionsRegistry(), inProject)
+    const binding = table.get('acp-grok')!
+    expect(binding.runSteps).toBeTypeOf('function')
+
+    await expect(binding.runSteps!(decision, turnOf('s1'), { first: true })).resolves.toEqual({ kind: 'completed' })
+    expect(factory.built).toEqual(['acp-grok'])
   })
 })

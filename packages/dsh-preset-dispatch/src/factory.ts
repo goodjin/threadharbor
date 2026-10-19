@@ -202,6 +202,10 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
       })
       return {
         run: async (decision, turn) => await runner.run(decision, turn),
+        // The segmented path, passed through with its `first` marker untouched:
+        // the registry's binding hands it to the dispatch, which iterates one
+        // external turn across several step calls.
+        runSteps: (decision, turn, at) => runner.runSteps(decision, turn, at),
         // Drops the connection itself, not just the runner's bookkeeping: a
         // runner that forgets its session id would otherwise hand back the
         // same conversation.

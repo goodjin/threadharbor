@@ -168,13 +168,17 @@ export class GatewayChunkQueue {
  * The turn's stream, translated.
  *
  * The runner pushes text and reasoning as they arrive; the loop needs them
- * wrapped in a block lifecycle with the finish strictly last. Text and
- * reasoning each own one block — interleaved deltas continue their own block,
- * the same slot discipline the assistant stream uses.
+ * wrapped in a block lifecycle with the finish strictly last. Blocks follow
+ * arrival order — a switch between text and reasoning opens the next block,
+ * same-kind deltas keep writing the current one — the same block order the
+ * assistant stream and native model streams use. Per-kind slots would fold a
+ * mid-turn thought back onto the text block's index, above text already on
+ * screen.
  */
 export class GatewayChunkStream {
   private readonly blocks: { blockType: 'text' | 'reasoning'; index: number; text: string }[] = []
-  private readonly byKind = new Map<'text' | 'reasoning', { blockType: 'text' | 'reasoning'; index: number; text: string }>()
+  /** The block same-kind deltas are writing; replaced by a fresh one on a switch. */
+  private current: { blockType: 'text' | 'reasoning'; index: number; text: string } | undefined
   private readonly sink: GatewaySink
 
   // No constructor parameter property: the web host loads this module through
@@ -197,17 +201,15 @@ export class GatewayChunkStream {
 
   private push(kind: 'text' | 'reasoning', text: string): void {
     if (text === '') return
-    let block = this.byKind.get(kind)
-    if (block === undefined) {
-      block = { blockType: kind, index: this.blocks.length, text: '' }
-      this.blocks.push(block)
-      this.byKind.set(kind, block)
-      this.sink.chunk({ type: 'block-start', index: block.index, blockType: kind })
+    if (this.current === undefined || this.current.blockType !== kind) {
+      this.current = { blockType: kind, index: this.blocks.length, text: '' }
+      this.blocks.push(this.current)
+      this.sink.chunk({ type: 'block-start', index: this.current.index, blockType: kind })
     }
-    block.text += text
+    this.current.text += text
     this.sink.chunk(kind === 'text'
-      ? { type: 'text-delta', index: block.index, text }
-      : { type: 'reasoning-delta', index: block.index, text })
+      ? { type: 'text-delta', index: this.current.index, text }
+      : { type: 'reasoning-delta', index: this.current.index, text })
   }
 
   /** Close the open blocks and finish, mapping the step ending. */

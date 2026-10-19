@@ -83,7 +83,7 @@ describe('AcpAssistantStream', () => {
     expect(stream.records().map(r => (r as { texts: readonly string[] }).texts)).toEqual([['first'], ['second']])
   })
 
-  it('gives each kind of delta its own block index, assigned in arrival order', () => {
+  it('hands out block indexes in arrival order, not per kind', () => {
     const { nextRevision } = collector()
     const stream = new AcpAssistantStream({ emit: () => {}, nextRevision, sessionId: 's', attempt: 1, turn: 1, step: 1 })
     stream.textDelta('first block')
@@ -92,7 +92,41 @@ describe('AcpAssistantStream', () => {
     expect(stream.records().map(r => (r as { index: number }).index)).toEqual([0, 1])
   })
 
-  it('keeps reasoning and text apart', () => {
+  it('numbers interleaved kinds 0,1,2,3 on the chunk frames and the records alike', () => {
+    const { nextRevision } = collector()
+    const frames: AnyFrame[] = []
+    const stream = new AcpAssistantStream({ emit: f => frames.push(f), nextRevision, sessionId: 's', attempt: 1, turn: 1, step: 1 })
+    stream.reasoningDelta('think')
+    stream.textDelta('say')
+    stream.reasoningDelta('think more')
+    stream.textDelta('say more')
+
+    const chunks = frames.filter(f => f['type'] === 'chunk')
+    expect(chunks.map(c => (c['chunk'] as { index: number }).index)).toEqual([0, 1, 2, 3])
+    expect(stream.records().map(r => (r as { index: number }).index)).toEqual([0, 1, 2, 3])
+    expect(stream.records().map(r => r['type'])).toEqual(['reasoning-chunks', 'text-chunks', 'reasoning-chunks', 'text-chunks'])
+  })
+
+  it('keeps consecutive same-kind deltas in one block and merges their texts', () => {
+    const { nextRevision } = collector()
+    let tick = 1_000
+    const frames: AnyFrame[] = []
+    const stream = new AcpAssistantStream({
+      emit: f => frames.push(f), nextRevision, sessionId: 's', attempt: 1, turn: 1, step: 1, now: () => tick += 5,
+    })
+    stream.reasoningDelta('part one, ')
+    stream.reasoningDelta('part two')
+    stream.textDelta('answer')
+
+    const chunks = frames.filter(f => f['type'] === 'chunk')
+    expect(chunks.map(c => (c['chunk'] as { index: number }).index)).toEqual([0, 0, 1])
+    expect(stream.records()).toEqual([
+      { type: 'reasoning-chunks', time0: 1_005, index: 0, dt: [5], texts: ['part one, ', 'part two'] },
+      { type: 'text-chunks', time0: 1_015, index: 1, dt: [], texts: ['answer'] },
+    ])
+  })
+
+  it('opens a fresh block when a kind returns, instead of reaching back to its old slot', () => {
     const { nextRevision } = collector()
     const stream = new AcpAssistantStream({ emit: () => {}, nextRevision, sessionId: 's', attempt: 1, turn: 1, step: 1 })
     stream.reasoningDelta('thinking')
@@ -100,9 +134,27 @@ describe('AcpAssistantStream', () => {
     stream.reasoningDelta('more thinking')
 
     expect(stream.records().map(r => r['type'])).toEqual(['reasoning-chunks', 'text-chunks', 'reasoning-chunks'])
-    // Same kind, same slot: the second thought rejoins the first instead of
-    // opening a third block.
-    expect(stream.records().map(r => (r as { index: number }).index)).toEqual([0, 1, 0])
+    // 换向即开新块：回到思考取下一个块号，而不是回到它最早的下标——
+    // 按类占槽曾把 mid-turn 的思考折回 0 号块，落上屏正文之上。
+    expect(stream.records().map(r => (r as { index: number }).index)).toEqual([0, 1, 2])
+  })
+
+  it('keeps end.index at the next chunk position across kind switches', () => {
+    const { nextRevision } = collector()
+    const frames: AnyFrame[] = []
+    const stream = new AcpAssistantStream({ emit: f => frames.push(f), nextRevision, sessionId: 's', attempt: 1, turn: 1, step: 1 })
+    stream.start()
+    stream.reasoningDelta('think')
+    stream.textDelta('say')
+    stream.reasoningDelta('think more')
+    stream.textDelta('say more')
+    stream.settle('assistant/message', () => 1)
+
+    // Four chunk frames went out (positions 0–3); the end frame still points
+    // at 4, the position the attempt's next chunk would take. Block numbers
+    // and frame positions are different counters, and this pins that.
+    const end = frames.find(f => f['type'] === 'end')!
+    expect(end['index']).toBe(4)
   })
 
   it('appends the durable event before announcing that the stream ended', () => {
