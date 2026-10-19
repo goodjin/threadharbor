@@ -175,21 +175,30 @@ export function routeQuotaFetcher(fetchImpl: typeof fetch = fetch): () => Promis
 }
 
 /**
+ * 渲染器绑定的快照钩子。真机上 ui-renderer 用 useSyncExternalStoreWithSelector
+ * 把注入的 hooks 源包成 (selector, isEqual) => S：**每次调用都必须带选择器**，
+ * 空参调用会抛 "selector is not a function"，条目被槽位错误边界收成空块。
+ * 这里只需要恒等选择器，所以按「选择器必填」声明，形状与真机一致。
+ */
+type SnapshotHook<T> = <S>(selector: (value: T | undefined) => S) => S
+
+/**
  * Render the quota pills for the composer dock.
- * @param props - the two reactive seats (framework-bound in production, plain
- * functions in tests), the subagent visibility flag, and the locale seat.
+ * @param props - the two reactive seats (framework-bound selector hooks in
+ * production, plain functions in tests), the subagent visibility flag, and the
+ * locale seat.
  * @returns two pills, or null whenever the row should not appear.
  */
 export function QuotaPillRow({ useQuota, useModelDirectory, visible = true, t = fallbackT }: {
-  useQuota?: () => QuotaWindows | undefined
-  useModelDirectory?: () => QuotaDirectorySnapshot | undefined
+  useQuota?: SnapshotHook<QuotaWindows>
+  useModelDirectory?: SnapshotHook<QuotaDirectorySnapshot>
   visible?: boolean
   t?: RuntimeT
 }): ReactNode {
   if (visible === false) return null
-  const model = useModelDirectory?.()?.current?.model
+  const model = useModelDirectory?.((value) => value)?.current?.model
   if (model === undefined || !model.startsWith(GLM_MODEL_PREFIX)) return null
-  const quota = useQuota?.()
+  const quota = useQuota?.((value) => value)
   if (quota === undefined) return null
   const windows = [quota.fiveHour, quota.weekly].filter((window): window is QuotaWindow => window !== undefined)
   if (windows.length === 0) return null
@@ -293,8 +302,8 @@ export function registerQuotaDockPills(
       },
     },
     (props: {
-      readonly useZcodeQuota?: () => QuotaWindows | undefined
-      readonly useZcodeDirectory?: () => QuotaDirectorySnapshot | undefined
+      readonly useZcodeQuota?: SnapshotHook<QuotaWindows>
+      readonly useZcodeDirectory?: SnapshotHook<QuotaDirectorySnapshot>
       readonly visible?: boolean
       readonly t?: RuntimeT
     }) => createElement(QuotaPillRow, {

@@ -160,6 +160,23 @@ describe('QuotaPillRow（胶囊渲染）', () => {
     expect(html({ directory: undefined, quota: WINDOWS })).toBe('')
   })
 
+  it('渲染器绑定的选择器钩子必须带选择器：空参调用不该把它打崩', () => {
+    // 真机上 ui-renderer 把注入的 hooks 源绑成 (selector, isEqual) => S；
+    // 不给选择器时 use-sync-external-store 会抛 "selector is not a function"。
+    function boundHook<T>(read: () => T) {
+      return (selector: (value: T) => unknown): unknown => {
+        if (typeof selector !== 'function') throw new TypeError('selector is not a function')
+        return selector(read())
+      }
+    }
+    const markup = renderToString(createElement(QuotaPillRow, {
+      useModelDirectory: boundHook(() => GLM_DIRECTORY) as never,
+      useQuota: boundHook(() => WINDOWS) as never,
+      t: zhT,
+    }))
+    expect(markup).toContain('data-zcode-quota')
+  })
+
   it('用量过八成标红、过半标黄、其余常态', () => {
     const hot = html({
       directory: GLM_DIRECTORY,
