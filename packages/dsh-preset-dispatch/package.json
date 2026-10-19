@@ -21,8 +21,9 @@
     "./package.json": "./package.json"
   },
   "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1",
     "@threadharbor/dsh-acp-agent": "workspace:^",
-    "@threadharbor/zcode-acp": "workspace:^",
-    "@deepseek-ai/schemastery": "^3.18.1"
+    "@threadharbor/minimaxi-acp": "workspace:^",
+    "@threadharbor/zcode-acp": "workspace:^"
   }
 }

@@ -1,0 +1,21 @@
+{
+  "name": "@threadharbor/minimaxi-acp",
+  "version": "0.1.0",
+  "description": "MiniMax model plugin: answers with the local MiniMax Code login and the managed gateway, leaving tools to DSH's own loop",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/goodjin/threadharbor.git",
+    "directory": "packages/minimaxi-acp"
+  },
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./package.json": "./package.json"
+  },
+  "dependencies": {
+    "proper-lockfile": "^4.1.2"
+  },
+  "devDependencies": {
+    "@types/proper-lockfile": "^4.1.4"
+  }
+}

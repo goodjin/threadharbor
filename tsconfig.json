@@ -8,6 +8,7 @@
     { "path": "packages/dsh-mobile-entry" },
     { "path": "packages/dsh-mobile-relay" },
     { "path": "packages/zcode-acp" },
+    { "path": "packages/minimaxi-acp" },
     { "path": "tsconfig.plugin.json" }
   ]
 }

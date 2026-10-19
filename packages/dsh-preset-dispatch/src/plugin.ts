@@ -37,7 +37,7 @@ import { followModelSelection, followPresetSelection } from './follow.ts'
 import { switchShared } from './switch-shared.ts'
 import { selectionOf } from './selection.ts'
 import type { CatalogDeps } from './catalog.ts'
-import { zcodeModelStream } from './zcode-model.ts'
+import { modelPluginStream } from './model-plugins.ts'
 import type { AcpPresetBinding } from './dispatch.ts'
 import type { AcpDialect, AcpTransport } from '@threadharbor/dsh-acp-agent'
 
@@ -275,7 +275,7 @@ export function applyAcpPlugin(
     modelsOf: presetId => modelsOfPreset(presets, factory, presetId),
     runtimeModelsOf: presetId => runtimeModelReports.modelsOf(presetId),
     dialectOf: presetId => table.get(presetId)?.dialect,
-    modelStream: zcodeModelStream(presets),
+    modelStream: modelPluginStream(presets),
   }
   // A model request landing on one of these routes for a session this row does
   // not drive is answered in place: the gateway borrows the agent as a model,

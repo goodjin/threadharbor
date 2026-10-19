@@ -142,6 +142,9 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
       if (preset.agent === 'zcode') {
         throw new Error('zcode answers as a model inside the native loop; it is not opened as an ACP session')
       }
+      if (preset.agent === 'minimaxi') {
+        throw new Error('minimaxi answers as a model inside the native loop; it is not opened as an ACP session')
+      }
       // Refuse before any child starts. An omitted directory would otherwise
       // inherit this process's directory, which is not the session's workspace.
       const cwd = cwdForOpen(options.cwd)

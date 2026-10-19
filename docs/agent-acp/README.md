@@ -9,10 +9,11 @@
 | **claude code** | ✅ 已实现，已实测 | stdio | [claude-code.md](./claude-code.md) |
 | **Cursor** | ✅ 已实现，已实测 | stdio | [cursor.md](./cursor.md) |
 | **zcode** | ✅ 模型插件 | 直连 GLM，不走 ACP | [zcode.md](./zcode.md) |
+| **minimaxi** | ✅ 模型插件，已实测 | 复用 MiniMax Code 登录，直连托管网关 | [minimaxi.md](./minimaxi.md) |
 
 已实现的四家共用的代码在 `packages/dsh-acp-agent/`：传输、客户端、投影、审批桥接是共用的，**每个 agent 只提供一个 dialect**。
 
-> **zcode 不在这张表里。** 它是模型列表里单独的一组 GLM，对话由 DSH 自己的循环处理。见 [zcode.md](./zcode.md)。
+> **zcode 与 minimaxi 都不在这张表里。** 它们是模型列表里单独的两组，对话由 DSH 自己的循环处理。见 [zcode.md](./zcode.md) 与 [minimaxi.md](./minimaxi.md)。
 
 ## 四家的字段差异对照
 

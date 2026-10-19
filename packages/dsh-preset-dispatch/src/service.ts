@@ -20,7 +20,7 @@ import type { ContentEvent } from './dispatch.ts'
 import { makeSessionFactory } from './factory.ts'
 import type { FactoryDeps } from './factory.ts'
 import { modelsOfPreset, registerCatalog, runtimeModels } from './catalog-registration.ts'
-import { zcodeModelStream } from './zcode-model.ts'
+import { modelPluginStream } from './model-plugins.ts'
 import { buildPresetTable, sessionsRegistry } from './registry.ts'
 import type { PresetConfig } from './registry.ts'
 
@@ -81,7 +81,7 @@ export function attachAcpDispatch(
     modelsOf: presetId => modelsOfPreset(config, factory, presetId),
     runtimeModelsOf: presetId => runtimeModelReports.modelsOf(presetId),
     dialectOf: presetId => table.get(presetId)?.dialect,
-    modelStream: zcodeModelStream(config),
+    modelStream: modelPluginStream(config),
   })
 
   ctx.on('agent/created', payload => {

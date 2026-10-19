@@ -257,3 +257,34 @@
                 - id: GLM-5.2
                   name: GLM 5.2
                   description: GLM Coding Plan
+    - id: acp-minimax
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: acp-minimax
+        name: MiniMax
+        order: 45
+        plugins:
+          - id: acp-minimax-binding
+            name: '@threadharbor/dsh-preset-dispatch'
+            config:
+              presetId: acp-minimax
+              agent: minimaxi
+              hideFromRoster: true
+              # minimaxi 是模型插件，不拉起任何进程。本机 MiniMax Code 的登录
+              # 凭据按官方那套路径与刷新逻辑读取（与桌面版共用同一个文件和同一把
+              # 锁），对话发给 MiniMax 的托管网关；区域从凭据所在目录读出，国内站
+              # 自动走 agent.minimax.cn。读文件、跑命令、审批、取消和会话记录仍由
+              # DSH 自己的循环处理。
+              #
+              # 没装或没登录 MiniMax Code 时，这一组模型发消息会直接失败并说明
+              # 去哪登录——本插件不另设密钥。
+              #
+              # 思考档位是 MiniMax 自己的 low/medium/high/xhigh/max；M3.1-Flash
+              # 关不掉思考，选 none 会被忽略（官方对 disabled 直接返回 2013）。
+              models:
+                - id: MiniMax-M3.1-Flash
+                  name: M3.1 Flash
+                  description: MiniMax Code 登录
+                - id: MiniMax-M3
+                  name: MiniMax M3
+                  description: MiniMax Code 登录

@@ -1,0 +1,20 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // `outDir`/`rootDir` are chosen so the emitted tree keeps the same relative
+    // shape as the source tree: our own files land in `lib/src/**` and the
+    // vendored ones in `lib/src/vendor/**`. That matters because the two are
+    // separate projects and an import rewritten across the boundary is only
+    // allowed when the distance between inputs and outputs is the same.
+    "outDir": "lib/src",
+    "rootDir": "src",
+    // The vendored tree is upstream's code, compiled under upstream's own
+    // rules. `exactOptionalPropertyTypes` is the one setting relaxed: upstream
+    // builds without it, and patching its source to satisfy our stricter
+    // setting is exactly the divergence this directory exists to avoid. Nothing
+    // in this package's own code is compiled with it off — that is the separate
+    // `tsconfig.json` project.
+    "exactOptionalPropertyTypes": false
+  },
+  "include": ["src/vendor/**/*.ts"]
+}

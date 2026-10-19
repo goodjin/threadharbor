@@ -9,7 +9,7 @@
 
 ## 一、先说结论
 
-**五个入口（grok / codex / claude / cursor / zcode）各自独立，可以分别装；不装也不影响 DSH 自带的 agent。** zcode 是模型，另外四个是 ACP agent。
+**六个入口（grok / codex / claude / cursor / zcode / minimaxi）各自独立，可以分别装；不装也不影响 DSH 自带的 agent。** zcode 与 minimaxi 是模型，另外四个是 ACP agent。
 
 不装任何东西 = 纯 DSH，所有会话走原生 agent，行为与没装之前一样。
 
@@ -195,6 +195,7 @@ preset——切走后残留的接管会在下一轮自己让位回原生 step（
 - 四个 ACP agent（帧方言、传输、权限、终端、投影）都在
   `dsh-preset-dispatch` 与 `dsh-acp-agent` 里，走的是同一套代码。
   zcode 不另起进程：模型列表里单独一组 GLM，用本机 ZCode 登录密钥直连 Coding Plan，读文件、跑命令、审批仍是 DSH 自己的。
+  minimaxi 同样不另起进程：模型列表里单独一组 MiniMax，用本机 MiniMax Code 的登录凭据直连托管网关，凭据的读取与刷新采用官方实现，与桌面版共用同一个文件与同一把锁；本机没登录 MiniMax Code 时该组不可用。
 - 宿主入口 `applyAcpPlugin` 已实现并有测试，作用域过滤、未知 agent 不接管、
   单个会话出错不影响其余，都有覆盖；
 - 真实 agent 端到端跑通：claude、codex、grok 各一轮，外加权限请求应答后回合继续、

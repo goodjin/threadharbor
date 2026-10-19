@@ -250,6 +250,7 @@ const DISPLAY: Readonly<Record<string, string>> = {
   codex: 'Codex',
   cursor: 'Cursor',
   zcode: 'ZCode',
+  minimaxi: 'MiniMax',
 }
 
 /**
