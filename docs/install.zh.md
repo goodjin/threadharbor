@@ -31,6 +31,10 @@ dsh plugin --profile web remove threadharbor
 
 ## 日常发布（源码本地 build / release snapshot）
 
+> （2026-10-20）双通道已退役：web 单实例固定 3080（`~/bin/dsh-web`），3081 已删除。
+> 下面的 promote 流程保留作参考；`--channel` 语义以 `scripts/release-promote.mjs`
+> 当时的实现为准。
+
 不通过 npm，而是把当前 checkout 的代码作为不可变快照发布到 `~/.local/share/threadharbor/releases/`，并把对应 channel（stable 3080 / test 3081）的 DSH Web 平滑切到新快照。完整链路在 `scripts/release-promote.mjs`：
 
 ```sh
