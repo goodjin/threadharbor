@@ -105,11 +105,28 @@ describe('错误页', () => {
     expect(plain.body).toBe('没有这台已登记的主机')
   })
 
+  it('fetch 的默认接受头 */* 拿到纯文本，不会拿到一整页 HTML', async () => {
+    const gateway = createGateway({
+      admit: () => ({ peer: {} }),
+      registry: async () => ({ ready: true, json: '[]' }),
+    })
+    const local = await startGateway(gateway)
+    const fetched = await rawRequest(local.port, '/threadharbor/gateway/missing/', { accept: '*/*' })
+    expect(fetched.status).toBe(404)
+    expect(fetched.headers['content-type']).toContain('text/plain')
+    expect(fetched.body).toBe('没有这台已登记的主机')
+  })
+
   it('错误页正文按 HTML 转义，不把消息当标签', () => {
     const html = gatewayErrorPage('连不上这台主机（<b>http://x</b>）& 重试', { back: '回本机', settings: '去设置' })
     expect(html).toContain('连不上这台主机（&lt;b&gt;http://x&lt;/b&gt;）&amp; 重试')
     expect(html).not.toContain('<b>http://x</b>')
     expect(html).toContain('href="/"')
+  })
+
+  it('页面标题是出错的理由，不是按钮上的文案', () => {
+    const html = gatewayErrorPage('没有这台已登记的主机', { back: '回本机', settings: '去设置' })
+    expect(html).toContain('<title>没有这台已登记的主机</title>')
   })
 })
 

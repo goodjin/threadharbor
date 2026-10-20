@@ -452,7 +452,7 @@ export function gatewayErrorPage(message: string, t: { back: string; settings: s
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${back}</title>
+<title>${body}</title>
 <style>
   :root { color-scheme: dark; }
   body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
