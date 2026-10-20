@@ -220,7 +220,9 @@ Expected: FAIL，参数个数不匹配。
 
 - [ ] **Step 4: 注入入口 DOM**
 
-在 `gatewayClientScript` 追加一段：DOM 就绪后在页面顶部插入一个 `id="th-host-bar"` 的条，内含主机名文本与一个指向本机根路径的链接（`href="/"`，id `th-back-home`）。样式写进注入脚本的内联样式，不依赖对方样式表。链接上挂一个委托监听，点击时若页面上已存在插件自己的切换器（以 Task 2 的选择器为标记）则不重复插条（Review Focus 2）——具体判据用「页面上是否已有 `[data-host-switcher]`」。
+在 `gatewayClientScript` 追加一段：DOM 就绪后在页面顶部插入一个 `id="th-host-bar"` 的条，内含主机名文本与一个指向本机根路径的链接（`href="/"`，id `th-back-home`）。样式写进注入脚本的内联样式，不依赖对方样式表。
+
+不重复插入的判据：页面上是否已存在 `[data-host-switcher]`（Task 2 的主机图标带这个标记）。因为对方的 React 应用是客户端渲染、可能晚于 DOM 就绪才挂上，判据要用 `MutationObserver` 双向裁决——对方切换器先出现就不插条；我们先插了、后来对方切换器出现就把我们的条移除。
 
 - [ ] **Step 5: 跑测试确认通过**
 
