@@ -204,6 +204,22 @@ scripts/profile-link-plugins.sh ~/.dsh/profiles/desktop      # 桌面版（重�
 脚本幂等：已一致的软链原样保留。新增插件包（仓库 `node_modules/@threadharbor/`
 下多了新名字）后，对每个在用的 profile 重跑一遍即可。
 
+**〇½、其他机器：git 安装自带构建（2026-10-20）。**
+仓库根有 `prepare` 钩子（`scripts/prepare-install.mjs`）：git 依赖落成纯 checkout
+后，安装时自动补 workspace 依赖并构建出 `lib/client.js`——没有它，客户端包不会
+被服务给页面（症状同上）。已经端到端验证：干净 checkout → `pnpm install`（自动
+构建）→ profile `link:` 引用 → 软链脚本 → 重启，模型入口带 agent 前缀。推荐把
+依赖 pin 在 commit 或 tag 上（对齐 superpowers 的用法）：
+
+```json
+{ "threadharbor": "github:goodjin/threadharbor#<commit-or-tag>" }
+```
+
+注意两点：一，profile 所在路径别放 /tmp 之类的别名目录（macOS 的 /tmp 是
+/private/tmp 的别名，dsh 客户端清单的归属判定在这种别名下会漏掉插件客户端）；
+二，bundle 补丁里各 agent 的 `command`、主机名等是按机器写的，装完按下面第三
+节逐行核对。
+
 **一、`session.header.agentPreset` 是平的，不是 `meta.agentPreset`。**
 读 `header.meta.agentPreset`（设计文档最初的写法）永远得到 undefined，
 派发会静默退回原生 agent，而且**任何地方都不报错**。

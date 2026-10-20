@@ -31,7 +31,7 @@ if [ -L "$NODE_MODULES/threadharbor" ]; then
 	target="$(readlink "$NODE_MODULES/threadharbor")"
 	resolved="$(cd "$NODE_MODULES" && cd "$(dirname "$target")" && pwd)/$(basename "$target")"
 	if [ "$resolved" != "$REPO" ]; then
-		echo "warn: $NODE_MODULES/threadharbor 指向 $resolved 而不是 $REPO；不改，请人工确认" >&2
+		echo "warn: $NODE_MODULES/threadharbor 指向 ${resolved} 而不是 ${REPO}；不改，请人工确认" >&2
 	fi
 else
 	echo "warn: $NODE_MODULES/threadharbor 缺失 —— profile 需要先以 link: 依赖引用本仓库并 pnpm install" >&2
