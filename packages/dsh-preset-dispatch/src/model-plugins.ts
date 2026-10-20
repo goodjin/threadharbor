@@ -11,6 +11,7 @@
 import type { CatalogTurnRequest } from './catalog.ts'
 import { minimaxiModelStream } from './minimaxi-model.ts'
 import type { PresetConfig } from './registry.ts'
+import { pairToolResults } from './tool-pairing.ts'
 import { zcodeModelStream } from './zcode-model.ts'
 import type { MiniMaxStreamChunk } from '@threadharbor/minimaxi-acp'
 import type { GlmStreamChunk } from '@threadharbor/zcode-acp'
@@ -24,12 +25,27 @@ export function modelPluginStream(
 ): (presetId: string, request: CatalogTurnRequest) => AsyncIterable<GlmStreamChunk | MiniMaxStreamChunk> | undefined {
   const plugins = [zcodeModelStream(config), minimaxiModelStream(config)]
   return (presetId, request) => {
+    const paired = withPairedResults(request)
     for (const plugin of plugins) {
-      const stream = plugin(presetId, request)
+      const stream = plugin(presetId, paired)
       if (stream !== undefined) return stream
     }
     return undefined
   }
+}
+
+/**
+ * The request with its tool calls paired to their results again.
+ *
+ * Both model rows answer in the anthropic messages format, which wants every
+ * tool call answered by the tool results of the very next user message. The
+ * session log does not always hold them in that order — a background subagent
+ * call that never got its result has it written at the tail of the log — and
+ * the provider refuses such a request outright.
+ */
+function withPairedResults(request: CatalogTurnRequest): CatalogTurnRequest {
+  const messages = Array.isArray(request.messages) ? request.messages : []
+  return { ...request, messages: pairToolResults(messages) }
 }
 
 /**

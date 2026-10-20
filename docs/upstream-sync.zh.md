@@ -86,7 +86,7 @@ zcode 与 minimaxi 这两组模型不是我们自己的实现，它们贴着两�
 | A5 | 托管网关地址表（`agent.minimax.cn` / `.io` 的 `/mavis/api/v1/llm/v1`） | `packages/config/src/config.ts` | `vendor/mcode-runtime/endpoints.ts` | 请求 404 或连错区 | 404 / 稳定 401 |
 | A6 | 区域判定：凭据目录里的 `cn` / `en` 决定网关 | `oauth-core/src/namespace.ts` | `packages/minimaxi-acp/src/credential.ts`（`detectNamespace`） | 国内号配国际网关 → 稳定 401 | 401 且换网关就好 |
 | A7 | 模型目录：模型 id、上下文/输出上限、思考能力（能否关思考）、档位表 | `packages/config/src/minimax-model-catalog.ts` | `vendor/mcode-runtime/model-catalog.ts` | 模型 id 变了 → 模型发不出去；`thinking_config.mode` 变了 → 关思考行为变了 | 模型 id 报无效；关思考报 2013 |
-| A8 | anthropic 消息协议本身（`thinking`/`output_config.effort`、思考签名、工具块） | anthropic 兼容接口 | `packages/minimaxi-acp/src/anthropic.ts`、`sse.ts` | 协议字段改名 → 请求被拒 | 网关返回参数错误 |
+| A8 | anthropic 消息协议本身（`thinking`/`output_config.effort`、思考签名、工具块） | anthropic 兼容接口 | `packages/minimaxi-acp/src/anthropic.ts`、`sse.ts`；重放时的工具配对在 `packages/dsh-preset-dispatch/src/tool-pairing.ts` | 协议字段改名 → 请求被拒 | 网关返回参数错误 |
 
 ### B. zcode（对齐型）
 
@@ -188,6 +188,7 @@ zcode 与 minimaxi 这两组模型不是我们自己的实现，它们贴着两�
 | 选 none 档关不掉思考 | A7 | 目录里的 `thinking_config.mode` 是不是变了 |
 | 第二轮被拒（多轮工具调用断） | B8 / A8 | 思考签名有没有原样回传 |
 | 工具结果报 2013 / tool id not found | B11 | 工具 id 是否用真实 id 回填 |
+| 报 2013「tool call result does not follow tool call」 | 我们自己的重放层（`packages/dsh-preset-dispatch/src/tool-pairing.ts`） | 历史里的工具调用与结果是否配对：补救写在日志末尾的结果有没有搬回调用旁 |
 | 配额胶囊不出现 | B9 | 额度接口形状、host 插件路由 |
 | 挂上模型但不注册（模型行在、列表空） | A7 / B10 | 模型 id 与目录、preset 行是否匹配 |
 
@@ -262,6 +263,7 @@ npm run test
 | --- | --- |
 | 2026-10-16 | GLM 套餐限额显示上线（胶囊、悬停、配色、只在 GLM 模型下出现） |
 | 2026-10-20 | MiniMax 国内站真机跑通：过期 154 小时的登录刷新成功；两轮含工具调用的多轮成立（签名原样回传被接受）；M3 关思考直连正常 |
+| 2026-10-20 | 工具配对的重放修复真机通过：同一段漂移的历史，修复前被 MiniMax 拒（2013），修复后 200 并正常作答 |
 
 ---
 
