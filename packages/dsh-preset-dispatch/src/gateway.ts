@@ -402,6 +402,9 @@ export class GatewayConversations {
     const configured = limits.stallMs
     const timeoutMs = configured ?? DEFAULT_STALL_MS
     const totalMs = limits.totalMs ?? DEFAULT_TOTAL_MS
+    // 子代理在跑时静默看门狗让路的上限：一个回合自己的预算那么多（总上限关掉
+    // 时取默认的 30 分钟）。子代理真卡死时，兜底仍然在——只是多等这一段。
+    const stallHoldLimitMs = totalMs > 0 ? totalMs : DEFAULT_TOTAL_MS
     // The deadline is an IDLE deadline, not a total-duration cap: every
     // streamed chunk and every tool write re-arms it. A turn may legitimately
     // run for hours while it keeps producing (2026-10-16 session 03067bcc:
@@ -424,6 +427,8 @@ export class GatewayConversations {
     // applies to the time the turn actually spends on its own.
     let totalDeadlineAt = 0
     let totalRemainingMs: number | undefined = undefined
+    // 静默看门狗让路的起点：外部 agent 开始等自己的子代理的那一刻。
+    let stallHoldStartedAt: number | undefined = undefined
     let settled = false
     // Set the moment the answer settles: the loop then closes the step, and a
     // write arriving after it lands outside every open step — the runner's
@@ -442,6 +447,20 @@ export class GatewayConversations {
       return lines.length === 0 ? '（无）' : lines.join('\n')
     }
     const fireStall = (): void => {
+      // 外部 agent 在等自己的子代理：连接安静不等于卡死——子代理可能正在安静
+      // 干活（2026-10-20 与总上限同族：父会话等子代理时被静默看门狗按超时收
+      // 尾，子会话还在跑）。这段等待给一个上限：一个回合自己的预算那么多，
+      // 超过仍没信号才收场——子代理真卡死时兜底还在。
+      if (delegatedLive() > 0) {
+        const limit = stallHoldLimitMs
+        const heldFor = stallHoldStartedAt === undefined ? 0 : Date.now() - stallHoldStartedAt
+        if (stallHoldStartedAt === undefined) stallHoldStartedAt = Date.now()
+        if (heldFor < limit) {
+          deadlineTimer = setTimeout(fireStall, limit - heldFor)
+          this.report(`acp gateway: session ${sessionId} is waiting on ${String(delegatedLive())} delegated run(s) — the silence watchdog is held for up to ${String(limit)}ms`)
+          return
+        }
+      }
       const silentForMs = Date.now() - lastActivityWall
       this.report(`acp gateway: session ${sessionId} answer stalled — no agent activity for ${String(silentForMs)}ms (limit ${String(timeoutMs)}ms) — ending the turn as error`)
       controller.abort()
@@ -620,6 +639,8 @@ export class GatewayConversations {
           if (delegatedLive() > 0) holdTotal()
           else resumeTotal()
         }
+        // 子代理收尾后，静默看门狗的让路从头算起：下一段等待另有一次机会。
+        if (delegatedLive() === 0) stallHoldStartedAt = undefined
         if (timeoutMs <= 0) return
         const diagnostics = entry.session?.diagnostics()
         if (diagnostics !== undefined && diagnostics.lastFrameAt > lastSeenFrameAt) {

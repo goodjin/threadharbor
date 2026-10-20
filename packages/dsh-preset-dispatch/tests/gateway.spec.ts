@@ -1048,6 +1048,42 @@ describe('GatewayConversations — 总上限与统一丢弃', () => {
     }
   })
 
+  it('静默看门狗到点时外部 agent 还在等子代理：让路一次，超过上限才收场', async () => {
+    // 与总上限同族：父会话在等子代理，连接安安静静——子代理可能正在安静地
+    // 干活，不是卡死。这段等待给一个上限（这里取一个回合自己的预算：200ms），
+    // 超过仍没信号才按静默收场，子代理真卡死时兜底还在。
+    vi.useFakeTimers()
+    try {
+      const fake = fakeSession()
+      fake.diagnosticsState.liveDelegatedRuns = 1
+      // 挂死的外部会话：一条帧都不来，只有看门狗能收场。
+      fake.answerWith(() => new Promise(() => {}))
+      const reports: string[] = []
+      const chunks: GatewayChunk[] = []
+      const gate = new GatewayConversations(
+        async () => fake.session,
+        message => { reports.push(message) },
+        undefined, undefined,
+        () => ({ stallMs: 40, totalMs: 200 }),
+      )
+      const answering = gate.answer('s1', 'acp-codex', { messages: [user('等子代理')] , position }, { chunk: c => { chunks.push(c) } })
+      // 静默期限（40ms）到点：子代理还在跑，让路，不收场。
+      await vi.advanceTimersByTimeAsync(100)
+      expect(chunks.find(c => c.type === 'finish')).toBeUndefined()
+      expect(fake.closes.count).toBe(0)
+      expect(reports.some(message => message.includes('silence watchdog is held'))).toBe(true)
+      // 让路上限（200ms）用完仍没信号：按静默收场。
+      await vi.advanceTimersByTimeAsync(300)
+      const finish = chunks.find(c => c.type === 'finish') as { reason: { kind: string; failure?: { code?: string; message?: string } } }
+      expect(finish).toBeDefined()
+      expect(finish.reason.kind).toBe('error')
+      expect(finish.reason.failure?.code).toBe('ACP_STALLED')
+      await answering
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('totalMs=0 不限：帧持续时远超总上限仍挂起，不误杀', async () => {
     vi.useFakeTimers()
     try {
