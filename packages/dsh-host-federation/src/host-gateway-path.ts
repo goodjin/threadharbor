@@ -222,10 +222,10 @@ export function rewriteJs(js: string, hostId: string): string {
  * renders its own switcher (`[data-host-switcher]`).
  */
 export function gatewayClientScript(hostId: string, hostTitle: string): string {
-  const prefix = JSON.stringify(gatewayPagePath(hostId).replace(/\/$/, ''))
-  const id = JSON.stringify(hostId)
-  const wsPath = JSON.stringify(GATEWAY_WS_PATH)
-  const title = JSON.stringify(hostTitle)
+  const prefix = scriptLiteral(gatewayPagePath(hostId).replace(/\/$/, ''))
+  const id = scriptLiteral(hostId)
+  const wsPath = scriptLiteral(GATEWAY_WS_PATH)
+  const title = scriptLiteral(hostTitle)
   return `(function(){
 var prefix=${prefix};
 var hostId=${id};
@@ -361,9 +361,9 @@ if(opened||tries>80){clearInterval(timer);timer=0;}
 }
 window.addEventListener("hashchange",function(){opened="";arm();});
 arm();
-function mountBar(){
-try{
-if(document.querySelector("[data-host-switcher]"))return;
+function switcherOn(){return !!document.querySelector("[data-host-switcher]");}
+function removeBar(){var b=document.getElementById("th-host-bar");if(b&&b.parentNode)b.parentNode.removeChild(b);}
+function insertBar(){
 var bar=document.createElement("div");
 bar.id="th-host-bar";
 bar.setAttribute("style","position:fixed;top:0;left:0;right:0;z-index:2147483647;display:flex;align-items:center;gap:12px;padding:7px 14px;background:#151a24;color:#e6e9ef;font:13px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;box-shadow:0 1px 4px rgba(0,0,0,.35);");
@@ -377,10 +377,32 @@ link.setAttribute("style","color:#8ab4ff;text-decoration:none;font-weight:600;")
 bar.appendChild(label);
 bar.appendChild(link);
 if(document.body)document.body.insertBefore(bar,document.body.firstChild);
+}
+function start(){
+try{
+if(!document.body||switcherOn())return;
+insertBar();
+if(typeof MutationObserver==="function"){
+var watcher=new MutationObserver(function(){
+if(switcherOn()){watcher.disconnect();removeBar();}
+});
+watcher.observe(document.body,{childList:true,subtree:true});
+}
 }catch(e){}
 }
-if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",mountBar);}else{mountBar();}
+if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",start);}else{start();}
 })();`
+}
+
+/**
+ * A JS string literal safe to drop inside a `<script>` element.
+ * `JSON.stringify` escapes quotes, backslashes, control characters, and
+ * U+2028/U+2029, but leaves `<`, `>`, and `&` untouched — any of which could
+ * close the surrounding tag or open an entity when a hostile host id or title
+ * is echoed back. Escape those too so the literal can never spell `</script`.
+ */
+function scriptLiteral(value: string): string {
+  return JSON.stringify(value).replace(/[<>&\u2028\u2029]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`)
 }
 
 function usableHostId(hostId: string): boolean {
