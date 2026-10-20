@@ -246,6 +246,8 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
           lastFrameAt: transport.lastFrameAt(),
           lastDiagnosticAt: transport.lastDiagnosticAt(),
           stderrTail: transport.stderrTail(),
+          // 外部 agent 自己的子代理/后台任务还开着几个：网关的总上限据此让路。
+          liveDelegatedRuns: runner.liveDelegatedRuns(),
         }),
       }
     },

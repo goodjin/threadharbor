@@ -106,7 +106,13 @@ function fakeSession() {
   let reply: (turn: Turnish) => Promise<GatewayStepEnd> = async () => ({ kind: 'completed' })
   const closes = { count: 0 }
   // 默认「帧一直新鲜」：旧的活轮次用例靠流口/工具写重置期限，不被帧轮询干扰。
-  const diagnosticsState = { lastFrameAt: Date.now(), lastDiagnosticAt: Date.now(), stderrTail: [] as string[] }
+  const diagnosticsState = {
+    lastFrameAt: Date.now(),
+    lastDiagnosticAt: Date.now(),
+    stderrTail: [] as string[],
+    // 外部 agent 自己的委托运行还开着几个：0 = 没有子代理在跑。
+    liveDelegatedRuns: 0,
+  }
   const endResult = (end: GatewayStepEnd) => ({ frames: [], end })
   const session: AcpSession = {
     run: async (decision: { messages?: unknown }, turn: unknown) => {
@@ -130,6 +136,7 @@ function fakeSession() {
       lastFrameAt: diagnosticsState.lastFrameAt,
       lastDiagnosticAt: diagnosticsState.lastDiagnosticAt,
       stderrTail: [...diagnosticsState.stderrTail],
+      liveDelegatedRuns: diagnosticsState.liveDelegatedRuns,
     }),
   } as unknown as AcpSession
   return {
@@ -994,6 +1001,48 @@ describe('GatewayConversations — 总上限与统一丢弃', () => {
       fake.answerWith(async () => ({ kind: 'completed' }))
       await gate.answer('s1', 'acp-codex', { messages: [user('跑长任务'), user('再跑')], position }, { chunk: () => {} })
       expect(opens).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('总上限到点时外部 agent 还在等自己的子代理：不收场，子代理收尾后按剩下的预算收场', async () => {
+    // 2026-10-20 会话 7165a323：codex 派出 5 个子代理后等了近 27 分钟，总上限
+    // （30 分钟）到点把主回合按 ACP_TIMEOUT 收尾——主会话报超时，5 个子代理的
+    // 结果全部丢失，界面上子会话还在跑。等子代理的那段时间不算这一回合自己
+    // 的预算：上限的钟停住，子代理收尾后再按剩下的预算算。
+    vi.useFakeTimers()
+    try {
+      const fake = fakeSession()
+      fake.diagnosticsState.liveDelegatedRuns = 1
+      // 持续吐字的活轮次：静默永远不触发，只有总上限能收场。
+      fake.answerWith(async turn => {
+        const handle = turn.openStream?.()
+        for (;;) {
+          handle?.textDelta('还在干')
+          await new Promise(resolve => { setTimeout(resolve, 500) })
+        }
+      })
+      const chunks: GatewayChunk[] = []
+      const gate = new GatewayConversations(
+        async () => fake.session,
+        undefined, undefined, undefined,
+        () => ({ stallMs: 5_000, totalMs: 20_000 }),
+      )
+      const answering = gate.answer('s1', 'acp-codex', { messages: [user('派活')] , position }, { chunk: c => { chunks.push(c) } })
+      // 总上限到点：子代理还在跑，这一回合不收场。
+      await vi.advanceTimersByTimeAsync(25_000)
+      expect(chunks.find(c => c.type === 'finish')).toBeUndefined()
+      expect(fake.closes.count).toBe(0)
+      // 子代理收尾：上限的钟按剩下的预算重新挂上，到点才收场。
+      fake.diagnosticsState.liveDelegatedRuns = 0
+      await vi.advanceTimersByTimeAsync(1_000)
+      await vi.advanceTimersByTimeAsync(20_000)
+      const finish = chunks.find(c => c.type === 'finish') as { reason: { kind: string; failure?: { code?: string; message?: string } } }
+      expect(finish).toBeDefined()
+      expect(finish.reason.kind).toBe('error')
+      expect(finish.reason.failure?.code).toBe('ACP_TIMEOUT')
+      await answering
     } finally {
       vi.useRealTimers()
     }

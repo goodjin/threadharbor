@@ -413,6 +413,17 @@ export class GatewayConversations {
     let deadlineTimer: ReturnType<typeof setTimeout> | undefined
     let totalTimer: ReturnType<typeof setTimeout> | undefined
     let pollTimer: ReturnType<typeof setInterval> | undefined
+    // The total cap's clock. While the external agent waits on its OWN
+    // delegated runs (its subagents, its background tasks) the clock is held:
+    // that wait is not this turn's own time, and ending the turn there says
+    // "wedged" about work that is still running — 2026-10-20 session
+    // 7165a323: codex spawned 5 subagents and waited for them; the 30-minute
+    // cap fired, the parent turn ended as ACP_TIMEOUT, all five results were
+    // lost, and the UI showed a timed-out parent next to children still
+    // running. The remaining budget is kept, not spent, so the cap still
+    // applies to the time the turn actually spends on its own.
+    let totalDeadlineAt = 0
+    let totalRemainingMs: number | undefined = undefined
     let settled = false
     // Set the moment the answer settles: the loop then closes the step, and a
     // write arriving after it lands outside every open step — the runner's
@@ -444,7 +455,39 @@ export class GatewayConversations {
         },
       })
     }
+    /** 外部 agent 自己的委托运行（子代理 / 后台任务）还开着几个。 */
+    const delegatedLive = (): number => entry.session?.diagnostics().liveDelegatedRuns ?? 0
+    /**
+     * 总上限的钟：外部 agent 在等自己的子代理时停表，等它们收尾再按剩下的预算继续。
+     *
+     * 返回 true 表示「现在正在等子代理」，调用方据此不收场。
+     */
+    const holdTotal = (): boolean => {
+      if (totalRemainingMs === undefined) return false
+      if (delegatedLive() <= 0) return false
+      if (totalTimer !== undefined) {
+        clearTimeout(totalTimer)
+        totalTimer = undefined
+        // 只扣掉已经走掉的那段：等的这段时间不算这一回合自己的预算。
+        totalRemainingMs = Math.max(0, totalDeadlineAt - Date.now())
+      }
+      return true
+    }
+    /** 子代理收尾后，把总上限的钟按剩下的预算重新挂上。 */
+    const resumeTotal = (): void => {
+      if (settled || totalTimer !== undefined || totalRemainingMs === undefined) return
+      if (delegatedLive() > 0) return
+      totalDeadlineAt = Date.now() + totalRemainingMs
+      totalTimer = setTimeout(fireTotal, totalRemainingMs)
+    }
     const fireTotal = (): void => {
+      // 外部 agent 还在等自己的子代理：这一回合没有超时可报。让总上限的钟
+      // 停住，等子代理收尾后再按剩下的预算算——把「还在干活」说成「卡住了」
+      // 是更糟的错，2026-10-20 会话 7165a323 就是这么把 5 个子代理的结果丢掉的。
+      if (holdTotal()) {
+        this.report(`acp gateway: session ${sessionId} is waiting on ${String(delegatedLive())} delegated run(s) — the total cap is held until they settle`)
+        return
+      }
       const silentForMs = Date.now() - lastActivityWall
       this.report(`acp gateway: session ${sessionId} answer exceeded the total cap of ${String(totalMs)}ms — ending the turn as error`)
       controller.abort()
@@ -463,6 +506,7 @@ export class GatewayConversations {
       if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
       if (totalTimer !== undefined) clearTimeout(totalTimer)
       if (pollTimer !== undefined) clearInterval(pollTimer)
+      totalRemainingMs = undefined
       answerEnded = true
       settle(value)
     }
@@ -546,20 +590,37 @@ export class GatewayConversations {
     entry.cursor = plan.cursor
     const run = entry.session.run(decision, turn) as Promise<unknown>
     run.catch(() => {}) // a late rejection from an already-ended turn must not crash the host
-    // The total cap is absolute: armed once at delivery, never re-armed. The
-    // silence watchdog below cannot end a turn that streams forever — only
-    // this one bounds it.
-    if (totalMs > 0) totalTimer = setTimeout(fireTotal, totalMs)
+    // The total cap bounds one answer however chatty it is. It is armed once at
+    // delivery and never re-armed — EXCEPT while the external agent waits on
+    // its own delegated runs: that wait is held out of the budget (see
+    // holdTotal), so the cap still measures the time this turn spends on its
+    // own work.
+    if (totalMs > 0) {
+      totalRemainingMs = totalMs
+      totalDeadlineAt = Date.now() + totalMs
+      totalTimer = setTimeout(fireTotal, totalMs)
+    }
     // The frame beacon watches the one signal neither the chunk tap nor the
     // tool writes can see: an agent whose process stays alive but answers
     // nothing (2026-10-16 codex — "tls handshake eof" on stderr, zero frames,
     // every stop press swallowed for ten minutes). stderr deliberately does
     // NOT count as activity here; it only feeds the note and the package.
-    if (timeoutMs > 0) {
+    //
+    // The same poll carries the total cap's hold: while the external agent
+    // waits on its own delegated runs, the cap's clock is stopped, and it
+    // starts again with the remaining budget once they settle. Without it the
+    // cap fires mid-wait and the children lose their results (2026-10-20
+    // session 7165a323).
+    if (timeoutMs > 0 || totalMs > 0) {
       const warnMs = limits.warnMs ?? DEFAULT_WARN_MS
-      const pollMs = Math.min(1_000, Math.max(200, Math.floor(timeoutMs / 4)))
+      const pollMs = Math.min(1_000, Math.max(200, Math.floor((timeoutMs > 0 ? timeoutMs : totalMs) / 4)))
       pollTimer = setInterval(() => {
         if (settled) return
+        if (totalRemainingMs !== undefined) {
+          if (delegatedLive() > 0) holdTotal()
+          else resumeTotal()
+        }
+        if (timeoutMs <= 0) return
         const diagnostics = entry.session?.diagnostics()
         if (diagnostics !== undefined && diagnostics.lastFrameAt > lastSeenFrameAt) {
           lastSeenFrameAt = diagnostics.lastFrameAt

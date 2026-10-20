@@ -8,7 +8,7 @@
  */
 
 import type { AcpFrame } from '@threadharbor/dsh-acp-agent'
-import { grokDialect, qoderDialect } from '@threadharbor/dsh-acp-agent'
+import { codexDialect, grokDialect, qoderDialect } from '@threadharbor/dsh-acp-agent'
 import { describe, expect, it } from 'vitest'
 import { AcpTurnRunner } from '../src/runner.ts'
 import type { AcpClientPort } from '../src/runner.ts'
@@ -740,5 +740,45 @@ describe('AcpTurnRunner — failed turns end with actionable error rows', () => 
     } })
     const result = await runner.run(DECISION, TURN_OF('s1'))
     expect(result.end.kind).toBe('aborted')
+  })
+})
+
+describe('AcpTurnRunner — 外部 agent 自己的委托运行', () => {
+  it('记着还开着的子代理：出生帧记一笔，收尾帧销掉', async () => {
+    // 外部 agent 在自己的回合里派出子代理并等它们——网关的总上限据此让路。
+    // 这份账本只回答「现在是不是在等自己的子代理」（2026-10-20 会话
+    // 7165a323：codex 派出 5 个子代理后等了近 27 分钟，总上限到点把主回合
+    // 按 ACP_TIMEOUT 收尾，5 个子代理的结果全部丢失）。
+    const client = fakeClient()
+    let emit: (frame: AcpFrame) => void = () => {}
+    client.onFrame = handler => { emit = handler }
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: codexDialect })
+    client.request = async method => {
+      if (method === 'session/new') return { sessionId: 's1', models: { availableModels: [] } }
+      if (method === 'session/prompt') {
+        emit({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: {
+            sessionId: 's1',
+            update: { sessionUpdate: 'subagent_spawned', subagentSessionId: 'child-1', name: '研究', task: '查资料' },
+          },
+        })
+        expect(runner.liveDelegatedRuns()).toBe(1)
+        emit({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: {
+            sessionId: 's1',
+            update: { sessionUpdate: 'subagent_state_update', subagentSessionId: 'child-1', state: 'completed', output: '好了' },
+          },
+        })
+        expect(runner.liveDelegatedRuns()).toBe(0)
+        return { stopReason: 'end_turn' }
+      }
+      return {}
+    }
+    await runner.run(DECISION, TURN({}))
+    expect(runner.liveDelegatedRuns()).toBe(0)
   })
 })

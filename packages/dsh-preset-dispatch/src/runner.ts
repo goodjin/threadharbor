@@ -444,6 +444,17 @@ export class AcpTurnRunner {
    * 整回合的帧在一个列表里，投影自己折叠得出来。
    */
   private spawnedRuns: Map<string, SpawnedTrack> | undefined
+  /**
+   * 外部 agent 自己的委托运行（子代理 / 后台任务）里还开着的那几个。
+   *
+   * 这份账本与 `spawnedRuns` 不同：后者只在 steps 路径存在，服务于「跨段补卡」；
+   * 这一份两条路径都在记，只回答一个问题——**外部 agent 现在是不是在等自己的
+   * 子代理**。网关的总上限据此让路：子代理还在跑的时候把主回合按超时收尾，
+   * 等于把「还在干活」说成「卡住了」（2026-10-20 会话 7165a323：codex 派出
+   * 5 个子代理后等了将近 27 分钟，总上限到点把主回合按 ACP_TIMEOUT 收尾，
+   * 5 个子代理的结果全部丢失，界面上主会话报超时、子会话还在跑）。
+   */
+  private readonly delegatedRuns = new Set<string>()
   private stream: TurnStreamPort | undefined
   /** Set when this turn's stop signal fired; everything after it is dropped. */
   private aborted = false
@@ -560,6 +571,7 @@ export class AcpTurnRunner {
     this.observeRawOutput(frame)
     // 出生帧建影子子会话、终态帧收尾；与 spawned 卡片记账互不干扰。
     this.routeSubagentFrame(frame)
+    this.trackDelegatedFrame(frame)
     const spawned = this.spawnedRuns === undefined ? undefined : this.trackSpawnedFrame(frame)
     this.writeToolFrame(frame)
     if (spawned !== undefined && this.liveCards?.written.has(spawned.callId) === true) spawned.cardOnLog = true
@@ -704,8 +716,41 @@ export class AcpTurnRunner {
     return undefined
   }
 
+  /**
+   * 外部 agent 自己的委托运行还开着几个。
+   *
+   * 网关的总上限读这个数：外部 agent 在等自己的子代理时，这一回合不按超时收尾
+   * ——子代理还在跑，报超时就是把「还在干活」说成「卡住了」。
+   */
+  liveDelegatedRuns(): number {
+    return this.delegatedRuns.size
+  }
+
+  /**
+   * 逐帧记账：委托运行出生时记一笔，收尾时销掉。
+   *
+   * 与 `trackSpawnedFrame` 读同一批帧，但只留「还开着没有」这一件事——补卡、
+   * 累积输出那些是 steps 路径的事，这里两条路径都要。
+   */
+  private trackDelegatedFrame(frame: AcpFrame): void {
+    const dialect = this.options.dialect
+    if (dialect === undefined) return
+    const update = this.frameUpdateOf(frame)
+    if (update === undefined) return
+    const reading = readSpawnedFrame(dialect, update)
+    if (reading === undefined) return
+    if (reading.kind === 'spawn') {
+      this.delegatedRuns.add(reading.call.callId)
+      return
+    }
+    if (reading.kind === 'state' && reading.settled) {
+      this.delegatedRuns.delete(reading.callId)
+    }
+  }
+
   /** 子会话帧：文本累积进 spawned 档案的输出（accumulate 的子代路由同款）。 */
   private trackChildChunk(frame: AcpFrame, childSessionId: string): void {
+
     const record = this.spawnedRuns?.get(childSessionId)
     if (record === undefined) return
     const update = this.frameUpdateOf(frame)
@@ -767,6 +812,8 @@ export class AcpTurnRunner {
       ? new AcpSegmenter(this.options.dialect)
       : undefined
     this.spawnedRuns = mode === 'steps' && this.options.dialect !== undefined ? new Map() : undefined
+    // 委托运行的账本随 prompt 重开：上一回合的子代理属于上一回合。
+    this.delegatedRuns.clear()
     this.aborted = false
     this.promptSettled = false
     this.replyStop = undefined

@@ -145,6 +145,13 @@ export type AcpSessionDiagnostics = {
   readonly lastDiagnosticAt: number
   /** The agent's last stderr lines, oldest first. */
   readonly stderrTail: readonly string[]
+  /**
+   * 外部 agent 自己的委托运行（子代理 / 后台任务）当前还开着几个。
+   *
+   * 缺席按 0 读：一个没有这条的宿主只会失去「等子代理时让总上限让路」这一条，
+   * 不会失去别的（0 与「没有子代理」同义）。
+   */
+  readonly liveDelegatedRuns?: number
 }
 
 /** How an agent is reached; separate so tests can stand in for spawning. */
