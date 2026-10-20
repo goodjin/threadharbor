@@ -19,8 +19,8 @@ import {
   AuthRequiredError,
   createMCodeTokenProvider,
   resolveMCodeOAuthEndpointConfig,
-} from './vendor/mcode-oauth/index.js'
-import type { AuthBuildEnv, AuthRegion } from './vendor/mcode-oauth/contracts.js'
+} from './vendor/mcode-oauth/index.ts'
+import type { AuthBuildEnv, AuthRegion } from './vendor/mcode-oauth/contracts.ts'
 import { managedBaseUrl } from './vendor/mcode-runtime/endpoints.ts'
 
 export type { AuthBuildEnv, AuthRegion }

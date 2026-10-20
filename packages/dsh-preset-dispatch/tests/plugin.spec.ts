@@ -16,6 +16,7 @@ import { applyAcpPlugin, type AcpPluginContext } from '../src/plugin.ts'
 import { forgetSession, rememberStepPosition } from '../src/step-position.ts'
 import type { AcpTransport } from '@threadharbor/dsh-acp-agent'
 import { installAcpDispatch } from '../src/dispatch.ts'
+import { switchShared } from '../src/switch-shared.ts'
 import type { AcpPresetBinding } from '../src/dispatch.ts'
 
 /** A context carrying only what this entry touches. */
@@ -717,3 +718,14 @@ describe('加载路径的模型报告真的进目录（applyAcpPlugin 端到端�
   })
 })
 
+describe('一行没有传输方言的模型', () => {
+  it('照样注册进切换网，模型才出现在模型列表里', () => {
+    // minimaxi 这类行没有子进程也没有 WebSocket 方言：它由 DSH 自己的循环
+    // 应答。曾经这里只认 zcode，于是这一行挂上了却什么都不注册，界面上的
+    // 表现是「模型在列表里选了却没人应答」。
+    switchShared.registerPreset('acp-test-unmount', { agent: 'grok' }, [])
+    const context = ctx()
+    applyAcpPlugin(context, 'acp-minimaxi', { agent: 'minimaxi' }, { install: () => {} })
+    expect(switchShared.config().presets['acp-minimaxi']?.agent).toBe('minimaxi')
+  })
+})

@@ -31,3 +31,28 @@ export function modelPluginStream(
     return undefined
   }
 }
+
+/**
+ * The rows answered inside DSH's own loop. A row on this list has no transport
+ * of its own — no child process, no socket — so every place that asks "does
+ * this row have a dialect, or is it a model?" must read the same list. Listing
+ * one of them in a second place is how a row ends up mounted and inert.
+ */
+const MODEL_BACKED_AGENTS = new Set(['zcode', 'minimaxi'])
+
+export function isModelBackedAgent(agent: string | undefined): boolean {
+  return agent !== undefined && MODEL_BACKED_AGENTS.has(agent)
+}
+
+/**
+ * Which rows are answered in place, for the startup log. A row that no plugin
+ * claims would otherwise look identical to a working one until someone sends a
+ * message and gets the gateway's answer instead of the model's.
+ */
+export function describeClaimedModels(config: PresetConfig): string {
+  const claimed: string[] = []
+  for (const [presetId, preset] of Object.entries(config.presets)) {
+    if (isModelBackedAgent(preset.agent)) claimed.push(`${presetId}=${preset.agent}`)
+  }
+  return claimed.length === 0 ? 'none' : claimed.join(' ')
+}

@@ -2,7 +2,7 @@ import {
   MCODE_OAUTH_SCOPES,
   type AccessTokenLease,
   type UnauthorizedContext,
-} from './contracts.js';
+} from './contracts.ts';
 import type {
   AuthStatusSnapshot,
   DeviceAuthorizationPrompt,
@@ -10,7 +10,7 @@ import type {
   LoginResult,
   LogoutResult,
   MCodeOAuthCore,
-} from './auth-core.js';
+} from './auth-core.ts';
 
 export interface MCodeTokenProvider {
   getStatus(): Promise<AuthStatusSnapshot>;

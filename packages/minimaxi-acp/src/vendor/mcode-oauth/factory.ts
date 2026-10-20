@@ -1,15 +1,15 @@
-import type { AuthNamespaceInput } from './contracts.js';
-import { MCodeOAuthCore } from './auth-core.js';
-import { createCredentialStore } from './credential-store/factory.js';
-import { createAuthNamespace } from './namespace.js';
-import { migrateLegacyAuthNamespace } from './namespace-migration.js';
-import { HttpOAuthClient, type HttpOAuthClientOptions } from './oauth-client.js';
+import type { AuthNamespaceInput } from './contracts.ts';
+import { MCodeOAuthCore } from './auth-core.ts';
+import { createCredentialStore } from './credential-store/factory.ts';
+import { createAuthNamespace } from './namespace.ts';
+import { migrateLegacyAuthNamespace } from './namespace-migration.ts';
+import { HttpOAuthClient, type HttpOAuthClientOptions } from './oauth-client.ts';
 import {
   createAuthManager,
   createTokenProvider,
   type MCodeAuthManager,
   type MCodeTokenProvider,
-} from './token-provider.js';
+} from './token-provider.ts';
 
 export interface CreateMCodeLocalAuthOptions extends AuthNamespaceInput {
   fetchImpl?: typeof fetch;

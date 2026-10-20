@@ -37,7 +37,7 @@ import { followModelSelection, followPresetSelection } from './follow.ts'
 import { switchShared } from './switch-shared.ts'
 import { selectionOf } from './selection.ts'
 import type { CatalogDeps } from './catalog.ts'
-import { modelPluginStream } from './model-plugins.ts'
+import { describeClaimedModels, isModelBackedAgent, modelPluginStream } from './model-plugins.ts'
 import type { AcpPresetBinding } from './dispatch.ts'
 import type { AcpDialect, AcpTransport } from '@threadharbor/dsh-acp-agent'
 
@@ -212,7 +212,7 @@ export function applyAcpPlugin(
   // not take the step over. An unknown agent is a configuration mistake, and
   // taking those sessions over would hand them to a dialect that does not
   // exist; better to leave them on the native agent, where they still work.
-  const modelBacked = config.agent === 'zcode'
+  const modelBacked = isModelBackedAgent(config.agent)
   if (dialect === undefined && !modelBacked) return
   // The models this preset offers the picker — the same list the host's model
   // selector reads, and the list the preset→model follow selects from.
@@ -277,6 +277,12 @@ export function applyAcpPlugin(
     dialectOf: presetId => table.get(presetId)?.dialect,
     modelStream: modelPluginStream(presets),
   }
+  // Self-report: a model row that never got claimed still shows up in the picker,
+  // and the first symptom is an empty or stale answer at send time, long after
+  // startup. Naming the claimed rows here makes that a log question instead.
+  process.stderr.write(
+    `[threadharbor] model rows answered in place: ${describeClaimedModels(presets)}\n`,
+  )
   // A model request landing on one of these routes for a session this row does
   // not drive is answered in place: the gateway borrows the agent as a model,
   // keeps one external conversation per session, and its answer arrives as

@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
 
-import { MCODE_OAUTH_CLIENT_ID, type AuthNamespaceInput } from './contracts.js';
-import type { CredentialKey } from './credential-store/types.js';
+import { MCODE_OAUTH_CLIENT_ID, type AuthNamespaceInput } from './contracts.ts';
+import type { CredentialKey } from './credential-store/types.ts';
 
 export interface AuthNamespace {
   authHome: string;

@@ -1,5 +1,5 @@
-import { FileStore, type FileStoreOptions } from './file-store.js';
-import type { CredentialStore } from './types.js';
+import { FileStore, type FileStoreOptions } from './file-store.ts';
+import type { CredentialStore } from './types.ts';
 
 export type CreateCredentialStoreOptions = FileStoreOptions;
 

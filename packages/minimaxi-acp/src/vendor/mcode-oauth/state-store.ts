@@ -1,8 +1,8 @@
 import { readFile } from 'node:fs/promises';
 
-import { atomicWritePrivateFile } from './fs/atomic-write.js';
-import type { AuthBuildEnv, AuthRegion } from './contracts.js';
-import type { PersistedCredentialStoreKind } from './credential-store/types.js';
+import { atomicWritePrivateFile } from './fs/atomic-write.ts';
+import type { AuthBuildEnv, AuthRegion } from './contracts.ts';
+import type { PersistedCredentialStoreKind } from './credential-store/types.ts';
 
 export const AUTH_STATE_SCHEMA_VERSION = 2 as const;
 export const AUTH_STATE_MIN_SUPPORTED_SCHEMA_VERSION = 1 as const;
@@ -117,7 +117,11 @@ function isOptionalString(value: unknown): boolean {
 }
 
 export class AuthStateStore {
-  constructor(private readonly path: string) {}
+  private readonly path: string;
+
+  constructor(path: string) {
+    this.path = path;
+  }
 
   async read(): Promise<AuthState | null> {
     let raw: string;

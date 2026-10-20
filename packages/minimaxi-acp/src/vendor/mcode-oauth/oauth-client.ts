@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 
-import { MCODE_OAUTH_AUDIENCE, MCODE_OAUTH_CLIENT_ID, MCODE_OAUTH_SCOPES } from './contracts.js';
+import { MCODE_OAUTH_AUDIENCE, MCODE_OAUTH_CLIENT_ID, MCODE_OAUTH_SCOPES } from './contracts.ts';
 
 const DEVICE_GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:device_code';
 
@@ -51,15 +51,16 @@ export interface HttpOAuthClientOptions {
 }
 
 export class OAuthProtocolError extends Error {
-  constructor(
-    readonly code: string,
-    message?: string,
-    readonly httpStatus?: number,
-  ) {
+  readonly code: string;
+  readonly httpStatus?: number;
+
+  constructor(code: string, message?: string, httpStatus?: number) {
     super(
       message ??
         `The OAuth server rejected the request (${code}${httpStatus ? `, HTTP ${httpStatus}` : ''}).`,
     );
+    this.code = code;
+    this.httpStatus = httpStatus;
     this.name = 'OAuthProtocolError';
   }
 }
@@ -68,8 +69,10 @@ export class HttpOAuthClient implements OAuthClient {
   private readonly fetchImpl: typeof fetch;
   private readonly sleep: (durationMs: number) => Promise<void>;
   private readonly now: () => number;
+  private readonly options: HttpOAuthClientOptions;
 
-  constructor(private readonly options: HttpOAuthClientOptions) {
+  constructor(options: HttpOAuthClientOptions) {
+    this.options = options;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.sleep =
       options.sleep ?? ((durationMs) => new Promise((resolve) => setTimeout(resolve, durationMs)));

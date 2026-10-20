@@ -1,4 +1,4 @@
-import type { AuthBuildEnv, AuthRegion } from './contracts.js';
+import type { AuthBuildEnv, AuthRegion } from './contracts.ts';
 
 export type MCodeOAuthEndpointEnvironment = Partial<
   Record<

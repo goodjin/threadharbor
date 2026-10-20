@@ -25,6 +25,7 @@
 import Schema from '@deepseek-ai/schemastery'
 import { hostname } from 'node:os'
 import { applyAcpPlugin } from './plugin.ts'
+import { isModelBackedAgent } from './model-plugins.ts'
 import { installAcpDispatch, presetOfState } from './dispatch.ts'
 import type { AgentLike, AcpPresetBinding, ContentEvent, StepPosition, TurnModelDecision, TurnStreamHandle } from './dispatch.ts'
 import type { ChildSessionLike, SubagentSessionHost } from './subagent-sessions.ts'
@@ -219,7 +220,10 @@ export function apply(ctx: unknown, config: Config): void {
   const questions = (foundQuestions === null || typeof foundQuestions !== 'object'
     ? undefined
     : foundQuestions as { ask(request: unknown): Promise<unknown> })
-  const transport = config.agent === 'zcode'
+  // A model row is answered inside the native loop and spawns nothing; calling
+  // it "process" would send whoever reads this log looking for a child process
+  // that was never going to exist.
+  const transport = isModelBackedAgent(config.agent)
     ? 'model'
     : config.url === undefined ? 'process' : 'websocket'
   const summary = `acp row mounted: preset=${config.presetId} agent=${config.agent} `

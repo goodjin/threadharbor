@@ -1,7 +1,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { atomicWritePrivateFile, ensurePrivateDirectory } from '../fs/atomic-write.js';
+import { atomicWritePrivateFile, ensurePrivateDirectory } from '../fs/atomic-write.ts';
 import {
   type CredentialKey,
   CredentialRecordCorruptError,
@@ -9,7 +9,7 @@ import {
   CredentialStorePermissionError,
   parseStoredCredential,
   type StoredCredential,
-} from './types.js';
+} from './types.ts';
 
 const FILE_SCHEMA_VERSION = 1;
 
