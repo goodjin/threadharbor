@@ -402,8 +402,9 @@ export class GatewayConversations {
     const configured = limits.stallMs
     const timeoutMs = configured ?? DEFAULT_STALL_MS
     const totalMs = limits.totalMs ?? DEFAULT_TOTAL_MS
-    // 子代理在跑时静默看门狗让路的上限：一个回合自己的预算那么多（总上限关掉
-    // 时取默认的 30 分钟）。子代理真卡死时，兜底仍然在——只是多等这一段。
+    // 子代理在跑时静默看门狗的容忍上限：从「最后一次信号」起算，最多安静这么久。
+    // 取一个回合自己的预算那么多（总上限关掉时取默认的 30 分钟）。子代理真卡死
+    // 时兜底仍在——只是多等这一段；子代理还在报东西时，这段从头再算。
     const stallHoldLimitMs = totalMs > 0 ? totalMs : DEFAULT_TOTAL_MS
     // The deadline is an IDLE deadline, not a total-duration cap: every
     // streamed chunk and every tool write re-arms it. A turn may legitimately
@@ -427,8 +428,9 @@ export class GatewayConversations {
     // applies to the time the turn actually spends on its own.
     let totalDeadlineAt = 0
     let totalRemainingMs: number | undefined = undefined
-    // 静默看门狗让路的起点：外部 agent 开始等自己的子代理的那一刻。
-    let stallHoldStartedAt: number | undefined = undefined
+    // 静默看门狗当前用的是哪个期限：外部 agent 在等自己的子代理时用更长的
+    // 那一个（见 stallHoldLimitMs），子代理收尾后换回原来的。
+    let stallHeld = false
     let settled = false
     // Set the moment the answer settles: the loop then closes the step, and a
     // write arriving after it lands outside every open step — the runner's
@@ -446,18 +448,29 @@ export class GatewayConversations {
       const lines = stderrTailNow().slice(-5).map(line => (line.length > 200 ? `${line.slice(0, 200)}…` : line))
       return lines.length === 0 ? '（无）' : lines.join('\n')
     }
+    /**
+     * 挂静默看门狗：期限从「最后一次信号」起算。
+     *
+     * 期限有两个：平时是 `stallMs`；外部 agent 在等自己的子代理时用更长的
+     * `stallHoldLimitMs`。两者都从最后一次信号起算——子代理只要还报东西，
+     * 静默的钟就重新开始，所以这不是「等一个固定时间」，而是「最多安静多久」。
+     */
+    const armStall = (limitMs: number): void => {
+      if (settled || timeoutMs <= 0) return
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
+      const silentForMs = Date.now() - lastActivityWall
+      deadlineTimer = setTimeout(fireStall, Math.max(0, limitMs - silentForMs))
+    }
     const fireStall = (): void => {
       // 外部 agent 在等自己的子代理：连接安静不等于卡死——子代理可能正在安静
       // 干活（2026-10-20 与总上限同族：父会话等子代理时被静默看门狗按超时收
-      // 尾，子会话还在跑）。这段等待给一个上限：一个回合自己的预算那么多，
-      // 超过仍没信号才收场——子代理真卡死时兜底还在。
+      // 尾，子会话还在跑）。给这段安静更长的容忍度，且从最后一次信号起算：
+      // 子代理还在报东西就一直等，一直不报才按卡死收场——兜底仍在。
       if (delegatedLive() > 0) {
-        const limit = stallHoldLimitMs
-        const heldFor = stallHoldStartedAt === undefined ? 0 : Date.now() - stallHoldStartedAt
-        if (stallHoldStartedAt === undefined) stallHoldStartedAt = Date.now()
-        if (heldFor < limit) {
-          deadlineTimer = setTimeout(fireStall, limit - heldFor)
-          this.report(`acp gateway: session ${sessionId} is waiting on ${String(delegatedLive())} delegated run(s) — the silence watchdog is held for up to ${String(limit)}ms`)
+        const silentForMs = Date.now() - lastActivityWall
+        if (silentForMs < stallHoldLimitMs) {
+          armStall(stallHoldLimitMs)
+          this.report(`acp gateway: session ${sessionId} is waiting on ${String(delegatedLive())} delegated run(s) — the silence watchdog tolerates ${String(stallHoldLimitMs)}ms of silence since the last signal`)
           return
         }
       }
@@ -532,8 +545,7 @@ export class GatewayConversations {
     const noteActivity = (): void => {
       if (settled || timeoutMs <= 0) return
       lastActivityWall = Date.now()
-      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
-      deadlineTimer = setTimeout(fireStall, timeoutMs)
+      armStall(stallHeld ? stallHoldLimitMs : timeoutMs)
     }
     const tappingSink: GatewaySink = { chunk: chunk => { noteActivity(); sink.chunk(chunk) } }
     const stream = new GatewayChunkStream(tappingSink)
@@ -639,8 +651,16 @@ export class GatewayConversations {
           if (delegatedLive() > 0) holdTotal()
           else resumeTotal()
         }
-        // 子代理收尾后，静默看门狗的让路从头算起：下一段等待另有一次机会。
-        if (delegatedLive() === 0) stallHoldStartedAt = undefined
+        // 静默看门狗的期限跟着子代理走：子代理开着就用长的那个（从最后一次信号
+        // 起算），子代理收尾后换回原来的那个。子代理还在报东西时，静默的钟
+        // 每次都重新开始——所以这不是「等一个固定时间」。
+        if (delegatedLive() > 0 && !stallHeld) {
+          stallHeld = true
+          armStall(stallHoldLimitMs)
+        } else if (delegatedLive() === 0 && stallHeld) {
+          stallHeld = false
+          armStall(timeoutMs)
+        }
         if (timeoutMs <= 0) return
         const diagnostics = entry.session?.diagnostics()
         if (diagnostics !== undefined && diagnostics.lastFrameAt > lastSeenFrameAt) {
