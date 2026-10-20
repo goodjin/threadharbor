@@ -43,6 +43,50 @@ const MAPPED_KINDS = new Set([
 ])
 
 /** 自带卡片/审批展示的请求：由各自的面板负责，不是未知输出。 */
+/**
+ * cursor 通知方法的可读格式化（字段结构来自官方文档 cursor.com/docs/cli/acp.md，
+ * 2026-10-19 核对）。三种通知都不需要应答，但值得看：待办更新是过程计划的
+ * 唯一来源；task 是 cursor 子代理的唯一线索（它不发 ACP 子代理帧）；
+ * generate_image 报告图片产物。
+ */
+const CURSOR_NOTIFICATION_FORMATTERS: Readonly<Record<string, {
+  readonly kind: string
+  format: (params: Record<string, unknown>) => string
+}>> = {
+  'cursor/update_todos': {
+    kind: 'cursor 待办',
+    format: params => {
+      const todos = Array.isArray(params['todos']) ? params['todos'].map(recordOf) : []
+      const merge = params['merge'] === true ? '合并' : '替换'
+      const marks: Record<string, string> = { completed: '✓', in_progress: '▶', cancelled: '✗' }
+      const items = todos.map(todo => {
+        const status = typeof todo['status'] === 'string' ? todo['status'] : ''
+        const mark = marks[status] ?? '○'
+        const content = typeof todo['content'] === 'string' ? todo['content'] : ''
+        return `${mark} ${content}`
+      })
+      return `待办（${merge}）：${items.join('  ')}`
+    },
+  },
+  'cursor/task': {
+    kind: 'cursor 子代理任务',
+    format: params => {
+      const description = typeof params['description'] === 'string' ? params['description'] : ''
+      const type = typeof params['subagentType'] === 'string' ? params['subagentType'] : ''
+      const durationMs = typeof params['durationMs'] === 'number' ? `，${String(Math.round(params['durationMs'] / 100) / 10)}s` : ''
+      return `子代理任务完成：${description}（${type}${durationMs}）`
+    },
+  },
+  'cursor/generate_image': {
+    kind: 'cursor 生成图片',
+    format: params => {
+      const description = typeof params['description'] === 'string' ? params['description'] : ''
+      const filePath = typeof params['filePath'] === 'string' ? ` → ${params['filePath']}` : ''
+      return `生成图片：${description}${filePath}`
+    },
+  },
+}
+
 const DEDICATED_METHODS = new Set([
   'session/request_permission',
   // cursor 的阻塞式提问与计划请求由各自的流程回答（client.ts 的扩展处理），
@@ -99,6 +143,11 @@ export function classifyRawOutput(
   }
   if (frame.method === 'session/update') {
     return { kind: kind === '' ? frame.method : kind, format: 'json', line: JSON.stringify(update) }
+  }
+  // cursor 的三种通知方法有可读格式（文档结构已知），其余厂商方法原样展示。
+  const notification = CURSOR_NOTIFICATION_FORMATTERS[frame.method]
+  if (notification !== undefined) {
+    return { kind: notification.kind, format: 'text' as const, line: notification.format(recordOf(frame.params)) }
   }
   // 厂商私有方法与未知请求：原样展示，种类用方法名。
   return { kind: frame.method, format: 'json', line: JSON.stringify({ method: frame.method, params: frame.params }) }
