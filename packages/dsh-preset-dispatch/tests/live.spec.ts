@@ -495,6 +495,32 @@ describe.skipIf(!LIVE)('dispatch stack against real agents', () => {
   }, 300_000)
 
   /**
+   * claude: 接管路径的活体验收（对照 codex/cursor 的同一组断言）。
+   *
+   * claude 的方言差异（工具名在 _meta.claudeCode.toolName、双层嵌套 content、
+   * 双帧工具生命周期）不影响接管路径的契约：分段、实时结果、遥测汇总。
+   */
+  it('claude: a real turn spans several runSteps calls with live results', async () => {
+    const { calls, appended, streams, promptSettledOrder } = await runStepsLive(TOOL_REPORT_PROMPT, {
+      dialect: claudeDialect,
+      command: CLAUDE_ACP,
+    })
+    expect(appended.length, 'the turn wrote nothing').toBeGreaterThan(0)
+    expect(streams.some(stream => stream.records().length > 0), 'no text streamed during the turn').toBe(true)
+    for (const event of appended) expect(typeof event.payload['step']).toBe('number')
+    const toolResultAt = appended.findIndex(event => event.type === 'tool/result')
+    if (toolResultAt >= 0 && promptSettledOrder >= 0) {
+      expect(toolResultAt, 'the tool result was replayed at turn end, not filed live').toBeLessThan(promptSettledOrder)
+    }
+    const segmented = appended.some(event => typeof event.payload['step'] === 'number' && (event.payload['step'] as number) > 1)
+    if (segmented) {
+      expect(calls.length).toBeGreaterThanOrEqual(2)
+      expect(calls[0]).toBeNull()
+    }
+    expect(calls.at(-1)).toEqual({ kind: 'completed' })
+  }, 300_000)
+
+  /**
    * The image-interception branch of the capability table, end to end: a real
    * claude turn whose user message carries an image. claude's table cell says
    * no, so the wire prompt must stay text-only, and the writer must expand the
