@@ -402,10 +402,6 @@ export class GatewayConversations {
     const configured = limits.stallMs
     const timeoutMs = configured ?? DEFAULT_STALL_MS
     const totalMs = limits.totalMs ?? DEFAULT_TOTAL_MS
-    // 子代理在跑时静默看门狗的容忍上限：从「最后一次信号」起算，最多安静这么久。
-    // 取一个回合自己的预算那么多（总上限关掉时取默认的 30 分钟）。子代理真卡死
-    // 时兜底仍在——只是多等这一段；子代理还在报东西时，这段从头再算。
-    const stallHoldLimitMs = totalMs > 0 ? totalMs : DEFAULT_TOTAL_MS
     // The deadline is an IDLE deadline, not a total-duration cap: every
     // streamed chunk and every tool write re-arms it. A turn may legitimately
     // run for hours while it keeps producing (2026-10-16 session 03067bcc:
@@ -417,20 +413,6 @@ export class GatewayConversations {
     let deadlineTimer: ReturnType<typeof setTimeout> | undefined
     let totalTimer: ReturnType<typeof setTimeout> | undefined
     let pollTimer: ReturnType<typeof setInterval> | undefined
-    // The total cap's clock. While the external agent waits on its OWN
-    // delegated runs (its subagents, its background tasks) the clock is held:
-    // that wait is not this turn's own time, and ending the turn there says
-    // "wedged" about work that is still running — 2026-10-20 session
-    // 7165a323: codex spawned 5 subagents and waited for them; the 30-minute
-    // cap fired, the parent turn ended as ACP_TIMEOUT, all five results were
-    // lost, and the UI showed a timed-out parent next to children still
-    // running. The remaining budget is kept, not spent, so the cap still
-    // applies to the time the turn actually spends on its own.
-    let totalDeadlineAt = 0
-    let totalRemainingMs: number | undefined = undefined
-    // 静默看门狗当前用的是哪个期限：外部 agent 在等自己的子代理时用更长的
-    // 那一个（见 stallHoldLimitMs），子代理收尾后换回原来的。
-    let stallHeld = false
     let settled = false
     // Set the moment the answer settles: the loop then closes the step, and a
     // write arriving after it lands outside every open step — the runner's
@@ -448,86 +430,42 @@ export class GatewayConversations {
       const lines = stderrTailNow().slice(-5).map(line => (line.length > 200 ? `${line.slice(0, 200)}…` : line))
       return lines.length === 0 ? '（无）' : lines.join('\n')
     }
+    /** 外部 agent 自己的委托运行（子代理 / 后台任务）还开着几个。 */
+    const delegatedLive = (): number => entry.session?.diagnostics().liveDelegatedRuns ?? 0
     /**
-     * 挂静默看门狗：期限从「最后一次信号」起算。
+     * 收场时把「还有几个委托运行没收尾」写进消息。
      *
-     * 期限有两个：平时是 `stallMs`；外部 agent 在等自己的子代理时用更长的
-     * `stallHoldLimitMs`。两者都从最后一次信号起算——子代理只要还报东西，
-     * 静默的钟就重新开始，所以这不是「等一个固定时间」，而是「最多安静多久」。
+     * 这个数不参与任何判定——它只回答「为什么停了」：还有子代理开着，说明外部
+     * agent 是卡在等它们，而不是自己卡死。2026-10-20 用户看到的就是「主会话
+     * 报超时、子会话还在跑」，这句话当时不在场。
      */
-    const armStall = (limitMs: number): void => {
-      if (settled || timeoutMs <= 0) return
-      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
-      const silentForMs = Date.now() - lastActivityWall
-      deadlineTimer = setTimeout(fireStall, Math.max(0, limitMs - silentForMs))
+    const delegatedNote = (): string => {
+      const live = delegatedLive()
+      return live <= 0 ? '' : `（还有 ${String(live)} 个委托运行未收尾）`
     }
     const fireStall = (): void => {
-      // 外部 agent 在等自己的子代理：连接安静不等于卡死——子代理可能正在安静
-      // 干活（2026-10-20 与总上限同族：父会话等子代理时被静默看门狗按超时收
-      // 尾，子会话还在跑）。给这段安静更长的容忍度，且从最后一次信号起算：
-      // 子代理还在报东西就一直等，一直不报才按卡死收场——兜底仍在。
-      if (delegatedLive() > 0) {
-        const silentForMs = Date.now() - lastActivityWall
-        if (silentForMs < stallHoldLimitMs) {
-          armStall(stallHoldLimitMs)
-          this.report(`acp gateway: session ${sessionId} is waiting on ${String(delegatedLive())} delegated run(s) — the silence watchdog tolerates ${String(stallHoldLimitMs)}ms of silence since the last signal`)
-          return
-        }
-      }
       const silentForMs = Date.now() - lastActivityWall
-      this.report(`acp gateway: session ${sessionId} answer stalled — no agent activity for ${String(silentForMs)}ms (limit ${String(timeoutMs)}ms) — ending the turn as error`)
+      this.report(`acp gateway: session ${sessionId} answer stalled — no agent activity for ${String(silentForMs)}ms (limit ${String(timeoutMs)}ms)${delegatedNote()} — ending the turn as error`)
       controller.abort()
       done({
         end: {
           kind: 'error',
           error: {
-            message: `外部 agent 静默 ${String(Math.round(silentForMs / 1000))}s 无进展，已自动停止并重开新会话。进程处置：已终止；agent 输出尾部：\n${tailLines()}`,
+            message: `外部 agent 静默 ${String(Math.round(silentForMs / 1000))}s 无进展，已自动停止并重开新会话。${delegatedNote()}进程处置：已终止；agent 输出尾部：\n${tailLines()}`,
             code: 'ACP_STALLED',
           },
         },
       })
     }
-    /** 外部 agent 自己的委托运行（子代理 / 后台任务）还开着几个。 */
-    const delegatedLive = (): number => entry.session?.diagnostics().liveDelegatedRuns ?? 0
-    /**
-     * 总上限的钟：外部 agent 在等自己的子代理时停表，等它们收尾再按剩下的预算继续。
-     *
-     * 返回 true 表示「现在正在等子代理」，调用方据此不收场。
-     */
-    const holdTotal = (): boolean => {
-      if (totalRemainingMs === undefined) return false
-      if (delegatedLive() <= 0) return false
-      if (totalTimer !== undefined) {
-        clearTimeout(totalTimer)
-        totalTimer = undefined
-        // 只扣掉已经走掉的那段：等的这段时间不算这一回合自己的预算。
-        totalRemainingMs = Math.max(0, totalDeadlineAt - Date.now())
-      }
-      return true
-    }
-    /** 子代理收尾后，把总上限的钟按剩下的预算重新挂上。 */
-    const resumeTotal = (): void => {
-      if (settled || totalTimer !== undefined || totalRemainingMs === undefined) return
-      if (delegatedLive() > 0) return
-      totalDeadlineAt = Date.now() + totalRemainingMs
-      totalTimer = setTimeout(fireTotal, totalRemainingMs)
-    }
     const fireTotal = (): void => {
-      // 外部 agent 还在等自己的子代理：这一回合没有超时可报。让总上限的钟
-      // 停住，等子代理收尾后再按剩下的预算算——把「还在干活」说成「卡住了」
-      // 是更糟的错，2026-10-20 会话 7165a323 就是这么把 5 个子代理的结果丢掉的。
-      if (holdTotal()) {
-        this.report(`acp gateway: session ${sessionId} is waiting on ${String(delegatedLive())} delegated run(s) — the total cap is held until they settle`)
-        return
-      }
       const silentForMs = Date.now() - lastActivityWall
-      this.report(`acp gateway: session ${sessionId} answer exceeded the total cap of ${String(totalMs)}ms — ending the turn as error`)
+      this.report(`acp gateway: session ${sessionId} answer exceeded the total cap of ${String(totalMs)}ms${delegatedNote()} — ending the turn as error`)
       controller.abort()
       done({
         end: {
           kind: 'error',
           error: {
-            message: `外部 agent 回合超过总上限 ${String(totalMs)}ms，已自动停止并重开新会话。静默 ${String(Math.round(silentForMs / 1000))}s；进程处置：已终止；agent 输出尾部：\n${tailLines()}`,
+            message: `外部 agent 回合超过总上限 ${String(totalMs)}ms，已自动停止并重开新会话。静默 ${String(Math.round(silentForMs / 1000))}s；${delegatedNote()}进程处置：已终止；agent 输出尾部：\n${tailLines()}`,
             code: 'ACP_TIMEOUT',
           },
         },
@@ -538,14 +476,38 @@ export class GatewayConversations {
       if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
       if (totalTimer !== undefined) clearTimeout(totalTimer)
       if (pollTimer !== undefined) clearInterval(pollTimer)
-      totalRemainingMs = undefined
       answerEnded = true
       settle(value)
     }
+    /**
+     * 有活动：两个期限都重新计时。
+     *
+     * 「总上限」不是墙上时钟——它是「最多连续安静多久」。agent（或它派出去的
+     * 子代理）每报一次东西，这个钟就重新开始，所以一个一直在忙的回合不会因为
+     * 跑得久而被掐掉。2026-10-20 会话 7165a323 就是反例：codex 派出 5 个子代理
+     * 后一边轮询一边等了 26 分钟，30 分钟的固定上限到点把主回合按超时杀掉，
+     * 5 个子代理的结果全部丢失——那时它明明还在上报。
+     */
     const noteActivity = (): void => {
-      if (settled || timeoutMs <= 0) return
+      if (settled) return
       lastActivityWall = Date.now()
-      armStall(stallHeld ? stallHoldLimitMs : timeoutMs)
+      if (timeoutMs > 0) {
+        if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
+        deadlineTimer = setTimeout(fireStall, timeoutMs)
+      }
+      armTotal()
+    }
+    /**
+     * 挂总上限的钟——先清掉旧的再挂新的。
+     *
+     * 「先清后挂」不是洁癖：交付时的那一次挂钟若不先清，就会把活动里已经挂好
+     * 的那只定时器变成孤儿（句柄被覆盖，定时器还在），到点照样收场——2026-10-20
+     * 那个「一直有上报也还是被掐」的用例就是这么红的。
+     */
+    const armTotal = (): void => {
+      if (settled || totalMs <= 0) return
+      if (totalTimer !== undefined) clearTimeout(totalTimer)
+      totalTimer = setTimeout(fireTotal, totalMs)
     }
     const tappingSink: GatewaySink = { chunk: chunk => { noteActivity(); sink.chunk(chunk) } }
     const stream = new GatewayChunkStream(tappingSink)
@@ -621,46 +583,21 @@ export class GatewayConversations {
     entry.cursor = plan.cursor
     const run = entry.session.run(decision, turn) as Promise<unknown>
     run.catch(() => {}) // a late rejection from an already-ended turn must not crash the host
-    // The total cap bounds one answer however chatty it is. It is armed once at
-    // delivery and never re-armed — EXCEPT while the external agent waits on
-    // its own delegated runs: that wait is held out of the budget (see
-    // holdTotal), so the cap still measures the time this turn spends on its
-    // own work.
-    if (totalMs > 0) {
-      totalRemainingMs = totalMs
-      totalDeadlineAt = Date.now() + totalMs
-      totalTimer = setTimeout(fireTotal, totalMs)
-    }
+    // Both deadlines are armed at delivery and re-armed by every piece of
+    // activity (see noteActivity). The total one is not a wall-clock cap: a
+    // turn that keeps reporting is never ended for taking long.
+    armTotal()
     // The frame beacon watches the one signal neither the chunk tap nor the
     // tool writes can see: an agent whose process stays alive but answers
     // nothing (2026-10-16 codex — "tls handshake eof" on stderr, zero frames,
     // every stop press swallowed for ten minutes). stderr deliberately does
     // NOT count as activity here; it only feeds the note and the package.
     //
-    // The same poll carries the total cap's hold: while the external agent
-    // waits on its own delegated runs, the cap's clock is stopped, and it
-    // starts again with the remaining budget once they settle. Without it the
-    // cap fires mid-wait and the children lose their results (2026-10-20
-    // session 7165a323).
     if (timeoutMs > 0 || totalMs > 0) {
       const warnMs = limits.warnMs ?? DEFAULT_WARN_MS
       const pollMs = Math.min(1_000, Math.max(200, Math.floor((timeoutMs > 0 ? timeoutMs : totalMs) / 4)))
       pollTimer = setInterval(() => {
         if (settled) return
-        if (totalRemainingMs !== undefined) {
-          if (delegatedLive() > 0) holdTotal()
-          else resumeTotal()
-        }
-        // 静默看门狗的期限跟着子代理走：子代理开着就用长的那个（从最后一次信号
-        // 起算），子代理收尾后换回原来的那个。子代理还在报东西时，静默的钟
-        // 每次都重新开始——所以这不是「等一个固定时间」。
-        if (delegatedLive() > 0 && !stallHeld) {
-          stallHeld = true
-          armStall(stallHoldLimitMs)
-        } else if (delegatedLive() === 0 && stallHeld) {
-          stallHeld = false
-          armStall(timeoutMs)
-        }
         if (timeoutMs <= 0) return
         const diagnostics = entry.session?.diagnostics()
         if (diagnostics !== undefined && diagnostics.lastFrameAt > lastSeenFrameAt) {
