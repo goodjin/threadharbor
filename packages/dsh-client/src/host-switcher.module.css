@@ -1,0 +1,72 @@
+.root {
+  position: relative;
+}
+
+.trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 8px;
+  background: transparent;
+  border: 0;
+  color: var(--fg, inherit);
+  cursor: pointer;
+}
+
+.trigger:hover {
+  background: var(--hover, rgba(127, 127, 127, 0.15));
+}
+
+.triggerLabel {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.list {
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  border-top: 1px solid var(--border, rgba(127, 127, 127, 0.35));
+}
+
+.item {
+  margin: 0;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  background: transparent;
+  border: 0;
+  color: var(--fg, inherit);
+  text-align: left;
+  cursor: pointer;
+}
+
+.row:hover {
+  background: var(--hover, rgba(127, 127, 127, 0.15));
+}
+
+.row[aria-disabled='true'] {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.rowLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowNote {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--fg-muted, #667);
+}

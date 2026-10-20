@@ -69,7 +69,9 @@ import { startRollUpSection } from '../rollup-section.ts'
 import { buildHostSessions, readSessionSources } from '../session-source.ts'
 import type { SectionSession, SessionRead } from '../session-source.ts'
 import { startPairingSurface } from '../pairing-panel.ts'
-import { AgentPanel } from '../panel.tsx'
+import { AgentPanel, mergeHostRows } from '../panel.tsx'
+import { HostSwitcher, switchEntries } from '../host-switcher.tsx'
+import { sharedHostSwitcherStore } from '../host-switcher-store.ts'
 import type { AgentListPort, AgentPanelBusinessProps, ProbeStarter, RemotePort, TailscalePeersResult, TailscalePort } from '../panel.tsx'
 import { readRemotePeer, startRemotePeer } from '../ssh-deploy.ts'
 import { registerAgentSwitchHandoverSurface } from '../handover-card.ts'
@@ -416,6 +418,27 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // Only `threadharbor.sidebarTree` = `on` brings the old shadowing tree back,
   // as an experiment with the native list standing by.
   maybeRegisterSidebarTree(ctx.slots, ctx, registry)
+
+  // 侧栏底脚的主机切换器：点某台已登记主机整页跳到那台机器（走网关），于是
+  // 每台机器用自己的原生侧栏。列表没有订阅接口，数据靠 hostStore 订阅（登记
+  // 簿 / 身份水合）加 3 秒轮询（在场与心跳）重画；整段放进 effect 卸载时清理。
+  const hostSwitcher = sharedHostSwitcherStore()
+  const refreshHostSwitcher = (): void => {
+    hostSwitcher.set(switchEntries(mergeHostRows(section.hosts(), registry.list()), registry.list()))
+  }
+  ctx.effect(() => {
+    refreshHostSwitcher()
+    const unsubscribe = hostStore.subscribe(refreshHostSwitcher)
+    const timer = window.setInterval(refreshHostSwitcher, 3000)
+    return () => {
+      unsubscribe()
+      window.clearInterval(timer)
+    }
+  }, 'threadharbor: host switcher data')
+  ctx.effect(() => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register(
+    { name: 'sidebar.footer.action', id: 'host-switcher', locale: NAMESPACE },
+    HostSwitcher,
+  )), 'threadharbor: host switcher')
 
   // Other hosts' sessions still run on their own machine. Selecting one swaps
   // the main area for this panel; clicking a local session hands it back.

@@ -32,6 +32,13 @@ export const NAMESPACE = 'threadharborClient'
 export const zh = {
   /** 侧栏行名：主机列表面板。 */
   'panel.label': '各主机',
+  /** 侧栏底脚的主机切换器：触发按钮与每条主机的注记。 */
+  'panel.switch.label': '切换主机',
+  'panel.switch.current': '本机',
+  'panel.switch.offline': '离线',
+  'panel.switch.unreachable': '未部署',
+  'panel.switch.noLaunchUrl': '没有打开地址，请到 设置 → 各主机 补上',
+  'panel.switch.open': '在这台主机上打开',
   /** 切换进度条的三个阶段；`{target}` 是新会话的 agent 名。 */
   'progress.preparing': '正在准备打开新会话 · {target}',
   'progress.loading': '正在读新会话的历史 · {target}',
@@ -439,6 +446,12 @@ export type HandoverKey = Extract<ClientLocaleKey, `handover.${string}`>
 /** 英文词典，键域与 zh 完全一致。 */
 export const en = {
   'panel.label': 'Hosts',
+  'panel.switch.label': 'Switch host',
+  'panel.switch.current': 'This machine',
+  'panel.switch.offline': 'Offline',
+  'panel.switch.unreachable': 'Not deployed',
+  'panel.switch.noLaunchUrl': 'No open address — add it under Settings → Hosts',
+  'panel.switch.open': 'Open on this host',
   'progress.preparing': 'Preparing to open the new session · {target}',
   'progress.loading': 'Reading the new session’s history · {target}',
   'progress.ready': 'New session ready, switching · {target}',
