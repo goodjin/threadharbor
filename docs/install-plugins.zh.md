@@ -197,7 +197,7 @@ agent 只要打同样的标记。网关是调用时在实例上按名字取方�
 （`node_modules/@threadharbor/`，部署切工作树时改仓库这一侧即可）：
 
 ```sh
-scripts/profile-link-plugins.sh ~/.dsh-web/profiles/web      # 3081
+scripts/profile-link-plugins.sh ~/.dsh-web/profiles/web      # 3080（~/bin/dsh-web）
 scripts/profile-link-plugins.sh ~/.dsh/profiles/desktop      # 桌面版（重启应用生效）
 ```
 
