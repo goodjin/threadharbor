@@ -6,7 +6,7 @@
 import { createServer, request as httpRequest, type IncomingMessage, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
-import { apply, createGateway, type Gateway } from '../src/host-gateway.ts'
+import { apply, createGateway, gatewayErrorPage, type Gateway } from '../src/host-gateway.ts'
 import {
   gatewayClientScript,
   parseGatewayRequest,
@@ -82,6 +82,34 @@ describe('网关路径', () => {
     expect(gatewayClientScript('mini', '小机器')).toContain('th-host-bar')
     expect(gatewayClientScript('mini', '小机器')).toContain('th-back-home')
     expect(() => { new Function(gatewayClientScript('mini', '小机器')) }).not.toThrow()
+  })
+})
+
+describe('错误页', () => {
+  it('页面导航的失败回错误页，程序请求仍是纯文本', async () => {
+    const gateway = createGateway({
+      admit: () => ({ peer: {} }),
+      registry: async () => ({ ready: true, json: '[]' }),
+    })
+    const local = await startGateway(gateway)
+    const page = await rawRequest(local.port, '/threadharbor/gateway/missing/', { accept: 'text/html' })
+    expect(page.status).toBe(404)
+    expect(page.headers['content-type']).toContain('text/html')
+    expect(page.body).toContain('没有这台已登记的主机')
+    expect(page.body).toContain('回本机')
+    expect(page.body).toContain('去设置')
+    expect(page.body).toContain('href="/"')
+    const plain = await rawRequest(local.port, '/threadharbor/gateway/missing/')
+    expect(plain.status).toBe(404)
+    expect(plain.headers['content-type']).toContain('text/plain')
+    expect(plain.body).toBe('没有这台已登记的主机')
+  })
+
+  it('错误页正文按 HTML 转义，不把消息当标签', () => {
+    const html = gatewayErrorPage('连不上这台主机（<b>http://x</b>）& 重试', { back: '回本机', settings: '去设置' })
+    expect(html).toContain('连不上这台主机（&lt;b&gt;http://x&lt;/b&gt;）&amp; 重试')
+    expect(html).not.toContain('<b>http://x</b>')
+    expect(html).toContain('href="/"')
   })
 })
 
