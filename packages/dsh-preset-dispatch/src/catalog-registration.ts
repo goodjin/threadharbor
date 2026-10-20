@@ -11,6 +11,7 @@
 import { catalogAdapter, providerRoute } from './catalog.ts'
 import type { CatalogDeps } from './catalog.ts'
 import type { AcpDialect } from '@threadharbor/dsh-acp-agent'
+import { isModelBackedAgent } from './model-plugins.ts'
 import type { AcpPresetConfig, PresetConfig } from './registry.ts'
 
 /**
@@ -75,9 +76,12 @@ export function modelsOfPreset(
   if (preset === undefined) return []
   const dialect = factory.dialectFor(presetId, preset)
   // Not ours, or an agent that publishes nothing: no models to advertise.
-  // zcode is a model plugin, so it has no frame dialect and the configured
-  // list is the catalog — that is what the picker offers.
-  if (dialect === undefined && preset.agent !== 'zcode') return []
+  // A model row has no frame dialect of its own — it is answered inside the
+  // native loop — so the configured list is the catalog, and that is exactly
+  // what the picker offers. This has to read the same list the plugin gate
+  // reads; naming one member of it here is how a row ends up registered with
+  // an empty model list.
+  if (dialect === undefined && !isModelBackedAgent(preset.agent)) return []
   return preset.models ?? []
 }
 

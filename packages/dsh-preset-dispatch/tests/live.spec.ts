@@ -24,11 +24,12 @@ import { AcpTurnRunner } from '../src/runner.ts'
 import type { ChildSessionLike, SubagentSessionHost } from '../src/subagent-sessions.ts'
 import type { AcpClientPort } from '../src/runner.ts'
 import { adaptClient } from '../src/factory.ts'
+import { stdioArgsForDialect } from '@threadharbor/dsh-acp-agent'
 import { AcpAssistantStream } from '../src/stream.ts'
 import { makeContentWriter, UNDELIVERED } from '../src/content-writer.ts'
 import { projectStepContent } from '@threadharbor/dsh-acp-agent'
 import { claudeDialect } from '@threadharbor/dsh-acp-agent'
-import { codexDialect } from '@threadharbor/dsh-acp-agent'
+import { codexDialect, cursorDialect } from '@threadharbor/dsh-acp-agent'
 import { grokDialect } from '@threadharbor/dsh-acp-agent'
 import { bridgePermissions } from '@threadharbor/dsh-acp-agent'
 import type { StepEndReason, TurnContext } from '../src/dispatch.ts'
@@ -38,6 +39,7 @@ import { join } from 'node:path'
 
 const LIVE = process.env['THREADHARBOR_LIVE_ACP'] === '1'
 const CODEX_ACP = process.env['THREADHARBOR_CODEX_ACP'] ?? 'codex-acp'
+const CURSOR_ACP = process.env['THREADHARBOR_CURSOR_ACP'] ?? 'cursor-agent'
 const CLAUDE_ACP = process.env['THREADHARBOR_CLAUDE_ACP'] ?? 'claude-agent-acp'
 
 const PROMPT = 'Reply with exactly this one sentence and nothing else: the tide comes in and goes out.'
@@ -45,7 +47,7 @@ const PROMPT = 'Reply with exactly this one sentence and nothing else: the tide 
 /** Drive one real agent through the dispatch stack and report what streamed. */
 async function runDispatch(command: string, dialect: AcpDialect, options: { modeId?: string } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'th-acp-dispatch-'))
-  const transport = new StdioAcpTransport({ command, cwd, onDiagnostic: () => {} })
+  const transport = new StdioAcpTransport({ command, args: stdioArgsForDialect(dialect), cwd, onDiagnostic: () => {} })
   const client = new AcpClient(transport, dialect)
   if (dialect.id === 'grok') client.terminals = new TerminalService()
   // Through the very bridge production uses, so this exercises the fail-closed
@@ -131,10 +133,23 @@ type SegmentedTurn = {
  * resolved, and the reply result itself. The client is closed before the
  * assertions run; they read only what this collected.
  */
-async function runStepsLive(prompt: string, options?: { subagents?: SubagentSessionHost }): Promise<SegmentedTurn> {
+async function runStepsLive(prompt: string, options?: {
+  subagents?: SubagentSessionHost
+  dialect?: AcpDialect
+  command?: string
+}): Promise<SegmentedTurn> {
+  const dialect = options?.dialect ?? codexDialect
+  const command = options?.command ?? CODEX_ACP
   const cwd = await mkdtemp(join(tmpdir(), 'th-acp-runsteps-'))
-  const transport = new StdioAcpTransport({ command: CODEX_ACP, cwd, onDiagnostic: () => {} })
-  const client = new AcpClient(transport, codexDialect)
+  const transport = new StdioAcpTransport({ command, args: stdioArgsForDialect(dialect), cwd, onDiagnostic: () => {} })
+  const client = new AcpClient(transport, dialect)
+  // cursor 的两个阻塞式自定义方法：按生产 client 的方式跳过/取消，否则回合会干等。
+  client.onExtensionRequest = frame => {
+    if (dialect.id !== 'cursor' || typeof frame.id !== 'number') return false
+    if (frame.method === 'cursor/ask_question') { client.reply(frame.id, { outcome: { outcome: 'skipped' } }); return true }
+    if (frame.method === 'cursor/create_plan') { client.reply(frame.id, { outcome: { outcome: 'cancelled' } }); return true }
+    return false
+  }
   // Through the very bridge production uses, so a real command execution is
   // approved the way a session approves it.
   client.onPermissionRequest = request => bridgePermissions(request, async () => 'allowed-once')
@@ -142,7 +157,7 @@ async function runStepsLive(prompt: string, options?: { subagents?: SubagentSess
   const appended: SegmentedTurn['appended'] = []
   let promptSettledOrder = -1
   let promptReply: SegmentedTurn['promptReply']
-  const base = adaptClient(client, codexDialect)
+  const base = adaptClient(client, dialect)
   const port: AcpClientPort = {
     request: async (method, params) => {
       const reply = await base.request(method, params)
@@ -163,7 +178,7 @@ async function runStepsLive(prompt: string, options?: { subagents?: SubagentSess
   // and no live-card binding, and every assertion below would pass vacuously.
   const runner = new AcpTurnRunner(port, {
     cwd,
-    dialect: codexDialect,
+    dialect,
     ...(options?.subagents === undefined ? {} : { subagents: options.subagents }),
   })
 
@@ -180,7 +195,7 @@ async function runStepsLive(prompt: string, options?: { subagents?: SubagentSess
     produce: result => projectStepContent(result.frames, {
       turn: 1,
       step,
-      dialect: codexDialect,
+      dialect,
       ...(result.stream === undefined ? {} : { stream: result.stream }),
     }),
     write,
@@ -441,6 +456,68 @@ describe.skipIf(!LIVE)('dispatch stack against real agents', () => {
       expect(types).toContain('assistant/message')
       expect(types.at(-1)).toBe('turn/end')
     }
+  }, 300_000)
+
+  /**
+   * cursor: 接管路径的活体验收（对照 codex 的同一组断言）。
+   *
+   * cursor 走自己的方言——`kind` 当工具名、pending 占位帧、diff 输出、无用量——
+   * 但接管路径的契约与 codex 相同：正文/思考在回合进行中就进流；工具结果在应答
+   * 落定前落盘（实时结果，不是回合末重放）；切段时首调 null、末调 completed；
+   * 回合末的遥测只以汇总卡出现，不混别的内容。
+   */
+  it('cursor: a real turn streams live, files live results, and summarizes telemetry', async () => {
+    const { calls, appended, streams, promptSettledOrder } = await runStepsLive(TOOL_REPORT_PROMPT, {
+      dialect: cursorDialect,
+      command: CURSOR_ACP,
+    })
+    expect(appended.length, 'the turn wrote nothing').toBeGreaterThan(0)
+    expect(streams.some(stream => stream.records().length > 0), 'no text streamed during the turn').toBe(true)
+    for (const event of appended) expect(typeof event.payload['step']).toBe('number')
+    const toolResultAt = appended.findIndex(event => event.type === 'tool/result')
+    if (toolResultAt >= 0 && promptSettledOrder >= 0) {
+      expect(toolResultAt, 'the tool result was replayed at turn end, not filed live').toBeLessThan(promptSettledOrder)
+    }
+    const segmented = appended.some(event => typeof event.payload['step'] === 'number' && (event.payload['step'] as number) > 1)
+    if (segmented) {
+      expect(calls.length).toBeGreaterThanOrEqual(2)
+      expect(calls[0]).toBeNull()
+    }
+    expect(calls.at(-1)).toEqual({ kind: 'completed' })
+    // 遥测汇总卡只允许四种已知遥测种类；`外部输出 ·` 前缀下出现别的种类就是分类缺口。
+    const rawCards = appended.filter(event => event.type === 'tool/call'
+      && String((event.payload as { name?: string }).name ?? '').includes('外部输出 ·'))
+    for (const card of rawCards) {
+      expect(String((card.payload as { name?: string }).name)).toMatch(
+        /外部输出 · (usage_update|session_info_update|available_commands_update|current_mode_update)/,
+      )
+    }
+  }, 300_000)
+
+  /**
+   * claude: 接管路径的活体验收（对照 codex/cursor 的同一组断言）。
+   *
+   * claude 的方言差异（工具名在 _meta.claudeCode.toolName、双层嵌套 content、
+   * 双帧工具生命周期）不影响接管路径的契约：分段、实时结果、遥测汇总。
+   */
+  it('claude: a real turn spans several runSteps calls with live results', async () => {
+    const { calls, appended, streams, promptSettledOrder } = await runStepsLive(TOOL_REPORT_PROMPT, {
+      dialect: claudeDialect,
+      command: CLAUDE_ACP,
+    })
+    expect(appended.length, 'the turn wrote nothing').toBeGreaterThan(0)
+    expect(streams.some(stream => stream.records().length > 0), 'no text streamed during the turn').toBe(true)
+    for (const event of appended) expect(typeof event.payload['step']).toBe('number')
+    const toolResultAt = appended.findIndex(event => event.type === 'tool/result')
+    if (toolResultAt >= 0 && promptSettledOrder >= 0) {
+      expect(toolResultAt, 'the tool result was replayed at turn end, not filed live').toBeLessThan(promptSettledOrder)
+    }
+    const segmented = appended.some(event => typeof event.payload['step'] === 'number' && (event.payload['step'] as number) > 1)
+    if (segmented) {
+      expect(calls.length).toBeGreaterThanOrEqual(2)
+      expect(calls[0]).toBeNull()
+    }
+    expect(calls.at(-1)).toEqual({ kind: 'completed' })
   }, 300_000)
 
   /**

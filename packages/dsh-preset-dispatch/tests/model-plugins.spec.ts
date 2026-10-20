@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { modelPluginStream } from '../src/model-plugins.ts'
+import { describeClaimedModels, modelPluginStream } from '../src/model-plugins.ts'
 import type { PresetConfig } from '../src/registry.ts'
 
 const config = {
@@ -35,5 +35,16 @@ describe('modelPluginStream', () => {
 
   it('declines a preset nobody owns', () => {
     expect(modelPluginStream(config)('nope', request)).toBeUndefined()
+  })
+})
+
+describe('describeClaimedModels', () => {
+  it('names every row answered in place, so a missing one is visible in the log', () => {
+    expect(describeClaimedModels(config)).toBe('acp-zcode=zcode acp-minimax=minimaxi')
+  })
+
+  it('says none rather than leaving an empty gap in the startup line', () => {
+    const bare = { presets: { 'acp-codex': { agent: 'codex', models: [] } } } as unknown as PresetConfig
+    expect(describeClaimedModels(bare)).toBe('none')
   })
 })

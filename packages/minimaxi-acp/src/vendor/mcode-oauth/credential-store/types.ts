@@ -1,4 +1,4 @@
-import { MCODE_OAUTH_AUDIENCE, MCODE_OAUTH_CLIENT_ID, MCODE_OAUTH_SCOPES } from '../contracts.js';
+import { MCODE_OAUTH_AUDIENCE, MCODE_OAUTH_CLIENT_ID, MCODE_OAUTH_SCOPES } from '../contracts.ts';
 
 export type CredentialStoreKind = 'file';
 export type LegacyCredentialStoreKind = 'os-keyring';

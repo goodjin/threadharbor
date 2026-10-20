@@ -43,7 +43,57 @@ const MAPPED_KINDS = new Set([
 ])
 
 /** 自带卡片/审批展示的请求：由各自的面板负责，不是未知输出。 */
-const DEDICATED_METHODS = new Set(['session/request_permission', 'cursor/ask_question'])
+/**
+ * cursor 通知方法的可读格式化（字段结构来自官方文档 cursor.com/docs/cli/acp.md，
+ * 2026-10-19 核对）。三种通知都不需要应答，但值得看：待办更新是过程计划的
+ * 唯一来源；task 是 cursor 子代理的唯一线索（它不发 ACP 子代理帧）；
+ * generate_image 报告图片产物。
+ */
+const CURSOR_NOTIFICATION_FORMATTERS: Readonly<Record<string, {
+  readonly kind: string
+  format: (params: Record<string, unknown>) => string
+}>> = {
+  'cursor/update_todos': {
+    kind: 'cursor 待办',
+    format: params => {
+      const todos = Array.isArray(params['todos']) ? params['todos'].map(recordOf) : []
+      const merge = params['merge'] === true ? '合并' : '替换'
+      const marks: Record<string, string> = { completed: '✓', in_progress: '▶', cancelled: '✗' }
+      const items = todos.map(todo => {
+        const status = typeof todo['status'] === 'string' ? todo['status'] : ''
+        const mark = marks[status] ?? '○'
+        const content = typeof todo['content'] === 'string' ? todo['content'] : ''
+        return `${mark} ${content}`
+      })
+      return `待办（${merge}）：${items.join('  ')}`
+    },
+  },
+  'cursor/task': {
+    kind: 'cursor 子代理任务',
+    format: params => {
+      const description = typeof params['description'] === 'string' ? params['description'] : ''
+      const type = typeof params['subagentType'] === 'string' ? params['subagentType'] : ''
+      const durationMs = typeof params['durationMs'] === 'number' ? `，${String(Math.round(params['durationMs'] / 100) / 10)}s` : ''
+      return `子代理任务完成：${description}（${type}${durationMs}）`
+    },
+  },
+  'cursor/generate_image': {
+    kind: 'cursor 生成图片',
+    format: params => {
+      const description = typeof params['description'] === 'string' ? params['description'] : ''
+      const filePath = typeof params['filePath'] === 'string' ? ` → ${params['filePath']}` : ''
+      return `生成图片：${description}${filePath}`
+    },
+  },
+}
+
+const DEDICATED_METHODS = new Set([
+  'session/request_permission',
+  // cursor 的阻塞式提问与计划请求由各自的流程回答（client.ts 的扩展处理），
+  // 不是「看不懂的输出」，不能进未知块。
+  'cursor/ask_question',
+  'cursor/create_plan',
+])
 
 /** 默认单块上限：超过就在同一连续段内切块，转录不会被一行巨物撑爆。 */
 const DEFAULT_MAX_BYTES = 8192
@@ -54,7 +104,13 @@ const DEFAULT_MAX_BYTES = 8192
  * 它们仍会被保存——但按种类汇总到回合末尾，一块一行种类名；这样「所有输出都
  * 可见」和「过程区保持原生观感」同时成立。
  */
-const TELEMETRY_KINDS = new Set(['usage_update', 'session_info_update', 'available_commands_update'])
+const TELEMETRY_KINDS = new Set([
+  'usage_update',
+  'session_info_update',
+  'available_commands_update',
+  // cursor 的模式切换（agent/ask/...）：和遥测一样只在回合末汇总，过程区不留噪音。
+  'current_mode_update',
+])
 
 function recordOf(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {}
@@ -87,6 +143,11 @@ export function classifyRawOutput(
   }
   if (frame.method === 'session/update') {
     return { kind: kind === '' ? frame.method : kind, format: 'json', line: JSON.stringify(update) }
+  }
+  // cursor 的三种通知方法有可读格式（文档结构已知），其余厂商方法原样展示。
+  const notification = CURSOR_NOTIFICATION_FORMATTERS[frame.method]
+  if (notification !== undefined) {
+    return { kind: notification.kind, format: 'text' as const, line: notification.format(recordOf(frame.params)) }
   }
   // 厂商私有方法与未知请求：原样展示，种类用方法名。
   return { kind: frame.method, format: 'json', line: JSON.stringify({ method: frame.method, params: frame.params }) }
@@ -165,14 +226,16 @@ export class RawOutputAggregator {
   /**
    * 回合末汇总：每种遥测帧一块，按首次出现的顺序。
    *
-   * 调用后清空汇总（一个回合只发一次），位置取该种类第一次出现的位置。
+   * 调用后清空汇总（一个回合只发一次）。位置**盖写出时**的 turn/step：汇总块
+   * 总在最后一段写出，日志只接纳与「当前打开的步骤」一致的 tool 事件——沿用
+   * 首次出现的位置（更早的步骤）会让整份日志加载不了。
    */
-  summary(): readonly RawOutputBlock[] {
+  summary(position: { readonly turn: number; readonly step: number }): readonly RawOutputBlock[] {
     const blocks: RawOutputBlock[] = []
     for (const [kind, tally] of this.telemetry) {
       blocks.push({
-        turn: tally.position.turn,
-        step: tally.position.step,
+        turn: position.turn,
+        step: position.step,
         kind,
         format: 'json',
         content: [`（${String(tally.lines.length)} 帧）`, ...tally.lines].join('\n'),

@@ -10,7 +10,7 @@
 import { describe, expect, it } from 'vitest'
 import { attachAcpDispatch } from '../src/service.ts'
 import { providerRoute } from '../src/catalog.ts'
-import { catalogRoutes } from '../src/catalog-registration.ts'
+import { catalogRoutes, modelsOfPreset } from '../src/catalog-registration.ts'
 import type { PresetConfig } from '../src/registry.ts'
 
 const CONFIG: PresetConfig = {
@@ -116,5 +116,31 @@ describe('attachAcpDispatch catalog wiring', () => {
     // A host without one is not ours to fail over: the dispatch still runs.
     const ctx = { on: () => {} } as never
     expect(() => { attachAcpDispatch(ctx, CONFIG, { answerPermission: async () => ({ outcome: 'reject' }), positionOf: () => ({ turn: 1, step: 1 }) }) }).not.toThrow()
+  })
+})
+
+describe('没有传输方言的模型行', () => {
+  const noDialect = { dialectFor: () => undefined }
+
+  it('模型列表照配置给出——这一行没有子进程，配置里的就是它能答的模型', () => {
+    // 这一类行（zcode、minimaxi）由 DSH 自己的循环应答，没有帧方言。曾经这里
+    // 只认 zcode，于是 minimaxi 那一行挂上了、也注册了，模型选择器却是空的。
+    const config: PresetConfig = {
+      presets: {
+        'acp-minimaxi': {
+          agent: 'minimaxi',
+          models: [{ id: 'MiniMax-M3.1-Flash', name: 'M3.1 Flash' }, { id: 'MiniMax-M3', name: 'MiniMax M3' }],
+        },
+      },
+    }
+    expect(modelsOfPreset(config, noDialect, 'acp-minimaxi').map(model => model.id))
+      .toEqual(['MiniMax-M3.1-Flash', 'MiniMax-M3'])
+  })
+
+  it('真正的外部 agent 没有方言时仍然不公布模型', () => {
+    const config: PresetConfig = {
+      presets: { 'acp-grok': { agent: 'grok', models: [{ id: 'grok-4', name: 'grok' }] } },
+    }
+    expect(modelsOfPreset(config, noDialect, 'acp-grok')).toEqual([])
   })
 })

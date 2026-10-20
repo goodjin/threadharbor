@@ -2,7 +2,7 @@ import { open } from 'node:fs/promises';
 
 import lockfile from 'proper-lockfile';
 
-import { ensurePrivateDirectory } from './fs/atomic-write.js';
+import { ensurePrivateDirectory } from './fs/atomic-write.ts';
 import { dirname } from 'node:path';
 
 export interface CrossProcessAuthLockOptions {
@@ -13,11 +13,10 @@ export interface CrossProcessAuthLockOptions {
 export class CrossProcessAuthLock {
   private readonly staleMs: number;
   private readonly retries: number;
+  private readonly lockPath: string;
 
-  constructor(
-    private readonly lockPath: string,
-    options: CrossProcessAuthLockOptions = {},
-  ) {
+  constructor(lockPath: string, options: CrossProcessAuthLockOptions = {}) {
+    this.lockPath = lockPath;
     this.staleMs = options.staleMs ?? 30_000;
     this.retries = options.retries ?? 120;
   }

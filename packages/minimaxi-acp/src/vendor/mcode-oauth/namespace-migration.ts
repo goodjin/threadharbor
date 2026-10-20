@@ -1,10 +1,10 @@
-import { CrossProcessAuthLock } from './cross-process-lock.js';
-import type { AuthNamespace } from './namespace.js';
+import { CrossProcessAuthLock } from './cross-process-lock.ts';
+import type { AuthNamespace } from './namespace.ts';
 import {
   AUTH_STATE_SCHEMA_VERSION,
   AuthStateStore,
   type AuthState,
-} from './state-store.js';
+} from './state-store.ts';
 
 export async function migrateLegacyAuthNamespace(namespace: AuthNamespace): Promise<void> {
   const legacyState = await retireMatchingLegacyRootState(namespace);

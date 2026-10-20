@@ -7,22 +7,22 @@ import {
   MCODE_OAUTH_SCOPES,
   type AccessTokenLease,
   type UnauthorizedContext,
-} from './contracts.js';
-import { CrossProcessAuthLock } from './cross-process-lock.js';
-import type { CredentialStore, StoredCredential } from './credential-store/types.js';
-import type { AuthNamespace } from './namespace.js';
+} from './contracts.ts';
+import { CrossProcessAuthLock } from './cross-process-lock.ts';
+import type { CredentialStore, StoredCredential } from './credential-store/types.ts';
+import type { AuthNamespace } from './namespace.ts';
 import {
   OAuthProtocolError,
   type DeviceAuthorization,
   type OAuthClient,
   type OAuthTokenGrant,
-} from './oauth-client.js';
+} from './oauth-client.ts';
 import {
   AUTH_STATE_SCHEMA_VERSION,
   AuthStateStore,
   type AuthState,
   type AuthStatus,
-} from './state-store.js';
+} from './state-store.ts';
 
 const DEFAULT_AUTHORIZATION_LEASE_MS = 10 * 60 * 1_000;
 const DEFAULT_STATE_POLL_INTERVAL_MS = 250;
@@ -64,9 +64,11 @@ export function assertSameLoginEpoch(
 
 export class AuthScopeUpgradeRequiredError extends Error {
   readonly code = 'AUTH_SCOPE_UPGRADE_REQUIRED';
+  readonly missingScopes: string[];
 
-  constructor(readonly missingScopes: string[]) {
+  constructor(missingScopes: string[]) {
     super('The current MCode authorization does not include the required scope.');
+    this.missingScopes = missingScopes;
     this.name = 'AuthScopeUpgradeRequiredError';
   }
 }
@@ -90,14 +92,18 @@ export function requiresInteractiveLogin(error: unknown): boolean {
 
 export class AuthDomainConflictError extends Error {
   readonly code = 'AUTH_DOMAIN_CONFLICT';
+  readonly active: Pick<AuthNamespace, 'buildEnv' | 'region'>;
+  readonly requested: Pick<AuthNamespace, 'buildEnv' | 'region'>;
 
   constructor(
-    readonly active: Pick<AuthNamespace, 'buildEnv' | 'region'>,
-    readonly requested: Pick<AuthNamespace, 'buildEnv' | 'region'>,
+    active: Pick<AuthNamespace, 'buildEnv' | 'region'>,
+    requested: Pick<AuthNamespace, 'buildEnv' | 'region'>,
   ) {
     super(
       `MCode is signed in to ${active.buildEnv}/${active.region}; sign out before using ${requested.buildEnv}/${requested.region}.`,
     );
+    this.active = active;
+    this.requested = requested;
     this.name = 'AuthDomainConflictError';
   }
 }
@@ -160,8 +166,10 @@ export class MCodeOAuthCore {
   private loginPromise: Promise<LoginResult> | undefined;
   private loginAbortController: AbortController | undefined;
   private initializePromise: Promise<void> | undefined;
+  private readonly options: MCodeOAuthCoreOptions;
 
-  constructor(private readonly options: MCodeOAuthCoreOptions) {
+  constructor(options: MCodeOAuthCoreOptions) {
+    this.options = options;
     this.stateStore = new AuthStateStore(options.namespace.statePath);
     this.lock = new CrossProcessAuthLock(options.namespace.lockPath);
     this.now = options.now ?? Date.now;
