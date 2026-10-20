@@ -1,5 +1,10 @@
 # Stable / Test 双通道发版规范
 
+> **⚠️ 已退役（2026-10-20）**：双通道方案停用，web 只剩一个实例，固定 3080
+> （DSH_HOME=`~/.dsh-web`，由 `~/bin/dsh-web` 管理；3081 与 `~/bin/dsh-web-3081`
+> 已删除）。本文保留作历史参考：其中的制品验证与 promote 流程思路仍可复用，
+> 但端口、通道与「3081 重启」相关操作一律以 AGENTS.md 的 3080 铁律为准。
+
 ThreadHarbor 在本地同时跑两个 DSH Web 实例：stable 通道（端口 3080）服务生产用户，test 通道（端口 3081）给本仓库开发用。两条通道共享同一份浏览器 `localStorage`，但 DSH_HOME 与 profile 互相隔离。（2026-10-10 复核：hostd 与 gateway 已随多主机迁移阶段 6 下线，通道隔离清单里原来的 catalog、known_hosts、SSH tunnel 都不再存在。）
 
 本规范约束 stable 通道，避免本地未提交改动意外污染生产。
