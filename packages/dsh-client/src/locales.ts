@@ -402,6 +402,27 @@ export const zh = {
   'panel.check.action.retry': '重新检测',
   'panel.check.manualHint': '普通用户和 sudo -n 都无权配置 tailscale serve。请在对方主机上依次手动执行下面的命令，然后点「重新检测」：',
   'panel.check.copy': '复制',
+
+  // —— 提供方与模型的屏蔽（设置栏目，存本机；含 ACP agent 与内置 provider） ——
+
+  'acpVisibility.label': '提供方与模型',
+  'acpVisibility.title': '屏蔽提供方与模型',
+  'acpVisibility.intro': '被屏蔽的提供方不会出现在模型选择里（输入框的模型入口与 /model 弹窗）；提供方未被屏蔽时，也可以只屏蔽它下面的个别模型。屏蔽只作用于选择列表：官方设置里的「模型」照旧列出全部、密钥不受影响，随时可以恢复。选择保存在这台机器上，换浏览器不会丢。',
+  'acpVisibility.summary': '已屏蔽 {agents} 个提供方、{models} 个模型。',
+  'acpVisibility.summaryNone': '当前没有屏蔽任何提供方或模型。',
+  'acpVisibility.reset': '全部恢复',
+  'acpVisibility.reload': '重新读取',
+  'acpVisibility.retry': '重试',
+  'acpVisibility.loading': '正在读取提供方与模型清单……',
+  'acpVisibility.empty': '这台主机没有列出任何模型提供方。',
+  'acpVisibility.noModels': '这个提供方没有可列出的模型。',
+  'acpVisibility.agentHiddenHint': '整个提供方已屏蔽；取消勾选后才能单独调整它下面的模型。',
+  'acpVisibility.agentToggleNamed': '屏蔽提供方：{name}',
+  'acpVisibility.modelToggleNamed': '屏蔽模型：{name}',
+  'acpVisibility.agentFailure': '模型目录读取失败：{message}',
+  'acpVisibility.error.missing': '这台主机没有提供模型目录（remote.session.modelCatalog）。',
+  'acpVisibility.error.shape': '模型目录的返回形状不符合预期。',
+  'acpVisibility.error.failed': '读取模型目录失败：{detail}',
 } satisfies Record<string, string>
 
 /** 这份文案的全部键，也是命名空间声明进 `LocaleNamespaceMap` 的键域。 */
@@ -774,6 +795,25 @@ export const en = {
   'panel.check.action.retry': 'Check again',
   'panel.check.manualHint': 'Neither the SSH user nor sudo -n may configure tailscale serve. Run these commands on the peer in order, then press “Check again”:',
   'panel.check.copy': 'Copy',
+
+  'acpVisibility.label': 'Providers & models',
+  'acpVisibility.title': 'Hide providers and models',
+  'acpVisibility.intro': 'A hidden provider disappears from the model pickers (the composer model menu and the /model popup); while a provider stays listed, individual models can be hidden too. Hiding only affects the pickers: the official Models settings keep listing everything and no key is touched, so restoring never asks for a key again. This choice is stored on this machine and survives a browser switch.',
+  'acpVisibility.summary': 'Hidden providers: {agents}; hidden models: {models}.',
+  'acpVisibility.summaryNone': 'No providers or models are hidden.',
+  'acpVisibility.reset': 'Restore all',
+  'acpVisibility.reload': 'Reload',
+  'acpVisibility.retry': 'Retry',
+  'acpVisibility.loading': 'Reading providers and models…',
+  'acpVisibility.empty': 'This host lists no model providers.',
+  'acpVisibility.noModels': 'This provider lists no models.',
+  'acpVisibility.agentHiddenHint': 'The whole provider is hidden; clear its checkbox to adjust individual models.',
+  'acpVisibility.agentToggleNamed': 'Hide provider: {name}',
+  'acpVisibility.modelToggleNamed': 'Hide model: {name}',
+  'acpVisibility.agentFailure': 'Model catalog failed: {message}',
+  'acpVisibility.error.missing': 'This host offers no model catalog (remote.session.modelCatalog).',
+  'acpVisibility.error.shape': 'The model catalog answered in an unexpected shape.',
+  'acpVisibility.error.failed': 'Reading the model catalog failed: {detail}',
 } satisfies Record<ClientLocaleKey, string>
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {

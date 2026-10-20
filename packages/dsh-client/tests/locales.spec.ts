@@ -28,6 +28,25 @@ const KEYS_USED_BY_COMPONENTS: readonly ClientLocaleKey[] = [
   'pairing.guidance.unreachableTitle',
   'pairing.guidance.unreachable',
   'pairing.guidance.detail',
+  // The ACP visibility settings section (acp-visibility-panel.tsx).
+  'acpVisibility.label',
+  'acpVisibility.title',
+  'acpVisibility.intro',
+  'acpVisibility.summary',
+  'acpVisibility.summaryNone',
+  'acpVisibility.reset',
+  'acpVisibility.reload',
+  'acpVisibility.retry',
+  'acpVisibility.loading',
+  'acpVisibility.empty',
+  'acpVisibility.noModels',
+  'acpVisibility.agentHiddenHint',
+  'acpVisibility.agentToggleNamed',
+  'acpVisibility.modelToggleNamed',
+  'acpVisibility.agentFailure',
+  'acpVisibility.error.missing',
+  'acpVisibility.error.shape',
+  'acpVisibility.error.failed',
 ]
 
 /** Every `{name}` placeholder a value carries, in order. */

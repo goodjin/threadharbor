@@ -120,6 +120,18 @@ function fakeCtx(options: { services?: Namespaces; slots?: PanelSlotHost } = {})
       // 缺席」在测试里变成必须显式处理，而 cordis 从来不这样。
       return services[name]
     },
+    // The real `ctx.inject` waits for a declared service and runs the callback
+    // in a child context. Here every service is present up front, so the child
+    // runs immediately — and only when the dependencies exist, which is the
+    // behavior the filter's "wait for modelDirectories" path relies on.
+    inject: (deps, callback) => {
+      if (deps.some(dep => services[dep] === undefined)) return () => {}
+      callback({
+        modelDirectories: services['modelDirectories'],
+        effect: (dispose: () => void) => { dispose(); return () => {} },
+      })
+      return () => {}
+    },
     slots: options.slots ?? slotHost(core),
   }
   const declared = new Set<string>(inject)
@@ -155,6 +167,9 @@ describe('面板挂载', () => {
 
     const sections = ctx.core.entriesOfSlot('settings.section')
     expect(sections.some(entry => entry.options.id === 'threadharbor-rollup')).toBe(true)
+    // The ACP visibility section is a second rail row, not a second screen on
+    // the hosts section: it must register even when this page has no catalog.
+    expect(sections.some(entry => entry.options.id === 'threadharbor-acp-visibility')).toBe(true)
     expect(ctx.core.entriesOfSlot('main').some(entry => entry.options.key === 'threadharbor-rollup')).toBe(false)
     expect(ctx.core.entriesOfSlot('sidebar.panellist').some(entry => entry.options.id === 'threadharbor-rollup')).toBe(false)
     expect(ctx.core.entriesOfSlot('main').some(entry => entry.options.key === 'threadharbor-remote-session')).toBe(true)

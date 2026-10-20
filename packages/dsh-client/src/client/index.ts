@@ -69,6 +69,12 @@ import { startRollUpSection } from '../rollup-section.ts'
 import { buildHostSessions, readSessionSources } from '../session-source.ts'
 import type { SectionSession, SessionRead } from '../session-source.ts'
 import { startPairingSurface } from '../pairing-panel.ts'
+import { startAcpVisibility } from '../acp-visibility.ts'
+import type { AcpVisibilityStore } from '../acp-visibility.ts'
+import { createAcpCatalogStore } from '../acp-visibility-catalog.ts'
+import { installAcpVisibilityFilter } from '../acp-visibility-filter.ts'
+import { registerAcpVisibilitySection } from '../acp-visibility-panel.tsx'
+import type { AcpVisibilityBusinessProps, AcpVisibilitySlotHost } from '../acp-visibility-panel.tsx'
 import { AgentPanel } from '../panel.tsx'
 import type { AgentListPort, AgentPanelBusinessProps, ProbeStarter, RemotePort, TailscalePeersResult, TailscalePort } from '../panel.tsx'
 import { readRemotePeer, startRemotePeer } from '../ssh-deploy.ts'
@@ -200,6 +206,12 @@ export type ClientPanelContext = {
   /** Any service name; absent names and absent services both read as undefined. */
   get(name: string): unknown
   slots: PanelSlotHost
+  /**
+   * Wait for an optional service and run inside its child context. Cordis
+   * supplies this; a narrow test context may not, and the wiring then tries
+   * one immediate read instead.
+   */
+  inject?(deps: readonly string[], callback: (child: unknown) => void): unknown
 }
 
 /**
@@ -386,6 +398,21 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
     log.info(`host store posture: ${JSON.stringify(hostStore.posture())}`)
   })
 
+  // Provider/model visibility: the choice rides the same machine-backed
+  // document as the host registry, and the pickers read it through a filter
+  // over the shared model-directory service. Every provider group is covered
+  // (ACP presets and built-in providers alike); the official Settings →
+  // Models page is not filtered, so the keys there stay reachable. The
+  // filter waits for that service (`ctx.inject`) so it cannot patch a
+  // service that has not arrived yet — and re-applies if the service is ever
+  // replaced.
+  const acpVisibility = startAcpVisibility(hostStore.storage, message => { log.warn(message) })
+  ctx.effect(
+    () => hostStore.subscribe(() => { acpVisibility.refresh() }),
+    'threadharbor: acp visibility re-read on host storage change',
+  )
+  mountAcpVisibilityFilter(ctx, acpVisibility, message => { log.warn(message) })
+
   const openGateway = (): GatewayOpening => openSessionGateway(ctx)
   // A mount-time read, purely for the self-report: what the host provides may
   // settle later, so absence here is a log line, never a functional gate.
@@ -409,6 +436,23 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
     },
   }
   registerPanelSlots(ctx.slots, face, () => t('panel.label'))
+
+  // 第二个设置栏目：提供方与模型的屏蔽。它读原始目录（不是被过滤后的
+  // 目录），否则被屏蔽的行就没法在这里重新出现、取消屏蔽；也正因官方
+  // 「模型」设置页不过滤，这里是屏蔽后唯一的恢复入口。
+  const acpFace: AcpVisibilityBusinessProps = {
+    visibility: acpVisibility,
+    catalog: createAcpCatalogStore(catalogReaderOf(ctx)),
+    hostStore: {
+      posture: () => hostStore.posture(),
+      subscribe: hostStore.subscribe,
+    },
+  }
+  registerAcpVisibilitySection(
+    ctx.slots as unknown as AcpVisibilitySlotHost,
+    acpFace,
+    () => t('acpVisibility.label'),
+  )
 
   // 阶段 L：以更低优先级数值遮蔽原生工作区列表，接管为「主机 → 项目 →
   // 会话」树（§8.5）。开关 threadharbor.sidebarTree=off 时跳过注册，原生
@@ -767,6 +811,64 @@ function tailscalePort(ctx: ClientPanelContext, channel: HostStoreChannel | unde
       return readPeers()
     },
   }
+}
+
+/**
+ * Install the picker filter once the model-directory service exists.
+ *
+ * `ctx.inject` is the real path: it runs the callback in a child fiber, so a
+ * service replaced later re-runs it and the old filter is disposed with that
+ * fiber. A test context without `inject` gets one immediate attempt, and a
+ * service that is not there yet simply means the pickers are unfiltered for
+ * this page — the settings section still stores the choice.
+ *
+ * The fallback reads through `ctx.get` only: a property read here would hit
+ * cordis's undeclared-property refusal (modelDirectories is optional for this
+ * entry, so it is not in the entry's inject list) and take the whole entry
+ * down.
+ */
+function mountAcpVisibilityFilter(
+  ctx: ClientPanelContext,
+  visibility: AcpVisibilityStore,
+  report: (message: string) => void,
+): void {
+  const attach = (service: unknown, effect: (dispose: () => void) => void): void => {
+    const dispose = installAcpVisibilityFilter(service, visibility, report)
+    if (dispose !== undefined) effect(dispose)
+  }
+  const injector = ctx.inject
+  if (typeof injector === 'function') {
+    injector.call(ctx, ['modelDirectories'], child => {
+      const childEffect = boundMethod(child, 'effect')
+      attach(propertyOf(child, 'modelDirectories'), dispose => {
+        if (childEffect !== undefined) childEffect(() => dispose)
+        else ctx.effect(() => dispose, 'threadharbor: acp visibility picker filter')
+      })
+    })
+    return
+  }
+  let service: unknown
+  try {
+    service = ctx.get('modelDirectories')
+  } catch {
+    service = undefined
+  }
+  attach(service, dispose => {
+    ctx.effect(() => dispose, 'threadharbor: acp visibility picker filter')
+  })
+}
+
+/**
+ * The raw model catalog for the settings section — the open door, not the
+ * filtered directories. Hidden rows must stay listable so they can be
+ * unhidden. Absent (no remote or no modelCatalog method) reads as undefined
+ * and the section says the host offers none.
+ */
+function catalogReaderOf(ctx: ClientPanelContext): (() => Promise<unknown>) | undefined {
+  const direct = readService(ctx, 'remote.session')
+  const session = direct ?? propertyOf(readService(ctx, 'remote'), 'session')
+  const read = boundMethod(session, 'modelCatalog')
+  return read === undefined ? undefined : async () => await read()
 }
 
 /** Re-read the host storage when this document changes elsewhere (another tab). */
