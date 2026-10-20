@@ -176,7 +176,7 @@ async function handleHttp(deps: GatewayDeps, jar: CookieJar, req: IncomingMessag
     text(res, 502, '远端没有换出登录 cookie，打开地址可能已失效')
     return
   }
-  await forwardHttp(req, res, target.origin, route.upstreamPath, route.search, route.hostId, cookie, () => {
+  await forwardHttp(req, res, target.origin, route.upstreamPath, route.search, route.hostId, target.hostTitle, cookie, () => {
     jar.invalidate(target.origin, target.token)
   })
 }
@@ -214,7 +214,7 @@ async function targetOf(
   hostId: string,
   pageHost: string | undefined,
 ): Promise<
-  | { readonly ok: true; readonly origin: string; readonly token: string }
+  | { readonly ok: true; readonly origin: string; readonly token: string; readonly hostTitle: string }
   | { readonly ok: false; readonly status: 400 | 404 | 503; readonly message: string }
 > {
   let read: RegistryRead
@@ -239,6 +239,7 @@ function forwardHttp(
   upstreamPath: string,
   search: string,
   hostId: string,
+  hostTitle: string,
   cookie: string,
   onUnauthorized: () => void,
 ): Promise<void> {
@@ -274,7 +275,7 @@ function forwardHttp(
         const raw = Buffer.concat(chunks)
         const body = total > GATEWAY_REWRITE_LIMIT_BYTES || kind === undefined
           ? raw
-          : Buffer.from(rewriteBody(kind, raw.toString('utf8'), hostId))
+          : Buffer.from(rewriteBody(kind, raw.toString('utf8'), hostId, hostTitle))
         const headersOut = responseHeaders(upRes, origin, hostId, true)
         headersOut['content-length'] = Buffer.byteLength(body)
         res.writeHead(upRes.statusCode ?? 502, headersOut)

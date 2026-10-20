@@ -28,7 +28,7 @@ export type GatewayRoute =
   | { readonly ok: false; readonly status: 400 | 404; readonly message: string }
 
 export type LaunchTarget =
-  | { readonly ok: true; readonly origin: string; readonly token: string }
+  | { readonly ok: true; readonly origin: string; readonly token: string; readonly hostTitle: string }
   | { readonly ok: false; readonly status: 404; readonly message: string }
 
 /** Page URL the iframe loads for one registered host. */
@@ -119,7 +119,9 @@ export function resolveLaunch(registryJson: string | undefined, hostId: string):
   }
   const token = launch.searchParams.get('token')
   if (token === null || token === '') return { ok: false, status: 404, message: '打开地址里没有登录令牌' }
-  return { ok: true, origin: launch.origin, token }
+  const rawTitle = entry['hostTitle']
+  const hostTitle = typeof rawTitle === 'string' && rawTitle.trim() !== '' ? rawTitle.trim() : hostId
+  return { ok: true, origin: launch.origin, token, hostTitle }
 }
 
 /** True when the registered origin is the page the browser is already on. */
@@ -169,8 +171,8 @@ export function rewriteKind(contentType: string | undefined): RewriteKind | unde
 export const GATEWAY_REWRITE_LIMIT_BYTES = REWRITE_LIMIT_BYTES
 
 /** Rewrite one text body. Callers skip this when the body is over the limit. */
-export function rewriteBody(kind: RewriteKind, body: string, hostId: string): string {
-  if (kind === 'html') return rewriteHtml(body, hostId)
+export function rewriteBody(kind: RewriteKind, body: string, hostId: string, hostTitle: string): string {
+  if (kind === 'html') return rewriteHtml(body, hostId, hostTitle)
   if (kind === 'css') return rewriteCss(body, hostId)
   return rewriteJs(body, hostId)
 }
@@ -180,13 +182,13 @@ export function rewriteBody(kind: RewriteKind, body: string, hostId: string): st
  * fetches and the mux socket through this gateway, and keeps the framed app's
  * storage off the parent page's keys.
  */
-export function rewriteHtml(html: string, hostId: string): string {
+export function rewriteHtml(html: string, hostId: string, hostTitle: string): string {
   const root = gatewayPagePath(hostId)
   const rewritten = html.replace(
     /(\s(?:src|href|action|poster)\s*=\s*)(['"])\/(?!\/)/gi,
     (_match, lead: string, quote: string) => `${lead}${quote}${root}`,
   )
-  const inject = `<base href="${root}"><script>${gatewayClientScript(hostId)}</script>`
+  const inject = `<base href="${root}"><script>${gatewayClientScript(hostId, hostTitle)}</script>`
   if (/<head\b[^>]*>/i.test(rewritten)) {
     return rewritten.replace(/<head\b[^>]*>/i, match => `${match}${inject}`)
   }
@@ -215,15 +217,20 @@ export function rewriteJs(js: string, hostId: string): string {
  * Runs in the framed page before the remote app.
  * Root-absolute URLs are prefixed; the mux WebSocket is sent to {@link GATEWAY_WS_PATH}.
  * Storage, cookies, and service workers stay in this frame so they cannot overwrite the parent page.
+ * Once the document is ready it also mounts a small `#th-host-bar` with the host
+ * title and a `#th-back-home` link to this machine, unless the remote page already
+ * renders its own switcher (`[data-host-switcher]`).
  */
-export function gatewayClientScript(hostId: string): string {
+export function gatewayClientScript(hostId: string, hostTitle: string): string {
   const prefix = JSON.stringify(gatewayPagePath(hostId).replace(/\/$/, ''))
   const id = JSON.stringify(hostId)
   const wsPath = JSON.stringify(GATEWAY_WS_PATH)
+  const title = JSON.stringify(hostTitle)
   return `(function(){
 var prefix=${prefix};
 var hostId=${id};
 var wsPath=${wsPath};
+var title=${title};
 var mark="thgw:"+hostId+":";
 var realLocal=null;
 var realSession=null;
@@ -354,6 +361,25 @@ if(opened||tries>80){clearInterval(timer);timer=0;}
 }
 window.addEventListener("hashchange",function(){opened="";arm();});
 arm();
+function mountBar(){
+try{
+if(document.querySelector("[data-host-switcher]"))return;
+var bar=document.createElement("div");
+bar.id="th-host-bar";
+bar.setAttribute("style","position:fixed;top:0;left:0;right:0;z-index:2147483647;display:flex;align-items:center;gap:12px;padding:7px 14px;background:#151a24;color:#e6e9ef;font:13px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;box-shadow:0 1px 4px rgba(0,0,0,.35);");
+var label=document.createElement("span");
+label.textContent="当前主机 "+title;
+var link=document.createElement("a");
+link.id="th-back-home";
+link.href="/";
+link.textContent="回本机";
+link.setAttribute("style","color:#8ab4ff;text-decoration:none;font-weight:600;");
+bar.appendChild(label);
+bar.appendChild(link);
+if(document.body)document.body.insertBefore(bar,document.body.firstChild);
+}catch(e){}
+}
+if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",mountBar);}else{mountBar();}
 })();`
 }
 

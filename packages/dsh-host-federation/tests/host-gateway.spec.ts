@@ -61,19 +61,27 @@ describe('网关路径', () => {
   })
 
   it('页面被改写到网关前缀，注入脚本能解析', () => {
-    const html = rewriteHtml('<html><head><script src="/assets/app.js"></script></head><body>REMOTE</body></html>', 'mini')
+    const html = rewriteHtml('<html><head><script src="/assets/app.js"></script></head><body>REMOTE</body></html>', 'mini', '迷你')
     expect(html.indexOf('<base href="/threadharbor/gateway/mini/">')).toBeLessThan(html.indexOf('src="/threadharbor/gateway/mini/assets/app.js"'))
     expect(html).toContain('REMOTE')
     expect(html).not.toContain('src="/assets/app.js"')
-    expect(() => { new Function(gatewayClientScript('mini')) }).not.toThrow()
-    expect(gatewayClientScript('mini')).toContain('/threadharbor/gateway-ws')
-    expect(gatewayClientScript('mini')).toContain('thSession=')
-    expect(gatewayClientScript('mini')).toContain('openSession')
-    expect(gatewayClientScript('mini')).not.toContain('</script')
+    expect(() => { new Function(gatewayClientScript('mini', '迷你')) }).not.toThrow()
+    expect(gatewayClientScript('mini', '迷你')).toContain('/threadharbor/gateway-ws')
+    expect(gatewayClientScript('mini', '迷你')).toContain('thSession=')
+    expect(gatewayClientScript('mini', '迷你')).toContain('openSession')
+    expect(gatewayClientScript('mini', '迷你')).not.toContain('</script')
     const rewritten = rewriteJs('ctx.get("uiWorkspace");ctx.uiWorkspace.openSession(id);import("/assets/app.js")', 'mini')
     expect(rewritten).toContain('(window.__thUiWorkspace=ctx.get("uiWorkspace"))')
     expect(rewritten).toContain('(window.__thUiWorkspace=ctx.uiWorkspace).openSession(id)')
     expect(rewritten).toContain('/threadharbor/gateway/mini/assets/app.js')
+  })
+
+  it('注入脚本带上当前主机名与回本机入口', () => {
+    const html = rewriteHtml('<html><head></head><body>REMOTE</body></html>', 'mini', '小机器')
+    expect(html).toContain('小机器')
+    expect(gatewayClientScript('mini', '小机器')).toContain('th-host-bar')
+    expect(gatewayClientScript('mini', '小机器')).toContain('th-back-home')
+    expect(() => { new Function(gatewayClientScript('mini', '小机器')) }).not.toThrow()
   })
 })
 
