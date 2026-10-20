@@ -249,6 +249,7 @@ const DISPLAY: Readonly<Record<string, string>> = {
   claude: 'Claude',
   codex: 'Codex',
   cursor: 'Cursor',
+  qoder: 'Qoder',
   zcode: 'ZCode',
   minimaxi: 'MiniMax',
 }

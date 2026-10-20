@@ -9,7 +9,7 @@
 
 ## 一、先说结论
 
-**六个入口（grok / codex / claude / cursor / zcode / minimaxi）各自独立，可以分别装；不装也不影响 DSH 自带的 agent。** zcode 与 minimaxi 是模型，另外四个是 ACP agent。
+**七个入口（grok / codex / claude / cursor / qoder / zcode / minimaxi）各自独立，可以分别装；不装也不影响 DSH 自带的 agent。** zcode 与 minimaxi 是模型，另外五个是 ACP agent。
 
 不装任何东西 = 纯 DSH，所有会话走原生 agent，行为与没装之前一样。
 
@@ -92,9 +92,31 @@ DSH 的 agent preset 本身**就是一个组合**（一组插件行）：
               agent: claude
               command: /Users/good/.local/bin/claude-agent-acp
               mode: default         # claude 默认 bypassPermissions，不写这行它永远不问
+
+    # ── qoder：起子进程，先在本机登录一次 ──────────────
+    - id: acp-qoder
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: acp-qoder
+        name: Qoder
+        order: 50
+        plugins:
+          - id: acp-qoder-binding
+            name: '@threadharbor/dsh-preset-dispatch'
+            config:
+              presetId: acp-qoder
+              agent: qoder
+              # 国际版二进制叫 qodercli；CN 版是 qoderclicn
+              command: /Users/good/.local/bin/qoderclicn
+              mode: default         # 动手前询问；另见下方模式表
+              # 不需要写 args：agent: qoder 会自动补 --acp。
+              # 需先在终端跑一次 `qoderclicn login`。
 ```
 
-**只想要一个？删掉另外两段即可。** 三段之间没有依赖。
+**只想要一个？删掉其余几段即可。** 各段之间没有依赖。
+
+`command` 之外还可以写可选的 `args`，显式写了就完全接管命令行；不写时按 `agent`
+补默认值（cursor 为 `acp --trust`，qoder 为 `--acp`，其余为空）。
 
 ### 看护参数（可选，2026-10-16）
 
@@ -115,7 +137,7 @@ preset 行可以再写四个毫秒数的看护参数，管的是「外部 agent 
 装好后 agent 会出现在两个地方：模型列表（composer 的 provider 列）和 preset
 选择器（新建会话的芯片）。两者指向同一批注册：DSH 的注册表激活 preset 时是
 **急切挂载**（`agent-preset-registry/src/index.ts` 的 `register()` 一进来就
-`mountPreset`），所以四行 dispatch 一直在跑、各自的模型一直躺在全局目录里——
+`mountPreset`），所以这些 dispatch 行一直在跑、各自的模型一直躺在全局目录里——
 这就是「模型列表可切换」的来源；而选择器读的是同一个注册表的名册。
 
 模型列表已经是完整的切换入口（空会话选 `acp:` 模型会原地切到对应 preset，
@@ -139,10 +161,12 @@ agent 只要打同样的标记。网关是调用时在实例上按名字取方�
 | grok | `grok` | WebSocket | `url` | 不支持，留空 |
 | codex | `codex` | 子进程 | `command` | `read-only`（每步都问）/ `agent`（默认）/ `agent-full-access`。**没有 `on-request` 这个值**——那是设计文档里 approval_policy 的词汇，不是 `session/set_mode` 收的 modeId |
 | claude code | `claude` | 子进程 | `command` | `default`（Manual，每步都问）/ `acceptEdits` / `plan` / `auto` / `bypassPermissions`（默认）。**想让它问必须显式写 `mode: default`** |
+| cursor | `cursor` | 子进程 | `command` | `agent`（默认）/ `plan` / `ask`。需先在终端完成一次 `agent login`；`args` 默认 `acp --trust` |
+| qoder | `qoder` | 子进程 | `command` | `default`（默认，动手前询问）/ `acceptEdits` / `bypassPermissions` / `plan`。需先在终端完成一次 `qoderclicn login`（国际版 `qodercli login`）；`args` 默认 `--acp` |
 
-（modeId 清单取自 `packages/dsh-acp-agent/tests/fixtures/captured-frames.json` 里
-三家的 `session/new` 实测帧：codex 的 `modes.availableModes` 与 claude 的
-`modes.availableModes`；grok 实测不返回 modes。）
+（modeId 清单取自 `packages/dsh-acp-agent/tests/fixtures/` 里各家的 `session/new`
+实测帧；grok 实测不返回 modes。cursor 与 qoder 的细节分别见
+[docs/agent-acp/cursor.md](agent-acp/cursor.md) 与 [docs/agent-acp/qoder.md](agent-acp/qoder.md)。）
 
 没有对应二进制就**不要写那一行**——写了会在第一次用到时报连接失败，
 而不是安装时报错。
@@ -192,14 +216,14 @@ preset——切走后残留的接管会在下一轮自己让位回原生 step（
 
 **已就绪**
 
-- 四个 ACP agent（帧方言、传输、权限、终端、投影）都在
+- 五个 ACP agent（帧方言、传输、权限、终端、投影）都在
   `dsh-preset-dispatch` 与 `dsh-acp-agent` 里，走的是同一套代码。
   zcode 不另起进程：模型列表里单独一组 GLM，用本机 ZCode 登录密钥直连 Coding Plan，读文件、跑命令、审批仍是 DSH 自己的。
   minimaxi 同样不另起进程：模型列表里单独一组 MiniMax，用本机 MiniMax Code 的登录凭据直连托管网关，凭据的读取与刷新采用官方实现，与桌面版共用同一个文件与同一把锁；本机没登录 MiniMax Code 时该组不可用。
 - 宿主入口 `applyAcpPlugin` 已实现并有测试，作用域过滤、未知 agent 不接管、
   单个会话出错不影响其余，都有覆盖；
-- 真实 agent 端到端跑通：claude、codex、grok 各一轮，外加权限请求应答后回合继续、
-  以及「回合还在跑就已经流出文字」。
+- 真实 agent 端到端跑通：claude、codex、grok、cursor、qoder 各一轮，外加权限请求
+  应答后回合继续、以及「回合还在跑就已经流出文字」。
 
 **四个真机浏览器问题的修复（2026-10-10 晚，全部真机复验过）**
 
@@ -387,6 +411,9 @@ DSH 配置下安装**不再需要版本放行**，真机加载无报错。渲染
 没有它这一行就不知道自己属于哪个 preset，会去接管所有会话。照着文档里原来的示例抄，
 会在启动时被配置校验挡下，报 `$.presetId missing required value`。上面的示例已补。
 
-**二、配置里没有 `args`。** 起子进程的 agent 只能给一个 `command`，没法带参数。
-要传参数只能自己包一个脚本。这条是从端到端复验里发现的：想用一个「握完手就在回合中途
-死掉」的假 agent 来验断连行为，发现没法把脚本路径传进去。
+**二、`args` 已支持（2026-10-20 更新）。** 这条坑最初是真的：起子进程的 agent
+那时只能给一个 `command`，没法带参数，端到端复验想用一个「握完手就在回合中途死掉」
+的假 agent 时，连脚本路径都传不进去。现在配置里有可选的 `args`，显式写了就完全
+接管命令行；不写时按 `agent` 补默认值（cursor 的 `acp --trust`、qoder 的 `--acp`）。
+qoder 子进程还会剥掉 IDE 注入的 `QODER_*` / `CLAUDE*` / `VSCODE_*` 环境变量，
+否则从 Qoder IDE 的终端启动会误判为 SDK worker 并直接退出。

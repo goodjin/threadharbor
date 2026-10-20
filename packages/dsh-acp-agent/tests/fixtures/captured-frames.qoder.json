@@ -1,0 +1,683 @@
+{
+  "initialize": {
+    "protocolVersion": 1,
+    "authMethods": [
+      {
+        "id": "qoderclicn-login",
+        "name": "Use qoderclicn login",
+        "description": "Use your existing qoderclicn login for this agent. If needed, sign in from qoderclicn first."
+      }
+    ],
+    "agentInfo": {
+      "name": "qoder-cli-cn",
+      "title": "Qoder CLI CN",
+      "version": "1.1.6"
+    },
+    "agentCapabilities": {
+      "_meta": {
+        "qoder": {
+          "promptQueueing": true
+        }
+      },
+      "loadSession": true,
+      "sessionCapabilities": {
+        "additionalDirectories": {},
+        "close": {},
+        "delete": {},
+        "fork": {},
+        "list": {},
+        "resume": {}
+      },
+      "promptCapabilities": {
+        "image": true,
+        "embeddedContext": true
+      },
+      "mcpCapabilities": {
+        "http": true,
+        "sse": true
+      }
+    }
+  },
+  "sessionNew": {
+    "sessionId": "3fad9baf-2211-47f9-8008-97185812207e",
+    "modes": {
+      "availableModes": [
+        {
+          "id": "default",
+          "name": "Default",
+          "description": "Prompts for approval"
+        },
+        {
+          "id": "acceptEdits",
+          "name": "Accept Edits",
+          "description": "Auto-approves edit tools"
+        },
+        {
+          "id": "bypassPermissions",
+          "name": "Bypass Permissions",
+          "description": "Auto-approves all tools"
+        },
+        {
+          "id": "plan",
+          "name": "Plan",
+          "description": "Read-only mode"
+        }
+      ],
+      "currentModeId": "default"
+    },
+    "models": {
+      "availableModels": [
+        {
+          "modelId": "auto",
+          "name": "Auto (default)",
+          "description": "Reasoning · Vision · 0.50x Credit"
+        },
+        {
+          "modelId": "fast",
+          "name": "Fast",
+          "description": "Reasoning · Vision · 0.80x Credit"
+        },
+        {
+          "modelId": "qmodel_38max",
+          "name": "Qwen3.8-Max",
+          "description": "Reasoning · Vision · New · 0.50x Credit"
+        },
+        {
+          "modelId": "qfmodel",
+          "name": "Qwen3.8-Flash",
+          "description": "Reasoning · Vision · New · 0.00x Credit"
+        },
+        {
+          "modelId": "qmodel_latest",
+          "name": "Qwen3.7-Max",
+          "description": "Reasoning · Vision · New · 0.50x Credit"
+        },
+        {
+          "modelId": "qmodel",
+          "name": "Qwen3.7-Plus",
+          "description": "Reasoning · Vision · New · 0.10x Credit"
+        },
+        {
+          "modelId": "q37fmodel",
+          "name": "Qwen3.7-Flash",
+          "description": "Reasoning · Vision · New · 0.10x Credit"
+        },
+        {
+          "modelId": "dmodel",
+          "name": "DeepSeek-V4-Pro",
+          "description": "Reasoning · Vision · New · 0.50x Credit"
+        },
+        {
+          "modelId": "dfmodel",
+          "name": "DeepSeek-Flash",
+          "description": "Vision · New · 0.00x Credit"
+        },
+        {
+          "modelId": "gmodel",
+          "name": "GLM-5.3",
+          "description": "Reasoning · Vision · New · 0.80x Credit"
+        },
+        {
+          "modelId": "gfmodel",
+          "name": "GLM-5.3-Flash",
+          "description": "Reasoning · Vision · New · 0.10x Credit"
+        },
+        {
+          "modelId": "gm51model",
+          "name": "GLM-5.2",
+          "description": "Reasoning · Vision · New · 0.60x Credit"
+        },
+        {
+          "modelId": "kmodel_latest",
+          "name": "Kimi-K3",
+          "description": "Vision · New · 1.40x Credit"
+        },
+        {
+          "modelId": "kmodel",
+          "name": "Kimi-K2.8-Preview",
+          "description": "Reasoning · Vision · New · 0.80x Credit"
+        },
+        {
+          "modelId": "mmodel",
+          "name": "MiniMax-M3.1-Flash",
+          "description": "Vision · New · 0.10x Credit"
+        }
+      ],
+      "currentModelId": "auto"
+    },
+    "configOptions": [
+      {
+        "type": "select",
+        "id": "mode",
+        "name": "Mode",
+        "category": "mode",
+        "currentValue": "default",
+        "options": [
+          {
+            "value": "default",
+            "name": "Default",
+            "description": "Prompts for approval"
+          },
+          {
+            "value": "acceptEdits",
+            "name": "Accept Edits",
+            "description": "Auto-approves edit tools"
+          },
+          {
+            "value": "bypassPermissions",
+            "name": "Bypass Permissions",
+            "description": "Auto-approves all tools"
+          },
+          {
+            "value": "plan",
+            "name": "Plan",
+            "description": "Read-only mode"
+          }
+        ]
+      },
+      {
+        "type": "select",
+        "id": "model",
+        "name": "Model",
+        "category": "model",
+        "currentValue": "auto",
+        "options": [
+          {
+            "value": "auto",
+            "name": "Auto (default)",
+            "description": "Reasoning · Vision · 0.50x Credit"
+          },
+          {
+            "value": "fast",
+            "name": "Fast",
+            "description": "Reasoning · Vision · 0.80x Credit"
+          },
+          {
+            "value": "qmodel_38max",
+            "name": "Qwen3.8-Max",
+            "description": "Reasoning · Vision · New · 0.50x Credit"
+          },
+          {
+            "value": "qfmodel",
+            "name": "Qwen3.8-Flash",
+            "description": "Reasoning · Vision · New · 0.00x Credit"
+          },
+          {
+            "value": "qmodel_latest",
+            "name": "Qwen3.7-Max",
+            "description": "Reasoning · Vision · New · 0.50x Credit"
+          },
+          {
+            "value": "qmodel",
+            "name": "Qwen3.7-Plus",
+            "description": "Reasoning · Vision · New · 0.10x Credit"
+          },
+          {
+            "value": "q37fmodel",
+            "name": "Qwen3.7-Flash",
+            "description": "Reasoning · Vision · New · 0.10x Credit"
+          },
+          {
+            "value": "dmodel",
+            "name": "DeepSeek-V4-Pro",
+            "description": "Reasoning · Vision · New · 0.50x Credit"
+          },
+          {
+            "value": "dfmodel",
+            "name": "DeepSeek-Flash",
+            "description": "Vision · New · 0.00x Credit"
+          },
+          {
+            "value": "gmodel",
+            "name": "GLM-5.3",
+            "description": "Reasoning · Vision · New · 0.80x Credit"
+          },
+          {
+            "value": "gfmodel",
+            "name": "GLM-5.3-Flash",
+            "description": "Reasoning · Vision · New · 0.10x Credit"
+          },
+          {
+            "value": "gm51model",
+            "name": "GLM-5.2",
+            "description": "Reasoning · Vision · New · 0.60x Credit"
+          },
+          {
+            "value": "kmodel_latest",
+            "name": "Kimi-K3",
+            "description": "Vision · New · 1.40x Credit"
+          },
+          {
+            "value": "kmodel",
+            "name": "Kimi-K2.8-Preview",
+            "description": "Reasoning · Vision · New · 0.80x Credit"
+          },
+          {
+            "value": "mmodel",
+            "name": "MiniMax-M3.1-Flash",
+            "description": "Vision · New · 0.10x Credit"
+          }
+        ]
+      }
+    ]
+  },
+  "tool": [
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "3fad9baf-2211-47f9-8008-97185812207e",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_09222dd685024da097b9ce66",
+          "status": "pending",
+          "title": "echo ACP_LIVE_OK",
+          "content": [
+            {
+              "type": "terminal",
+              "terminalId": "call_09222dd685024da097b9ce66"
+            }
+          ],
+          "kind": "execute",
+          "rawInput": {
+            "command": "echo ACP_LIVE_OK",
+            "description": "Echo ACP_LIVE_OK"
+          },
+          "_meta": {
+            "qoder": {
+              "toolName": "Bash"
+            },
+            "terminal_info": {
+              "terminal_id": "call_09222dd685024da097b9ce66"
+            }
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "3fad9baf-2211-47f9-8008-97185812207e",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_09222dd685024da097b9ce66",
+          "_meta": {
+            "terminal_output": {
+              "terminal_id": "call_09222dd685024da097b9ce66",
+              "data": "ACP_LIVE_OK"
+            }
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "3fad9baf-2211-47f9-8008-97185812207e",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_09222dd685024da097b9ce66",
+          "status": "completed",
+          "content": [
+            {
+              "type": "terminal",
+              "terminalId": "call_09222dd685024da097b9ce66"
+            }
+          ],
+          "rawOutput": "ACP_LIVE_OK",
+          "_meta": {
+            "terminal_exit": {
+              "terminal_id": "call_09222dd685024da097b9ce66",
+              "exit_code": 0,
+              "signal": null
+            }
+          }
+        }
+      }
+    }
+  ],
+  "write": [
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "db50643e-2b63-43f9-b5c3-73e13f0f2198",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_49fedd66b4754804a02d337a",
+          "status": "pending",
+          "title": "Write /tmp/qoder-perm-probe/probe.txt",
+          "content": [
+            {
+              "type": "diff",
+              "path": "/tmp/qoder-perm-probe/probe.txt",
+              "oldText": null,
+              "newText": "hello from qoder\n"
+            }
+          ],
+          "kind": "edit",
+          "rawInput": {
+            "content": "hello from qoder\n",
+            "file_path": "/tmp/qoder-perm-probe/probe.txt"
+          },
+          "locations": [
+            {
+              "path": "/tmp/qoder-perm-probe/probe.txt"
+            }
+          ],
+          "_meta": {
+            "qoder": {
+              "toolName": "Write"
+            }
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "session/request_permission",
+      "params": {
+        "sessionId": "db50643e-2b63-43f9-b5c3-73e13f0f2198",
+        "options": [
+          {
+            "optionId": "proceed_always",
+            "name": "Allow for this session",
+            "kind": "allow_always"
+          },
+          {
+            "optionId": "proceed_once",
+            "name": "Allow",
+            "kind": "allow_once"
+          },
+          {
+            "optionId": "cancel",
+            "name": "Reject",
+            "kind": "reject_once"
+          }
+        ],
+        "toolCall": {
+          "toolCallId": "call_49fedd66b4754804a02d337a",
+          "status": "pending",
+          "title": "Edit probe.txt",
+          "content": [
+            {
+              "type": "diff",
+              "path": "/tmp/qoder-perm-probe/probe.txt",
+              "oldText": null,
+              "newText": "hello from qoder\n",
+              "_meta": {
+                "kind": "add"
+              }
+            }
+          ],
+          "kind": "edit",
+          "rawInput": {
+            "content": "hello from qoder\n",
+            "file_path": "/tmp/qoder-perm-probe/probe.txt"
+          },
+          "_meta": {
+            "qoder": {
+              "toolName": "Write"
+            }
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "db50643e-2b63-43f9-b5c3-73e13f0f2198",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_49fedd66b4754804a02d337a",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "File created successfully at: /tmp/qoder-perm-probe/probe.txt"
+              }
+            }
+          ],
+          "rawOutput": "File created successfully at: /tmp/qoder-perm-probe/probe.txt"
+        }
+      }
+    }
+  ],
+  "readSearch": [
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "95e4040e-ce4e-4157-b026-a9ee94b86c7f",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_65cc5a20082f415eb2df31d3",
+          "status": "pending",
+          "title": "Read /tmp/qoder-perm-probe/probe.txt",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "{\n  \"file_path\": \"/tmp/qoder-perm-probe/probe.txt\"\n}"
+              }
+            }
+          ],
+          "kind": "read",
+          "rawInput": {
+            "file_path": "/tmp/qoder-perm-probe/probe.txt"
+          },
+          "locations": [
+            {
+              "path": "/tmp/qoder-perm-probe/probe.txt"
+            }
+          ],
+          "_meta": {
+            "qoder": {
+              "toolName": "Read"
+            }
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "95e4040e-ce4e-4157-b026-a9ee94b86c7f",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_03a7d6031b3143da9890c213",
+          "status": "pending",
+          "title": "Search hello",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "{\n  \"output_mode\": \"content\",\n  \"path\": \"/tmp/qoder-perm-probe\",\n  \"pattern\": \"hello\"\n}"
+              }
+            }
+          ],
+          "kind": "search",
+          "rawInput": {
+            "output_mode": "content",
+            "path": "/tmp/qoder-perm-probe",
+            "pattern": "hello"
+          },
+          "locations": [
+            {
+              "path": "/tmp/qoder-perm-probe"
+            }
+          ],
+          "_meta": {
+            "qoder": {
+              "toolName": "Grep"
+            }
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "95e4040e-ce4e-4157-b026-a9ee94b86c7f",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_28e579b4521a4a3a8fec0928",
+          "status": "pending",
+          "title": "Search *.txt",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "{\n  \"path\": \"/tmp/qoder-perm-probe\",\n  \"pattern\": \"*.txt\"\n}"
+              }
+            }
+          ],
+          "kind": "search",
+          "rawInput": {
+            "path": "/tmp/qoder-perm-probe",
+            "pattern": "*.txt"
+          },
+          "locations": [
+            {
+              "path": "/tmp/qoder-perm-probe"
+            }
+          ],
+          "_meta": {
+            "qoder": {
+              "toolName": "Glob"
+            }
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "95e4040e-ce4e-4157-b026-a9ee94b86c7f",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_65cc5a20082f415eb2df31d3",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "```\n1\thello from qoder, edited\n2\t\n```"
+              }
+            }
+          ],
+          "rawOutput": "1\thello from qoder, edited\n2\t"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "95e4040e-ce4e-4157-b026-a9ee94b86c7f",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_03a7d6031b3143da9890c213",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "probe.txt:1:hello from qoder, edited"
+              }
+            }
+          ],
+          "rawOutput": "probe.txt:1:hello from qoder, edited"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "95e4040e-ce4e-4157-b026-a9ee94b86c7f",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_28e579b4521a4a3a8fec0928",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "probe.txt"
+              }
+            }
+          ],
+          "rawOutput": "probe.txt"
+        }
+      }
+    }
+  ],
+  "promptReply": {
+    "stopReason": "end_turn",
+    "userMessageId": "585cac5f-ab46-4dd4-94dd-53db0723fc38",
+    "usage": {
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "totalTokens": 0
+    },
+    "_meta": {
+      "quota": {
+        "token_count": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        },
+        "model_usage": [
+          {
+            "model": "auto",
+            "token_count": {
+              "input_tokens": 0,
+              "output_tokens": 0
+            }
+          }
+        ]
+      }
+    }
+  },
+  "cancelReply": {
+    "stopReason": "cancelled",
+    "userMessageId": "7fddcfc7-c041-491a-b757-a80a93bdcd23",
+    "usage": {
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "totalTokens": 0
+    },
+    "_meta": {
+      "quota": {
+        "token_count": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        },
+        "model_usage": [
+          {
+            "model": "auto",
+            "token_count": {
+              "input_tokens": 0,
+              "output_tokens": 0
+            }
+          }
+        ]
+      }
+    }
+  }
+}

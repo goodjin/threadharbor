@@ -38,6 +38,7 @@ import { claudeDialect } from '../src/dialects/claude.ts'
 import { codexDialect } from '../src/dialects/codex.ts'
 import { cursorDialect } from '../src/dialects/cursor.ts'
 import { grokDialect } from '../src/dialects/grok.ts'
+import { qoderDialect } from '../src/dialects/qoder.ts'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import type { AcpFrame } from '../src/acp-client.ts'
@@ -46,6 +47,10 @@ import type { AcpDialect } from '../src/dialects/types.ts'
 const captured = JSON.parse(
   readFileSync(fileURLToPath(new URL('./fixtures/captured-frames.json', import.meta.url)), 'utf8'),
 ) as Record<string, Record<string, unknown>>
+
+const qoderCaptured = JSON.parse(
+  readFileSync(fileURLToPath(new URL('./fixtures/captured-frames.qoder.json', import.meta.url)), 'utf8'),
+) as { tool: AcpFrame[]; readSearch: AcpFrame[] }
 
 /** Names `classifyTool` (TOOL_VARIANTS) maps to a generic-row variant. */
 const CLASSIFY_NAMES = new Set([
@@ -98,8 +103,17 @@ describe('mapToolName', () => {
     expect(mapToolName(claudeDialect, 'Skill')).toBe('skill')
   })
 
+  it('qoder 的 _meta.qoder.toolName 映射成 DSH 短名', () => {
+    expect(mapToolName(qoderDialect, 'Bash')).toBe('bash')
+    expect(mapToolName(qoderDialect, 'Read')).toBe('read')
+    expect(mapToolName(qoderDialect, 'Edit')).toBe('edit')
+    expect(mapToolName(qoderDialect, 'Write')).toBe('write')
+    expect(mapToolName(qoderDialect, 'Grep')).toBe('grep')
+    expect(mapToolName(qoderDialect, 'Glob')).toBe('glob')
+  })
+
   it('每张映射表的值都是 DSH 认识的键（classifyTool 或 keyed toolview）', () => {
-    for (const dialect of [claudeDialect, codexDialect, grokDialect, cursorDialect]) {
+    for (const dialect of [claudeDialect, codexDialect, grokDialect, cursorDialect, qoderDialect]) {
       for (const [raw, mapped] of Object.entries(dialect.capabilities.toolNameMap)) {
         expect(CLASSIFY_NAMES.has(mapped) || KEYED_NAMES.has(mapped),
           `${dialect.id}: ${raw} → ${mapped} 不是 DSH 认识的工具名`).toBe(true)
@@ -108,7 +122,7 @@ describe('mapToolName', () => {
   })
 
   it('每张映射表至少有一条，且键不与值冲突（映射后仍是认识的名字或原样）', () => {
-    for (const dialect of [claudeDialect, codexDialect, grokDialect, cursorDialect]) {
+    for (const dialect of [claudeDialect, codexDialect, grokDialect, cursorDialect, qoderDialect]) {
       expect(Object.keys(dialect.capabilities.toolNameMap).length,
         `${dialect.id} 的 toolNameMap 不应为空`).toBeGreaterThan(0)
     }
@@ -129,6 +143,20 @@ describe('投影写出的 tool/call 名经映射', () => {
 
   it('projectTurn：grok 实拍 run_terminal_command 写成 bash', () => {
     expect(call(projectTurn(captured['grok']!['tool'] as AcpFrame[], { turn: 1, dialect: grokDialect })).name).toBe('bash')
+  })
+
+  it('projectTurn：qoder 实拍 _meta.qoder.toolName Bash 写成 bash', () => {
+    expect(call(projectTurn(qoderCaptured.tool, { turn: 1, dialect: qoderDialect })).name).toBe('bash')
+  })
+
+  it('projectTurnIncremental：qoder 流式路径同样映射', () => {
+    expect(call(projectTurnIncremental(qoderCaptured.tool, { turn: 1, dialect: qoderDialect })).name).toBe('bash')
+  })
+
+  it('projectToolCallFrame：qoder 的 Read 首帧开卡映射成 read', () => {
+    const frame = qoderCaptured.readSearch[0]!
+    const event = projectToolCallFrame(frame, { turn: 1, step: 1, dialect: qoderDialect })
+    expect((event!.payload as { name: string }).name).toBe('read')
   })
 
   it('projectTurnIncremental：流式路径同样映射（首帧开卡是唯一入库的卡）', () => {
@@ -165,5 +193,5 @@ function recordOf(value: unknown): Record<string, unknown> {
 }
 
 /** Type-level guard used above: every dialect is an AcpDialect. */
-const dialects: readonly AcpDialect[] = [claudeDialect, codexDialect, grokDialect, cursorDialect]
+const dialects: readonly AcpDialect[] = [claudeDialect, codexDialect, grokDialect, cursorDialect, qoderDialect]
 void dialects

@@ -8,7 +8,7 @@
  */
 
 import type { AcpFrame } from '@threadharbor/dsh-acp-agent'
-import { grokDialect } from '@threadharbor/dsh-acp-agent'
+import { grokDialect, qoderDialect } from '@threadharbor/dsh-acp-agent'
 import { describe, expect, it } from 'vitest'
 import { AcpTurnRunner } from '../src/runner.ts'
 import type { AcpClientPort } from '../src/runner.ts'
@@ -101,7 +101,7 @@ describe('AcpTurnRunner', () => {
     // Cursor must authenticate (after an interactive `agent login`) before
     // session/new; the other agents have no such step and omit the method.
     const client = fakeClient()
-    ;(client as AcpClientPort & { authenticate?: () => Promise<unknown> }).authenticate = async () => {
+    ;(client as AcpClientPort & { authenticate?: (initializeResult: unknown) => Promise<unknown> }).authenticate = async () => {
       client.calls.push({ method: 'authenticate', params: {} })
     }
     await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
@@ -112,6 +112,67 @@ describe('AcpTurnRunner', () => {
     // cursor's handshake requires.
     expect(order.indexOf('authenticate')).toBeGreaterThan(order.indexOf('initialize'))
     expect(order.indexOf('authenticate')).toBeLessThan(order.indexOf('session/new'))
+  })
+
+  it('does not authenticate qoder when a logged-in session opens directly', async () => {
+    // Qoder's CLI needs no authenticate round-trip once logged in, and calling
+    // it anyway intermittently stalls for the whole open timeout (measured
+    // 2026-10-20). The working path must not pay that call.
+    const client = fakeClient()
+    let auths = 0
+    client.authenticate = async () => { auths += 1 }
+
+    await new AcpTurnRunner(client, { cwd: '/tmp', dialect: qoderDialect })
+      .run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
+
+    expect(client.calls.map(call => call.method)).not.toContain('authenticate')
+    expect(auths).toBe(0)
+  })
+
+  it('authenticates qoder after session/new refuses for lack of login, then retries once', async () => {
+    const client = fakeClient()
+    const request = client.request
+    let opens = 0
+    client.request = async (method, params) => {
+      if (method !== 'session/new') return await request(method, params)
+      opens += 1
+      client.calls.push({ method, params })
+      if (opens === 1) {
+        throw new Error('acp error: {"code":-32000,"message":"Authentication required: Authentication is required."}')
+      }
+      return { sessionId: 's1', models: { availableModels: [] } }
+    }
+    client.authenticate = async () => {
+      client.calls.push({ method: 'authenticate', params: {} })
+    }
+
+    await new AcpTurnRunner(client, { cwd: '/tmp', dialect: qoderDialect })
+      .run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
+
+    const order = client.calls.map(call => call.method)
+    expect(order.filter(method => method === 'session/new')).toHaveLength(2)
+    // The refusal comes first, then authenticate, then the one retry.
+    expect(order.indexOf('authenticate')).toBeGreaterThan(order.indexOf('session/new'))
+    expect(order.lastIndexOf('session/new')).toBeGreaterThan(order.indexOf('authenticate'))
+  })
+
+  it('does not retry qoder session/new on a failure that is not an auth refusal', async () => {
+    const client = fakeClient()
+    const request = client.request
+    let auths = 0
+    client.request = async (method, params) => {
+      if (method !== 'session/new') return await request(method, params)
+      client.calls.push({ method, params })
+      throw new Error('acp error: {"code":-32602,"message":"Invalid params"}')
+    }
+    client.authenticate = async () => { auths += 1 }
+
+    const result = await new AcpTurnRunner(client, { cwd: '/tmp', dialect: qoderDialect })
+      .run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
+
+    expect(client.calls.filter(call => call.method === 'session/new')).toHaveLength(1)
+    expect(auths).toBe(0)
+    expect(result.end).toMatchObject({ kind: 'error' })
   })
 
   it('declares the subagents client capability in the handshake', async () => {

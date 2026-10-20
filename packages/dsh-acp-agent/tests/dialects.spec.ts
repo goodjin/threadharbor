@@ -16,6 +16,7 @@ import { claudeDialect } from '../src/dialects/claude.ts'
 import { codexDialect } from '../src/dialects/codex.ts'
 import { cursorDialect } from '../src/dialects/cursor.ts'
 import { grokDialect } from '../src/dialects/grok.ts'
+import { qoderDialect } from '../src/dialects/qoder.ts'
 import type { AcpFrame } from '../src/acp-client.ts'
 
 const captured = JSON.parse(
@@ -25,6 +26,25 @@ const captured = JSON.parse(
 const cursorCaptured = JSON.parse(
   readFileSync(fileURLToPath(new URL('./fixtures/captured-frames.cursor.json', import.meta.url)), 'utf8'),
 ) as Record<string, unknown>
+
+const qoderCaptured = JSON.parse(
+  readFileSync(fileURLToPath(new URL('./fixtures/captured-frames.qoder.json', import.meta.url)), 'utf8'),
+) as {
+  initialize: Record<string, unknown>
+  sessionNew: Record<string, unknown>
+  tool: AcpFrame[]
+  write: AcpFrame[]
+  readSearch: AcpFrame[]
+  promptReply: unknown
+  cancelReply: unknown
+}
+
+const qoderUpdate = (frame: AcpFrame) => (frame.params as { update: Record<string, unknown> }).update
+
+const qoderToolName = (frame: AcpFrame) => {
+  const meta = qoderUpdate(frame)['_meta'] as { qoder?: { toolName?: string } } | undefined
+  return meta?.qoder?.toolName
+}
 
 const claudeNew = captured['claude']!['sessionNew']
 const codexNew = captured['codex']!['sessionNew']
@@ -175,6 +195,72 @@ describe('cursor dialect', () => {
     expect(cursorDialect.isContent({ sessionUpdate: 'current_mode_update' })).toBe(false)
     expect(cursorDialect.isContent({ sessionUpdate: 'available_commands_update' })).toBe(false)
     expect(cursorDialect.isContent({ sessionUpdate: 'session_info_update' })).toBe(false)
+  })
+})
+
+describe('qoder dialect', () => {
+  it('derives the authenticate method from initialize.authMethods, not a fixed id', () => {
+    // The CN build names it qoderclicn-login; the international build's id is
+    // different, so only the agent's own list is reliable.
+    expect(qoderDialect.authenticateMethodIdFrom!(qoderCaptured.initialize)).toBe('qoderclicn-login')
+    expect(qoderDialect.authenticateMethodIdFrom!({ authMethods: [{ id: 'other' }, { id: 'qoder-login' }] })).toBe('qoder-login')
+    expect(qoderDialect.authenticateMethodIdFrom!({})).toBeUndefined()
+  })
+
+  it('authenticates on demand: a logged-in session/new needs no round-trip', () => {
+    expect(qoderDialect.authenticateOnDemand).toBe(true)
+    expect(qoderDialect.sessionNeedsAuthenticate!(
+      new Error('acp error: {"code":-32000,"message":"Authentication required: Authentication is required."}'),
+    )).toBe(true)
+    expect(qoderDialect.sessionNeedsAuthenticate!(new Error('acp error: {"code":-32602,"message":"Invalid params"}')))
+      .toBe(false)
+  })
+
+  it('reads models from models.availableModels', () => {
+    const models = qoderDialect.readModels(qoderCaptured.sessionNew)
+    expect(models).toHaveLength(15)
+    expect(models[0]).toEqual({ id: 'auto', name: 'Auto (default)', description: 'Reasoning · Vision · 0.50x Credit' })
+    expect(models.map(model => model.id)).toContain('qmodel_38max')
+  })
+
+  it('takes the tool name from _meta.qoder.toolName, not the mutating title', () => {
+    const opening = qoderDialect.foldTool(undefined, qoderUpdate(qoderCaptured.tool[0]!))
+    expect(opening.name).toBe('Bash')
+    expect(opening.arguments).toEqual({ command: 'echo ACP_LIVE_OK', description: 'Echo ACP_LIVE_OK' })
+    expect(opening.title).toBe('echo ACP_LIVE_OK')
+  })
+
+  it('does not read the opening frame content as output — it is the request echo', () => {
+    const readOpening = qoderCaptured.readSearch.find(frame => qoderToolName(frame) === 'Read')!
+    expect(qoderDialect.foldTool(undefined, qoderUpdate(readOpening)).output).toBe('')
+  })
+
+  it('reads terminal bytes from _meta.terminal_output.data and the result from rawOutput', () => {
+    const [opening, interim, done] = qoderCaptured.tool
+    expect(qoderDialect.toolOutput(qoderUpdate(interim!))).toBe('ACP_LIVE_OK')
+    const folded = qoderDialect.foldTool(qoderDialect.foldTool(undefined, qoderUpdate(opening!)), qoderUpdate(interim!))
+    expect(folded.output).toBe('ACP_LIVE_OK')
+    expect(qoderDialect.foldTool(folded, qoderUpdate(done!)).status).toBe('completed')
+    expect(qoderDialect.foldTool(folded, qoderUpdate(done!)).output).toBe('ACP_LIVE_OK')
+  })
+
+  it('reads the permission request tool name from _meta, where draft agents use name', () => {
+    const permission = qoderCaptured.write.find(frame => frame.method === 'session/request_permission')!
+    const toolCall = (permission.params as { toolCall: Record<string, unknown> }).toolCall
+    expect(qoderDialect.readPermissionToolName!(toolCall)).toBe('Write')
+  })
+
+  it('reports no usage for its zeroed reply, and keeps a real one', () => {
+    expect(qoderDialect.readReplyUsage(qoderCaptured.promptReply)).toBeUndefined()
+    expect(qoderDialect.readReplyUsage({ usage: { inputTokens: 12, outputTokens: 3, totalTokens: 15 } }))
+      .toEqual({ inputTokens: 12, outputTokens: 3, totalTokens: 15 })
+  })
+
+  it('treats tool frames and message chunks as content, command lists as chatter', () => {
+    expect(qoderDialect.isContent({ sessionUpdate: 'tool_call' })).toBe(true)
+    expect(qoderDialect.isContent({ sessionUpdate: 'agent_message_chunk' })).toBe(true)
+    expect(qoderDialect.isContent({ sessionUpdate: 'available_commands_update' })).toBe(false)
+    expect(qoderDialect.isContent({ sessionUpdate: 'current_mode_update' })).toBe(false)
   })
 })
 

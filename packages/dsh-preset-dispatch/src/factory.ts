@@ -16,7 +16,9 @@ import {
   codexDialect,
   cursorDialect,
   grokDialect,
+  qoderDialect,
   stdioArgsFor as acpStdioArgsFor,
+  stdioEnvFor as acpStdioEnvFor,
 } from '@threadharbor/dsh-acp-agent'
 import type {
   AcpDialect,
@@ -73,6 +75,7 @@ const DIALECTS: Readonly<Record<string, AcpDialect>> = {
   claude: claudeDialect,
   codex: codexDialect,
   cursor: cursorDialect,
+  qoder: qoderDialect,
 }
 
 /**
@@ -149,6 +152,10 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
       // inherit this process's directory, which is not the session's workspace.
       const cwd = cwdForOpen(options.cwd)
 
+      // A host launched from the Qoder IDE exports SDK-entrypoint variables
+      // that make the CLI refuse to start headless; the helper strips them for
+      // that agent and returns undefined (inherit) for the rest.
+      const childEnv = acpStdioEnvFor(preset.agent)
       // grok is reached over a `grok agent serve` WebSocket this transport starts
       // and owns (random port + secret, ready-wait, kill on close) — unlike the
       // stdio agents, whose command spawns itself. A preset that names a static
@@ -164,6 +171,7 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
               command: preset.command ?? '',
               args: stdioArgsFor(preset),
               cwd,
+              ...(childEnv === undefined ? {} : { env: childEnv }),
             }))
       // The client and the registry's death watcher both listen; the fanout is
       // what lets them without one stealing the other's slot.
@@ -245,9 +253,18 @@ export function adaptClient(client: AcpClient, dialect: AcpDialect): AcpClientPo
     notify: (method, params) => { client.notify(method, params) },
     onFrame: handler => { client.onFrame(frame => { handler(frame) }) },
     // Cursor must authenticate (after an interactive `agent login`) before
-    // session/new; the runner calls this between initialize and session/new.
-    ...(dialect.authenticateMethodId === undefined
+    // session/new; qoder derives its own method id (CN and international builds
+    // differ) from the initialize reply and authenticates only when
+    // session/new refuses. The runner owns WHEN; this owns WHAT to send.
+    ...(dialect.authenticateMethodId === undefined && dialect.authenticateMethodIdFrom === undefined
       ? {}
-      : { authenticate: () => client.request('authenticate', { methodId: dialect.authenticateMethodId }) }),
+      : {
+          authenticate: (initializeResult: unknown) => {
+            const methodId = dialect.authenticateMethodId ?? dialect.authenticateMethodIdFrom?.(initializeResult)
+            return methodId === undefined
+              ? Promise.resolve(undefined)
+              : client.request('authenticate', { methodId })
+          },
+        }),
   }
 }

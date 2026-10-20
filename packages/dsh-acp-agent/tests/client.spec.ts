@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest'
 import { AcpClient } from '../src/client.ts'
 import type { AcpTransport } from '../src/transport.ts'
 import { TerminalService } from '../src/terminals.ts'
+import { qoderDialect } from '../src/dialects/qoder.ts'
 
 /** A transport that records what was written, and can push frames in. */
 function fakeTransport(): AcpTransport & { readonly sent: string[]; deliver: (line: string) => void; die: (reason: string) => void } {
@@ -96,6 +97,52 @@ describe('AcpClient permission requests', () => {
 
     expect(asked?.toolName).toBe('Bash')
   })
+
+  it("reads qoder's tool name from toolCall._meta and selects its allow-once option", async () => {
+    // Qoder names the tool nowhere else, and its ids are numeric 0 — truthiness
+    // checks would drop both. The allow option is `proceed_once`, whose id does
+    // not start with "allow"; only `kind` identifies it.
+    const transport = fakeTransport()
+    const client = new AcpClient(transport, qoderDialect)
+    let asked: { toolName?: string | undefined } | undefined
+    client.onPermissionRequest = async request => {
+      asked = { toolName: request.toolName }
+      return { outcome: 'allow' }
+    }
+    transport.deliver(QODER_PERMISSION_REQUEST)
+    await flush()
+
+    expect(asked?.toolName).toBe('Write')
+    const answer = JSON.parse(transport.sent[0]!) as {
+      id: number
+      result: { outcome: { optionId: string } }
+    }
+    expect(answer.id).toBe(0)
+    expect(answer.result.outcome.optionId).toBe('proceed_once')
+  })
+})
+
+/** The exact permission request qoder-cli-cn 1.1.6 emitted (2026-10-20). */
+const QODER_PERMISSION_REQUEST = JSON.stringify({
+  jsonrpc: '2.0',
+  id: 0,
+  method: 'session/request_permission',
+  params: {
+    sessionId: 'db50643e-2b63-43f9-b5c3-73e13f0f2198',
+    options: [
+      { optionId: 'proceed_always', name: 'Allow for this session', kind: 'allow_always' },
+      { optionId: 'proceed_once', name: 'Allow', kind: 'allow_once' },
+      { optionId: 'cancel', name: 'Reject', kind: 'reject_once' },
+    ],
+    toolCall: {
+      toolCallId: 'call_49fedd66b4754804a02d337a',
+      status: 'pending',
+      title: 'Edit probe.txt',
+      kind: 'edit',
+      rawInput: { content: 'hello from qoder\n', file_path: '/tmp/qoder-perm-probe/probe.txt' },
+      _meta: { qoder: { toolName: 'Write' } },
+    },
+  },
 })
 /**
  * The frame grok sent while a turn was in flight (captured 2026-10-09).

@@ -15,7 +15,7 @@ stdio 子进程，命令 `claude-agent-acp`（Node 包 `@agentclientprotocol/cla
 
 ## 接口形状
 
-`initialize → session/new → session/prompt`。**不需要 `authenticate`**——实测它的 `authMethods` 是**空数组**，是四家里唯一不声明任何鉴权方式的。
+`initialize → session/new → session/prompt`。**不需要 `authenticate`**——实测它的 `authMethods` 是**空数组**，是五家里唯一不声明任何鉴权方式的。
 
 `session/new` 返回：
 

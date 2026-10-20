@@ -94,6 +94,44 @@ export interface AcpDialect {
   readonly authenticateMethodId?: string | undefined
 
   /**
+   * The `authenticate` method to derive from the `initialize` reply.
+   *
+   * Qoder's method id differs between its CN and international builds
+   * (`qoderclicn-login` vs `qoder-login`), so the agent's own `authMethods` list
+   * is the only source that holds across both. Tried after the static id.
+   */
+  readonly authenticateMethodIdFrom?: ((initializeResult: unknown) => string | undefined) | undefined
+
+  /**
+   * Whether `authenticate` can wait until `session/new` refuses the session.
+   *
+   * Qoder works without the round-trip once its CLI has logged in, and its
+   * `authenticate` occasionally stalled for the whole timeout while logged in
+   * (measured 2026-10-20: two of three captures hit 120 s, the third returned
+   * `{}` instantly). Opening first and authenticating only on a refusal keeps
+   * the working path fast. Cursor, whose session/new always fails without it,
+   * keeps the eager step.
+   */
+  readonly authenticateOnDemand?: boolean | undefined
+
+  /**
+   * Whether a `session/new` rejection is the agent asking for authentication.
+   *
+   * Consulted only for `authenticateOnDemand` dialects, to tell "log in first"
+   * (worth one authenticate + retry) from every other open failure.
+   */
+  readonly sessionNeedsAuthenticate?: ((error: unknown) => boolean) | undefined
+
+  /**
+   * The tool identity on a permission request.
+   *
+   * Draft ACP puts it in `toolCall.name`; qoder reports it only in
+   * `toolCall._meta.qoder.toolName`, which the shared reader cannot know without
+   * asking the dialect. Absent means read `toolCall.name`.
+   */
+  readonly readPermissionToolName?: ((toolCall: Record<string, unknown>) => string | undefined) | undefined
+
+  /**
    * Fold one tool-related update frame into the call it belongs to.
    *
    * `carried` is the call as earlier frames of the same id established, or

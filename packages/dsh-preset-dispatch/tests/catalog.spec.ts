@@ -90,6 +90,16 @@ describe('catalogAdapter', () => {
     expect(adapter.providerInfo(providerRoute('acp-grok')).name).toBe('Grok')
   })
 
+  it('names every driven agent, never the raw preset id', () => {
+    // A missing entry falls back to the preset id ("acp-qoder"), which is
+    // what then leaks into the composer's "agent · model" label.
+    const qoderAdapter = catalogAdapter(
+      { presets: { 'acp-qoder': { agent: 'qoder', command: 'qoder-acp' } } },
+      { modelsOf: () => [], dialectOf: () => undefined },
+    )
+    expect(qoderAdapter.providerInfo(providerRoute('acp-qoder')).name).toBe('Qoder')
+  })
+
   it('advertises the models that agent actually reports', async () => {
     const models = await adapter.listModels(providerRoute('acp-claude'))
     expect(models).toEqual([{

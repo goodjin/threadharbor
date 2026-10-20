@@ -77,6 +77,15 @@ export type TerminalCreateRequest = {
   readonly cwd?: string
 }
 
+/**
+ * What the client needs of a dialect: an identity, and optionally the place its
+ * permission requests hide the tool name (Qoder: `_meta.qoder.toolName`).
+ */
+type PermissionToolNameReader = {
+  readonly id: string
+  readonly readPermissionToolName?: ((toolCall: Record<string, unknown>) => string | undefined) | undefined
+}
+
 export class AcpClient {
   private readonly pending = new Map<number, Pending>()
   private readonly frameObservers = new Set<(frame: AcpFrame) => void>()
@@ -133,9 +142,9 @@ export class AcpClient {
   files: FsService | undefined = new FsService()
 
   private readonly transport: AcpTransport
-  private readonly dialect: { readonly id: string }
+  private readonly dialect: PermissionToolNameReader
 
-  constructor(transport: AcpTransport, dialect: { readonly id: string }) {
+  constructor(transport: AcpTransport, dialect: PermissionToolNameReader) {
     this.transport = transport
     this.dialect = dialect
     this.transport.onLine(line => this.receive(line))
@@ -351,7 +360,7 @@ export class AcpClient {
    */
   private async answerPermission(frame: AcpFrame): Promise<void> {
     const params = (frame.params ?? {}) as {
-      toolCall?: { name?: unknown; rawInput?: unknown; title?: unknown }
+      toolCall?: Record<string, unknown>
       options?: { optionId?: unknown; name?: unknown; kind?: unknown }[]
       sessionId?: unknown
       requestId?: unknown
@@ -365,12 +374,17 @@ export class AcpClient {
         kind: typeof option.kind === 'string' ? option.kind : 'unknown',
       }]
     })
+    const toolCall = params.toolCall ?? {}
+    // Draft agents name the tool on `toolCall.name`; qoder only under
+    // `toolCall._meta.qoder.toolName`, so the dialect gets first say.
+    const toolName = this.dialect.readPermissionToolName?.(toolCall)
+      ?? (typeof toolCall['name'] === 'string' ? toolCall['name'] : undefined)
     const request: PermissionRequest = {
       ...(typeof params.requestId === 'string' || typeof params.requestId === 'number' ? { requestId: params.requestId } : {}),
       ...(typeof params.sessionId === 'string' ? { sessionId: params.sessionId } : {}),
-      ...(typeof params.toolCall?.name === 'string' ? { toolName: params.toolCall.name } : {}),
-      ...(params.toolCall?.rawInput === undefined ? {} : { rawInput: params.toolCall.rawInput }),
-      ...(typeof params.toolCall?.title === 'string' ? { title: params.toolCall.title } : {}),
+      ...(toolName === undefined ? {} : { toolName }),
+      ...(toolCall['rawInput'] === undefined ? {} : { rawInput: toolCall['rawInput'] }),
+      ...(typeof toolCall['title'] === 'string' ? { title: toolCall['title'] } : {}),
       options,
     }
 

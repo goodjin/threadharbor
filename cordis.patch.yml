@@ -288,3 +288,74 @@
                 - id: MiniMax-M3
                   name: MiniMax M3
                   description: MiniMax Code 登录
+    - id: acp-qoder
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: acp-qoder
+        name: Qoder
+        order: 50
+        plugins:
+          - id: acp-qoder-binding
+            name: '@threadharbor/dsh-preset-dispatch'
+            config:
+              presetId: acp-qoder
+              agent: qoder
+              hideFromRoster: true
+              # Qoder 的 CLI 默认是交互式 agent；`--acp` 由共享参数表补上
+              # （packages/dsh-acp-agent/src/spawn-args.ts），这里不重复。
+              # 国际站把 command 指向 `qoder`/`qodercli`；本机是 CN 版。
+              command: /Users/good/.local/bin/qoderclicn
+              # 登录走 `qoderclicn login`，凭据留在 CLI 自己的
+              # ~/.qoder-cn 配置目录。已登录时会话不需要 authenticate；只有 session/new
+              # 报认证错误时才补一次 authenticate 并重试（2026-10-20 实测：
+              # 已登录时调用 authenticate 偶尔会挂满超时）。
+              # 默认模式就是逐次询问；写出来是不让构建的默认值漂移。
+              mode: default
+              # 清单 = 2026-10-20 真机探针（qoder-cli-cn 1.1.6，真实
+              # initialize + session/new）读到的 models.availableModels，一字不差。
+              models:
+                - id: auto
+                  name: Auto (default)
+                  description: Reasoning · Vision · 0.50x Credit
+                - id: fast
+                  name: Fast
+                  description: Reasoning · Vision · 0.80x Credit
+                - id: qmodel_38max
+                  name: Qwen3.8-Max
+                  description: Reasoning · Vision · New · 0.50x Credit
+                - id: qfmodel
+                  name: Qwen3.8-Flash
+                  description: Reasoning · Vision · New · 0.00x Credit
+                - id: qmodel_latest
+                  name: Qwen3.7-Max
+                  description: Reasoning · Vision · New · 0.50x Credit
+                - id: qmodel
+                  name: Qwen3.7-Plus
+                  description: Reasoning · Vision · New · 0.10x Credit
+                - id: q37fmodel
+                  name: Qwen3.7-Flash
+                  description: Reasoning · Vision · New · 0.10x Credit
+                - id: dmodel
+                  name: DeepSeek-V4-Pro
+                  description: Reasoning · Vision · New · 0.50x Credit
+                - id: dfmodel
+                  name: DeepSeek-Flash
+                  description: Vision · New · 0.00x Credit
+                - id: gmodel
+                  name: GLM-5.3
+                  description: Reasoning · Vision · New · 0.80x Credit
+                - id: gfmodel
+                  name: GLM-5.3-Flash
+                  description: Reasoning · Vision · New · 0.10x Credit
+                - id: gm51model
+                  name: GLM-5.2
+                  description: Reasoning · Vision · New · 0.60x Credit
+                - id: kmodel_latest
+                  name: Kimi-K3
+                  description: Vision · New · 1.40x Credit
+                - id: kmodel
+                  name: Kimi-K2.8-Preview
+                  description: Reasoning · Vision · New · 0.80x Credit
+                - id: mmodel
+                  name: MiniMax-M3.1-Flash
+                  description: Vision · New · 0.10x Credit

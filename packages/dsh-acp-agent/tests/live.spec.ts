@@ -29,7 +29,8 @@ import { claudeDialect } from '../src/dialects/claude.ts'
 import { codexDialect } from '../src/dialects/codex.ts'
 import { cursorDialect } from '../src/dialects/cursor.ts'
 import { grokDialect } from '../src/dialects/grok.ts'
-import { stdioArgsForDialect } from '../src/spawn-args.ts'
+import { qoderDialect } from '../src/dialects/qoder.ts'
+import { stdioArgsForDialect, stdioEnvFor } from '../src/spawn-args.ts'
 import type { AcpDialect } from '../src/dialects/types.ts'
 import type { AcpTransport } from '../src/transport.ts'
 import type { AcpFrame, AcpSession } from '../src/acp-client.ts'
@@ -77,6 +78,8 @@ const LIVE = process.env['THREADHARBOR_LIVE_ACP'] === '1'
 const CODEX_ACP = process.env['THREADHARBOR_CODEX_ACP'] ?? 'codex-acp'
 const CLAUDE_ACP = process.env['THREADHARBOR_CLAUDE_ACP'] ?? 'claude-agent-acp'
 const CURSOR_ACP = process.env['THREADHARBOR_CURSOR_ACP'] ?? 'cursor-agent'
+/** CN build installs `qoderclicn`; the international build installs `qoder`. */
+const QODER_ACP = process.env['THREADHARBOR_QODER_ACP'] ?? 'qoderclicn'
 const CWD = process.cwd()
 const PROMPT = 'Run the shell command `echo ACP_LIVE_OK` and then tell me what it printed.'
 /**
@@ -102,9 +105,15 @@ async function runLiveAgent(
   dialect: AcpDialect,
   options: { readonly modeId?: string; readonly prompt?: string } = {},
 ): Promise<LiveResult> {
+  const env = stdioEnvFor(dialect.id)
   const transport = new StdioAcpTransport({
     command,
+    // The same table production spawns from: qoder needs `--acp`, cursor needs
+    // `acp --trust`, and a bare spawn would pass this suite while production
+    // launched the interactive agent.
+    args: stdioArgsForDialect(dialect),
     cwd: CWD,
+    ...(env === undefined ? {} : { env }),
     onDiagnostic: () => {}, // agents are chatty on stderr; it is not protocol
   })
   return runLiveAgentOver(transport, dialect, options)
@@ -116,12 +125,14 @@ async function openLiveAgent(
   dialect: AcpDialect,
   options: { readonly modeId?: string } = {},
 ): Promise<LiveSession> {
+  const env = stdioEnvFor(dialect.id)
   const transport = new StdioAcpTransport({
     command,
     // The same table production spawns from, so a probe can never pass over a
     // deployment that launches the agent wrongly.
     args: stdioArgsForDialect(dialect),
     cwd: CWD,
+    ...(env === undefined ? {} : { env }),
     onDiagnostic: () => {}, // agents are chatty on stderr; it is not protocol
   })
   return openLiveAgentOver(transport, dialect, options)
@@ -204,7 +215,7 @@ async function openLiveAgentOver(
     }
   }
 
-  await bounded(`${dialect.id}: initialize`, client.request('initialize', {
+  const initializeResult = await bounded(`${dialect.id}: initialize`, client.request('initialize', {
     protocolVersion: 1,
     // Mirrors the runner's handshake, including both subagent-capability
     // spellings (the draft field and the _meta.jetbrains.air fallback the
@@ -219,16 +230,26 @@ async function openLiveAgentOver(
     },
   }))
   client.notify('initialized', {})
-  // Cursor must authenticate (after an interactive `agent login`) before
-  // session/new; the runner does exactly this in production.
-  if (dialect.authenticateMethodId !== undefined) {
-    await bounded(`${dialect.id}: authenticate`, client.request('authenticate', { methodId: dialect.authenticateMethodId }))
+  // Mirror the runner's auth policy exactly: cursor authenticates before
+  // session/new; qoder opens first and authenticates only if refused.
+  const authenticate = async () => {
+    const methodId = dialect.authenticateMethodId ?? dialect.authenticateMethodIdFrom?.(initializeResult)
+    if (methodId === undefined) return
+    await bounded(`${dialect.id}: authenticate`, client.request('authenticate', { methodId }))
   }
+  const onDemand = dialect.authenticateOnDemand === true
+  if (!onDemand) await authenticate()
 
-  const session = AcpClient.toSession(
-    await bounded(`${dialect.id}: session/new`, client.request('session/new', { cwd: CWD, mcpServers: [] })),
-    dialect,
-  )
+  const openSession = () => bounded(`${dialect.id}: session/new`, client.request('session/new', { cwd: CWD, mcpServers: [] }))
+  let rawSession: unknown
+  try {
+    rawSession = await openSession()
+  } catch (error) {
+    if (!onDemand || dialect.sessionNeedsAuthenticate?.(error) !== true) throw error
+    await authenticate()
+    rawSession = await openSession()
+  }
+  const session = AcpClient.toSession(rawSession, dialect)
 
   // grok needs no mode; claude ships in bypassPermissions and must be switched
   // to Manual or it will never ask for anything.
@@ -550,10 +571,34 @@ describe.skipIf(!LIVE)('live ACP agents through the shared layer', () => {
       serve.kill('SIGTERM')
     }
   }, 240_000)
+
+  it('qoder: opens a session, answers, and projects its tool call', async () => {
+    // The CN binary here is qoderclicn, spawned with `--acp` from the shared
+    // table. A logged-in CLI opens without authenticate; if the login has
+    // expired the helper's on-demand step logs in and retries.
+    const result = await runLiveAgent(QODER_ACP, qoderDialect)
+    expect(result.session.sessionId).toBeTruthy()
+    expect(result.session.models.length).toBeGreaterThan(0)
+    expect(result.answer.length).toBeGreaterThan(0)
+    // Qoder names the tool in _meta.qoder.toolName; the map renders it as bash.
+    expect(result.toolNames).toContain('bash')
+    expect(result.toolOutputs.join('')).toContain('ACP_LIVE_OK')
+  }, 240_000)
+
+  it('qoder: answers a permission request and the turn continues', async () => {
+    const result = await runLiveAgent(QODER_ACP, qoderDialect, {
+      prompt: 'Create a file at /tmp/threadharbor-qoder-live.txt containing the word ok, using the write tool. Then tell me it is done.',
+    })
+    // Qoder's default mode asks before writes. If this reads 0, the prompt
+    // stopped triggering an edit and the test is proving nothing.
+    expect(result.permissionsAnswered).toBeGreaterThan(0)
+    expect(result.answer.length).toBeGreaterThan(0)
+    expect(result.toolOutputs.join('')).toContain('File created successfully')
+  }, 240_000)
 })
 
 /* ----------------------------------------------------------------------- */
-/* Acceptance: cancel, image, tool frames, replay — each against all four.  */
+/* Acceptance: cancel, image, tool frames, replay — each against all five.  */
 /* ----------------------------------------------------------------------- */
 
 /**
@@ -743,7 +788,7 @@ function openStdio(
   return () => openLiveAgent(command, dialect, options)
 }
 
-describe.skipIf(!LIVE)('live acceptance: cancel, image, tool frames, replay (four agents)', () => {
+describe.skipIf(!LIVE)('live acceptance: cancel, image, tool frames, replay (five agents)', () => {
   it('claude: session/cancel ends the turn within 5s as cancelled, then silence', async () => {
     await cancelCase(claudeDialect, openStdio(CLAUDE_ACP, claudeDialect, { modeId: 'default' }))
   }, 240_000)
@@ -760,6 +805,10 @@ describe.skipIf(!LIVE)('live acceptance: cancel, image, tool frames, replay (fou
     await cancelCase(cursorDialect, openStdio(CURSOR_ACP, cursorDialect))
   }, 240_000)
 
+  it('qoder: session/cancel ends the turn within 5s as cancelled, then silence', async () => {
+    await cancelCase(qoderDialect, openStdio(QODER_ACP, qoderDialect))
+  }, 240_000)
+
   it('codex: names the four quadrant colors of an image block', async () => {
     expectFourColors(await imageCase(codexDialect, openStdio(CODEX_ACP, codexDialect)))
   }, 240_000)
@@ -772,6 +821,10 @@ describe.skipIf(!LIVE)('live acceptance: cancel, image, tool frames, replay (fou
 
   it('cursor: names the four quadrant colors of an image block', async () => {
     expectFourColors(await imageCase(cursorDialect, openStdio(CURSOR_ACP, cursorDialect)))
+  }, 240_000)
+
+  it('qoder: names the four quadrant colors of an image block', async () => {
+    expectFourColors(await imageCase(qoderDialect, openStdio(QODER_ACP, qoderDialect)))
   }, 240_000)
 
   it('claude: the capability table declines images, so the router holds them back (拦下)', async () => {
@@ -799,6 +852,10 @@ describe.skipIf(!LIVE)('live acceptance: cancel, image, tool frames, replay (fou
     await toolShapeCase(cursorDialect, openStdio(CURSOR_ACP, cursorDialect))
   }, 240_000)
 
+  it('qoder: tool frames are call + optional terminal output + completed, one card and one result', async () => {
+    await toolShapeCase(qoderDialect, openStdio(QODER_ACP, qoderDialect))
+  }, 240_000)
+
   it('claude: a fresh session answers from the replayed previous turn', async () => {
     // stdio: each call to the opener spawns a fresh process, which is exactly
     // the fresh-agent situation the second round wants.
@@ -824,6 +881,11 @@ describe.skipIf(!LIVE)('live acceptance: cancel, image, tool frames, replay (fou
   it('cursor: a fresh session answers from the replayed previous turn', async () => {
     const opener = openStdio(CURSOR_ACP, cursorDialect)
     await replayCase(cursorDialect, opener, opener)
+  }, 240_000)
+
+  it('qoder: a fresh session answers from the replayed previous turn', async () => {
+    const opener = openStdio(QODER_ACP, qoderDialect)
+    await replayCase(qoderDialect, opener, opener)
   }, 240_000)
 })
 /* ----------------------------------------------------------------------- */

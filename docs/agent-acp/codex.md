@@ -85,7 +85,7 @@ session/prompt { sessionId, prompt: [...], modelId: '<选中的模型>' }
 
 （`session/set_mode` 正常：不存在的 mode 会回 `Invalid params`。）
 
-## 会话能力：四家里声明得最全
+## 会话能力：五家里声明得最全
 
 codex 的 `initialize` 声明了 `sessionCapabilities` 的**全部七项**：`resume` / `list` / `close` / `delete` / `fork` / `subagents` / `additionalDirectories`。
 

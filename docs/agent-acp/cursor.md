@@ -35,7 +35,7 @@ Cursor 的帧形状**最接近 codex**：工具名在 `kind`、输出在 `rawOut
 | `authenticate` | ⚠️ **不返回**，挂住等交互式登录 |
 | `session/list` | ❌ `-32000 Authentication required` |
 
-另外三家里 `initialize` 完直接 `session/new`；**只有 Cursor 必须在终端先完成一次 `agent login`**。登录后 `authenticate` 即刻返回 OK。
+另外几家 `initialize` 完直接 `session/new`；**只有 Cursor 必须在终端先完成一次 `agent login`**。登录后 `authenticate` 即刻返回 OK。
 
 ### 鉴权方式
 
@@ -143,7 +143,7 @@ params.toolCall = { toolCallId, title, kind, status, content }
 
 实测 `session/prompt` 的响应只有 `{"stopReason": "end_turn"}`，**不带任何 usage**；更新帧的 `_meta` 里也没有。
 
-四家里只有 grok 通过更新帧报 token。**Cursor 在 ACP 模式下拿不到用量**，界面上的 token 统计对 Cursor 会是空的。
+五家里只有 grok 通过更新帧报 token（Qoder 报的是全 0，等于没报）。**Cursor 在 ACP 模式下拿不到用量**，界面上的 token 统计对 Cursor 会是空的。
 
 ## 噪声帧
 
@@ -200,7 +200,7 @@ params.toolCall = { toolCallId, title, kind, status, content }
 6. **`toolCallId` 里的换行符**要处理，否则日志和单行协议会出问题
 7. **可执行文件路径做成配置项**，避开 `~/.local/bin/agent` 冲突
 
-其中第 3 条最容易被漏——现有三家都不需要它。
+其中第 3 条最容易被漏——其余几家都不需要它（Qoder 也只在被拒时认证，见 [qoder.md](./qoder.md)）。
 
 ## 证据
 

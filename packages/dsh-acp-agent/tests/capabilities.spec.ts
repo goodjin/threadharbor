@@ -13,6 +13,7 @@ import { claudeDialect } from '../src/dialects/claude.ts'
 import { codexDialect } from '../src/dialects/codex.ts'
 import { grokDialect } from '../src/dialects/grok.ts'
 import { cursorDialect } from '../src/dialects/cursor.ts'
+import { qoderDialect } from '../src/dialects/qoder.ts'
 
 describe('capabilities', () => {
   it('claude: 不认图片、工具帧有执行中', () => {
@@ -36,8 +37,15 @@ describe('capabilities', () => {
     expect(cursorDialect.capabilities.toolFrameShape).toBe('in_progress')
   })
 
-  it('四家都认取消', () => {
-    for (const d of [claudeDialect, codexDialect, grokDialect, cursorDialect]) {
+  it('qoder: 认图片、工具帧两段、命令经工具帧、可取消', () => {
+    expect(qoderDialect.capabilities.acceptsImageContent).toBe(true)
+    expect(qoderDialect.capabilities.toolFrameShape).toBe('two_frame')
+    expect(qoderDialect.capabilities.commandVia).toBe('tool_frame')
+    expect(qoderDialect.capabilities.cancelsTurns).toBe(true)
+  })
+
+  it('五家都认取消', () => {
+    for (const d of [claudeDialect, codexDialect, grokDialect, cursorDialect, qoderDialect]) {
       expect(d.capabilities.cancelsTurns).toBe(true)
     }
   })
@@ -64,5 +72,17 @@ describe('capabilities', () => {
     expect(codexDialect.capabilities.toolNameMap).toEqual({ execute: 'bash' })
     expect(cursorDialect.capabilities.toolNameMap).toEqual({ execute: 'bash' })
     expect(grokDialect.capabilities.toolNameMap).toEqual({ run_terminal_command: 'bash' })
+  })
+
+  it('qoder maps only the tool names its live capture showed', () => {
+    // 2026-10-20, qoder-cli-cn 1.1.6: Bash/Read/Edit/Write/Grep/Glob.
+    expect(qoderDialect.capabilities.toolNameMap).toEqual({
+      Bash: 'bash',
+      Read: 'read',
+      Edit: 'edit',
+      Write: 'write',
+      Grep: 'grep',
+      Glob: 'glob',
+    })
   })
 })
