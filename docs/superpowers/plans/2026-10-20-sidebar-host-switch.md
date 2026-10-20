@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development (recommended) or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 插件停止遮蔽 DSH 原生侧栏浏览区，改由侧栏底部的主机切换器整页跳转到目标机器，使每台机器都用自己的原生侧栏。
+**Goal:** 插件停止遮蔽 DSH 原生侧栏浏览区，侧栏顶部多一个主机图标，点开主区主机列表，在列表里挑一台即整页跳到那台机器，使每台机器都用自己的原生侧栏。
 
-**Architecture:** 影子树（按优先级 -10 遮蔽 `sidebar.workspaces`）改为默认不注册，开关语义反转为 `threadharbor.sidebarTree=on` 才启用。主机切换器注册进 `sidebar.footer.action`，点某台主机即 `location.assign` 到 `gatewayPagePath(hostId)`；网关在改写对方页面时注入一个「当前主机 + 回本机」入口，并对页面导航请求（`Accept: text/html`）回 HTML 错误页而不是裸文本。跨主机汇总树先只停用、后单独一次提交删除。
+**Architecture:** 影子树（按优先级 -10 遮蔽 `sidebar.workspaces`）改为默认不注册，开关语义反转为 `threadharbor.sidebarTree=on` 才启用。主机入口是 `sidebar.panellist` 里一个图标，与配对图标并列（`order: 102`，排在 101 的配对图标下面）；主机列表同一份 `AgentPanel` 组件多注册一个 `main` 的 keyed 座位，点图标即 `selectPanel` 切过去；列表里每台主机的「打开」是到 `/threadharbor/gateway/<hostId>/` 的链接。网关在改写对方页面时注入一个「当前主机 + 回本机」入口（去重判据沿用主机图标上的 `data-host-switcher`），并对页面导航请求（`Accept: text/html`）回 HTML 错误页而不是裸文本。跨主机汇总树先只停用、后单独一次提交删除。
 
 **Tech Stack:** TypeScript、React 18（浏览器半边）、vitest（node 与 jsdom 双环境）、DSH Cordis 插槽系统、Node `http`（宿主端转发）。
 
@@ -12,25 +12,28 @@
 
 ## Global Constraints
 
-- 用户可见文案一律走 `packages/dsh-client/src/locales.ts` 的 `zh` 与 `en` 两段词典，键名前缀 `panel.switch.`；`tests/ui-i18n.spec.ts` 会拒绝硬编码文案。源码注释用英文。
+- 用户可见文案一律走 `packages/dsh-client/src/locales.ts` 的 `zh` 与 `en` 两段词典，`tests/ui-i18n.spec.ts` 会拒绝硬编码文案。主机图标沿用既有键 `panel.label`（'各主机' / 'Hosts'），上一版底部切换器的 `panel.switch.*` 六个键要一并删掉（zh 与 en 同步删，缺一个就红）。注释语言跟随所在文件既有语言，不统一改成英文。
 - 命名空间常量是 `NAMESPACE = 'threadharborClient'`（见 `packages/dsh-client/src/locales.ts`）。
 - 提交信息用中文，与仓库历史一致。
 - 单文件测试命令：`npx vitest run <path>`；仓库根已有 vitest。
 - `reference/deepseek-harness/` 是被忽略的只读检出，不得修改。
 - 本机 DSH Web 测试实例（3081）只经 `~/bin/dsh-web-3081` 起停，不得手敲裸命令；别的端口必须显式指定独立的 `DSH_HOME`。
 - 影子树注册**不得**声明任何子插槽：`ui-slots` 对子插槽是先到先得，重复声明会抛 `slot "X" is already declared`，而原生那份注册必定发生（`packages/dsh-client/src/sidebar-tree.ts` 现在不声明，保持这一点）。
-- 浏览器半边的状态容器照抄 `packages/dsh-client/src/remote-session-store.ts` 的手写 `createXStore()` 形状（`set`/`get`/`subscribe`），不用 zustand。
+- 面板图标行的 **id 必须与主区 keyed 座位的 key 同名**：面板行的点击就是 `selectPanel(id)`（`reference/deepseek-harness/packages/client/ui-sidebar/src/client/SidebarRoot.tsx:68`）。
+- 面板图标的 `order` **数字越大越靠下**（`PANEL_ORDER = 100` 的注释写着「above 100 sits below DSH's own rows」，`PAIRING_PANEL_ORDER = 101`）。主机图标要排在配对图标下面，用 102。
+- `selectPanel` 在目标键未注册时**抛错**（`reference/deepseek-harness/packages/client/ui-layout/src/client/service.ts:72-75`）。调用处必须兜住，不能让异常掀翻整页。
+- 若本任务需要新的状态容器，照抄 `packages/dsh-client/src/remote-session-store.ts` 的手写 `createXStore()` 形状（`set`/`get`/`subscribe`），不用 zustand。
 - Node 版本 `^22.19.0 || >=24.0.0`。
 
 ## Review Focus
 
 以下五类是规格没写、但真实使用中最可能咬人的输入。每条在所属任务里有对应测试。
 
-1. **侧栏收窄成 56px 轨时切换器仍在。** `SidebarRoot` 在两种宽度下都渲染 `sidebar.footer.action`，只多传一个 `wide`。切换器必须跟着 `wide` 变形态，不能把窄轨撑破，也不能在窄轨下留一个点不动的死按钮。
-2. **对方机器自己也装了本插件。** 于是远端页面上同时出现网关注入的「回本机」入口和插件自己的切换器。两者的去向必须一致，不允许出现两个语义打架的入口（网关注入的入口在插件选择器存在时应让位或被抑制）。
-3. **地址栏被手工编辑或浏览器后退到未登记主机的网关路径。** 此时必须有可读的错误页，且同时给出「回本机」和「去设置」两个出口，不是白屏也不是裸文本。
-4. **切主机时当前机器上正在跑回合。** 导航离开页面不等于停掉会话（会话跑在那台机器上），但入口处必须能看出这一点，不能让人以为回合被中断。
-5. **登记簿里有主机但没有打开地址。** 这种主机不可点（没有可导航的路径），但要在列表里出现并说明原因，不能静默消失。
+1. **冷启动时点主机图标。** 主区 keyed 座位与面板图标行都经 `inject` 等座位就位，两者不一定同时到位；`selectPanel` 遇到未注册的键会抛错。那一下不能掀翻整页，也不能静默无反应。
+2. **主机图标与配对图标的上下顺序。** `order` 数字越大越靠下，102 要落在 101 的配对图标**下面**；写反了不会报错，只会让图标跑到上面去。
+3. **对方机器没装插件。** 那种页面上没有主机图标，唯一的出路是网关注入的那条；去重判据是「页面上存在 `data-host-switcher`」，对方真没装时不能误判成已装而把注入的出口也撤掉。
+4. **窄侧栏下主机图标只有图标、没有文字。** 文字走 tooltip，tooltip 文本必须是「各主机」，不能是空白或原始键名。
+5. **列表里那台没部署的主机。** 它不能有「打开」（没有地址就没有可导航的路径），给的是「部署」——这是面板的既有行为，本次改动不能破坏它。
 
 ---
 
@@ -93,94 +96,87 @@ git commit -m "侧栏：影子树默认不注册，开关反转为 =on 才遮蔽
 
 ---
 
-### Task 2: 主机切换器
+### Task 2: 侧栏顶部主机图标 + 主机列表挂进主区
+
+> 这一批替换掉上一版「侧栏底部分体切换器」那套（已实现于提交 `d456096`/`eabe8f5`）。形态由用户拍板改为顶部图标 + 主区主机列表，见规格「修订」一节。
 
 **Files:**
-- Create: `packages/dsh-client/src/host-switcher.tsx`
-- Create: `packages/dsh-client/src/host-switcher-store.ts`
-- Create: `packages/dsh-client/src/host-switcher.module.css`
-- Modify: `packages/dsh-client/src/client/index.ts`（注册 `sidebar.footer.action`）
-- Modify: `packages/dsh-client/src/locales.ts`（`zh` 与 `en` 各加一组 `panel.switch.*`）
-- Test: `packages/dsh-client/tests/host-switcher.spec.ts`
+- Create: `packages/dsh-client/src/host-icon.tsx`（面板图标行的图标）
+- Delete: `packages/dsh-client/src/host-switcher.tsx`、`host-switcher-store.ts`、`host-switcher.module.css`、`packages/dsh-client/tests/host-switcher.spec.ts`
+- Modify: `packages/dsh-client/src/client/index.ts`（`registerPanelSlots` 扩成三个座位；摘掉 `sidebar.footer.action` 的注册）
+- Modify: `packages/dsh-client/src/locales.ts`（删掉 `panel.switch.*` 六个键的 zh 与 en）
+- Test: `packages/dsh-client/tests/host-icon.spec.ts`
 
 **Interfaces:**
-- Consumes: `HostListRow`（`packages/dsh-client/src/panel.tsx:245`，字段 `hostId`/`name`/`self`/`online`/`connection`/`address?`/`launchUrl?`）；`mergeHostRows(hosts, registrations)`（`panel.tsx:402`，后两个参数可选）；`HostRegistration`（`hostId`/`hostTitle`/`address`/`launchUrl?`，来自 `@threadharbor/dsh-host-federation`）；`gatewayPagePath(hostId)`（`packages/dsh-host-federation/src/index.ts:62` 转出）；`RuntimeT`/`NAMESPACE`/`fallbackT`（`locales.ts`）；`HostStatus`（`packages/dsh-client/src/host-state.ts:33`）。
+- Consumes:
+  - `AgentPanel` 与 `AgentPanelBusinessProps`（`packages/dsh-client/src/client/index.ts:221-231` 里 `registerPanelSlots` 已经在用，它们是设置分区那个座位的主体）
+  - `PANEL_ID = 'threadharbor-rollup'`（`client/index.ts:163`）——主机图标行的 id 与主区 keyed 座位的 key 用它
+  - `ctx.get('layout')`（布局服务，暴露 `selectPanel(panelId: MainPanelId | null): void`；`reference/deepseek-harness/packages/client/ui-layout/src/client/service.ts:36`）
+  - 注册模板：`packages/dsh-client/src/pairing-panel.ts:169-177`（面板图标行）与 `:169-171`（`main` keyed 座位）
+  - `NAMESPACE`、`RuntimeT`、`panel.label`（'各主机' / 'Hosts'，`locales.ts:34` 与 `:448`）
 - Produces:
-  - `export type SwitchEntry = { readonly hostId: string; readonly label: string; readonly self: boolean; readonly online: boolean; readonly launchable: boolean; readonly status: HostStatus; readonly path: string }`，其中 `path` 对本机为 `''`，对远端是 `gatewayPagePath(hostId)`。
-  - `export function switchEntries(rows: readonly HostListRow[], registrations: readonly HostRegistration[]): readonly SwitchEntry[]`——纯函数，本机排第一，其余按 `rows` 原序；`launchable = self || (registration?.launchUrl 非空)`。
-  - `export function createHostSwitcherStore(): { entries(): readonly SwitchEntry[]; set(next: readonly SwitchEntry[]): void; subscribe(l: () => void): () => void }`，形状照抄 `remote-session-store.ts`。
-  - 注册：`slots.inject('sidebar.footer.action', () => slots.register({ name: 'sidebar.footer.action', id: 'host-switcher', locale: NAMESPACE }, HostSwitcher))`，组件 props 是该槽的 owner props `{ readonly wide: boolean }`。
+  - `export const HOST_ICON_PANEL_ORDER = 102`（排在 `PAIRING_PANEL_ORDER = 101` 下面）
+  - `export function HostIcon(props: { readonly t?: RuntimeT }): JSX.Element`——图标根元素带 `data-host-switcher`
+  - 三个座位同由 `registerPanelSlots` 注册：`settings.section`（既有）、`sidebar.panellist`（新增，id = `PANEL_ID`，order = `HOST_ICON_PANEL_ORDER`，label = `() => t('panel.label')`）、`main`（新增，key = `PANEL_ID`，`inject: () => face`）
 
-- [ ] **Step 1: 写纯函数测试**
+- [ ] **Step 1: 写注册与图标的失败测试**
 
-`tests/host-switcher.spec.ts` 顶部加 `@vitest-environment jsdom`（渲染用例需要），先只测纯函数：
+新建 `packages/dsh-client/tests/host-icon.spec.ts`。挂载用的壳子照抄 `packages/dsh-client/tests/panel-mount.spec.ts` 与 `handover-mount.spec.ts` 里那套真 `SlotCore` 挂载（上一版为此补过 `sidebar.footer.action` 的声明）。
+
+用例：
 
 ```ts
-it('本机排第一且不可跨机跳转：path 为空', () => { ... })
-it('没有打开地址的登记主机 launchable 为 false，仍出现在列表里', () => { ... })
-it('有打开地址的主机 path 是 gatewayPagePath(hostId)', () => { ... })
+it('主机图标进面板图标区，id 与主区座位同名，排在配对图标下面', () => { ... })
+it('图标根元素带 data-host-switcher（网关注入入口的去重判据）', () => { ... })
+it('面板图标行的标签是词典里的「各主机」，不是空串也不是原始键名', () => { ... })
+it('主区座位已注册时，点图标切到主机列表面板', () => { ... })
+it('主区座位还没注册时，点图标不抛错，也要有交代', () => { ... })
+it('主机列表里没有打开地址的那台，给的是「部署」而不是「打开」', () => { ... })
 ```
 
-数据用 `makeRegistry()`（照抄 `sidebar-tree.spec.ts:27`）造真登记簿，`mergeHostRows` 造行。
+第三条与第四条用一个会记调用的假布局服务（`{ selectPanel(id) { calls.push(id) } }`）驱动；第四条让假服务抛错，断言异常没有掀翻渲染，且界面给出了可读的交代。第六条是回归钉子：主机列表通过新的主区座位挂出来之后，那台没部署的主机仍然只给「部署」。
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `npx vitest run packages/dsh-client/tests/host-switcher.spec.ts`
-Expected: FAIL，`switchEntries` 尚未导出。
+Run: `npx vitest run packages/dsh-client/tests/host-icon.spec.ts`
+Expected: FAIL，`host-icon.tsx` 尚不存在。
 
-- [ ] **Step 3: 实现 `switchEntries` 与 store**
+- [ ] **Step 3: 实现图标组件**
 
-在 `host-switcher-store.ts` 放 store；在 `host-switcher.tsx` 放类型与纯函数。组件本任务先不写。
+`host-icon.tsx`：一个面板图标（宽侧栏下 16px、窄轨 18px——尺寸由 `sidebar.panellist` 的 owner props 给，形状照 `pairing-panel.ts` 的 `PairingIcon`），根元素带 `data-host-switcher`。点击行为：读 `ctx.get('layout')`，调 `selectPanel(PANEL_ID)`；抛错时兜住并在图标旁给一句可读交代（走词典，不硬编码）。
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `npx vitest run packages/dsh-client/tests/host-switcher.spec.ts`
-Expected: 三个纯函数用例 PASS。
-
-- [ ] **Step 5: 写组件渲染测试**
-
-用 `createRoot` + `act` 渲染 `HostSwitcher({ wide: true })`，断言：
-- 收起状态下按钮读出的是当前主机名（`panel.switch.current`，文案「本机」起）；
-- 展开后每个 `SwitchEntry` 有一行，标签取 `entry.label`；
-- `launchable` 为 false 的行 `aria-disabled="true"` 且点击不导航（Review Focus 5）；
-- `wide: false` 时只渲染一个图标按钮，不渲染展开列表（Review Focus 1）；
-- 点击任一可用项后，除了 `window.location.assign` 之外没有任何别的调用——用一个会记录调用的假 `assign` 断言没有触发停止/归档/分叉一类动作（Review Focus 4）。
-
-- [ ] **Step 6: 跑测试确认失败**
-
-Run: `npx vitest run packages/dsh-client/tests/host-switcher.spec.ts`
-Expected: FAIL，`HostSwitcher` 尚未导出。
-
-- [ ] **Step 7: 实现组件与样式**
-
-`HostSwitcher` 从 store 读 `entries()`，用 `useSyncExternalStore` 订阅（这是插件内已有的读法；若 `remote-session-poll.ts` 之外没有先例，就照该 store 的 `subscribe` 契约写一个本地 `useEffect` 订阅）。点击可用的远端项时 `window.location.assign(entry.path)`；点击本机项时 `window.location.assign('/')`。点击不可用项不导航。
-
-- [ ] **Step 8: 跑测试确认通过**
-
-Run: `npx vitest run packages/dsh-client/tests/host-switcher.spec.ts`
+Run: `npx vitest run packages/dsh-client/tests/host-icon.spec.ts`
 Expected: PASS。
 
-- [ ] **Step 9: 加文案**
+- [ ] **Step 5: 扩 `registerPanelSlots` 成三个座位**
 
-`locales.ts` 的 `zh` 与 `en` 各加：`panel.switch.label`（切换主机 / Switch host）、`panel.switch.current`（本机 / This machine）、`panel.switch.offline`（离线 / Offline）、`panel.switch.unreachable`（未部署 / Not deployed）、`panel.switch.noLaunchUrl`（没有打开地址，请到 设置 → 各主机 补上 / No open address — add it under Settings → Hosts）、`panel.switch.open`（在这台主机上打开 / Open on this host）。
+在 `client/index.ts:221-231` 的 `registerPanelSlots` 里，除了既有的 `settings.section`，再加两处 `inject`：`sidebar.panellist`（`{ name: 'sidebar.panellist', id: PANEL_ID, order: HOST_ICON_PANEL_ORDER, label, locale: NAMESPACE }`）与 `main`（`{ name: 'main', key: PANEL_ID, locale: NAMESPACE, inject: () => face }`）。三处都用 `inject` 等座位就位，不要直接 `register`。
 
-- [ ] **Step 10: 注册并接线**
+- [ ] **Step 6: 跑测试确认通过**
 
-在 `client/index.ts` 里，紧接 `maybeRegisterSidebarTree(...)` 之后注册 `sidebar.footer.action`。数据刷新复用已有的 `hostStore.subscribe` 与 `section.hosts()`：每次变化时 `set(switchEntries(mergeHostRows(section.hosts(), registry.list()), registry.list()))`。整段放进 `ctx.effect` 以便卸载时清理。
+Run: `npx vitest run packages/dsh-client/tests/host-icon.spec.ts packages/dsh-client/tests/panel-mount.spec.ts packages/dsh-client/tests/handover-mount.spec.ts`
+Expected: PASS（后两个是真 `SlotCore` 挂载，主区多一个 keyed 座位不该影响它们）。
 
-- [ ] **Step 11: 跑本包全量测试**
+- [ ] **Step 7: 摘掉底部切换器**
+
+删掉四个文件（`host-switcher.tsx`、`host-switcher-store.ts`、`host-switcher.module.css`、`tests/host-switcher.spec.ts`），删掉 `client/index.ts` 里 `sidebar.footer.action` 那段注册（连同它的 import 与 store 接线），并把 `locales.ts` 里 `panel.switch.*` 六个键的 zh 与 en 一并删掉。改完先查一遍引用，确认没有别处还在用：`grep -rn "host-switcher\|panel.switch\." packages/ --include="*.ts" --include="*.tsx" | grep -v node_modules` 应当没有命中。
+
+另外检查 `panel-mount.spec.ts` 与 `handover-mount.spec.ts` 里为上一版补的 `sidebar.footer.action` 槽声明：没有任何东西再注册进那个槽了，把那两行删掉（留着也无害，但那是上一版的遗留）。
+
+- [ ] **Step 8: 跑本包全量测试**
 
 Run: `npx vitest run packages/dsh-client/tests`
-Expected: PASS，含新增的 `ui-i18n.spec.ts`（文案都走了词典）与 `runtime-locale.spec.ts`。
+Expected: PASS，含 `ui-i18n.spec.ts`（zh 与 en 同步删过）与 `runtime-locale.spec.ts`。
 
-- [ ] **Step 12: 提交**
+- [ ] **Step 9: 提交**
 
 ```bash
-git add packages/dsh-client/src/host-switcher.tsx packages/dsh-client/src/host-switcher-store.ts packages/dsh-client/src/host-switcher.module.css packages/dsh-client/src/client/index.ts packages/dsh-client/src/locales.ts packages/dsh-client/tests/host-switcher.spec.ts
-git commit -m "侧栏：底部主机切换器，点击整页跳到目标主机"
+git add -A packages/dsh-client
+git commit -m "侧栏：主机入口改为顶部图标，主机列表同组件挂进主区"
 ```
 
----
 
 ### Task 3: 网关注入回本机入口
 
@@ -290,7 +286,7 @@ Expected: 打印访问地址。
 
 打开该地址，确认：顶栏有「添加工作区」入口（插件不再遮蔽）；会话行悬停出现归档与置顶按钮；定时任务的时钟标记若该机有定时任务则出现。
 
-再确认侧栏收窄成窄轨（56px）时：底部切换器图标按钮点得开、浮出的主机列表**没有被宿主侧栏的 overflow 裁掉**（浮层要能伸出窄轨外，这条 jsdom 测不到，只有真机能验），点条目后整页跳转。
+再确认主机入口：**侧栏顶部面板图标区**里有一个主机图标，排在配对图标**下面**（Review Focus 2），宽侧栏下点它右侧主区打开主机列表；窄侧栏（56px）下它只剩一个图标，悬停有「各主机」的提示（Review Focus 4），点它同样能打开主机列表。
 
 - [ ] **Step 3: 起第二台实例**
 
@@ -298,7 +294,9 @@ Expected: 打印访问地址。
 
 - [ ] **Step 4: 切换与回程**
 
-在第一台点切换器里的第二台，确认整页进入第二台、侧栏是第二台自己的原生树；开一段对话、发消息、触发一次审批并批准，确认流式与审批都正常；点网关注入的「回本机」回到第一台。
+在第一台点顶部主机图标 → 主区主机列表 → 点第二台的「打开」，确认整页进入第二台、侧栏是第二台自己的原生树；第二台自己的侧栏顶部也应当有主机图标（每台都装了插件，Review Focus 3）；开一段对话、发消息、触发一次审批并批准，确认流式与审批都正常；点网关注入的「回本机」回到第一台。
+
+另外确认列表里那台**没部署**的主机（先别填打开地址）：它那行给的是「部署」，不是「打开」（Review Focus 5）。
 
 - [ ] **Step 5: 失败路径**
 
