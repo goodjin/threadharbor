@@ -8,6 +8,44 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 agent 接进 
 > [docs/design/dsh-multi-host-migration.md](docs/design/dsh-multi-host-migration.md)；
 > 旧架构描述见 [docs/architecture.zh.md](docs/architecture.zh.md)（文首有过时标注）。
 
+## 安装
+
+要求：dsh ≥ 0.2.1-rc.2，Node ≥ 24（或 22.19），pnpm（corepack 会按 `packageManager` 自动取用）。
+
+1. clone 仓库到本机任意固定路径（不要放 /tmp 之类的别名目录），安装依赖——`prepare`
+   钩子会自动构建出客户端包，无需手工构建：
+
+   ```sh
+   git clone https://github.com/goodjin/threadharbor && cd threadharbor && pnpm install
+   ```
+
+2. 把它接进要装的 dsh profile。编辑 profile 的 `package.json`，加上依赖与 bundle
+   声明，然后安装并同步插件软链：
+
+   ```jsonc
+   {
+     "dependencies": { "threadharbor": "link:<仓库路径>" },
+     "dsh": { "profile": { "bundles": [ "…现有 bundles…", "threadharbor" ] } }
+   }
+   ```
+
+   ```sh
+   pnpm install
+   <仓库路径>/scripts/profile-link-plugins.sh <profile 目录>
+   ```
+
+3. 重启 dsh（桌面版重启应用）。输入框的模型入口应显示「Agent 名 · 模型名」，左侧出现
+   「Hosts」面板；七个 agent 的 preset 行由仓库根 `cordis.patch.yml` 带入。
+
+各 agent 的本机命令路径、主机名、模型清单等按机器写在 preset 行里，装完照
+[docs/install-plugins.zh.md](docs/install-plugins.zh.md) 逐行核对；那篇文档还有排查
+守则（插件装载沉默失败的表现与定位）。不想维护本地 clone 的机器，第 2 步的依赖可以
+直接用 git 形式（安装时同样会被自动构建）：
+
+```json
+{ "threadharbor": "github:goodjin/threadharbor#v0.1.0" }
+```
+
 ## 当前能力
 
 以下每条都以当前代码为准（核对时间 2026-10-16；「真机可达」按 `tests/wiring.spec.ts` 从宿主加载入口做的传递可达性检查口径）：
