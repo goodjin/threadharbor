@@ -105,24 +105,29 @@ git commit -m "侧栏：影子树默认不注册，开关反转为 =on 才遮蔽
 - Delete: `packages/dsh-client/src/host-switcher.tsx`、`host-switcher-store.ts`、`host-switcher.module.css`、`packages/dsh-client/tests/host-switcher.spec.ts`
 - Modify: `packages/dsh-client/src/client/index.ts`（`registerPanelSlots` 扩成三个座位；摘掉 `sidebar.footer.action` 的注册）
 - Modify: `packages/dsh-client/src/locales.ts`（删掉 `panel.switch.*` 六个键的 zh 与 en）
+- Modify: `packages/dsh-client/tests/panel-mount.spec.ts`（断言翻转：主机座位现在**在** `main` 与 `sidebar.panellist` 里）
 - Test: `packages/dsh-client/tests/host-icon.spec.ts`
 
 **Interfaces:**
 - Consumes:
   - `AgentPanel` 与 `AgentPanelBusinessProps`（`packages/dsh-client/src/client/index.ts:221-231` 里 `registerPanelSlots` 已经在用，它们是设置分区那个座位的主体）
-  - `PANEL_ID = 'threadharbor-rollup'`（`client/index.ts:163`）——主机图标行的 id 与主区 keyed 座位的 key 用它
-  - `ctx.get('layout')`（布局服务，暴露 `selectPanel(panelId: MainPanelId | null): void`；`reference/deepseek-harness/packages/client/ui-layout/src/client/service.ts:36`）
-  - 注册模板：`packages/dsh-client/src/pairing-panel.ts:169-177`（面板图标行）与 `:169-171`（`main` keyed 座位）
-  - `NAMESPACE`、`RuntimeT`、`panel.label`（'各主机' / 'Hosts'，`locales.ts:34` 与 `:448`）
+  - `PANEL_ID = 'threadharbor-rollup'`（`client/index.ts:163`）——面板图标行的 id 与主区 keyed 座位的 key 用它
+  - `PropsRuntime<'sidebar.panellist'>`（owner props 是 `{ size, active }`）
+  - 注册模板：`packages/dsh-client/src/pairing-panel.ts:169-177`（面板图标行）与 `PairingIcon`（图标的写法）
+  - `NAMESPACE`、`panel.label`（'各主机' / 'Hosts'，`locales.ts:34` 与 `:448`）
 - Produces:
   - `export const HOST_ICON_PANEL_ORDER = 102`（排在 `PAIRING_PANEL_ORDER = 101` 下面）
-  - `export function createHostIcon(select: () => void): (props: { readonly size?: number; readonly active?: boolean; readonly t?: RuntimeT }) => JSX.Element`——图标由工厂产出并**闭包持有** `select`（图标是在插槽里渲染的，拿不到注册上下文，所以「切面板」这件事必须由注册处包好传进来）；根元素带 `data-host-switcher`；`select` 抛错时组件兜住并给一句可读的交代（走词典，不硬编码）。
-  - `registerPanelSlots` 的第四个参数：`selectHostPanel: () => void`——由 `client/index.ts` 传入（那里有 `ctx`），内部取 `ctx.get('layout')` 再调 `selectPanel(PANEL_ID)`。
+  - `export function HostIcon(props: PropsRuntime<'sidebar.panellist'>): ReturnType<typeof createElement>`——纯图形，根元素带 `data-host-switcher`，**不接点击**
   - 三个座位同由 `registerPanelSlots` 注册：`settings.section`（既有）、`sidebar.panellist`（新增，id = `PANEL_ID`，order = `HOST_ICON_PANEL_ORDER`，label = `() => t('panel.label')`）、`main`（新增，key = `PANEL_ID`，`inject: () => face`）
 
-- [ ] **Step 1: 写注册与图标的失败测试**
+**两条读源码得来的硬事实（实现时别踩）：**
 
-新建 `packages/dsh-client/tests/host-icon.spec.ts`。挂载用的壳子照抄 `packages/dsh-client/tests/panel-mount.spec.ts` 与 `handover-mount.spec.ts` 里那套真 `SlotCore` 挂载（上一版为此补过 `sidebar.footer.action` 的声明）。
+1. **点击由侧栏的外壳接管，图标不接。** 侧栏给面板行渲染的是整行 `<button onClick={() => selectPanel(id)}>`，我们的图标只是行里的一块图形（`reference/deepseek-harness/packages/client/ui-sidebar/src/client/SidebarRoot.tsx:59-81`）。所以图标**不能自己挂 onClick**——按钮里嵌按钮是非法嵌套，而且外壳那次点击本来就是要的切换行为。
+2. **`selectPanel` 对未注册的键抛错**（`reference/deepseek-harness/packages/client/ui-layout/src/client/service.ts:72-75`）。兜法不是自己接住（点击不归我们管），而是保证**主区座位先于图标行就位**：`main` 与 `sidebar` 都是根座位的子座位（根注册时一并声明），而 `sidebar.panellist` 由侧栏入口稍后声明，所以主区座位一定先注册。这一条由测试钉住。
+
+- [ ] **Step 1: 写失败测试**
+
+新建 `packages/dsh-client/tests/host-icon.spec.ts`，壳子照抄 `packages/dsh-client/tests/panel-mount.spec.ts` 里的真 `SlotCore` 挂载（`shellWith` / `slotHost` / `fakeCtx`）。
 
 用例：
 
@@ -130,12 +135,8 @@ git commit -m "侧栏：影子树默认不注册，开关反转为 =on 才遮蔽
 it('主机图标进面板图标区，id 与主区座位同名，排在配对图标下面', () => { ... })
 it('图标根元素带 data-host-switcher（网关注入入口的去重判据）', () => { ... })
 it('面板图标行的标签是词典里的「各主机」，不是空串也不是原始键名', () => { ... })
-it('主区座位已注册时，点图标切到主机列表面板', () => { ... })
-it('主区座位还没注册时，点图标不抛错，也要有交代', () => { ... })
-it('主机列表里没有打开地址的那台，给的是「部署」而不是「打开」', () => { ... })
+it('主区座位与图标行同时就位：外壳点图标时 selectPanel 有键可切', () => { ... })
 ```
-
-第三条与第四条用一个会记调用的假回调驱动（`createHostIcon(() => { calls.push(1) })`）；第四条让假回调抛错，断言异常没有掀翻渲染，且界面给出了可读的交代。第六条是回归钉子：主机列表通过新的主区座位挂出来之后，那台没部署的主机仍然只给「部署」。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -144,7 +145,7 @@ Expected: FAIL，`host-icon.tsx` 尚不存在。
 
 - [ ] **Step 3: 实现图标组件**
 
-`host-icon.tsx`：`createHostIcon(select)` 产出一个面板图标（宽侧栏下 16px、窄轨 18px——尺寸由 `sidebar.panellist` 的 owner props 给，形状照 `pairing-panel.ts` 的 `PairingIcon`），根元素带 `data-host-switcher`。点击时调 `select()`；`select` 抛错就兜住，并在图标旁给一句可读交代（走词典，不硬编码）。
+`host-icon.tsx`：照 `pairing-panel.ts` 的 `PairingIcon` 写一个面板图标（同样用 `createElement` 画 svg，`props.size` 定尺寸、`props.active` 定透明度），根元素带 `data-host-switcher`。**不挂 onClick。**
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -155,25 +156,27 @@ Expected: PASS。
 
 在 `client/index.ts:221-231` 的 `registerPanelSlots` 里，除了既有的 `settings.section`，再加两处 `inject`：`sidebar.panellist`（`{ name: 'sidebar.panellist', id: PANEL_ID, order: HOST_ICON_PANEL_ORDER, label, locale: NAMESPACE }`）与 `main`（`{ name: 'main', key: PANEL_ID, locale: NAMESPACE, inject: () => face }`）。三处都用 `inject` 等座位就位，不要直接 `register`。
 
-`registerPanelSlots` 增加第四个参数 `selectHostPanel: () => void`；调用处（`client/index.ts:413` 附近）传入一个从 `ctx.get('layout')` 取到 `selectPanel` 再调 `PANEL_ID` 的闭包。`ctx.get('layout')` 可能是 undefined（服务没就位），这时同样当异常处理，别让图标点下去毫无反应。
-
 - [ ] **Step 6: 跑测试确认通过**
 
 Run: `npx vitest run packages/dsh-client/tests/host-icon.spec.ts packages/dsh-client/tests/panel-mount.spec.ts packages/dsh-client/tests/handover-mount.spec.ts`
-Expected: PASS（后两个是真 `SlotCore` 挂载，主区多一个 keyed 座位不该影响它们）。
+Expected: PASS。
 
-- [ ] **Step 7: 摘掉底部切换器**
+- [ ] **Step 7: 翻转 `panel-mount.spec.ts` 里那条断言**
 
-删掉四个文件（`host-switcher.tsx`、`host-switcher-store.ts`、`host-switcher.module.css`、`tests/host-switcher.spec.ts`），删掉 `client/index.ts` 里 `sidebar.footer.action` 那段注册（连同它的 import 与 store 接线），并把 `locales.ts` 里 `panel.switch.*` 六个键的 zh 与 en 一并删掉。改完先查一遍引用，确认没有别处还在用：`grep -rn "host-switcher\|panel.switch\." packages/ --include="*.ts" --include="*.tsx" | grep -v node_modules` 应当没有命中。
+那条用例现在断言主机座位**不在** `main`、**不在** `sidebar.panellist`（`tests/panel-mount.spec.ts:158-159`）。改版后两处都该**在**，把这两条断言翻过来，并把用例名里的「各主机成为设置栏目」补上「也在主区有座位」的说明。断言要写明 id 与 key 同名。
 
-另外检查 `panel-mount.spec.ts` 与 `handover-mount.spec.ts` 里为上一版补的 `sidebar.footer.action` 槽声明：没有任何东西再注册进那个槽了，把那两行删掉（留着也无害，但那是上一版的遗留）。
+- [ ] **Step 8: 摘掉底部切换器**
 
-- [ ] **Step 8: 跑本包全量测试**
+删掉四个文件（`host-switcher.tsx`、`host-switcher-store.ts`、`host-switcher.module.css`、`tests/host-switcher.spec.ts`），删掉 `client/index.ts` 里 `sidebar.footer.action` 那段注册（连同它的 import 与 store 接线），并把 `locales.ts` 里 `panel.switch.*` 六个键的 zh 与 en 一并删掉。改完先查一遍引用：`grep -rn "host-switcher\|panel\.switch\." packages/ --include="*.ts" --include="*.tsx" | grep -v node_modules` 应当没有命中。
+
+另外检查 `panel-mount.spec.ts` 与 `handover-mount.spec.ts` 里为上一版补的 `sidebar.footer.action` 槽声明：没有任何东西再注册进那个槽了，把那两行删掉。
+
+- [ ] **Step 9: 跑本包全量测试**
 
 Run: `npx vitest run packages/dsh-client/tests`
 Expected: PASS，含 `ui-i18n.spec.ts`（zh 与 en 同步删过）与 `runtime-locale.spec.ts`。
 
-- [ ] **Step 9: 提交**
+- [ ] **Step 10: 提交**
 
 ```bash
 git add -A packages/dsh-client
