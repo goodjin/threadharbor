@@ -32,6 +32,25 @@
   border-top: 1px solid var(--border, rgba(127, 127, 127, 0.35));
 }
 
+/* 窄轨下浮在按钮上方的列表容器：底部 100% 锚在触发按钮上沿。 */
+.popover {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  min-width: 220px;
+  margin-bottom: 4px;
+  padding: 4px 0;
+  background: var(--dsw-specific-sidebar-fill, var(--bg, #fff));
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.35));
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  z-index: 20;
+}
+
+.popover .list {
+  border-top: 0;
+}
+
 .item {
   margin: 0;
 }

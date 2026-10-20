@@ -61,9 +61,10 @@ export type HostSwitcherProps = {
 }
 
 /**
- * 侧栏底脚的主机切换器。`wide` 为真时渲染一个可展开的按钮 + 列表：点可用
+ * 侧栏底脚的主机切换器。`wide` 为真时渲染一个可展开的按钮 + 行内列表：点可用
  * 远端项整页 `window.location.assign` 到网关路径，点本机回根路径，点不可用
- * 项不导航。`wide` 为假（56px 窄轨）时只渲染一个图标按钮，不展开列表。
+ * 项不导航。`wide` 为假（56px 窄轨）时只渲染一个图标按钮，点开后列表浮在
+ * 按钮上方的浮层里（该槽没有「展开侧栏」能力，窄轨下用浮层容纳条目）。
  * 根元素带 `data-host-switcher`，网关注入方靠它避免在已装本插件的页面上
  * 重复插入回本机入口。
  */
@@ -77,6 +78,28 @@ export function HostSwitcher({ wide, t = fallbackT }: HostSwitcherProps): ReactN
     window.location.assign(entry.path === '' ? '/' : entry.path)
   }
 
+  const list = (
+    <ul className={styles.list} data-host-switcher-list>
+      {entries.map(entry => {
+        const note = entryNote(entry, t)
+        return (
+          <li key={entry.hostId} className={styles.item}>
+            <button
+              type="button"
+              className={styles.row}
+              aria-disabled={entry.launchable ? undefined : 'true'}
+              data-host-switcher-entry={entry.hostId}
+              onClick={() => open(entry)}
+            >
+              <span className={styles.rowLabel}>{entry.label}</span>
+              {note !== undefined && <span className={styles.rowNote}>{note}</span>}
+            </button>
+          </li>
+        )
+      })}
+    </ul>
+  )
+
   if (!wide) {
     return (
       <div data-host-switcher className={styles.root}>
@@ -84,11 +107,14 @@ export function HostSwitcher({ wide, t = fallbackT }: HostSwitcherProps): ReactN
           type="button"
           className={styles.trigger}
           aria-label={t('panel.switch.label')}
+          aria-expanded={expanded}
+          aria-haspopup="true"
           data-host-switcher-trigger
           onClick={() => setExpanded(value => !value)}
         >
           <SwitchIcon />
         </button>
+        {expanded && <div className={styles.popover}>{list}</div>}
       </div>
     )
   }
@@ -106,38 +132,19 @@ export function HostSwitcher({ wide, t = fallbackT }: HostSwitcherProps): ReactN
         <SwitchIcon />
         <span className={styles.triggerLabel}>{t('panel.switch.current')}</span>
       </button>
-      {expanded && (
-        <ul className={styles.list} data-host-switcher-list>
-          {entries.map(entry => {
-            const note = entryNote(entry, t)
-            return (
-              <li key={entry.hostId} className={styles.item}>
-                <button
-                  type="button"
-                  className={styles.row}
-                  aria-disabled={entry.launchable ? undefined : 'true'}
-                  data-host-switcher-entry={entry.hostId}
-                  onClick={() => open(entry)}
-                >
-                  <span className={styles.rowLabel}>{entry.label}</span>
-                  {note !== undefined && <span className={styles.rowNote}>{note}</span>}
-                </button>
-              </li>
-            )
-          })}
-        </ul>
-      )}
+      {expanded && list}
     </div>
   )
 }
 
-/** 行尾的注记：不可用给「未部署 / 没有打开地址」，可用但离线给「离线」，其余给「在这台主机上打开」。 */
-function entryNote(entry: SwitchEntry, t: RuntimeT): string | undefined {
+/** 行尾的注记：不可用给状态词（未部署 / 未启动 / 未知）或「没有打开地址」，可用但离线给「离线」，其余给「在这台主机上打开」。 */
+export function entryNote(entry: SwitchEntry, t: RuntimeT): string | undefined {
   if (entry.self) return undefined
   if (!entry.launchable) {
-    return entry.status === 'undeployed' || entry.status === 'stopped' || entry.status === 'unknown'
-      ? t('panel.switch.unreachable')
-      : t('panel.switch.noLaunchUrl')
+    if (entry.status === 'undeployed') return t('panel.switch.unreachable')
+    if (entry.status === 'stopped') return t('panel.status.stopped')
+    if (entry.status === 'unknown') return t('panel.status.unknown')
+    return t('panel.switch.noLaunchUrl')
   }
   if (!entry.online) return t('panel.switch.offline')
   return t('panel.switch.open')

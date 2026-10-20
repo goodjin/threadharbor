@@ -9,12 +9,13 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
-import { switchEntries, HostSwitcher } from '../src/host-switcher.tsx'
+import { switchEntries, entryNote, HostSwitcher } from '../src/host-switcher.tsx'
+import type { SwitchEntry } from '../src/host-switcher.tsx'
 import { sharedHostSwitcherStore } from '../src/host-switcher-store.ts'
 import { mergeHostRows } from '../src/panel.tsx'
 import { gatewayPagePath, hostRegistry } from '@threadharbor/dsh-host-federation'
 import type { HostSnapshot } from '@threadharbor/dsh-host-federation'
-import { zh } from '../src/locales.ts'
+import { fallbackT, zh } from '../src/locales.ts'
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
 
@@ -66,6 +67,56 @@ describe('switchEntries（纯函数）', () => {
     const peer = entries.find(entry => entry.hostId === 'peer')
     expect(peer?.launchable).toBe(true)
     expect(peer?.path).toBe(gatewayPagePath('peer'))
+  })
+})
+
+/** 造一条可切换条目，缺省为「可跳转且在线」的远端主机；用 overrides 改状态。 */
+function makeEntry(overrides: Partial<SwitchEntry> = {}): SwitchEntry {
+  return {
+    hostId: 'h',
+    label: 'h',
+    self: false,
+    online: true,
+    launchable: true,
+    status: 'connected',
+    path: gatewayPagePath('h'),
+    ...overrides,
+  }
+}
+
+describe('entryNote（状态注记）', () => {
+  it('本机不显示注记', () => {
+    expect(entryNote(makeEntry({ self: true }), fallbackT)).toBeUndefined()
+  })
+
+  it('未部署 → 未部署', () => {
+    expect(entryNote(makeEntry({ launchable: false, status: 'undeployed' }), fallbackT))
+      .toBe(zh['panel.switch.unreachable'])
+  })
+
+  it('未启动 → 未启动（不是未部署）', () => {
+    expect(entryNote(makeEntry({ launchable: false, status: 'stopped' }), fallbackT))
+      .toBe(zh['panel.status.stopped'])
+  })
+
+  it('未知 → 未知（不是未部署）', () => {
+    expect(entryNote(makeEntry({ launchable: false, status: 'unknown' }), fallbackT))
+      .toBe(zh['panel.status.unknown'])
+  })
+
+  it('其它不可跳转 → 没有打开地址', () => {
+    expect(entryNote(makeEntry({ launchable: false, status: 'disconnected' }), fallbackT))
+      .toBe(zh['panel.switch.noLaunchUrl'])
+  })
+
+  it('可跳转但离线 → 离线', () => {
+    expect(entryNote(makeEntry({ launchable: true, online: false }), fallbackT))
+      .toBe(zh['panel.switch.offline'])
+  })
+
+  it('可跳转且在线 → 在这台主机上打开', () => {
+    expect(entryNote(makeEntry({ launchable: true, online: true }), fallbackT))
+      .toBe(zh['panel.switch.open'])
   })
 })
 
@@ -163,11 +214,21 @@ describe('HostSwitcher（组件）', () => {
     }
   })
 
-  it('wide=false 时只渲染一个图标按钮，不渲染展开列表', async () => {
+  it('wide=false 时只渲染图标按钮；点开后在按钮上方浮出列表（非死按钮）', async () => {
+    const registry = makeRegistry([
+      { hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' },
+    ])
+    sharedHostSwitcherStore().set(switchEntries(mergeHostRows([], registry.list()), registry.list()))
     const { container, root } = await renderHostSwitcher(false)
     try {
-      expect(container.querySelector('[data-host-switcher-trigger]')).not.toBeNull()
+      const trigger = container.querySelector<HTMLElement>('[data-host-switcher-trigger]')
+      expect(trigger).not.toBeNull()
+      // 收起态不渲染列表
       expect(container.querySelector('[data-host-switcher-list]')).toBeNull()
+      act(() => { trigger!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })) })
+      // 点开后在浮层里出列表与条目行
+      expect(container.querySelector('[data-host-switcher-list]')).not.toBeNull()
+      expect(container.querySelector('[data-host-switcher-entry="bench"]')).not.toBeNull()
     } finally {
       await act(async () => { root.unmount() })
       container.remove()
@@ -194,6 +255,32 @@ describe('HostSwitcher（组件）', () => {
       })
       expect(assign).toHaveBeenCalledTimes(1)
       expect(assign).toHaveBeenCalledWith(gatewayPagePath('peer'))
+    } finally {
+      await act(async () => { root.unmount() })
+      container.remove()
+    }
+  })
+
+  it('点击本机项：window.location.assign("/")，回到根路径', async () => {
+    const assign = vi.fn()
+    vi.stubGlobal('location', { assign })
+    const registry = makeRegistry()
+    const hosts: HostSnapshot[] = [
+      { hostId: 'self-host', hostTitle: '本机', lastSeen: 1_000, self: true },
+    ]
+    sharedHostSwitcherStore().set(switchEntries(mergeHostRows(hosts, registry.list()), registry.list()))
+    const { container, root } = await renderHostSwitcher(true)
+    try {
+      act(() => {
+        container.querySelector<HTMLElement>('[data-host-switcher-trigger]')!
+          .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+      })
+      act(() => {
+        container.querySelector<HTMLElement>('[data-host-switcher-entry="self-host"]')!
+          .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+      })
+      expect(assign).toHaveBeenCalledTimes(1)
+      expect(assign).toHaveBeenCalledWith('/')
     } finally {
       await act(async () => { root.unmount() })
       container.remove()
