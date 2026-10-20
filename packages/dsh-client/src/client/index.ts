@@ -410,13 +410,18 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   }
   registerPanelSlots(ctx.slots, face, () => t('panel.label'))
 
-  // 阶段 L：以更低优先级数值遮蔽原生工作区列表，接管为「主机 → 项目 →
-  // 会话」树（§8.5）。开关 threadharbor.sidebarTree=off 时跳过注册，原生
-  // 列表照常——升级漂移时的一键退路。
+  // The shadow tree is opt-in now: by default nothing registers for
+  // sidebar.workspaces, so DSH's native browsing area keeps the slot and all
+  // of its own abilities (new project, unarchive, hover cards, shortcuts).
+  // Only `threadharbor.sidebarTree` = `on` brings the old shadowing tree back,
+  // as an experiment with the native list standing by.
   maybeRegisterSidebarTree(ctx.slots, ctx, registry)
 
-  // 其他主机上的会话仍跑在那台机器上。选中时主区换成这块面板，读写都经本机
-  // 代理打到对方 DSH；点回本机会话时面板让位，原生对话界面回来。
+  // Other hosts' sessions still run on their own machine. Selecting one swaps
+  // the main area for this panel; clicking a local session hands it back.
+  // With the shadow tree unregistered (the default) nothing reaches this panel
+  // any more: the tree was its only entry point (no sidebar icon). Task 6
+  // deletes this registration.
   ctx.effect(
     () => registerRemoteConversation(ctx.slots, sharedRemoteConversation()),
     'threadharbor: remote conversation',
