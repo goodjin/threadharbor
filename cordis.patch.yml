@@ -306,7 +306,10 @@
               # 国际站把 command 指向 `qoder`/`qodercli`；本机是 CN 版。
               command: /Users/good/.local/bin/qoderclicn
               # 登录走 `qoderclicn login`，凭据留在 CLI 自己的
-              # ~/.qoder-cn 配置目录。已登录时会话不需要 authenticate；只有 session/new
+              # ~/.qoder-cn 配置目录。无头部署可改用 PAT：
+              # 宿主进程设 QODERCN_PERSONAL_ACCESS_TOKEN 即自动登录（官方
+              # ACP 文档写明的路径；spawn 的 env 白名单会放行它，见
+              # spawn-args.ts）。已登录时会话不需要 authenticate；只有 session/new
               # 报认证错误时才补一次 authenticate 并重试（2026-10-20 实测：
               # 已登录时调用 authenticate 偶尔会挂满超时）。
               # 默认模式就是逐次询问；写出来是不让构建的默认值漂移。

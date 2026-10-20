@@ -145,6 +145,21 @@ export type RunnerOptions = {
    * open proceeds exactly as before.
    */
   readonly onModels?: (models: readonly { id: string; name: string; description?: string }[]) => void
+  /**
+   * The external session id a previous host generation journaled for this DSH
+   * session, when one is remembered.
+   *
+   * A dialect whose capabilities declare `supportsSessionResume` gets one
+   * `session/resume` attempt against that id before any `session/new` — the
+   * agent-side conversation is then reattached as-is, and the first prompt
+   * carries no text replay (the agent still has the history; riding the
+   * transcript would read it to the agent twice). A resume that fails for any
+   * reason falls through to the ordinary open, replay included — an agent that
+   * dropped its sessions must not take the DSH session down with it. Absent,
+   * or naming an id for a dialect without the capability, means open exactly
+   * as before.
+   */
+  readonly resumeOf?: (dshSessionId: string) => string | undefined
 }
 
 /** Long enough for a cold process to start, short enough to not strand a turn. */
@@ -394,6 +409,13 @@ export class AcpTurnRunner {
   private dshSessionId: string | undefined
   private opening: Promise<string> | undefined
   /**
+   * The last open reattached a journaled external session (`session/resume`)
+   * rather than opening a fresh one. One turn's worth of state: the first
+   * prompt after a resume must not ride the text replay, and any later open
+   * (a different DSH session, a dropped connection) starts the question over.
+   */
+  private resumedLastOpen = false
+  /**
    * 帧队列：observe 只入队，泵从队首消费。
    *
    * 队列随 prompt 生命周期清空（beginPrompt）——两次回合之间到达的帧属于无主
@@ -458,6 +480,19 @@ export class AcpTurnRunner {
 
   private readonly client: AcpClientPort
   private readonly options: RunnerOptions
+  /**
+   * The config-option id carrying this agent's model selector, read off the
+   * latest `session/new` reply by the dialect (`modelVia: 'config_option'`).
+   * Undefined for prompt_param dialects and for a reply that named no selector.
+   */
+  private modelConfigId: string | undefined
+  /**
+   * The modelId last applied to the current external session via
+   * `session/set_config_option`. Keyed to the session, not the turn: the
+   * agent keeps the selection across turns, so an unchanged pick must not
+   * re-travel the wire before every prompt.
+   */
+  private appliedModelId: string | undefined
 
   constructor(client: AcpClientPort, options: RunnerOptions) {
     this.client = client
@@ -879,8 +914,9 @@ export class AcpTurnRunner {
     const handedOver = this.options.primer?.take(turn.sessionId)
     // The host transcript rides the first request too, but only when no
     // handover exists — the handover is the fresher copy of the same
-    // conversation, and carrying both would read the history twice.
-    const replayed = handedOver === undefined && firstOpen
+    // conversation, and carrying both would read the history twice. A resumed
+    // open needs neither: the agent still has the conversation it kept.
+    const replayed = handedOver === undefined && firstOpen && !this.resumedLastOpen
       ? this.options.replay?.take(turn.sessionId)
       : undefined
     const { text: question, images, undelivered } = promptContent(decision.messages, this.options.dialect)
@@ -899,13 +935,20 @@ export class AcpTurnRunner {
       prompt: [{ type: 'text', text }, ...images],
     }
     // The session's own selection outranks the configured default: it is what
-    // the user picked for this conversation.
+    // the user picked for this conversation. Config-option dialects get it
+    // applied ahead of the prompt — inside the same try, so a refused pick is
+    // classified exactly like a refused prompt instead of dying unhandled.
     const modelId = turn.modelId ?? this.options.modelId
-    if (modelId !== undefined) params['modelId'] = modelId
+    if (modelId !== undefined && this.options.dialect?.modelVia !== 'config_option') {
+      params['modelId'] = modelId
+    }
 
     let reply: unknown
     let failure: unknown
     try {
+      if (modelId !== undefined && this.options.dialect?.modelVia === 'config_option') {
+        await this.applyModel(sessionId, modelId)
+      }
       reply = await this.client.request('session/prompt', params)
     } catch (error: unknown) {
       // Remember it and settle the listeners; the classification below turns
@@ -1026,7 +1069,7 @@ export class AcpTurnRunner {
       // the first request only. Taken before the request and put back if the
       // request failed.
       const handedOver = this.options.primer?.take(turn.sessionId)
-      const replayed = handedOver === undefined && firstOpen
+      const replayed = handedOver === undefined && firstOpen && !this.resumedLastOpen
         ? this.options.replay?.take(turn.sessionId)
         : undefined
       this.replayRode = replayed !== undefined
@@ -1043,10 +1086,17 @@ export class AcpTurnRunner {
         prompt: [{ type: 'text', text }, ...images],
       }
       const modelId = turn.modelId ?? this.options.modelId
-      if (modelId !== undefined) params['modelId'] = modelId
+      if (modelId !== undefined && this.options.dialect?.modelVia !== 'config_option') {
+        params['modelId'] = modelId
+      }
       // prompt 不在本次调用里等完：应答落定只是末段的闭合条件之一，段边界才是
       // 本次调用的返回时机。落定后续接只做三件事——记录结果、解除监听、唤醒泵。
-      void this.client.request('session/prompt', params).then(
+      // config_option 方言把选型应用串在 prompt 前面：同一个 promise，落定/失败
+      // 与 prompt 共用同一条通路，选型被拒不会卡死泵。
+      const asking = modelId !== undefined && this.options.dialect?.modelVia === 'config_option'
+        ? this.applyModel(sessionId, modelId).then(() => this.client.request('session/prompt', params))
+        : this.client.request('session/prompt', params)
+      void asking.then(
         reply => {
           this.promptSettled = true
           this.replyStop = (reply as { stopReason?: unknown } | null)?.stopReason
@@ -1445,6 +1495,40 @@ export class AcpTurnRunner {
       cwd: this.options.cwd,
       mcpServers: [],
     })
+    // A journaled external session gets one reattach attempt first: when it
+    // works, the conversation continues exactly as the agent kept it — same
+    // history, same model selection state — and the first prompt rides no text
+    // replay. Anything else (no journal, dialect not measured for resume,
+    // agent-side session gone) opens fresh through the ordinary path below.
+    this.resumedLastOpen = false
+    const journaled = this.dshSessionId !== undefined && this.options.dialect?.capabilities.supportsSessionResume === true
+      ? this.options.resumeOf?.(this.dshSessionId)
+      : undefined
+    if (journaled !== undefined) {
+      onStage('session/resume')
+      try {
+        const resumed = await this.client.request('session/resume', {
+          sessionId: journaled,
+          cwd: this.options.cwd,
+          mcpServers: [],
+        })
+        this.resumedLastOpen = true
+        this.appliedModelId = undefined
+        this.modelConfigId = this.options.dialect?.modelConfigId?.(resumed)
+        if (this.options.dialect !== undefined && this.options.onModels !== undefined) {
+          this.options.onModels(this.options.dialect.readModels(resumed))
+        }
+        if (this.options.modeId !== undefined) {
+          onStage('session/set_mode')
+          await this.client.request('session/set_mode', { sessionId: journaled, modeId: this.options.modeId })
+        }
+        return journaled
+      } catch {
+        // The agent-side session is gone or refuses (its own retention, a CLI
+        // update, another machine). Fall through: a fresh open plus the text
+        // replay is the degraded-but-working path, and has been all along.
+      }
+    }
     onStage('session/new')
     let rawReply: unknown
     try {
@@ -1462,6 +1546,9 @@ export class AcpTurnRunner {
     if (typeof reply?.sessionId !== 'string') {
       throw new Error('acp session/new returned no sessionId')
     }
+    // A fresh session knows no model selection, whatever the last one had.
+    this.appliedModelId = undefined
+    this.modelConfigId = this.options.dialect?.modelConfigId?.(reply)
     // The picker serves what the agent reported; the dialect knows where the
     // list lives. Reported even when empty — an agent that serves nothing must
     // be able to replace whatever was believed before.
@@ -1473,6 +1560,21 @@ export class AcpTurnRunner {
       await this.client.request('session/set_mode', { sessionId: reply.sessionId, modeId: this.options.modeId })
     }
     return reply.sessionId
+  }
+
+  /**
+   * Apply a picked modelId the protocol's own way, once per actual change.
+   *
+   * `session/set_config_option` writes the model selector the agent advertised
+   * in `session/new` — the path for dialects with `modelVia: 'config_option'`,
+   * whose prompt-side modelId param would be an undocumented extension. A
+   * failure propagates: a turn that ran on a model the user did not pick is
+   * worse than a turn that ends saying why the pick did not land.
+   */
+  private async applyModel(sessionId: string, modelId: string): Promise<void> {
+    if (this.modelConfigId === undefined || modelId === this.appliedModelId) return
+    await this.client.request('session/set_config_option', { sessionId, configId: this.modelConfigId, value: modelId })
+    this.appliedModelId = modelId
   }
 }
 

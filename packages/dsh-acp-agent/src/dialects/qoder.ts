@@ -93,6 +93,11 @@ export const qoderDialect: AcpDialect = {
     // Opening frame, optional terminal-output frame with no status, completed.
     toolFrameShape: 'two_frame',
     commandVia: 'tool_frame',
+    // initialize advertised `loadSession: true` with the full
+    // sessionCapabilities set (list/resume/fork/close/delete) — captured
+    // 2026-10-20. `session/resume` reattaches that server-side conversation,
+    // so a host restart need not rebuild context from a text replay.
+    supportsSessionResume: true,
     // Measured on 2026-10-20. Values are DSH's own tool names (verified against
     // the reference client's classifyTool table / keyed toolview registry on
     // 2026-10-13); Qoder names not seen live stay unmapped and degrade to the
@@ -127,7 +132,42 @@ export const qoderDialect: AcpDialect = {
     return outputFrom(update)
   },
 
+  // The user's pick rides `session/set_config_option` — the protocol's write
+  // path for the model selector Qoder publishes in session/new. Nothing
+  // documents a modelId param on session/prompt; an undocumented param on a
+  // closed-source server is one silent ignore away from a picker that lies.
+  modelVia: 'config_option',
+
+  modelConfigId(reply) {
+    const options = record(reply)['configOptions']
+    if (!Array.isArray(options)) return undefined
+    const entry = options
+      .map(record)
+      .find(option => option['category'] === 'model' || option['id'] === 'model')
+    const id = record(entry)['id']
+    return typeof id === 'string' ? id : undefined
+  },
+
   readModels(reply) {
+    // The standard carrier first (config option with the model category — the
+    // same place claude reads), `models.availableModels` as the fallback for a
+    // build that omits the selector. Same 15 models either way, measured.
+    const config = record(reply)['configOptions']
+    if (Array.isArray(config)) {
+      const entry = config
+        .map(record)
+        .find(option => option['category'] === 'model' || option['id'] === 'model')
+      const choices = record(entry)['options']
+      if (Array.isArray(choices)) {
+        return choices.map(record).flatMap(choice => {
+          const id = choice['value']
+          if (typeof id !== 'string') return []
+          const name = typeof choice['name'] === 'string' ? choice.name : id
+          const description = typeof choice['description'] === 'string' ? choice['description'] : undefined
+          return [{ id, name, ...(description === undefined ? {} : { description }) }]
+        })
+      }
+    }
     const available = record(record(reply)['models'])['availableModels']
     if (!Array.isArray(available)) return []
     return available.map(record).flatMap(model => {

@@ -62,6 +62,17 @@ export type FactoryDeps = {
    */
   onRuntimeModels?(presetId: string, models: readonly { id: string; name: string; description?: string }[]): void
   /**
+   * The external session id a previous host generation journaled for one DSH
+   * session of this preset, when one is remembered.
+   *
+   * Keyed by both because a session that switched presets must not resume into
+   * the wrong agent's conversation. The runner turns the answer into one
+   * `session/resume` attempt before any `session/new` (dialect-gated); a
+   * caller without a journal — every deployment today — omits this and opens
+   * exactly as before.
+   */
+  resumeOf?(presetId: string, dshSessionId: string): string | undefined
+  /**
    * 外部子代理的影子子会话端口。
    *
    * 缺席（或 `available:false`）时泵内子会话动作归零：只留父会话卡片。
@@ -217,6 +228,7 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
         cwd,
         dialect,
         ...(deps.onRuntimeModels === undefined ? {} : { onModels: models => { deps.onRuntimeModels!(presetId, models) } }),
+        ...(deps.resumeOf === undefined ? {} : { resumeOf: dshSessionId => deps.resumeOf!(presetId, dshSessionId) }),
         ...(deps.subagents === undefined ? {} : { subagents: deps.subagents }),
       })
       return {

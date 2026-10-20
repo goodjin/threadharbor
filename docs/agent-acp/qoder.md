@@ -1,8 +1,8 @@
 # Qoder 的 ACP 对接
 
 > 核对时间：2026-10-20
-> 来源：官方文档 <https://docs.qoder.com/zh/cli/acp>、<https://docs.qoder.com/zh/cli/cli-reference>、<https://docs.qoder.cn/cli/installation> + **本机实机探测**（qoder-cli-cn 1.1.6，已完成 `qoderclicn login`）
-> 状态：**已实现，已实测。** qoder dialect（`packages/dsh-acp-agent/src/dialects/qoder.ts`）与 `acp-qoder` 预设行已落地；协议形状、工具投影、权限应答、取消、图像、新会话回放都跑过真回合，`live.spec.ts` 的 6 个 Qoder 用例全部通过（2026-10-20）。
+> 来源：官方文档 <https://docs.qoder.com/zh/cli/acp>、<https://docs.qoder.cn/cli/acp>（CN 站，含 PAT 无头认证）、<https://docs.qoder.cn/cli/cli-reference>、<https://docs.qoder.cn/cli/settings-reference>、<https://docs.qoder.cn/cli/installation> + **本机实机探测**（qoder-cli-cn 1.1.6，已完成 `qoderclicn login`）
+> 状态：**已实现，已实测。** qoder dialect（`packages/dsh-acp-agent/src/dialects/qoder.ts`）与 `acp-qoder` 预设行已落地；协议形状、工具投影、权限应答、取消、图像、新会话回放、**模型选择（session/set_config_option）**、**会话恢复（session/resume）** 都跑过真回合，`live.spec.ts` 的 8 个 Qoder 用例全部通过（2026-10-20）。
 
 ## 一句话结论
 
@@ -31,6 +31,8 @@ qoderclicn login
 
 凭据留在 CLI 自己的配置目录（本机在 `~/.qoder-cn`），本项目不读、不复制、不另设密钥。
 
+**无头部署（服务器/CI）不用交互登录**：官方 CN 站 ACP 文档（docs.qoder.cn/cli/acp，2026-10-20 核对）明确 CLI 启动时检查 `QODERCN_PERSONAL_ACCESS_TOKEN`，设置后自动登录——Zed 的接入示例就是通过 `env` 传它。PAT 在 <https://qoder.cn/account/integrations> 创建（值只在创建时可见）。实测（2026-10-20 探针）：假 PAT 不崩、`session/new` 照常回 `-32000`，正好落入按需认证路径，所以放行该变量对现有流程零风险。`stdioEnvFor('qoder')` 的剥除表对它（连同 `QODERCN_CONFIG_DIR`、`QODERCN_MODEL`）开了精确名白名单；`QODERCN_PERMISSION_MODE` 有意不放行——模式归 DSH 管（预设 `mode` + `session/set_mode`），两个主人只会把事实搞乱。
+
 ## 启动方式
 
 ```sh
@@ -57,7 +59,7 @@ qoder: ['--acp'],
 sdk_invalid_args: Agent SDK entrypoint env is set but required flags are missing
 ```
 
-实测命中过的变量包括 `QODER_AGENT_SDK_ENTRYPOINT`、`QODER_SDK_AUTH_PAYLOAD_FILE`、`QODER_CONFIG_DIR`、`QODER_WORKER_*`、`QODERCN_*`，以及 VS Code 的 IPC 句柄（`VSCODE_*`）。**这些变量不影响 `qoderclicn login` 的结果，只影响无头启动。**
+实测命中过的变量包括 `QODER_AGENT_SDK_ENTRYPOINT`、`QODER_SDK_AUTH_PAYLOAD_FILE`、`QODER_CONFIG_DIR`、`QODER_WORKER_*`、`QODERCN_*`，以及 VS Code 的 IPC 句柄（`VSCODE_*`）。**这些变量不影响 `qoderclicn login` 的结果，只影响无头启动。**（2026-10-20 补充探针：把这些疑似标记**逐个单独**设给 1.1.6——entrypoint 三种取值、payload 文件、worker+config 组合——全都正常完成握手；真凶在 IDE 终端的全量环境里，未定位到具体变量/取值。所以剥除按前缀走仍是安全默认，只对下述精确名单开白。）
 
 生产代码在拉起 qoder 子进程时剥掉这些前缀（`stdioEnvFor('qoder')`，见 `spawn-args.ts`）：spawn 的 `env` 是整体替换，所以返回的是一份完整过滤后的副本，`PATH` / `HOME` 等照常保留。其它 agent 不动，继续继承本进程环境。
 
@@ -109,13 +111,18 @@ sdk_invalid_args: Agent SDK entrypoint env is set but required flags are missing
 
 ```
 { sessionId,
-  models: { availableModels: [ { modelId, name, description }, … ] },   // 15 个
+  models: { availableModels: [ { modelId, name, description }, … ],   // 15 个
+            currentModelId: "auto" },
   modes: { currentModeId: "default",
            availableModes: [default, acceptEdits, bypassPermissions, plan] },
-  configOptions: [ … ] }
+  configOptions: [
+    { type: "select", id: "mode",  category: "mode",  currentValue: "default", options: [ … ] },
+    { type: "select", id: "model", category: "model", currentValue: "auto",    options: [ … 15 个 ] } ] }
 ```
 
-模型列表就在 `models.availableModels`，字段与 grok / codex / cursor 一致（`modelId` / `name` / `description`）。**`modelId` 没有 Cursor 那种方括号参数后缀**，可以原样展示、原样回传。
+模型列表在 `models.availableModels`，字段与 grok / codex / cursor 一致（`modelId` / `name` / `description`）。**`modelId` 没有 Cursor 那种方括号参数后缀**，可以原样展示、原样回传。
+
+**`configOptions` 是 ACP 标准的模型/模式选择通道，也是唯一有文档依据的写入路径。** dialect 的 `readModels` 优先从 `configOptions[category=model]` 读（与 claude 同一处），`models.availableModels` 作回退；用户选型由 runner 发 `session/set_config_option { sessionId, configId: "model", value: <modelId> }`（2026-10-20 真机验证：agent 接受写入并回 `config_option_update` 确认）。以前往 `session/prompt` 的 params 里塞 `modelId` 的做法已废——ACP schema 的 `PromptRequest` 只有 `sessionId` 和 `prompt`，那个参数属于自创扩展，Qoder 文档从未认领。
 
 实测 15 个模型：
 
@@ -206,6 +213,17 @@ params.toolCall = { toolCallId, status, title, kind, rawInput, content,
 
 `session/cancel` 能中断进行中的回合。实测让 agent 跑 `sleep 90`，第一帧工具调用之后 3.7 秒发出取消，回复 `stopReason: "cancelled"`，之后不再有该回合的帧。`live.spec.ts` 的取消用例要求在 5 秒内结束。
 
+## 会话恢复（session/resume）：已实测
+
+`initialize` 广播 `loadSession: true` + `sessionCapabilities`（list/resume/fork/close/delete），会话按项目目录持久化在 `~/.qoder-cn/projects/<目录编码>/`。runner 对声明了 `supportsSessionResume` 的方言（qoder 已声明）先试 `session/resume { sessionId, cwd, mcpServers }`，失败（任何错误）回退普通 `session/new` + 文本回放；resume 成功的首回合**不再**骑「之前对话」——agent 那边历史还在，再灌一遍是双重历史。
+
+真机实测（2026-10-20，live 用例）钉住两条：
+
+1. **有过回合的会话**：transport 关掉（进程退出）后，新进程 `session/resume` 同一个 id 成功——宿主重启后的接续走这条，不再靠文本拼接。
+2. **空会话不落盘**：开了会话但没发过任何消息，进程退出后 resume 同一个 id 报 `-32602 INVALID_SESSION_IDENTIFIER`（错误信息里指明它在项目目录下找过会话文件）。回退路径就是为这个准备的。
+
+**宿主侧的持久化还没接**：journal 里记「DSH 会话 → acp sessionId」的写入点（现成的接缝是 `AcpPluginDeps`/factory 的 `resumeOf`，按 (presetId, dshSessionId) 键控，要动会话日志格式）是独立一块，接上后重启即原生续聊。
+
 ## 噪声帧与私有扩展
 
 过滤掉的会话更新：
@@ -222,18 +240,20 @@ params.toolCall = { toolCallId, status, title, kind, rawInput, content,
 
 ## 接进本项目要改的地方（已落地）
 
-1. **新增 `dialects/qoder.ts`**：工具名取 `_meta.qoder.toolName`；输出取 `rawOutput` / `_meta.terminal_output.data`；模型取 `models.availableModels`；零用量报 `undefined`
+1. **新增 `dialects/qoder.ts`**：工具名取 `_meta.qoder.toolName`；输出取 `rawOutput` / `_meta.terminal_output.data`；模型优先取 `configOptions[category=model]`（回退 `models.availableModels`）；零用量报 `undefined`；`modelVia: 'config_option'` + `modelConfigId`；`supportsSessionResume: true`
 2. **在 `factory.ts` 的 `DIALECTS` 登记** `qoder`
 3. **`spawn-args.ts` 加 `--acp`**，并在同一张表旁边说明裸启动是交互式 CLI
-4. **`stdioEnvFor('qoder')` 剥掉 IDE/SDK 环境变量**，生产与 live 测试共用
+4. **`stdioEnvFor('qoder')` 剥掉 IDE/SDK 环境变量**，生产与 live 测试共用；`QODERCN_PERSONAL_ACCESS_TOKEN` / `QODERCN_CONFIG_DIR` / `QODERCN_MODEL` 精确名白名单放行（官方无头认证，见上文）
 5. **按需认证**：`authenticateMethodIdFrom` + `authenticateOnDemand` + `sessionNeedsAuthenticate`
 6. **权限请求工具名**：`readPermissionToolName` 读 `_meta.qoder.toolName`
 7. **权限 id=0**：客户端本来就按 `typeof id === 'number'` 判断，无需改动，但测试必须钉住
+8. **模型选择走 `session/set_config_option`**（runner 对 `modelVia: 'config_option'` 方言按变更应用，失败归入回合错误分类）；`session/prompt` 的自创 `modelId` 参数仅保留给旧方言（claude/grok/codex 未迁移，行为不变）
+9. **会话恢复**：runner 的 `resumeOf` 端口 + resume-先行-回退；factory `deps.resumeOf` 穿透；宿主 journal 待接（见上节）
 
 ## 证据
 
-**已实测**：initialize 完整返回、登录后免认证直接 `session/new`、未登录的 `-32000`、主动 authenticate 的偶发挂起、15 个模型与 4 个模式、Bash/Read/Grep/Glob/Write 的完整工具帧、权限请求与应答、回合正常走完、取消、零用量、图像回合（四象限颜色识别）、工具帧一键一结果、新会话回放上一轮对话。
+**已实测**：initialize 完整返回、登录后免认证直接 `session/new`、未登录的 `-32000`、主动 authenticate 的偶发挂起、15 个模型与 4 个模式、Bash/Read/Grep/Glob/Write 的完整工具帧、权限请求与应答、回合正常走完、取消、零用量、图像回合（四象限颜色识别）、工具帧一键一结果、新会话回放上一轮对话、`session/set_config_option` 切模型并被 agent 确认（2026-10-20 live）、`session/resume` 跨进程重连 + 空会话 `INVALID_SESSION_IDENTIFIER`（2026-10-20 live）、PAT/配置变量的逐个探针（2026-10-20，均不触发 sdk_invalid_args）。
 
 **抓到的原始帧已存为夹具**：`packages/dsh-acp-agent/tests/fixtures/captured-frames.qoder.json`，方言单测直接照它写。
 
-**未实测**：工具失败时的 `status` 取值（只见过 `pending` / `completed`）、`session/load` / `resume` 的实际行为、`fs/*` 与 `terminal/*` 子协议、国际版的具体 `authMethods` id 与模型清单（CN 版实测，国际版按同一方言处理）。
+**未实测**：工具失败时的 `status` 取值（只见过 `pending` / `completed`）、`session/fork` 的实际行为、`fs/*` 与 `terminal/*` 子协议、国际版的具体 `authMethods` id 与模型清单（CN 版实测，国际版按同一方言处理）、真 PAT 的端到端自动登录（需要先在 qoder.cn 创建 PAT，值只在创建时可见）。

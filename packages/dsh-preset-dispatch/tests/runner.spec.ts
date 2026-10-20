@@ -235,6 +235,62 @@ describe('AcpTurnRunner', () => {
     expect((prompt.params as { modelId?: string }).modelId).toBe('grok-4.7')
   })
 
+  it('applies a config-option dialect’s pick through session/set_config_option before the prompt', async () => {
+    // Qoder publishes the model selector in session/new and documents no
+    // modelId param on session/prompt — the pick travels the protocol's own
+    // write path, ahead of the prompt it applies to.
+    const client = fakeClient()
+    client.request = async (method, params) => {
+      client.calls.push({ method, params })
+      if (method === 'session/new') {
+        return {
+          sessionId: 's1',
+          configOptions: [{ id: 'model', category: 'model', currentValue: 'auto',
+            options: [{ value: 'auto', name: 'Auto' }, { value: 'gmodel', name: 'GLM-5.3' }] }],
+        }
+      }
+      if (method === 'session/prompt') return { stopReason: 'end_turn' }
+      return {}
+    }
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: qoderDialect })
+    await runner.run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1, modelId: 'gmodel' })
+
+    const order = client.calls.map(call => call.method)
+    expect(order).toContain('session/set_config_option')
+    expect(order.indexOf('session/set_config_option')).toBeLessThan(order.indexOf('session/prompt'))
+    expect(client.calls.find(call => call.method === 'session/set_config_option')!.params)
+      .toEqual({ sessionId: 's1', configId: 'model', value: 'gmodel' })
+    // The nonstandard prompt param stays out: this agent has no documented use for it.
+    expect((client.calls.find(call => call.method === 'session/prompt')!.params as { modelId?: string }).modelId).toBeUndefined()
+  })
+
+  it('applies a config-option pick once per change, not once per turn', async () => {
+    // The agent keeps its selection across turns; re-sending an unchanged
+    // pick before every prompt would charge the wire for nothing.
+    const client = fakeClient()
+    client.request = async (method, params) => {
+      client.calls.push({ method, params })
+      if (method === 'session/new') {
+        return { sessionId: 's1', configOptions: [{ id: 'model', category: 'model',
+          options: [{ value: 'auto', name: 'Auto' }, { value: 'gmodel', name: 'GLM-5.3' }] }] }
+      }
+      if (method === 'session/prompt') return { stopReason: 'end_turn' }
+      return {}
+    }
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: qoderDialect })
+    const turn = (modelId: string) => ({ sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1, modelId })
+
+    await runner.run(DECISION, turn('gmodel'))
+    await runner.run(DECISION, turn('gmodel'))
+    expect(client.calls.filter(call => call.method === 'session/set_config_option')).toHaveLength(1)
+
+    await runner.run(DECISION, turn('auto'))
+    const values = client.calls
+      .filter(call => call.method === 'session/set_config_option')
+      .map(call => (call.params as { value: string }).value)
+    expect(values).toEqual(['gmodel', 'auto'])
+  })
+
   it('returns only that turn’s frames, not everything seen so far', async () => {
     // Frames arrive while the prompt is still in flight, which is when they
     // really arrive.
@@ -403,6 +459,86 @@ describe('AcpTurnRunner handshake', () => {
       { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
     expect(result.end).toMatchObject({ kind: 'error', error: { code: 'ACP_CONNECTION' } })
     expect((result.end as { error: { message: string } }).error.message).toContain('within 20ms')
+  })
+})
+
+describe('AcpTurnRunner — resumed external sessions', () => {
+  /** A client whose agent-side sessions survive its own process. */
+  const resumableClient = () => {
+    const client = fakeClient()
+    client.request = async (method, params) => {
+      client.calls.push({ method, params })
+      if (method === 'session/resume') {
+        return { configOptions: [{ id: 'model', category: 'model', currentValue: 'auto', options: [] }] }
+      }
+      if (method === 'session/new') return { sessionId: 's1' }
+      if (method === 'session/prompt') return { stopReason: 'end_turn' }
+      return {}
+    }
+    return client
+  }
+  const TURN_S1 = { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 }
+
+  it('reattaches a journaled session instead of opening fresh, and skips the text replay', async () => {
+    // The agent still has the conversation it kept server-side, so the prompt
+    // must arrive bare: riding the host transcript would read the history to
+    // the agent a second time.
+    const client = resumableClient()
+    const taken: string[] = []
+    const runner = new AcpTurnRunner(client, {
+      cwd: '/tmp',
+      dialect: qoderDialect,
+      resumeOf: () => 'old-s1',
+      replay: { take: sessionId => { taken.push(sessionId); return '旧对话' } },
+    })
+
+    await runner.run(DECISION, TURN_S1)
+
+    const order = client.calls.map(call => call.method)
+    expect(order).not.toContain('session/new')
+    expect(client.calls.find(call => call.method === 'session/resume')!.params)
+      .toEqual({ sessionId: 'old-s1', cwd: '/tmp', mcpServers: [] })
+    const prompt = client.calls.find(call => call.method === 'session/prompt')!
+    expect((prompt.params as { sessionId: string }).sessionId).toBe('old-s1')
+    expect((prompt.params as { prompt: { text: string }[] }).prompt[0]!.text).toBe('hello')
+    expect(taken).toEqual([])
+  })
+
+  it('falls back to a fresh open with the replay intact when the agent no longer has the session', async () => {
+    // Agents prune their own sessions (retention, a CLI update); a journaled
+    // id that went stale must degrade to today's behavior, not fail the turn.
+    const client = resumableClient()
+    client.request = async (method, params) => {
+      client.calls.push({ method, params })
+      if (method === 'session/resume') throw new Error('session not found')
+      if (method === 'session/new') return { sessionId: 's1' }
+      if (method === 'session/prompt') return { stopReason: 'end_turn' }
+      return {}
+    }
+    const runner = new AcpTurnRunner(client, {
+      cwd: '/tmp',
+      dialect: qoderDialect,
+      resumeOf: () => 'old-s1',
+      replay: { take: () => '旧对话' },
+    })
+
+    await runner.run(DECISION, TURN_S1)
+
+    const order = client.calls.map(call => call.method)
+    expect(order).toContain('session/resume')
+    expect(order).toContain('session/new')
+    const prompt = client.calls.find(call => call.method === 'session/prompt')!
+    expect((prompt.params as { sessionId: string }).sessionId).toBe('s1')
+    expect((prompt.params as { prompt: { text: string }[] }).prompt[0]!.text).toContain('【之前对话】')
+  })
+
+  it('never attempts a resume for a dialect that does not declare the capability', async () => {
+    const client = resumableClient()
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: grokDialect, resumeOf: () => 'old-s1' })
+
+    await runner.run(DECISION, TURN_S1)
+
+    expect(client.calls.map(call => call.method)).not.toContain('session/resume')
   })
 })
 

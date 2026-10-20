@@ -19,6 +19,7 @@
 import { describe, expect, it } from 'vitest'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { rmSync } from 'node:fs'
 import { deflateSync } from 'node:zlib'
 import { AcpClient } from '../src/client.ts'
 import { TerminalService } from '../src/terminals.ts'
@@ -586,6 +587,10 @@ describe.skipIf(!LIVE)('live ACP agents through the shared layer', () => {
   }, 240_000)
 
   it('qoder: answers a permission request and the turn continues', async () => {
+    // A leftover from a previous run would make the agent's write tool report
+    // "updated" instead of "created" — clear the path so the prompt means the
+    // same thing every time this case runs.
+    rmSync('/tmp/threadharbor-qoder-live.txt', { force: true })
     const result = await runLiveAgent(QODER_ACP, qoderDialect, {
       prompt: 'Create a file at /tmp/threadharbor-qoder-live.txt containing the word ok, using the write tool. Then tell me it is done.',
     })
@@ -855,6 +860,51 @@ describe.skipIf(!LIVE)('live acceptance: cancel, image, tool frames, replay (fiv
   it('qoder: tool frames are call + optional terminal output + completed, one card and one result', async () => {
     await toolShapeCase(qoderDialect, openStdio(QODER_ACP, qoderDialect))
   }, 240_000)
+
+  it('qoder: session/set_config_option switches the model and the agent reports it back', async () => {
+    // The picker's choice travels the config option Qoder publishes in
+    // session/new (id "model", category "model") — the protocol's write path,
+    // not an undocumented prompt param. The agent confirms the write either in
+    // the reply or in a following config_option_update notification; either
+    // name must be gmodel, the value the dialect reads for GLM-5.3.
+    const live = await openStdio(QODER_ACP, qoderDialect)()
+    try {
+      const reply = await live.client.request('session/set_config_option', {
+        sessionId: live.session.sessionId,
+        configId: 'model',
+        value: 'gmodel',
+      })
+      if (JSON.stringify(reply).includes('gmodel')) return
+      await live.waitFor(
+        frame => frame.method === 'session/update'
+          && (frame.params as { update?: { sessionUpdate?: string } }).update?.sessionUpdate === 'config_option_update'
+          && JSON.stringify(frame.params).includes('gmodel'),
+        8_000,
+        'the config_option_update echo naming gmodel',
+      )
+    } finally {
+      live.close()
+    }
+  }, 60_000)
+
+  it('qoder: session/resume reattaches the conversation a closed transport left behind', async () => {
+    // initialize advertised loadSession with the resume capability; this is
+    // the wire proof that a host restart can reattach instead of rebuilding
+    // context from a text replay. One session with a real turn (measured
+    // 2026-10-20: a session opened but never prompted is never persisted, and
+    // its id resumes as INVALID_SESSION_IDENTIFIER), transport closed, a new
+    // process resuming the same id must succeed.
+    const first = await openStdio(QODER_ACP, qoderDialect)()
+    const sessionId = first.session.sessionId
+    await first.prompt('Reply with the single word ok.')
+    first.close()
+    const second = await openStdio(QODER_ACP, qoderDialect)()
+    try {
+      await second.client.request('session/resume', { sessionId, cwd: CWD, mcpServers: [] })
+    } finally {
+      second.close()
+    }
+  }, 60_000)
 
   it('claude: a fresh session answers from the replayed previous turn', async () => {
     // stdio: each call to the opener spawns a fresh process, which is exactly

@@ -63,6 +63,29 @@ const SCRUBBED_ENV_PREFIXES: Readonly<Record<string, readonly RegExp[]>> = {
 }
 
 /**
+ * Exact names that survive the prefix scrub, per agent.
+ *
+ * The scrub is by prefix because the sdk_invalid_args death was only ever
+ * observed in the Qoder IDE terminal's full environment — the one triggering
+ * variable was never isolated (probed 2026-10-20: none of the suspected
+ * markers kills 1.1.6 on its own). But the prefix also swallows the CLI's own
+ * headless configuration, and one of those names is the documented non-
+ * interactive login for ACP clients (docs.qoder.cn/cli/acp, checked
+ * 2026-10-20: `QODERCN_PERSONAL_ACCESS_TOKEN` auto-logins, the Zed example
+ * passes it via env; probed alone it neither triggers the death nor counts as
+ * a login when invalid). The other two are documented config
+ * (docs.qoder.cn/cli/settings-reference) a server deployment may legitimately
+ * set: a dedicated config dir and a default model.
+ *
+ * `QODERCN_PERMISSION_MODE` is deliberately absent: DSH owns the mode (preset
+ * `mode` applied via `session/set_mode`), and a second master would only make
+ * the effective mode harder to explain.
+ */
+const KEEP_ENV_NAMES: Readonly<Record<string, readonly string[]>> = {
+  qoder: ['QODERCN_PERSONAL_ACCESS_TOKEN', 'QODERCN_CONFIG_DIR', 'QODERCN_MODEL'],
+}
+
+/**
  * The environment one agent's child process gets.
  *
  * Spawn REPLACES the environment when given one, so a filtered copy has to be
@@ -77,8 +100,10 @@ export function stdioEnvFor(agent: string | undefined, base: NodeJS.ProcessEnv =
   if (agent === undefined) return undefined
   const scrubbed = SCRUBBED_ENV_PREFIXES[agent]
   if (scrubbed === undefined) return undefined
+  const kept = KEEP_ENV_NAMES[agent]
   const env: NodeJS.ProcessEnv = {}
   for (const [key, value] of Object.entries(base)) {
+    if (kept !== undefined && kept.includes(key)) { env[key] = value; continue }
     if (scrubbed.some(pattern => pattern.test(key))) continue
     env[key] = value
   }

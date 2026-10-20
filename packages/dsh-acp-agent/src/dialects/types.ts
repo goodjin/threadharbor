@@ -67,6 +67,10 @@ export type TurnUsage = {
  *                        every ACP agent pushes them as a `tool_frame`
  *   toolNameMap          the agent's native tool names translated onto the
  *                        short names DSH renders, e.g. `Read → read`
+ *   supportsSessionResume `session/resume` can reattach a session the agent
+ *                        kept server-side (its initialize advertised
+ *                        `loadSession`). Absent means unmeasured — the runner
+ *                        then never resumes, exactly as before.
  */
 export type AcpCapabilities = {
   readonly cancelsTurns: boolean
@@ -74,6 +78,7 @@ export type AcpCapabilities = {
   readonly toolFrameShape: 'in_progress' | 'two_frame'
   readonly commandVia: 'tool_frame'
   readonly toolNameMap: Readonly<Record<string, string>>
+  readonly supportsSessionResume?: boolean | undefined
 }
 
 export interface AcpDialect {
@@ -147,6 +152,27 @@ export interface AcpDialect {
 
   /** The model list carried by a `session/new` reply. */
   readModels(reply: unknown): readonly { id: string; name: string; description?: string }[]
+
+  /**
+   * How a user-picked modelId reaches the agent.
+   *
+   * `'prompt_param'` (the default; every dialect so far) tucks `modelId` onto
+   * the `session/prompt` params — an extension outside the ACP schema that
+   * those agents honor. `'config_option'` uses the protocol's own write path:
+   * `session/set_config_option` with the config option that carries the model
+   * selector. Qoder publishes that selector in `session/new` (configOptions,
+   * category `"model"`) and documents no modelId param on `session/prompt`, so
+   * the prompt param would land on a server free to ignore it — the picker
+   * would offer a choice the agent never applies.
+   */
+  readonly modelVia?: 'prompt_param' | 'config_option' | undefined
+
+  /**
+   * The config-option id carrying the model selector, read off the
+   * `session/new` reply. Consulted per opened session when `modelVia` is
+   * `'config_option'`; the selector's id is the agent's to spell.
+   */
+  readonly modelConfigId?: ((sessionNewReply: unknown) => string | undefined) | undefined
 
   /**
    * The token usage carried by a turn's `session/prompt` reply, if any.

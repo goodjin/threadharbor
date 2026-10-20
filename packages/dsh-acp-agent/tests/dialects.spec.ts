@@ -216,11 +216,25 @@ describe('qoder dialect', () => {
       .toBe(false)
   })
 
-  it('reads models from models.availableModels', () => {
+  it('reads models from the standard model config option, availableModels as fallback', () => {
+    // configOptions is the protocol's carrier for the picker list (the same
+    // place claude reads); `models` is Qoder's own addition with the same
+    // content. Standard first, fallback for a build that omits the selector.
     const models = qoderDialect.readModels(qoderCaptured.sessionNew)
     expect(models).toHaveLength(15)
     expect(models[0]).toEqual({ id: 'auto', name: 'Auto (default)', description: 'Reasoning · Vision · 0.50x Credit' })
     expect(models.map(model => model.id)).toContain('qmodel_38max')
+    expect(qoderDialect.readModels({ models: { availableModels: [{ modelId: 'm1', name: 'M1' }] } }))
+      .toEqual([{ id: 'm1', name: 'M1' }])
+  })
+
+  it('reads models through session/set_config_option, not a prompt param', () => {
+    // Nothing documents a modelId param on session/prompt; the selector Qoder
+    // publishes in session/new is the documented write path.
+    expect(qoderDialect.modelVia).toBe('config_option')
+    expect(qoderDialect.modelConfigId!(qoderCaptured.sessionNew)).toBe('model')
+    expect(qoderDialect.modelConfigId!({ configOptions: [{ id: 'mode', category: 'mode' }] })).toBeUndefined()
+    expect(qoderDialect.modelConfigId!({})).toBeUndefined()
   })
 
   it('takes the tool name from _meta.qoder.toolName, not the mutating title', () => {
