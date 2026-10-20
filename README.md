@@ -126,7 +126,7 @@ cordis.patch.yml               安装到 DSH Web profile 的标准 bundle patch�
 reference/                     被 Git 忽略的 DeepSeek Harness 参考源码
 ```
 
-设计说明见 [docs/design/dsh-multi-host-migration.md](docs/design/dsh-multi-host-migration.md)，各 agent 的对接实测见 [docs/agent-acp/](docs/agent-acp/README.md)，AgentHarbor/SessionPort 对比见 [docs/landscape.zh.md](docs/landscape.zh.md)。通过 SSH 在远端安装 DSH 见 [docs/ssh-deploy.zh.md](docs/ssh-deploy.zh.md)。手机端（Android）的通道、配对与手机页见 [docs/mobile-client.zh.md](docs/mobile-client.zh.md)。
+设计说明见 [docs/design/dsh-multi-host-migration.md](docs/design/dsh-multi-host-migration.md)，各 agent 的对接实测见 [docs/agent-acp/](docs/agent-acp/README.md)，AgentHarbor/SessionPort 对比见 [docs/landscape.zh.md](docs/landscape.zh.md)。通过 SSH 在远端安装 DSH 见 [docs/ssh-deploy.zh.md](docs/ssh-deploy.zh.md)。手机端（Android）的通道、配对与手机页见 [docs/mobile-client.zh.md](docs/mobile-client.zh.md)。zcode 与 minimaxi 两组模型贴着 ZCode 与 MiniMax Code 两个上游走，依赖哪些上游事实、上游更新时如何判断要不要跟，见 [docs/upstream-sync.zh.md](docs/upstream-sync.zh.md)。
 
 ## 开发检查
 

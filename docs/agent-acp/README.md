@@ -15,6 +15,8 @@
 已实现的五家共用的代码在 `packages/dsh-acp-agent/`：传输、客户端、投影、审批桥接是共用的，**每个 agent 只提供一个 dialect**。
 
 > **zcode 与 minimaxi 不在下面的字段对照表里。** 它们是模型列表里单独的两组，不走 ACP，对话由 DSH 自己的循环处理。见 [zcode.md](./zcode.md) 与 [minimaxi.md](./minimaxi.md)。
+>
+> 这两组贴着 ZCode 与 MiniMax Code 两个上游走（凭据、接口、模型清单、额度口径）。上游更新时如何判断要不要跟，见 [上游同步说明](../upstream-sync.zh.md)。
 
 ## 五家的字段差异对照
 
