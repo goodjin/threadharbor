@@ -76,6 +76,7 @@ import { installAcpVisibilityFilter } from '../acp-visibility-filter.ts'
 import { registerAcpVisibilitySection } from '../acp-visibility-panel.tsx'
 import type { AcpVisibilityBusinessProps, AcpVisibilitySlotHost } from '../acp-visibility-panel.tsx'
 import { AgentPanel } from '../panel.tsx'
+import { HostIcon, HOST_ICON_PANEL_ORDER } from '../host-icon.tsx'
 import type { AgentListPort, AgentPanelBusinessProps, ProbeStarter, RemotePort, TailscalePeersResult, TailscalePort } from '../panel.tsx'
 import { readRemotePeer, startRemotePeer } from '../ssh-deploy.ts'
 import { registerAgentSwitchHandoverSurface } from '../handover-card.ts'
@@ -236,6 +237,19 @@ export function registerPanelSlots(slots: PanelSlotHost, face: AgentPanelBusines
   const settingsSlots = slots as unknown as SettingsSlotHost
   settingsSlots.inject('settings.section', () => settingsSlots.register(
     { name: 'settings.section', id: PANEL_ID, order: PANEL_ORDER, label, locale: NAMESPACE, inject: () => face },
+    AgentPanel,
+  ))
+  // The same surface, a second seat: the sidebar's global panel row and the
+  // main column it switches to. The row's id and the main slot's key are the
+  // same string on purpose — the sidebar draws that row as a button whose
+  // click is `selectPanel(id)`, so a mismatch would leave the button pointing
+  // at a panel that does not exist.
+  slots.inject('sidebar.panellist', () => slots.register(
+    { name: 'sidebar.panellist', id: PANEL_ID, order: HOST_ICON_PANEL_ORDER, label, locale: NAMESPACE },
+    HostIcon,
+  ))
+  slots.inject('main', () => slots.register(
+    { name: 'main', key: PANEL_ID, locale: NAMESPACE, inject: () => face },
     AgentPanel,
   ))
 }
@@ -454,13 +468,24 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
     () => t('acpVisibility.label'),
   )
 
-  // 阶段 L：以更低优先级数值遮蔽原生工作区列表，接管为「主机 → 项目 →
-  // 会话」树（§8.5）。开关 threadharbor.sidebarTree=off 时跳过注册，原生
-  // 列表照常——升级漂移时的一键退路。
+  // The shadow tree is opt-in now: by default nothing registers for
+  // sidebar.workspaces, so DSH's native browsing area keeps the slot and all
+  // of its own abilities (new project, unarchive, hover cards, shortcuts).
+  // Only `threadharbor.sidebarTree` = `on` brings the old shadowing tree back,
+  // as an experiment with the native list standing by.
   maybeRegisterSidebarTree(ctx.slots, ctx, registry)
 
-  // 其他主机上的会话仍跑在那台机器上。选中时主区换成这块面板，读写都经本机
-  // 代理打到对方 DSH；点回本机会话时面板让位，原生对话界面回来。
+  // The hosts surface reaches the main column through the sidebar's panel row
+  // (registered in registerPanelSlots): the row is a button the sidebar owns,
+  // and its click switches the main column to the hosts panel. Picking a host
+  // there and pressing "open" navigates the whole page to that machine's
+  // gateway path, so every machine runs its own native sidebar.
+
+  // Other hosts' sessions still run on their own machine. Selecting one swaps
+  // the main area for this panel; clicking a local session hands it back.
+  // With the shadow tree unregistered (the default) nothing reaches this panel
+  // any more: the tree was its only entry point (no sidebar icon). Task 6
+  // deletes this registration.
   ctx.effect(
     () => registerRemoteConversation(ctx.slots, sharedRemoteConversation()),
     'threadharbor: remote conversation',
@@ -549,7 +574,7 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // Self-report at mount. This panel is easy to mistake for a plugin that
   // never loaded; these lines are how anyone can tell the difference.
   const identity = section.identity()
-  log.info(`panel registered: id=${PANEL_ID}, slots=settings.section, order=${PANEL_ORDER}`)
+  log.info(`panel registered: id=${PANEL_ID}, slots=settings.section,sidebar.panellist,main, order=${PANEL_ORDER}/${HOST_ICON_PANEL_ORDER}`)
   log.info(`probe gateway: ${mountOpening.gateway === undefined ? `not open at mount (missing ${mountOpening.missing.join(', ')}); retried per use` : 'open'}`)
   log.info(`roll-up identity: ${identity.hostId}${identity.derived ? ' (derived from page origin; configure it in the panel)' : ''}; session tree: DSH projections + remote pull via launchUrl`)
 }

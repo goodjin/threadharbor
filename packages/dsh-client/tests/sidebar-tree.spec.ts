@@ -1,5 +1,6 @@
 /**
- * 遮蔽注册与回退开关：maybeRegisterSidebarTree 只在开关开启时以更低
+ * 遮蔽注册与实验开关：默认不注册，原生浏览区照常；只有显式把
+ * threadharbor.sidebarTree 设为 'on'，maybeRegisterSidebarTree 才以更低
  * 优先级数值注册 sidebar.workspaces（槽位机制：数值最小者渲染，原生
  * 占位者被遮蔽）。组件容器 ShadowTreeHost 组装本机读取、远端轮询与
  * 登记簿合成，喂给 HostSessionTree；自身不发请求的纯渲染树已在
@@ -52,20 +53,21 @@ const makeSlots = (): TreeSlotHost & { registered: Array<{ name: string; priorit
 beforeEach(() => { localStorage.clear() })
 
 describe('maybeRegisterSidebarTree（遮蔽注册与开关）', () => {
-  it('开关默认开启：以更低优先级数值与 locale 声明注册 sidebar.workspaces', () => {
-    const slots = makeSlots()
-    maybeRegisterSidebarTree(slots, { get: () => undefined })
-    expect(slots.registered).toEqual([{ name: 'sidebar.workspaces', priority: -10, locale: 'threadharborClient' }])
-  })
-
-  it('开关 off：完全不注册，原生列表照常', () => {
-    localStorage.setItem(TREE_STORAGE_KEY, 'off')
+  it('默认不注册：原生浏览区照常', () => {
     const slots = makeSlots()
     maybeRegisterSidebarTree(slots, { get: () => undefined })
     expect(slots.registered).toEqual([])
   })
 
+  it('开关 on：以更低优先级数值与 locale 声明注册 sidebar.workspaces', () => {
+    localStorage.setItem(TREE_STORAGE_KEY, 'on')
+    const slots = makeSlots()
+    maybeRegisterSidebarTree(slots, { get: () => undefined })
+    expect(slots.registered).toEqual([{ name: 'sidebar.workspaces', priority: -10, locale: 'threadharborClient' }])
+  })
+
   it('同一槽位重复注册（HMR 场景）：第二次静默跳过', () => {
+    localStorage.setItem(TREE_STORAGE_KEY, 'on')
     const slots = makeSlots()
     maybeRegisterSidebarTree(slots, { get: () => undefined })
     maybeRegisterSidebarTree(slots, { get: () => undefined })
@@ -96,6 +98,8 @@ describe('槽位组件在无注入 props 时的生产真相', () => {
   afterEach(() => { vi.restoreAllMocks() })
 
   const captureComponent = (ctx: { get(name: string): unknown }): (props: Record<string, unknown>) => unknown => {
+    // This block tests the shadow component itself, which is opt-in now.
+    localStorage.setItem(TREE_STORAGE_KEY, 'on')
     const slots = makeSlots()
     const registry = makeRegistry([{ hostId: 'mini', hostTitle: '迷你主机', address: 'http://127.0.0.1:1' }])
     let component: (props: Record<string, unknown>) => unknown = () => null

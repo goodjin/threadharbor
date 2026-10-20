@@ -1,11 +1,12 @@
 /**
- * The shadow that takes over `sidebar.workspaces`.
+ * The experimental shadow of `sidebar.workspaces`.
  *
- * The slot system renders the lowest priority number, so registering at -10
- * shadows DSH's native workspace list (its default registration is 0) — the
- * takeover is the mechanism's documented face, not a hack. A localStorage kill
- * switch (`threadharbor.sidebarTree` = `off`) skips the registration entirely
- * and the native list comes back: the honest retreat when an upgrade drifts.
+ * Registering at -10 shadows DSH's native workspace list (its default
+ * registration is 0) — the slot mechanism's documented face, not a hack. But
+ * the native list owns the whole browsing experience (new project, unarchive,
+ * hover cards, shortcuts), so shadowing is now opt-in: only an explicit
+ * `threadharbor.sidebarTree` = `on` in localStorage brings the tree back, and
+ * the default leaves DSH's native list untouched.
  *
  * This module owns the plumbing the pure tree refuses to do: reading this
  * machine's sessions from DSH's services, polling the registry's deployed
@@ -27,7 +28,10 @@ import type { HostSessionsResult } from './remote-session-poll.ts'
 import type { RuntimeT } from './locales.ts'
 import { NAMESPACE, fallbackT } from './locales.ts'
 
-/** The kill switch: `off` restores DSH's native workspace list. */
+/**
+ * The opt-in switch: an explicit `on` restores the shadowing tree; anything
+ * else (including no value at all) leaves DSH's native workspace list alone.
+ */
 export const TREE_STORAGE_KEY = 'threadharbor.sidebarTree'
 
 /** The slot face the client entry hands in; tests build a recording fake. */
@@ -53,18 +57,20 @@ const safeStorage = (): Storage | { getItem(): null; setItem(): void; removeItem
 
 /**
  * Register the tree once per slot host, at a priority that shadows the native
- * workspace list. HMR re-runs land in the WeakSet guard and stay silent.
+ * workspace list — but only when the opt-in switch is explicitly `on`. Without
+ * it the native list keeps the slot. HMR re-runs land in the WeakSet guard and
+ * stay silent.
  */
 export function maybeRegisterSidebarTree(slots: TreeSlotHost, ctx: ServicesCtx, registry?: RegistryLike): void {
   if (registeredHosts.has(slots)) return
   registeredHosts.add(slots)
-  let off = false
+  let on = false
   try {
-    off = localStorage.getItem(TREE_STORAGE_KEY) === 'off'
+    on = localStorage.getItem(TREE_STORAGE_KEY) === 'on'
   } catch {
-    off = false
+    on = false
   }
-  if (off) return
+  if (!on) return
   // The entry hands in the panel's own registry (the settings-channel storage);
   // the localStorage default only serves tests and standalone mounts, and
   // would silently disagree with what the panel shows.

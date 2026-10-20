@@ -160,7 +160,7 @@ function remoteNamespaces(): Namespaces {
 }
 
 describe('面板挂载', () => {
-  it('主机服务齐全时，面板进 settings.section（各主机成为设置栏目），全程不炸', () => {
+  it('主机服务齐全时，面板进 settings.section，也在主区有座位，全程不炸', () => {
     const ctx = fakeCtx({ services: remoteNamespaces() })
 
     expect(() => { apply(ctx) }).not.toThrow()
@@ -170,8 +170,11 @@ describe('面板挂载', () => {
     // The ACP visibility section is a second rail row, not a second screen on
     // the hosts section: it must register even when this page has no catalog.
     expect(sections.some(entry => entry.options.id === 'threadharbor-acp-visibility')).toBe(true)
-    expect(ctx.core.entriesOfSlot('main').some(entry => entry.options.key === 'threadharbor-rollup')).toBe(false)
-    expect(ctx.core.entriesOfSlot('sidebar.panellist').some(entry => entry.options.id === 'threadharbor-rollup')).toBe(false)
+    // 同一份主机界面挂了两个座位：设置里的那个分区，和侧栏顶部图标点开后
+    // 主区那个 keyed 座位。图标行的 id 与主区座位的 key 必须同名——侧栏
+    // 给面板行画的按钮点下去就是 selectPanel(id)。
+    expect(ctx.core.entriesOfSlot('main').some(entry => entry.options.key === 'threadharbor-rollup')).toBe(true)
+    expect(ctx.core.entriesOfSlot('sidebar.panellist').some(entry => entry.options.id === 'threadharbor-rollup')).toBe(true)
     expect(ctx.core.entriesOfSlot('main').some(entry => entry.options.key === 'threadharbor-remote-session')).toBe(true)
   })
 

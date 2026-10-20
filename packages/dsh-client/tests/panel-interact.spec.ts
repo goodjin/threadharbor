@@ -1038,6 +1038,50 @@ describe('主机详情：使用这台主机 + 远程部署（状态机如实呈�
       delete (globalThis as { fetch?: unknown }).fetch
     }
   })
+
+  it('有打开地址（插件已部署）的主机：给的是「打开」，地址是网关路径', async () => {
+    const registry = makeRegistry()
+    ;(registry as unknown as { add: (i: Record<string, unknown>) => unknown }).add({
+      hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081', ssh: SSH_SEED, launchUrl: 'http://192.168.1.20:3081/?token=abc',
+    })
+    const { container, root } = await mountPanel(registry)
+    try {
+      click(container, '[data-host-open="bench"]')
+      const open = container.querySelector('[data-action="open-page"]')
+      expect(open).not.toBeNull()
+      expect(open?.getAttribute('href')).toBe('/threadharbor/gateway/bench/')
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('没部署（没有打开地址）的主机：没有「打开」，别把人领到打不开的地址上', async () => {
+    const registry = makeRegistry()
+    ;(registry as unknown as { add: (i: Record<string, unknown>) => unknown }).add({
+      hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081', ssh: SSH_SEED,
+    })
+    const { container, root } = await mountPanel(registry)
+    try {
+      click(container, '[data-host-open="bench"]')
+      expect(q(container, '[data-panel-page="detail"]')).toBeTruthy()
+      expect(container.querySelector('[data-action="open-page"]')).toBeNull()
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('没存凭据的主机：给的是「填 SSH」，同样没有「打开」', async () => {
+    const registry = makeRegistry([{ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' }])
+    const { container, root } = await mountPanel(registry)
+    try {
+      click(container, '[data-host-open="bench"]')
+      expect(q(container, '[data-panel-page="detail"]')).toBeTruthy()
+      expect(container.querySelector('[data-action="open-deploy"]')).not.toBeNull()
+      expect(container.querySelector('[data-action="open-page"]')).toBeNull()
+    } finally {
+      await unmount(root)
+    }
+  })
 })
 
 describe('主机行状态词由 hostStatus 推导（事实进、一个词出）', () => {

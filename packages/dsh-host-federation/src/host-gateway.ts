@@ -176,7 +176,7 @@ async function handleHttp(deps: GatewayDeps, jar: CookieJar, req: IncomingMessag
     text(res, 502, '远端没有换出登录 cookie，打开地址可能已失效')
     return
   }
-  await forwardHttp(req, res, target.origin, route.upstreamPath, route.search, route.hostId, cookie, () => {
+  await forwardHttp(req, res, target.origin, route.upstreamPath, route.search, route.hostId, target.hostTitle, cookie, () => {
     jar.invalidate(target.origin, target.token)
   })
 }
@@ -214,7 +214,7 @@ async function targetOf(
   hostId: string,
   pageHost: string | undefined,
 ): Promise<
-  | { readonly ok: true; readonly origin: string; readonly token: string }
+  | { readonly ok: true; readonly origin: string; readonly token: string; readonly hostTitle: string }
   | { readonly ok: false; readonly status: 400 | 404 | 503; readonly message: string }
 > {
   let read: RegistryRead
@@ -239,6 +239,7 @@ function forwardHttp(
   upstreamPath: string,
   search: string,
   hostId: string,
+  hostTitle: string,
   cookie: string,
   onUnauthorized: () => void,
 ): Promise<void> {
@@ -274,7 +275,7 @@ function forwardHttp(
         const raw = Buffer.concat(chunks)
         const body = total > GATEWAY_REWRITE_LIMIT_BYTES || kind === undefined
           ? raw
-          : Buffer.from(rewriteBody(kind, raw.toString('utf8'), hostId))
+          : Buffer.from(rewriteBody(kind, raw.toString('utf8'), hostId, hostTitle))
         const headersOut = responseHeaders(upRes, origin, hostId, true)
         headersOut['content-length'] = Buffer.byteLength(body)
         res.writeHead(upRes.statusCode ?? 502, headersOut)
@@ -423,8 +424,67 @@ function createJar(exchange: (origin: string, token: string) => Promise<string |
 
 function text(res: ServerResponse, status: number, message: string): void {
   if (res.headersSent) return
+  const accept = headerString(res.req.headers.accept)
+  if (accept !== undefined && accept.toLowerCase().includes('text/html')) {
+    res.writeHead(status, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+    res.end(gatewayErrorPage(message, { back: '回本机', settings: '去设置' }))
+    return
+  }
   res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
   res.end(message)
+}
+
+/**
+ * A standalone HTML page for browser navigations that cannot reach the host.
+ *
+ * Used only when the request asks for HTML (`Accept` contains `text/html`); a
+ * fetch/XHR that asks for JSON or nothing keeps getting plain text. The page
+ * carries its own inline styles and two exits to this machine: back home and
+ * the settings entry, both at `/`. The caller's message is HTML-escaped so it
+ * can never open a tag.
+ */
+export function gatewayErrorPage(message: string, t: { back: string; settings: string }): string {
+  const body = escapeHtml(message)
+  const back = escapeHtml(t.back)
+  const settings = escapeHtml(t.settings)
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${body}</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+         background: #151a24; color: #e6e9ef;
+         font: 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 34em; padding: 32px; text-align: center; }
+  h1 { margin: 0 0 16px; font-size: 17px; font-weight: 600; overflow-wrap: anywhere; }
+  nav { display: flex; gap: 12px; justify-content: center; }
+  a { color: #8ab4ff; text-decoration: none; font-weight: 600; }
+  a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<main>
+  <h1>${body}</h1>
+  <nav>
+    <a href="/">${back}</a>
+    <a href="/">${settings}</a>
+  </nav>
+</main>
+</body>
+</html>`
+}
+
+/** Escape a string for safe interpolation into HTML text content. */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
 }
 
 function headerString(value: string | string[] | undefined): string | undefined {

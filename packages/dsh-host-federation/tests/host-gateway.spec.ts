@@ -6,7 +6,7 @@
 import { createServer, request as httpRequest, type IncomingMessage, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
-import { apply, createGateway, type Gateway } from '../src/host-gateway.ts'
+import { apply, createGateway, gatewayErrorPage, type Gateway } from '../src/host-gateway.ts'
 import {
   gatewayClientScript,
   parseGatewayRequest,
@@ -61,19 +61,72 @@ describe('网关路径', () => {
   })
 
   it('页面被改写到网关前缀，注入脚本能解析', () => {
-    const html = rewriteHtml('<html><head><script src="/assets/app.js"></script></head><body>REMOTE</body></html>', 'mini')
+    const html = rewriteHtml('<html><head><script src="/assets/app.js"></script></head><body>REMOTE</body></html>', 'mini', '迷你')
     expect(html.indexOf('<base href="/threadharbor/gateway/mini/">')).toBeLessThan(html.indexOf('src="/threadharbor/gateway/mini/assets/app.js"'))
     expect(html).toContain('REMOTE')
     expect(html).not.toContain('src="/assets/app.js"')
-    expect(() => { new Function(gatewayClientScript('mini')) }).not.toThrow()
-    expect(gatewayClientScript('mini')).toContain('/threadharbor/gateway-ws')
-    expect(gatewayClientScript('mini')).toContain('thSession=')
-    expect(gatewayClientScript('mini')).toContain('openSession')
-    expect(gatewayClientScript('mini')).not.toContain('</script')
+    expect(() => { new Function(gatewayClientScript('mini', '迷你')) }).not.toThrow()
+    expect(gatewayClientScript('mini', '迷你')).toContain('/threadharbor/gateway-ws')
+    expect(gatewayClientScript('mini', '迷你')).toContain('thSession=')
+    expect(gatewayClientScript('mini', '迷你')).toContain('openSession')
+    expect(gatewayClientScript('mini', '迷你')).not.toContain('</script')
     const rewritten = rewriteJs('ctx.get("uiWorkspace");ctx.uiWorkspace.openSession(id);import("/assets/app.js")', 'mini')
     expect(rewritten).toContain('(window.__thUiWorkspace=ctx.get("uiWorkspace"))')
     expect(rewritten).toContain('(window.__thUiWorkspace=ctx.uiWorkspace).openSession(id)')
     expect(rewritten).toContain('/threadharbor/gateway/mini/assets/app.js')
+  })
+
+  it('注入脚本带上当前主机名与回本机入口', () => {
+    const html = rewriteHtml('<html><head></head><body>REMOTE</body></html>', 'mini', '小机器')
+    expect(html).toContain('小机器')
+    expect(gatewayClientScript('mini', '小机器')).toContain('th-host-bar')
+    expect(gatewayClientScript('mini', '小机器')).toContain('th-back-home')
+    expect(() => { new Function(gatewayClientScript('mini', '小机器')) }).not.toThrow()
+  })
+})
+
+describe('错误页', () => {
+  it('页面导航的失败回错误页，程序请求仍是纯文本', async () => {
+    const gateway = createGateway({
+      admit: () => ({ peer: {} }),
+      registry: async () => ({ ready: true, json: '[]' }),
+    })
+    const local = await startGateway(gateway)
+    const page = await rawRequest(local.port, '/threadharbor/gateway/missing/', { accept: 'text/html' })
+    expect(page.status).toBe(404)
+    expect(page.headers['content-type']).toContain('text/html')
+    expect(page.body).toContain('没有这台已登记的主机')
+    expect(page.body).toContain('回本机')
+    expect(page.body).toContain('去设置')
+    expect(page.body).toContain('href="/"')
+    const plain = await rawRequest(local.port, '/threadharbor/gateway/missing/')
+    expect(plain.status).toBe(404)
+    expect(plain.headers['content-type']).toContain('text/plain')
+    expect(plain.body).toBe('没有这台已登记的主机')
+  })
+
+  it('fetch 的默认接受头 */* 拿到纯文本，不会拿到一整页 HTML', async () => {
+    const gateway = createGateway({
+      admit: () => ({ peer: {} }),
+      registry: async () => ({ ready: true, json: '[]' }),
+    })
+    const local = await startGateway(gateway)
+    const fetched = await rawRequest(local.port, '/threadharbor/gateway/missing/', { accept: '*/*' })
+    expect(fetched.status).toBe(404)
+    expect(fetched.headers['content-type']).toContain('text/plain')
+    expect(fetched.body).toBe('没有这台已登记的主机')
+  })
+
+  it('错误页正文按 HTML 转义，不把消息当标签', () => {
+    const html = gatewayErrorPage('连不上这台主机（<b>http://x</b>）& 重试', { back: '回本机', settings: '去设置' })
+    expect(html).toContain('连不上这台主机（&lt;b&gt;http://x&lt;/b&gt;）&amp; 重试')
+    expect(html).not.toContain('<b>http://x</b>')
+    expect(html).toContain('href="/"')
+  })
+
+  it('页面标题是出错的理由，不是按钮上的文案', () => {
+    const html = gatewayErrorPage('没有这台已登记的主机', { back: '回本机', settings: '去设置' })
+    expect(html).toContain('<title>没有这台已登记的主机</title>')
   })
 })
 

@@ -32,6 +32,7 @@ export const NAMESPACE = 'threadharborClient'
 export const zh = {
   /** 侧栏行名：主机列表面板。 */
   'panel.label': '各主机',
+  /** 侧栏底脚的主机切换器：触发按钮与每条主机的注记。 */
   /** 切换进度条的三个阶段；`{target}` 是新会话的 agent 名。 */
   'progress.preparing': '正在准备打开新会话 · {target}',
   'progress.loading': '正在读新会话的历史 · {target}',
