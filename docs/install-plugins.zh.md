@@ -188,6 +188,22 @@ agent 只要打同样的标记。网关是调用时在实例上按名字取方�
 
 ## 四、几个容易踩的地方
 
+**〇、每个 profile 都要跑一遍统一的插件软链同步（2026-10-20）。**
+宿主组合层认的是 bundle 链接（`node_modules/threadharbor -> 仓库`），但客户端包
+（`@threadharbor/dsh-client` 等）的解析还需要 profile 级的一组软链。这组链以前靠
+各 profile 手工 `ln -s`，结果是 web 装过、桌面没装——桌面页面上 threadharbor 的
+客户端整个缺席（输入框模型入口只剩官方的裸模型名），而宿主侧照常挂载，**完全不报
+错**。现在统一走一条幂等流程，来源是仓库自己的工作区
+（`node_modules/@threadharbor/`，部署切工作树时改仓库这一侧即可）：
+
+```sh
+scripts/profile-link-plugins.sh ~/.dsh-web/profiles/web      # 3081
+scripts/profile-link-plugins.sh ~/.dsh/profiles/desktop      # 桌面版（重启应用生效）
+```
+
+脚本幂等：已一致的软链原样保留。新增插件包（仓库 `node_modules/@threadharbor/`
+下多了新名字）后，对每个在用的 profile 重跑一遍即可。
+
 **一、`session.header.agentPreset` 是平的，不是 `meta.agentPreset`。**
 读 `header.meta.agentPreset`（设计文档最初的写法）永远得到 undefined，
 派发会静默退回原生 agent，而且**任何地方都不报错**。

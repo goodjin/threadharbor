@@ -54,6 +54,7 @@
     "@deepseek-ai/cordis": "^4.0.1"
   },
   "scripts": {
+    "prepare": "node scripts/prepare-install.mjs",
     "reference:checkout": "bash scripts/checkout-reference.sh",
     "reference:checkout-mobile": "bash scripts/checkout-reference-mobile.sh",
     "clean": "node scripts/clean.mjs",
