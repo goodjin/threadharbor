@@ -69,9 +69,8 @@ import { startRollUpSection } from '../rollup-section.ts'
 import { buildHostSessions, readSessionSources } from '../session-source.ts'
 import type { SectionSession, SessionRead } from '../session-source.ts'
 import { startPairingSurface } from '../pairing-panel.ts'
-import { AgentPanel, mergeHostRows } from '../panel.tsx'
-import { HostSwitcher, switchEntries } from '../host-switcher.tsx'
-import { sharedHostSwitcherStore } from '../host-switcher-store.ts'
+import { AgentPanel } from '../panel.tsx'
+import { HostIcon, HOST_ICON_PANEL_ORDER } from '../host-icon.tsx'
 import type { AgentListPort, AgentPanelBusinessProps, ProbeStarter, RemotePort, TailscalePeersResult, TailscalePort } from '../panel.tsx'
 import { readRemotePeer, startRemotePeer } from '../ssh-deploy.ts'
 import { registerAgentSwitchHandoverSurface } from '../handover-card.ts'
@@ -226,6 +225,19 @@ export function registerPanelSlots(slots: PanelSlotHost, face: AgentPanelBusines
   const settingsSlots = slots as unknown as SettingsSlotHost
   settingsSlots.inject('settings.section', () => settingsSlots.register(
     { name: 'settings.section', id: PANEL_ID, order: PANEL_ORDER, label, locale: NAMESPACE, inject: () => face },
+    AgentPanel,
+  ))
+  // The same surface, a second seat: the sidebar's global panel row and the
+  // main column it switches to. The row's id and the main slot's key are the
+  // same string on purpose — the sidebar draws that row as a button whose
+  // click is `selectPanel(id)`, so a mismatch would leave the button pointing
+  // at a panel that does not exist.
+  slots.inject('sidebar.panellist', () => slots.register(
+    { name: 'sidebar.panellist', id: PANEL_ID, order: HOST_ICON_PANEL_ORDER, label, locale: NAMESPACE },
+    HostIcon,
+  ))
+  slots.inject('main', () => slots.register(
+    { name: 'main', key: PANEL_ID, locale: NAMESPACE, inject: () => face },
     AgentPanel,
   ))
 }
@@ -419,26 +431,11 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // as an experiment with the native list standing by.
   maybeRegisterSidebarTree(ctx.slots, ctx, registry)
 
-  // 侧栏底脚的主机切换器：点某台已登记主机整页跳到那台机器（走网关），于是
-  // 每台机器用自己的原生侧栏。列表没有订阅接口，数据靠 hostStore 订阅（登记
-  // 簿 / 身份水合）加 3 秒轮询（在场与心跳）重画；整段放进 effect 卸载时清理。
-  const hostSwitcher = sharedHostSwitcherStore()
-  const refreshHostSwitcher = (): void => {
-    hostSwitcher.set(switchEntries(mergeHostRows(section.hosts(), registry.list()), registry.list()))
-  }
-  ctx.effect(() => {
-    refreshHostSwitcher()
-    const unsubscribe = hostStore.subscribe(refreshHostSwitcher)
-    const timer = window.setInterval(refreshHostSwitcher, 3000)
-    return () => {
-      unsubscribe()
-      window.clearInterval(timer)
-    }
-  }, 'threadharbor: host switcher data')
-  ctx.effect(() => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register(
-    { name: 'sidebar.footer.action', id: 'host-switcher', locale: NAMESPACE },
-    HostSwitcher,
-  )), 'threadharbor: host switcher')
+  // The hosts surface reaches the main column through the sidebar's panel row
+  // (registered in registerPanelSlots): the row is a button the sidebar owns,
+  // and its click switches the main column to the hosts panel. Picking a host
+  // there and pressing "open" navigates the whole page to that machine's
+  // gateway path, so every machine runs its own native sidebar.
 
   // Other hosts' sessions still run on their own machine. Selecting one swaps
   // the main area for this panel; clicking a local session hands it back.
