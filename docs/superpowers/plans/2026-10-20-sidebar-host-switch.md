@@ -116,7 +116,8 @@ git commit -m "侧栏：影子树默认不注册，开关反转为 =on 才遮蔽
   - `NAMESPACE`、`RuntimeT`、`panel.label`（'各主机' / 'Hosts'，`locales.ts:34` 与 `:448`）
 - Produces:
   - `export const HOST_ICON_PANEL_ORDER = 102`（排在 `PAIRING_PANEL_ORDER = 101` 下面）
-  - `export function HostIcon(props: { readonly t?: RuntimeT }): JSX.Element`——图标根元素带 `data-host-switcher`
+  - `export function createHostIcon(select: () => void): (props: { readonly size?: number; readonly active?: boolean; readonly t?: RuntimeT }) => JSX.Element`——图标由工厂产出并**闭包持有** `select`（图标是在插槽里渲染的，拿不到注册上下文，所以「切面板」这件事必须由注册处包好传进来）；根元素带 `data-host-switcher`；`select` 抛错时组件兜住并给一句可读的交代（走词典，不硬编码）。
+  - `registerPanelSlots` 的第四个参数：`selectHostPanel: () => void`——由 `client/index.ts` 传入（那里有 `ctx`），内部取 `ctx.get('layout')` 再调 `selectPanel(PANEL_ID)`。
   - 三个座位同由 `registerPanelSlots` 注册：`settings.section`（既有）、`sidebar.panellist`（新增，id = `PANEL_ID`，order = `HOST_ICON_PANEL_ORDER`，label = `() => t('panel.label')`）、`main`（新增，key = `PANEL_ID`，`inject: () => face`）
 
 - [ ] **Step 1: 写注册与图标的失败测试**
@@ -134,7 +135,7 @@ it('主区座位还没注册时，点图标不抛错，也要有交代', () => {
 it('主机列表里没有打开地址的那台，给的是「部署」而不是「打开」', () => { ... })
 ```
 
-第三条与第四条用一个会记调用的假布局服务（`{ selectPanel(id) { calls.push(id) } }`）驱动；第四条让假服务抛错，断言异常没有掀翻渲染，且界面给出了可读的交代。第六条是回归钉子：主机列表通过新的主区座位挂出来之后，那台没部署的主机仍然只给「部署」。
+第三条与第四条用一个会记调用的假回调驱动（`createHostIcon(() => { calls.push(1) })`）；第四条让假回调抛错，断言异常没有掀翻渲染，且界面给出了可读的交代。第六条是回归钉子：主机列表通过新的主区座位挂出来之后，那台没部署的主机仍然只给「部署」。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -143,7 +144,7 @@ Expected: FAIL，`host-icon.tsx` 尚不存在。
 
 - [ ] **Step 3: 实现图标组件**
 
-`host-icon.tsx`：一个面板图标（宽侧栏下 16px、窄轨 18px——尺寸由 `sidebar.panellist` 的 owner props 给，形状照 `pairing-panel.ts` 的 `PairingIcon`），根元素带 `data-host-switcher`。点击行为：读 `ctx.get('layout')`，调 `selectPanel(PANEL_ID)`；抛错时兜住并在图标旁给一句可读交代（走词典，不硬编码）。
+`host-icon.tsx`：`createHostIcon(select)` 产出一个面板图标（宽侧栏下 16px、窄轨 18px——尺寸由 `sidebar.panellist` 的 owner props 给，形状照 `pairing-panel.ts` 的 `PairingIcon`），根元素带 `data-host-switcher`。点击时调 `select()`；`select` 抛错就兜住，并在图标旁给一句可读交代（走词典，不硬编码）。
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -153,6 +154,8 @@ Expected: PASS。
 - [ ] **Step 5: 扩 `registerPanelSlots` 成三个座位**
 
 在 `client/index.ts:221-231` 的 `registerPanelSlots` 里，除了既有的 `settings.section`，再加两处 `inject`：`sidebar.panellist`（`{ name: 'sidebar.panellist', id: PANEL_ID, order: HOST_ICON_PANEL_ORDER, label, locale: NAMESPACE }`）与 `main`（`{ name: 'main', key: PANEL_ID, locale: NAMESPACE, inject: () => face }`）。三处都用 `inject` 等座位就位，不要直接 `register`。
+
+`registerPanelSlots` 增加第四个参数 `selectHostPanel: () => void`；调用处（`client/index.ts:413` 附近）传入一个从 `ctx.get('layout')` 取到 `selectPanel` 再调 `PANEL_ID` 的闭包。`ctx.get('layout')` 可能是 undefined（服务没就位），这时同样当异常处理，别让图标点下去毫无反应。
 
 - [ ] **Step 6: 跑测试确认通过**
 
