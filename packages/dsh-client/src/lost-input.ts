@@ -234,22 +234,26 @@ export const lostInputStateDefinition: ConversationNodeDefinition<LostInputState
   publication: () => 'none',
 }
 
-function locationOf(context: ConversationNodeContext<LostInputData | undefined>): ConversationLocation {
+function locationOf(context: ConversationNodeContext<LostInputData | null>): ConversationLocation {
   return context.start?.location ?? context.matches[0]?.location ?? { kind: 'unresolved' }
 }
 
-/** 渲染 Definition：只在 error 结尾、且确有未送达消息时出节点。 */
-export const lostInputDefinition: ConversationNodeDefinition<LostInputData | undefined> = {
+/**
+ * 渲染 Definition：只在 error 结尾、且确有未送达消息时出节点。
+ * 没有未送达消息时 State 用 null 占位：引擎把 start 返回 undefined
+ * 当成非法状态抛错，整段窗口重放会因此中断。
+ */
+export const lostInputDefinition: ConversationNodeDefinition<LostInputData | null> = {
   kind: LOST_INPUT_NODE_KIND,
   target: 'chat',
   match: (event) => event.type === 'turn/end' && event.data.reason.kind === 'error'
     ? { id: String(event.seq), role: 'start' }
     : null,
   start: (_context, match, reader: ConversationContextReader) => {
-    if (match.event.type !== 'turn/end') return undefined
+    if (match.event.type !== 'turn/end') return null
     const previous = reader.previous<LostInputState>(LOST_INPUT_STATE_KIND)?.state
     const messages = previous === undefined ? [] : lostInputAtTurnEnd(previous)
-    if (messages.length === 0) return undefined
+    if (messages.length === 0) return null
     return {
       turn: match.event.data.turn,
       seq: match.event.seq,
@@ -260,7 +264,7 @@ export const lostInputDefinition: ConversationNodeDefinition<LostInputData | und
   update: context => context.state,
   buildViewNode: (context) => {
     const data = context.state
-    if (data === undefined) return null
+    if (data === undefined || data === null) return null
     return {
       key: context.key,
       kind: LOST_INPUT_NODE_KIND,

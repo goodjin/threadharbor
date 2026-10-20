@@ -141,7 +141,15 @@ describe('Definition：什么时候出节点', () => {
 
     const emptyReader = { previous: () => undefined }
     const none = lostInputDefinition.start({} as never, { event: startEvent, role: 'start', location: { kind: 'unresolved' } } as never, emptyReader as never)
+    expect(none).toBeNull()
     expect(lostInputDefinition.buildViewNode?.({ state: none, key: 'k', kind: LOST_INPUT_NODE_KIND, id: '3', matches: [], start: undefined, current: new Map() } as never)).toBeNull()
+    expect(lostInputDefinition.buildViewNode?.({ state: undefined, key: 'k', kind: LOST_INPUT_NODE_KIND, id: '3', matches: [], start: undefined, current: new Map() } as never)).toBeNull()
+  })
+
+  it('没有未送达消息时 start 返回 null：引擎把 undefined 状态当装配错误并中止整个窗口', () => {
+    const emptyReader = { previous: () => undefined }
+    const state = lostInputDefinition.start({} as never, { event: turnEnd(9), role: 'start', location: { kind: 'unresolved' } } as never, emptyReader as never)
+    expect(state).not.toBeUndefined()
   })
 })
 
