@@ -37,8 +37,13 @@ export type AcpClientPort = {
    * Cursor must authenticate (after an interactive `agent login`) between
    * `initialize` and `session/new`; the other agents have no such step, so the
    * port omits this and the runner skips it. Absent means "no authenticate".
+   *
+   * Takes the `initialize` reply because an agent's method id may be per-build
+   * (qoder CN vs international) and only the agent's own `authMethods` list
+   * knows it. Whether the step runs before `session/new` or waits for a
+   * refusal is the runner's decision, read from the dialect.
    */
-  authenticate?(): Promise<unknown>
+  authenticate?(initializeResult: unknown): Promise<unknown>
 }
 
 /** Where a turn's text and reasoning go as they arrive. */
@@ -559,9 +564,9 @@ export class AcpTurnRunner {
     }
   }
 
-  /** 回合末把遥测帧按种类汇总成块写掉（每回合一次）。 */
-  private writeRawSummary(turn: TurnContext): void {
-    const blocks = this.rawOutput?.summary() ?? []
+  /** 回合末把遥测帧按种类汇总成块写掉（每回合一次，位置用写出时的步骤）。 */
+  private writeRawSummary(turn: TurnContext, position: { readonly turn: number; readonly step: number }): void {
+    const blocks = this.rawOutput?.summary(position) ?? []
     for (const block of blocks) {
       try {
         turn.write([{ type: RAW_OUTPUT, payload: block }])
@@ -1106,7 +1111,7 @@ export class AcpTurnRunner {
           // 结束原因走返回值（公告或 spawned 收尾待写时不算空，见下）。
           if (this.frames.length === 0 && !this.noticePending() && !this.spawnedTailPending()) {
             stream?.abandon()
-            this.writeRawSummary(turn)
+            if (turn.position !== undefined) this.writeRawSummary(turn, turn.position)
             this.subagents?.parentTurnEnd(turn.sessionId)
             return end
           }
@@ -1252,7 +1257,7 @@ export class AcpTurnRunner {
     }
     // 遥测汇总只在回合末写：中途闭段就倒出来会把过程区重新弄脏，而且卡片必须
     // 排在段消息之前（消息是这一步的最后一条 assistant 消息，视图只保留它）。
-    if (final) this.writeRawSummary(turn)
+    if (final && live !== undefined) this.writeRawSummary(turn, { turn: live.turn, step: live.step })
     const notice = !this.noticeWritten && this.undelivered.length > 0 && position !== undefined
       ? [{
         type: UNDELIVERED,
@@ -1403,7 +1408,7 @@ export class AcpTurnRunner {
   }
 
   private async doOpen(onStage: (stage: string) => void): Promise<string> {
-    await this.client.request('initialize', {
+    const initializeResult = await this.client.request('initialize', {
       protocolVersion: 1,
       // `subagents` opts into the ACP subagent draft (#1992): adapters that
       // implement it (codex-acp, claude-agent-acp) then report subagent and
@@ -1426,16 +1431,34 @@ export class AcpTurnRunner {
       },
     })
     this.client.notify('initialized', {})
-    // Cursor authenticates here; the other agents have no such step.
-    if (this.client.authenticate !== undefined) {
+    const authenticate = this.client.authenticate
+    // Cursor must authenticate before session/new. Qoder must not: once its CLI
+    // is logged in session/new succeeds without the round-trip, and its
+    // authenticate intermittently stalls (measured 2026-10-20). Qoder opens
+    // first and authenticates only when session/new refuses for lack of login.
+    const onDemand = this.options.dialect?.authenticateOnDemand === true
+    if (authenticate !== undefined && !onDemand) {
       onStage('authenticate')
-      await this.client.authenticate()
+      await authenticate(initializeResult)
     }
-    onStage('session/new')
-    const reply = (await this.client.request('session/new', {
+    const openSession = () => this.client.request('session/new', {
       cwd: this.options.cwd,
       mcpServers: [],
-    })) as { sessionId?: unknown } | null
+    })
+    onStage('session/new')
+    let rawReply: unknown
+    try {
+      rawReply = await openSession()
+    } catch (error) {
+      if (authenticate === undefined || !onDemand || this.options.dialect?.sessionNeedsAuthenticate?.(error) !== true) {
+        throw error
+      }
+      onStage('authenticate')
+      await authenticate(initializeResult)
+      onStage('session/new')
+      rawReply = await openSession()
+    }
+    const reply = rawReply as { sessionId?: unknown } | null
     if (typeof reply?.sessionId !== 'string') {
       throw new Error('acp session/new returned no sessionId')
     }

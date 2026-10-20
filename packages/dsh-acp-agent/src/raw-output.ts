@@ -43,7 +43,13 @@ const MAPPED_KINDS = new Set([
 ])
 
 /** 自带卡片/审批展示的请求：由各自的面板负责，不是未知输出。 */
-const DEDICATED_METHODS = new Set(['session/request_permission', 'cursor/ask_question'])
+const DEDICATED_METHODS = new Set([
+  'session/request_permission',
+  // cursor 的阻塞式提问与计划请求由各自的流程回答（client.ts 的扩展处理），
+  // 不是「看不懂的输出」，不能进未知块。
+  'cursor/ask_question',
+  'cursor/create_plan',
+])
 
 /** 默认单块上限：超过就在同一连续段内切块，转录不会被一行巨物撑爆。 */
 const DEFAULT_MAX_BYTES = 8192
@@ -54,7 +60,13 @@ const DEFAULT_MAX_BYTES = 8192
  * 它们仍会被保存——但按种类汇总到回合末尾，一块一行种类名；这样「所有输出都
  * 可见」和「过程区保持原生观感」同时成立。
  */
-const TELEMETRY_KINDS = new Set(['usage_update', 'session_info_update', 'available_commands_update'])
+const TELEMETRY_KINDS = new Set([
+  'usage_update',
+  'session_info_update',
+  'available_commands_update',
+  // cursor 的模式切换（agent/ask/...）：和遥测一样只在回合末汇总，过程区不留噪音。
+  'current_mode_update',
+])
 
 function recordOf(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {}
@@ -165,14 +177,16 @@ export class RawOutputAggregator {
   /**
    * 回合末汇总：每种遥测帧一块，按首次出现的顺序。
    *
-   * 调用后清空汇总（一个回合只发一次），位置取该种类第一次出现的位置。
+   * 调用后清空汇总（一个回合只发一次）。位置**盖写出时**的 turn/step：汇总块
+   * 总在最后一段写出，日志只接纳与「当前打开的步骤」一致的 tool 事件——沿用
+   * 首次出现的位置（更早的步骤）会让整份日志加载不了。
    */
-  summary(): readonly RawOutputBlock[] {
+  summary(position: { readonly turn: number; readonly step: number }): readonly RawOutputBlock[] {
     const blocks: RawOutputBlock[] = []
     for (const [kind, tally] of this.telemetry) {
       blocks.push({
-        turn: tally.position.turn,
-        step: tally.position.step,
+        turn: position.turn,
+        step: position.step,
         kind,
         format: 'json',
         content: [`（${String(tally.lines.length)} 帧）`, ...tally.lines].join('\n'),

@@ -93,13 +93,13 @@ describe('RawOutputAggregator', () => {
   it('种类切换时先交出前一块，新段从切换帧起', () => {
     const agg = new RawOutputAggregator()
     expect(agg.observe(update('plan'), AT, { childSession: false })).toBeUndefined()
-    const closed = agg.observe(update('current_mode_update'), AT, { childSession: false })
+    const closed = agg.observe(update('config_option_update'), AT, { childSession: false })
     expect(closed).toBeDefined()
     expect(closed!.kind).toBe('plan')
     expect(closed!.count).toBe(1)
     const second = agg.flush(AT)
     expect(second).toBeDefined()
-    expect(second!.kind).toBe('current_mode_update')
+    expect(second!.kind).toBe('config_option_update')
     expect(second!.count).toBe(1)
   })
 
@@ -149,10 +149,10 @@ describe('RawOutputAggregator', () => {
   it('块携带段起点的位置（跨步骤不换起点）', () => {
     const agg = new RawOutputAggregator()
     agg.observe(update('plan'), { turn: 1, step: 1 }, { childSession: false })
-    const closed = agg.observe(update('current_mode_update'), { turn: 1, step: 2 }, { childSession: false })
+    const closed = agg.observe(update('config_option_update'), { turn: 1, step: 2 }, { childSession: false })
     expect(closed).toMatchObject({ turn: 1, step: 1, kind: 'plan' })
     const second = agg.flush({ turn: 1, step: 2 })
-    expect(second).toMatchObject({ turn: 1, step: 2, kind: 'current_mode_update' })
+    expect(second).toMatchObject({ turn: 1, step: 2, kind: 'config_option_update' })
   })
 
   it('遥测帧不实时出块、不打断连续段，回合末按种类汇总', () => {
@@ -167,7 +167,7 @@ describe('RawOutputAggregator', () => {
     const closed = agg.flush(AT)
     expect(closed).toMatchObject({ kind: 'plan', count: 2 })
     // 回合末汇总：每种遥测一块，全部帧都算进去。
-    const summary = agg.summary()
+    const summary = agg.summary(AT)
     expect(summary.map(block => [block.kind, block.count])).toEqual([
       ['usage_update', 2],
       ['session_info_update', 1],
@@ -175,11 +175,34 @@ describe('RawOutputAggregator', () => {
     expect(summary[0]!.content).toContain('（2 帧）')
   })
 
+  it('current_mode_update 属遥测：不实时出块、回合末汇总（cursor 的模式切换）', () => {
+    const agg = new RawOutputAggregator()
+    expect(agg.observe(update('current_mode_update', { mode: 'agent' }), AT, { childSession: false })).toBeUndefined()
+    expect(agg.flush(AT)).toBeUndefined()
+    const summary = agg.summary(AT)
+    expect(summary.map(block => block.kind)).toEqual(['current_mode_update'])
+  })
+
+  it('cursor/create_plan 是专用流程，不是未知输出', () => {
+    expect(classifyRawOutput({ id: 5, method: 'cursor/create_plan', params: {} }, { childSession: false })).toBeUndefined()
+  })
+
+  it('summary 盖写出时的位置：遥测汇总在末段写出，就必须带末段的步骤号', () => {
+    const agg = new RawOutputAggregator()
+    agg.observe(update('usage_update', { a: 1 }), { turn: 1, step: 1 }, { childSession: false })
+    agg.observe(update('session_info_update', { b: 1 }), { turn: 1, step: 1 }, { childSession: false })
+    const blocks = agg.summary({ turn: 1, step: 2 })
+    expect(blocks.map(block => ({ kind: block.kind, turn: block.turn, step: block.step }))).toEqual([
+      { kind: 'usage_update', turn: 1, step: 2 },
+      { kind: 'session_info_update', turn: 1, step: 2 },
+    ])
+  })
+
   it('summary 之后空段 flush 不出块', () => {
     const agg = new RawOutputAggregator()
     agg.observe(update('usage_update', { a: 1 }), AT, { childSession: false })
-    expect(agg.summary()).toHaveLength(1)
-    expect(agg.summary()).toHaveLength(0)
+    expect(agg.summary(AT)).toHaveLength(1)
+    expect(agg.summary(AT)).toHaveLength(0)
   })
 
   it('空段 flush 不出块', () => {
