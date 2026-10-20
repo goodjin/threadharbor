@@ -530,7 +530,7 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // Self-report at mount. This panel is easy to mistake for a plugin that
   // never loaded; these lines are how anyone can tell the difference.
   const identity = section.identity()
-  log.info(`panel registered: id=${PANEL_ID}, slots=settings.section, order=${PANEL_ORDER}`)
+  log.info(`panel registered: id=${PANEL_ID}, slots=settings.section,sidebar.panellist,main, order=${PANEL_ORDER}/${HOST_ICON_PANEL_ORDER}`)
   log.info(`probe gateway: ${mountOpening.gateway === undefined ? `not open at mount (missing ${mountOpening.missing.join(', ')}); retried per use` : 'open'}`)
   log.info(`roll-up identity: ${identity.hostId}${identity.derived ? ' (derived from page origin; configure it in the panel)' : ''}; session tree: DSH projections + remote pull via launchUrl`)
 }
