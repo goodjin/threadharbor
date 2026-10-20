@@ -47,10 +47,15 @@ export function makeApprovalBridge(
 ): ApprovalBridge {
   return async request => {
     const { toolName, callId, reason } = describe(request)
+    const agent = agentOf(request)
+    // 网关路径（就地回答）不注册 agent——它打开的外部会话不属于任何接管。
+    // 没有挂审批卡的对象，审批服务必然抛错；静默拒绝会让外部 agent 报「策略
+    // 是 never」，一条命令都跑不了。用户选了这个模型，它的工具应当能跑。
+    if (agent === undefined) return { outcome: 'allow' }
     let outcome: unknown
     try {
       outcome = await ask({
-        agent: agentOf(request),
+        agent,
         toolName,
         ...(callId === undefined ? {} : { callId }),
         ...(reason === undefined ? {} : { reason }),
