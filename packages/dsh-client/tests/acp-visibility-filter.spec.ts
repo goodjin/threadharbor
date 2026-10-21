@@ -253,6 +253,29 @@ describe('目录包装', () => {
     expect(service.directoryFor).toBe(original)
   })
 
+  it('客户端图被热替换后：旧实例上的包装层转到当下这一代，模型不消失', () => {
+    // 2026-10-20 桌面版：宿主重建了客户端包，SSE 把新图推给开着的页签；上一代
+    // 的服务实例被处置，而官方那个模型座位还攥着旧实例 → 座位条目崩掉，输入框的
+    // 模型入口整个消失，页签不自愈（空白首页没事，有会话的窗口就废了）。
+    //
+    // 包装层在调用时转到当下这一代的服务：旧实例上装的包装层照样服务当下的目录。
+    const first = fakeService(fakeDirectory())
+    installAcpVisibilityFilter(first, fakeVisibility())
+    // 新一代：宿主重建了客户端包，包装重新装到新实例上；它的目录是另一份。
+    const nextState = initialState()
+    nextState.groups = [{ id: 'acp:next-gen', name: 'Next', models: [{ id: 'n', name: 'N' }] }]
+    const second = fakeService({ ...fakeDirectory(), store: {
+      getSnapshot: () => nextState,
+      subscribe: () => () => {},
+    } })
+    installAcpVisibilityFilter(second, fakeVisibility())
+
+    const viaStale = first.directoryFor('s1') as ProxiedDirectory
+    expect(viaStale).toBeDefined()
+    // 旧实例上的调用给的是**当下这一代**的目录（不是它自己那份旧的）。
+    expect(viaStale.store.getSnapshot()?.groups.map(group => group.id)).toEqual(['acp:next-gen'])
+  })
+
   it('服务已经没了时不把异常抛给调用方：座位照常渲染', async () => {
     // 2026-10-20 桌面版：连接重建后旧的服务实例被处置，它的原方法一调就抛
     // 「cannot get required service "remote.session" in inactive context」；
