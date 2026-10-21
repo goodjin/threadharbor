@@ -72,15 +72,24 @@ export const cursorDialect: AcpDialect = {
   foldTool(carried, update) {
     const rawId = typeof update['toolCallId'] === 'string' ? update['toolCallId'] : randomUUID()
     const toolCallId = singleLineId(rawId)
+    const input = record(update['rawInput'])
+    // cursor 的子代理派发是它自己的 `task` 工具：ACP 帧里 `kind` 叫 "other"，
+    // 原工具名在 rawInput._toolName（2026-10-21 真机抓帧：design-work 派发）。
+    // 不认它，投影就看不出这是一次子代理派发，界面上只剩一张叫 "other" 的卡片。
+    const dispatch = subagentDispatchOf(input)
     // `kind` ("execute") is the only identity cursor offers, as with codex.
     const name = carried?.name
+      || (dispatch === undefined ? undefined : 'subagent')
       || (typeof update['kind'] === 'string' ? update['kind'] : undefined)
       || (typeof update['title'] === 'string' ? update['title'] : 'tool')
     const output = outputFrom(update)
     return {
       callId: toolCallId,
       name,
-      arguments: update['rawInput'] ?? carried?.arguments ?? {},
+      // 子代理卡片用草案的形状（prompt + agent），与 codex/grok 的那张一致。
+      arguments: dispatch === undefined
+        ? (update['rawInput'] ?? carried?.arguments ?? {})
+        : { prompt: dispatch.prompt, agent: dispatch.agent },
       title: typeof update['title'] === 'string' ? update['title'] : carried?.title,
       status: typeof update['status'] === 'string' ? update['status'] : carried?.status,
       output: output.length > 0 ? output : (carried?.output ?? ''),
@@ -110,6 +119,26 @@ export const cursorDialect: AcpDialect = {
   isContent(update) {
     return typeof update['sessionUpdate'] === 'string' && !CHATTER.has(update['sessionUpdate'] as string)
   },
+}
+
+/** cursor's subagent dispatch: the `task` tool (its own name, in rawInput). */
+type SubagentDispatch = { readonly prompt: string; readonly agent: string }
+
+/**
+ * Read cursor's subagent dispatch out of a tool call's raw input.
+ *
+ * cursor names its own `task` tool; the ACP frame calls the tool "other" and
+ * keeps the original name in `_toolName` (2026-10-21 capture: a design-work
+ * dispatch). The description is the agent's name, the prompt is its task —
+ * the same two fields the ACP subagent draft's card carries, so the card reads
+ * the same as codex's and grok's.
+ */
+function subagentDispatchOf(input: Record<string, unknown>): SubagentDispatch | undefined {
+  if (input['_toolName'] !== 'task') return undefined
+  const prompt = typeof input['prompt'] === 'string' ? input['prompt'] : ''
+  const description = typeof input['description'] === 'string' ? input['description'] : ''
+  if (prompt === '' && description === '') return undefined
+  return { prompt, agent: description === '' ? 'subagent' : description }
 }
 
 /** Commands return stdout; reads return rawOutput.content; edits return ACP diff content. */

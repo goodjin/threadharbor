@@ -27,6 +27,7 @@ import { projectStepContent } from '../src/projection.ts'
 import { codexDialect } from '../src/dialects/codex.ts'
 import { grokDialect } from '../src/dialects/grok.ts'
 import { claudeDialect } from '../src/dialects/claude.ts'
+import { cursorDialect } from '../src/dialects/cursor.ts'
 import type { AcpFrame } from '../src/acp-client.ts'
 
 const ROOT = 'root-session'
@@ -176,6 +177,55 @@ describe('async task frames', () => {
     asyncTaskId: TASK,
     state,
     summary: 'watch exited 0',
+  })
+
+  it('认得 cursor 自己的 task 工具：子代理派发也落成 subagent 卡片', () => {
+    // 2026-10-21 真机抓帧（桌面版 cursor 会话）：cursor 用自己的 `task` 工具派
+    // 子代理，ACP 帧里工具名是 "other"，原工具名在 rawInput._toolName，任务在
+    // prompt，代理名在 description。不认它，界面就只剩一张叫 "other" 的卡片，
+    // 子代理不展现。
+    const update = {
+      sessionUpdate: 'tool_call',
+      toolCallId: 'call-1',
+      kind: 'other',
+      status: 'pending',
+      rawInput: {
+        _toolName: 'task',
+        prompt: '你是 design-work 独立子代理。只做方案设计。',
+        description: '技能统一 design-work',
+      },
+    }
+    const projected = projectStepContent([rootUpdate(update)], {
+      dialect: cursorDialect,
+      turn: 1,
+      step: 1,
+    })
+    const call = projected.find(event => event.type === 'tool/call')
+    expect(call).toBeDefined()
+    const payload = (call as { payload: { name: string; arguments: string } }).payload
+    expect(payload.name).toBe('subagent')
+    expect(JSON.parse(payload.arguments)).toEqual({
+      prompt: '你是 design-work 独立子代理。只做方案设计。',
+      agent: '技能统一 design-work',
+    })
+  })
+
+  it('cursor 的别的工具（updateTodos）不认成子代理', () => {
+    const update = {
+      sessionUpdate: 'tool_call',
+      toolCallId: 'call-2',
+      kind: 'other',
+      status: 'pending',
+      rawInput: { _toolName: 'updateTodos' },
+    }
+    const projected = projectStepContent([rootUpdate(update)], {
+      dialect: cursorDialect,
+      turn: 1,
+      step: 1,
+    })
+    const call = projected.find(event => event.type === 'tool/call')
+    const payload = (call as { payload: { name: string } }).payload
+    expect(payload.name).not.toBe('subagent')
   })
 
   it('maps a background task onto its own card with the description as arguments', () => {

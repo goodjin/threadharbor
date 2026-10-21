@@ -66,6 +66,14 @@
               agent: codex
               hideFromRoster: true
               command: /Users/good/.local/bin/codex-acp
+              # 静默看门狗的期限放宽到 5 分钟（默认 120 秒）。
+              #
+              # 2026-10-21 桌面版现场：codex 在大仓里干活（一万个文件的索引）
+              # 时，工具结果落地后它要等模型的下一次回答；这一等常常超过两分钟，
+              # 而它在等的时候不吐任何帧——在外面看与「卡死」一模一样，120 秒的
+              # 看门狗就把这一轮杀了（同一会话当天四次 ACP_STALLED）。进程没死、
+              # stderr 也是空的，它只是在等。
+              stallMs: 300000
               # 不写 cwd。写了也会被忽略。
               # 外部会话只用这条 DSH 会话自己的工作区；没有工作区就不开工。
               # mode 留空 = 该构建的默认 agent（"Approve for me"）。
