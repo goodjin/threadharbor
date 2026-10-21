@@ -842,6 +842,11 @@ export class AcpTurnRunner {
     if (isTool && typeof rawId === 'string') {
       const folded = dialect.foldTool(carried, update)
       live.tools.set(rawId, folded)
+      // 子代理经**工具调用**派发时（cursor 的 `task` 工具，2026-10-21 真机抓帧：
+      // kind "other" + rawInput._toolName "task"），也要开一个影子子会话——否则
+      // 界面上只有一张卡片，子会话列表里没有它（ACP 草案的 subagent_spawned 帧
+      // 那条路由 routeSubagentFrame 负责，两条路现在都有子会话）。
+      this.trackSubagentTool(rawId, folded)
       // A placeholder frame announces the call before its arguments exist
       // (cursor's pending edit, codex's read). The card is immutable, so
       // writing it now would freeze `{}` in place of the real input. Wait for
@@ -875,6 +880,33 @@ export class AcpTurnRunner {
       return
     }
     live.settled.add(callId)
+  }
+
+  /**
+   * A subagent dispatched through a TOOL CALL rather than through the draft's
+   * frames: open a shadow child session for it, and close it when the call
+   * settles.
+   *
+   * cursor 的子代理派发就是这么来的（真机抓帧 2026-10-21）：一条 `kind: "other"`
+   * 的工具调用，`rawInput._toolName` 是 "task"，任务在 `prompt`，代理名在
+   * `description`。dialect 把它认成 `subagent` 卡片，这里再把它认成一个子会话。
+   *
+   * @param callId - the tool call's id; it is the child's identity too.
+   * @param folded - the folded tool call.
+   */
+  private trackSubagentTool(callId: string, folded: ToolCall): void {
+    const sessions = this.subagents
+    const parentId = this.parentSessionId
+    if (sessions === undefined || parentId === undefined) return
+    if (folded.name !== 'subagent') return
+    const args = recordOf(folded.arguments)
+    const task = typeof args['prompt'] === 'string' ? args['prompt'] : ''
+    const label = typeof args['agent'] === 'string' && args['agent'] !== '' ? args['agent'] : 'subagent'
+    if (folded.status === 'completed' || folded.status === 'failed') {
+      sessions.terminal(parentId, callId, folded.status === 'completed' ? 'completed' : 'failed', folded.output)
+      return
+    }
+    sessions.spawn(parentId, callId, label, task)
   }
 
   /** Feed one frame's text to the live stream. */

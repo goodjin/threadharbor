@@ -7,7 +7,7 @@
 
 import { describe, expect, it } from 'vitest'
 import type { AcpFrame } from '@threadharbor/dsh-acp-agent'
-import { codexDialect } from '@threadharbor/dsh-acp-agent'
+import { codexDialect, cursorDialect } from '@threadharbor/dsh-acp-agent'
 import { AcpTurnRunner } from '../src/runner.ts'
 import type { AcpClientPort } from '../src/runner.ts'
 import type { StepDecisionLike } from '../src/dispatch.ts'
@@ -103,6 +103,41 @@ describe('子代理帧接线（run）', () => {
     ])
     expect(emitted.filter(entry => entry.type === 'chunk').length).toBeGreaterThan(0)
     expect(emitted.filter(entry => entry.type === 'end')).toHaveLength(1)
+  })
+
+  it('经工具调用派发的子代理（cursor 的 task 工具）也建子会话', async () => {
+    // 2026-10-21 真机抓帧：cursor 的子代理派发是一条 `kind: "other"` 的工具
+    // 调用，rawInput._toolName 是 "task"，任务在 prompt、代理名在 description。
+    // dialect 把它认成 subagent 卡片，这里再把它认成一个子会话——否则界面上
+    // 只有一张卡片，子会话列表里没有它。
+    const client = fakeClient()
+    const { host, opened, parentEvents, childAppends } = fakeHost()
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: cursorDialect, subagents: host })
+    const turn = { sessionId: 'dsh-1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 }
+    const running = runner.run(DECISION, turn)
+    await new Promise(resolve => { setTimeout(resolve, 0) })
+    client.deliver(parentUpdate({
+      sessionUpdate: 'tool_call',
+      toolCallId: 'call-1',
+      title: 'Task: 写探测文件到 /tmp',
+      kind: 'other',
+      status: 'pending',
+      rawInput: { _toolName: 'task', prompt: '在 /tmp 写 ok', description: '写探测文件到 /tmp' },
+    }))
+    client.deliver(parentUpdate({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call-1',
+      status: 'completed',
+      rawOutput: { durationMs: 10893, isBackground: false },
+    }))
+    client.releaseReply()
+    await running
+
+    expect(opened).toEqual(['acp-sub-call-1'])
+    expect(parentEvents.map(entry => entry.type)).toEqual(['subagent/catalog'])
+    expect(parentEvents[0]!.payload).toMatchObject({ label: '写探测文件到 /tmp' })
+    // 子会话随调用收尾（不是一直开着）。
+    expect(childAppends.get('acp-sub-call-1')!.map(entry => entry.type)).toContain('turn/end')
   })
 
   it('无端口时零调用，回合照常收尾', async () => {
