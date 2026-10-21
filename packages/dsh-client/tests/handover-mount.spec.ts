@@ -36,6 +36,9 @@ function shellWith(core: SlotCore): void {
         // ui-conversation declares this seat too; the model entry registers
         // into it, so a shell that omits it stops modeling the real host.
         'conversation.input.model': { kind: 'single', scope: 'session' },
+        // 官方 model-selection 声明的模型标签子座位（0.2.1-rc.2）：可见的
+        // 模型名由它渲染，我们占的正是它。壳里少了它，注册会当场炸出来。
+        'conversation.input.model.label': { kind: 'single', scope: 'session', inline: true },
         // The composer dock under the input box: the zcode quota pills land
         // beside the official stats pills (ui-chat's registration).
         'conversation.composer.dock': { kind: 'list', scope: 'session' },

@@ -57,7 +57,7 @@ import { layeredIdentitySettings, IDENTITY_STORAGE_KEY } from '../settings-sourc
 import { maybeRegisterSidebarTree } from '../sidebar-tree.ts'
 import { registerRemoteConversation } from '../remote-conversation.tsx'
 import { sharedRemoteConversation } from '../remote-conversation-store.ts'
-import { registerModelSeat } from '../model-seat.ts'
+import { registerModelLabel } from '../model-label.tsx'
 import { registerSessionIdBar } from '../session-id-bar.ts'
 import { createQuotaPoller, registerQuotaDockPills, routeQuotaFetcher } from '../quota-pill.ts'
 import { registerInterruptedTurnRecovery } from '../interrupted-turn-recovery.ts'
@@ -491,24 +491,19 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
     'threadharbor: remote conversation',
   )
 
-  // 输入框上的模型入口：同样用更低优先级盖住官方那一份，好让选外部 agent 时
-  // 按钮上看得见是谁在回答。目录、选择提交这些仍是官方的服务，换的只是标签。
-  // 开关 threadharbor.modelSeat=off 时不注册，原生入口照常。
+  // 输入框上的模型名：给外部 agent 的模型加一个 agent 前缀，好让选了谁在回答
+  // 一眼看得见。2026-10-20 改法：不再替换整个「模型座位」，只占官方在
+  // 0.2.1-rc.2 声明的标签子座位——子座位由官方声明，inject 等它出现，顺序无关；
+  // 座位本身仍是官方那份渲染（菜单、搜索、强度选择都还是官方的），我们那份
+  // 0.2.0 时代的拷贝（composer-model-select.tsx）随之删掉。
+  //
+  // 开关 threadharbor.modelSeat=off 时不注册，原生标签照常。
   //
   // `ctx.slots` 的 register 是按座位种类分派的一组泛型重载，本地那套手写的结构
   // 接口表达不了它（种类条件类型在泛型下摊不开），所以这里按调用方给的最小接
   // 口投影一次——和下面 registerSessionIdBar 同一处境，不是这一行特有的将就。
-  //
-  // 服务经 ctx.get 取，不经 ctx.模型目录：模型目录不在本入口的 inject 声明里，
-  // cordis 会拒绝直接读（cannot get property "modelDirectories" without inject），
-  // 抛错把整个入口打成 failed，页面停在「Failed to load plugins」。ctx.get 不要求
-  // 声明、缺席时给 undefined，而 registerModelSeat 本就按「没有就不注册」处理，
-  // 所以这个座位对模型选择服务是可选的，就该这么取。
   const seatHost = ctx.slots as never
-  ctx.effect(() => registerModelSeat(seatHost, {
-    modelDirectories: ctx.get('modelDirectories') as never,
-    sessions: ctx.get('sessions') as never,
-  }), 'threadharbor: composer model seat')
+  ctx.effect(() => registerModelLabel(seatHost), 'threadharbor: composer model label')
 
   // 会话头工具行：会话编号 + 复制按钮（会话作用域槽位，inject 首参即编号）。
   registerSessionIdBar(seatHost)

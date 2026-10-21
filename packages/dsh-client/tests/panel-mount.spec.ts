@@ -65,6 +65,17 @@ function shellWith(core: SlotCore): void {
     },
     () => createElement('div'),
   )
+  // 官方 model-selection 的那份注册（0.2.1-rc.2）：模型座位自己声明一个
+  // 标签子座位，可见��模型名由它渲染——我们占的正是这个子座位，所以壳里
+  // 必须有它，否则注册会在真机上等着一个没人声明的座位。
+  core.register(
+    {
+      name: 'conversation.input.model',
+      children: { 'conversation.input.model.label': { kind: 'single', scope: 'session', inline: true } },
+      inject: () => null,
+    },
+    () => createElement('div'),
+  )
 }
 
 /**
@@ -178,19 +189,12 @@ describe('面板挂载', () => {
     expect(ctx.core.entriesOfSlot('main').some(entry => entry.options.key === 'threadharbor-remote-session')).toBe(true)
   })
 
-  it('输入框的模型入口在主机给出目录服务时接管那个座位', () => {
-    // 这条用例盯的是「读服务必须先声明」这条规矩。模型入口要读的模型目录服务
-    // 不在本入口的声明里：真实上下文会当场拒绝（cordis 抛 cannot get property
-    // "modelDirectories" without inject），整个入口变成 failed，页面停在
-    // 「Failed to load plugins」，而模型入口自己本该在没有服务时安静不注册。
-    // 假上下文只有跟真实上下文一致地拒绝，才拦得住这一类回归。
-    const ctx = fakeCtx({
-      services: {
-        ...remoteNamespaces(),
-        modelDirectories: { directoryFor: () => ({}) },
-        sessions: { subagentAddress: () => undefined },
-      },
-    })
+  it('输入框的模型名占官方那个标签子座位', () => {
+    // 2026-10-20 改法：不再接管整个模型座位，只占官方 model-selection 声明的
+    // 标签子座位（可见的模型名由它渲染）。子座位是官方声明的，inject 等它出现，
+    // 装载顺序不影响结果——旧做法在挂载那一刻读一次模型目录服务，读不到就静默
+    // 不注册，官方座位顶上，界面上只剩裸模型名。
+    const ctx = fakeCtx({ services: { ...remoteNamespaces() } })
     const registered: string[] = []
     const inner = ctx.core.register.bind(ctx.core)
     ;(ctx.core.register as unknown as (...args: never[]) => unknown) = (...args: never[]) => {
@@ -201,7 +205,15 @@ describe('面板挂载', () => {
 
     expect(() => { apply(ctx) }).not.toThrow()
 
-    expect(registered).toContain('conversation.input.model')
+    expect(registered).toContain('conversation.input.model.label')
+  })
+
+  it('模型目录服务缺席也照样挂载：那道读数已经不在我们这条路上', () => {
+    // 旧做法要读模型目录服务来决定要不要注册，读不到就安静不注册。现在标签的
+    // props 里就带着 provider 与 model，agent 名字直接从 provider 拿——没有
+    // 「读不到」这条路，也就没有那种静默失败。
+    const ctx = fakeCtx({ services: { ...remoteNamespaces() } })
+    expect(() => { apply(ctx) }).not.toThrow()
   })
 
   it('入口声明了模型座位那条路要读的服务', () => {
