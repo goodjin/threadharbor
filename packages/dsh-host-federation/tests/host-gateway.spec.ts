@@ -247,14 +247,18 @@ describe('转发', () => {
       },
       connection: { admit: () => ({ peer: {} }) },
       inject(_names: readonly string[], run: (child: unknown) => void) {
-        run({
-          settings: {
-            describe: async () => [{
+        // 真的设置服务是对象方法，靠 this 读自己的状态；摘下来单独调用会炸，
+        // 网关每次取登记簿都会 503。这里照这个形状假一份。
+        const settings = {
+          registry: registryJson(upstream.port),
+          async describe() {
+            return [{
               ns: 'threadharbor-host-store',
-              value: { data: { 'dsh.host.registry': registryJson(upstream.port) } },
-            }],
+              value: { data: { 'dsh.host.registry': this.registry } },
+            }]
           },
-        })
+        }
+        run({ settings })
       },
     })
     expect(routes.map(route => route.path)).toEqual(['/threadharbor/gateway', '/threadharbor/gateway-ws'])

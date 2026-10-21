@@ -552,8 +552,11 @@ function bindSettings(ctx: unknown, accept: (face: SettingsFace) => void): void 
       say('settings service did not arrive with describe — the gateway stays closed')
       return
     }
-    const describe = child['settings']['describe'] as () => Promise<unknown>
-    accept({ describe: () => describe() })
+    const service = child['settings']
+    const describe = service['describe'] as () => Promise<unknown>
+    // The service method reads its own state through `this`; calling it
+    // detached throws, and every gateway page would answer 503.
+    accept({ describe: () => describe.call(service) })
   })
 }
 
