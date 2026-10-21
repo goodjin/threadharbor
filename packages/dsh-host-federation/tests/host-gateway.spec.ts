@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { apply, createGateway, gatewayErrorPage, type Gateway } from '../src/host-gateway.ts'
 import {
   gatewayClientScript,
+  listGatewayHosts,
   parseGatewayRequest,
   parseGatewayUpgrade,
   resolveLaunch,
@@ -82,6 +83,20 @@ describe('网关路径', () => {
     expect(gatewayClientScript('mini', '小机器')).toContain('th-host-bar')
     expect(gatewayClientScript('mini', '小机器')).toContain('th-back-home')
     expect(() => { new Function(gatewayClientScript('mini', '小机器')) }).not.toThrow()
+  })
+
+  it('切换器只列出有打开地址的其余主机，排除正在看的那台并去重', () => {
+    const json = JSON.stringify([
+      { hostId: 'mini', hostTitle: '迷你', address: 'http://10.0.0.8:3081', launchUrl: 'http://10.0.0.8:3081/?token=a' },
+      { hostId: 'far', hostTitle: '远端', address: 'http://10.0.0.9:3080', launchUrl: 'http://10.0.0.9:3080/?token=b' },
+      { hostId: 'far', hostTitle: '重复的远端', address: 'http://10.0.0.9:3080', launchUrl: 'http://10.0.0.9:3080/?token=c' },
+      { hostId: 'no-token', hostTitle: '没令牌', address: 'http://10.0.0.10:3080' },
+      { hostId: '', hostTitle: '空标识', address: 'http://10.0.0.11:3080', launchUrl: 'http://10.0.0.11:3080/?token=d' },
+    ])
+    expect(listGatewayHosts(json, 'mini')).toEqual([{ hostId: 'far', hostTitle: '远端' }])
+    expect(listGatewayHosts(json, 'far')).toEqual([{ hostId: 'mini', hostTitle: '迷你' }])
+    expect(listGatewayHosts('not json', 'mini')).toEqual([])
+    expect(listGatewayHosts(undefined, 'mini')).toEqual([])
   })
 })
 

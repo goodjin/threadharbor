@@ -111,7 +111,7 @@ class FakeHostStore {
 }
 
 /** 真的 hostRegistry 配内存存储；entries 作为种子直接走 add 的真实校验。 */
-function makeRegistry(entries: readonly { hostId: string; hostTitle: string; address: string }[] = []): HostRegistryPort {
+function makeRegistry(entries: readonly { hostId: string; hostTitle: string; address: string; launchUrl?: string }[] = []): HostRegistryPort {
   const map = new Map<string, string>()
   const registry = hostRegistry({
     getItem: key => map.get(key) ?? null,
@@ -151,7 +151,7 @@ const TWO_PEERS: readonly TailscalePeer[] = [
   { name: 'labbox', ip: '100.101.2.9', online: false },
 ]
 
-async function mountPanel(registry: HostRegistryPort, hostStore?: FakeHostStore, rollUp?: FakeRollUp, tailscale?: TailscalePort, remote?: RemotePort): Promise<{ container: HTMLElement; root: Root }> {
+async function mountPanel(registry: HostRegistryPort, hostStore?: FakeHostStore, rollUp?: FakeRollUp, tailscale?: TailscalePort, remote?: RemotePort, navigate?: (url: string) => void): Promise<{ container: HTMLElement; root: Root }> {
   const container = document.createElement('div')
   document.body.appendChild(container)
   const root = createRoot(container)
@@ -164,6 +164,7 @@ async function mountPanel(registry: HostRegistryPort, hostStore?: FakeHostStore,
     ...(hostStore === undefined ? {} : { hostStore }),
     ...(tailscale === undefined ? {} : { tailscale }),
     ...(remote === undefined ? {} : { remote }),
+    ...(navigate === undefined ? {} : { navigate }),
   }
   await act(async () => {
     root.render(createElement(AgentPanel, props))
@@ -223,6 +224,27 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
       expect(q(container, '[data-host-row="bench"] [data-host-status]').getAttribute('data-host-status')).toBe('offline')
       expect(container.querySelector('[data-agent-section]')).toBeNull()
       expect(container.querySelector('[data-panel-page="detail"]')).toBeNull()
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('有入口的主机：主区是整页切换的链接，设置按钮仍进设置页', async () => {
+    const { container, root } = await mountPanel(makeRegistry([
+      {
+        hostId: 'bench',
+        hostTitle: '测试机',
+        address: 'http://192.168.1.20:3081',
+        launchUrl: 'http://192.168.1.20:3081/?token=tk',
+      },
+    ]))
+    try {
+      const open = q(container, '[data-host-open="bench"]')
+      expect(open.tagName).toBe('A')
+      expect(open.getAttribute('href')).toBe('/threadharbor/gateway/bench/')
+      click(container, '[data-host-row="bench"] [data-host-settings]')
+      expect(q(container, '[data-panel-page="detail"]')).toBeTruthy()
+      expect(q(container, '[data-form-field-address]').tagName).toBe('SPAN')
     } finally {
       await unmount(root)
     }
@@ -904,8 +926,8 @@ describe('主机详情：使用这台主机 + 远程部署（状态机如实呈�
     }
   })
 
-  it('存了连接方式：连接并打开走 connect 路由，成功后登记更新为新网址并开新标签', async () => {
-    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+  it('存了连接方式：连接并打开走 connect 路由，成功后登记更新并整页进入那台主机', async () => {
+    const navigated: string[] = []
     const { calls } = stubFetch({
       'host-ssh.connect': { ok: true, value: { endpoint: 'http://127.0.0.1:45555', launchUrl: 'http://127.0.0.1:45555/?token=neo', mode: 'tunnel', peer: { pluginsInstalled: true, listen: 'loopback', port: 3081 } } },
     })
@@ -913,7 +935,7 @@ describe('主机详情：使用这台主机 + 远程部署（状态机如实呈�
     // 用真实 registry 的存储端口补种 ssh 信息：makeRegistry 只收三个字段，这里手动再 add 一条带 ssh 的
     const withSsh = makeRegistry([])
     ;(withSsh as unknown as { add: (i: Record<string, unknown>) => unknown }).add({ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081', ssh: SSH_SEED })
-    const { container, root } = await mountPanel(withSsh)
+    const { container, root } = await mountPanel(withSsh, undefined, undefined, undefined, undefined, url => { navigated.push(url) })
     try {
       click(container, '[data-host-open="bench"]')
       click(container, '[data-action="connect-open"]')
@@ -924,13 +946,12 @@ describe('主机详情：使用这台主机 + 远程部署（状态机如实呈�
         ssh: { target: SSH_SEED.target, port: 22, user: SSH_SEED.user, identityFile: SSH_SEED.identityFile, hostKeyFingerprint: SSH_SEED.hostKeyFingerprint },
         remoteWebPort: 3081,
       })
-      expect(open).toHaveBeenCalledWith('/threadharbor/gateway/bench/', '_blank', 'noopener')
+      expect(navigated).toEqual(['/threadharbor/gateway/bench/'])
       const updated = withSsh.list().find(entry => entry.hostId === 'bench')
       expect(updated?.address).toBe('http://127.0.0.1:45555')
       expect(updated?.launchUrl).toBe('http://127.0.0.1:45555/?token=neo')
       expect(updated?.ssh?.target).toBe(SSH_SEED.target)
     } finally {
-      open.mockRestore()
       await unmount(root)
       delete (globalThis as { fetch?: unknown }).fetch
     }
@@ -1124,7 +1145,8 @@ describe('主机详情：使用这台主机 + 远程部署（状态机如实呈�
     })
     const { container, root } = await mountPanel(registry)
     try {
-      click(container, '[data-host-open="bench"]')
+      // 行主区现在是整页进入那台主机的链接；设置页从行尾按钮进。
+      click(container, '[data-host-row="bench"] [data-host-settings]')
       const open = container.querySelector('[data-action="open-page"]')
       expect(open).not.toBeNull()
       expect(open?.getAttribute('href')).toBe('/threadharbor/gateway/bench/')

@@ -485,7 +485,12 @@
 }
 
 /* 每行高度一致（2026-10-13 用户反馈）：定高，不是最小高——内容都是单行
-   （长了省略号），行与行不会因为内容不同而高矮不齐。 */
+   （长了省略号），行与行不会因为内容不同而高矮不齐。设置按钮绝对定位在
+   行尾，主按钮的三列与表头的前三列同宽。 */
+.hostRowLine {
+  position: relative;
+}
+
 .hostRowButton {
   appearance: none;
   border: none;
@@ -493,14 +498,16 @@
   color: inherit;
   font: inherit;
   text-align: left;
+  text-decoration: none;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 96px) minmax(0, 220px) 56px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 96px) minmax(0, 220px);
   align-items: center;
   gap: 12px;
   min-width: 0;
   width: 100%;
   height: 40px;
-  padding: 0 16px;
+  /* 右侧给设置按钮留出 56px + 间距 + 行内边距。 */
+  padding: 0 84px 0 16px;
   box-sizing: border-box;
   cursor: pointer;
 }
@@ -561,20 +568,25 @@
   white-space: nowrap;
 }
 
-/* 第三列的设置按钮外观：整行是打开设置页的按钮，这个 span 是它的第三列
-   长相，不是又一个独立控件。 */
+/* 行尾的设置按钮：与主按钮（进入主机）分开的第二个动作。 */
 .rowSettings {
-  flex: none;
-  justify-self: end;
+  appearance: none;
+  position: absolute;
+  right: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: transparent;
+  cursor: pointer;
   border: 1px solid var(--dsw-alias-border-l3);
   border-radius: var(--dsw-radius-sm);
   padding: 2px 10px;
+  font: inherit;
   font-size: 12px;
   line-height: 1.6;
   color: var(--dsw-alias-label-secondary);
 }
 
-.hostRowButton:hover .rowSettings {
+.rowSettings:hover {
   border-color: var(--dsw-alias-border-l4);
   color: var(--dsw-alias-label-primary);
 }
@@ -668,4 +680,66 @@
 .tailscalePeerMeta {
   font-size: 11px;
   color: var(--dsw-alias-label-secondary);
+}
+
+/*
+ * 手机/窄屏（2026-10-22）：列表行只留「名称 + 状态」和设置按钮，IP 列让位；
+ * 表单不再被 420px 卡住；输入框 16px 防止 iOS 聚焦时整页缩放；点按目标
+ * 抬到 32px 以上。侧栏浮层由 mobile-layout.ts 管，不在这里。
+ */
+@media (max-width: 640px) {
+  .root {
+    padding: 12px 12px 20px;
+    gap: 12px;
+  }
+
+  .card {
+    padding: 10px 12px;
+  }
+
+  .hostListHead {
+    display: none;
+  }
+
+  .hostRowButton {
+    grid-template-columns: minmax(0, 1fr) minmax(0, auto);
+    gap: 8px;
+    height: 44px;
+    padding: 0 60px 0 12px;
+  }
+
+  .hostIp {
+    display: none;
+  }
+
+  .rowSettings {
+    right: 8px;
+    min-height: 32px;
+    padding: 4px 10px;
+  }
+
+  .formGrid,
+  .tailscaleSection {
+    max-width: none;
+  }
+
+  .input,
+  .textarea {
+    font-size: 16px;
+  }
+
+  .action {
+    min-height: 32px;
+    padding: 5px 12px;
+  }
+
+  .sshKeyRow,
+  .launchUrlText,
+  .readonlyValue {
+    overflow-wrap: anywhere;
+  }
+
+  .verdictAdvice {
+    max-width: none;
+  }
 }

@@ -19,6 +19,7 @@ import {
   GATEWAY_PREFIX,
   GATEWAY_REWRITE_LIMIT_BYTES,
   GATEWAY_WS_PATH,
+  listGatewayHosts,
   parseGatewayRequest,
   parseGatewayUpgrade,
   pointsAtPageHost,
@@ -26,6 +27,7 @@ import {
   rewriteBody,
   rewriteKind,
   rewriteLocation,
+  type GatewayPeer,
 } from './host-gateway-path.ts'
 
 export const name = 'threadharbor-host-gateway'
@@ -176,7 +178,7 @@ async function handleHttp(deps: GatewayDeps, jar: CookieJar, req: IncomingMessag
     text(res, 502, '远端没有换出登录 cookie，打开地址可能已失效')
     return
   }
-  await forwardHttp(req, res, target.origin, route.upstreamPath, route.search, route.hostId, target.hostTitle, cookie, () => {
+  await forwardHttp(req, res, target.origin, route.upstreamPath, route.search, route.hostId, target.hostTitle, target.peers, cookie, () => {
     jar.invalidate(target.origin, target.token)
   })
 }
@@ -214,7 +216,7 @@ async function targetOf(
   hostId: string,
   pageHost: string | undefined,
 ): Promise<
-  | { readonly ok: true; readonly origin: string; readonly token: string; readonly hostTitle: string }
+  | { readonly ok: true; readonly origin: string; readonly token: string; readonly hostTitle: string; readonly peers: readonly GatewayPeer[] }
   | { readonly ok: false; readonly status: 400 | 404 | 503; readonly message: string }
 > {
   let read: RegistryRead
@@ -229,7 +231,7 @@ async function targetOf(
   if (pointsAtPageHost(launch.origin, pageHost)) {
     return { ok: false, status: 400, message: '不能把本机页面再代理回本机' }
   }
-  return launch
+  return { ...launch, peers: listGatewayHosts(read.json, hostId) }
 }
 
 function forwardHttp(
@@ -240,6 +242,7 @@ function forwardHttp(
   search: string,
   hostId: string,
   hostTitle: string,
+  peers: readonly GatewayPeer[],
   cookie: string,
   onUnauthorized: () => void,
 ): Promise<void> {
@@ -275,7 +278,7 @@ function forwardHttp(
         const raw = Buffer.concat(chunks)
         const body = total > GATEWAY_REWRITE_LIMIT_BYTES || kind === undefined
           ? raw
-          : Buffer.from(rewriteBody(kind, raw.toString('utf8'), hostId, hostTitle))
+          : Buffer.from(rewriteBody(kind, raw.toString('utf8'), hostId, hostTitle, peers))
         const headersOut = responseHeaders(upRes, origin, hostId, true)
         headersOut['content-length'] = Buffer.byteLength(body)
         res.writeHead(upRes.statusCode ?? 502, headersOut)

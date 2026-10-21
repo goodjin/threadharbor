@@ -9,8 +9,8 @@
 #   1. 从 `tailscale status --json` 读本机的 ts.net 域名（Self 的 DNS 名）；
 #   2. `tailscale serve --bg <dsh端口>`——把本机回环上的 DSH 端口发布为
 #      https://<本机域名>/（Let's Encrypt 证书，仅 tailnet 内设备可达）；
-#   3. 打印还差的两步配置：dsh 启动时要加的 --trusted-host 行（含启动示例），
-#      以及 profile 里的 mobileOrigin 字段值。
+#   3. 打印还差的两步：dsh 启动时要加的 --trusted-host 行（含启动示例），
+#      以及「手机配对」面板里要填的手机访问地址。
 #
 # 脚本只改 tailscale 的 serve 配置（由 tailscaled 持久保存；若电脑重启后不再
 # 生效，重跑一次本脚本即可）；除此之外不改任何东西。撤销发布：`tailscale serve reset`。
@@ -124,14 +124,14 @@ cat <<EOF
 
      THREADHARBOR_TRUSTED_HOST=$dns_name scripts/dev.sh restart web
 
-2. 在 profile 的 cordis.patch.yml（\$DSH_HOME/profiles/web/cordis.patch.yml）
-   里给 threadharbor-mobile-entry 行配 mobileOrigin（注意：https 开头、
-   不带路径、结尾没有斜杠）：
+2. 在桌面端侧栏「手机配对」面板的「手机访问地址」里填：
 
-     - id: threadharbor-mobile-entry
-       config:
-         mobileOrigin: https://$dns_name
+     https://$dns_name
 
-改完重启 dsh，桌面端侧栏「手机配对」面板就能出二维码，手机扫码完成配对。
+   保存即生效，不用改配置文件、不用重启 DSH；二维码会按它重新生成。
+   只填源（协议、主机、端口），不带路径、查询或结尾斜杠。
+
+填好后，手机扫面板上的二维码完成配对。扫码打开的是完整 DSH 界面；
+要在这台页面里切换到其他主机，那几台也要各自打开过一次它的页面（报到）。
 撤销发布：tailscale serve reset
 EOF

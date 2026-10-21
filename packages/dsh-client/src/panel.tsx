@@ -171,6 +171,8 @@ export type AgentPanelBusinessProps = {
   readonly remote?: RemotePort
   /** Storage events re-read the registry; injectable for tests. */
   listenStorage?(handler: () => void): () => void
+  /** Whole-page navigation into another host's gateway; injectable for tests. */
+  navigate?(url: string): void
   /** Said instead of an empty list, so "none listed" never reads as "none configured". */
   readonly agentsNote?: string | undefined
 }
@@ -810,14 +812,19 @@ function VerdictLine(props: {
 
 /**
  * One host row in the list. The row is a line in a table — name, status, IP,
- * settings — and the whole row is the button that opens the host's detail page;
- * every row is one fixed height so the list reads as a table.
- * @param props - the merged row and the open handler.
+ * settings — and the main hit area opens the host (its own page when a launch
+ * URL exists, otherwise this host's settings page); the trailing settings
+ * button always goes to the settings page. Every row is one fixed height so
+ * the list reads as a table.
+ * @param props - the merged row and the open/settings handlers.
  * @returns the row.
  */
 export function HostRow(props: {
   readonly row: HostListRow
+  /** Set when the row opens another host's page; absent means settings. */
+  readonly href?: string | undefined
   readonly onOpen: () => void
+  readonly onSettings: () => void
   /** The locale seat, threaded from the panel. */
   readonly t: PanelT
 }): ReactNode {
@@ -833,30 +840,50 @@ export function HostRow(props: {
     : row.connection === 'connected' || row.connection === 'reachable'
       ? 'online' as const
       : 'offline' as const
+  const content = (
+    <>
+      <span className={styles.hostNameCell}>
+        <span
+          data-host-status={tone}
+          className={styles.hostStatusDot}
+          title={word}
+          aria-label={word}
+          role="img"
+        />
+        <strong data-host-name="" className={styles.hostName}>{row.name}</strong>
+      </span>
+      <span data-host-connection="" className={styles.hostConnection} title={word}>{word}</span>
+      <span data-host-ip="" className={styles.hostIp} title={ip ?? undefined}>{ip ?? '—'}</span>
+    </>
+  )
   return (
     <div data-host-row={row.hostId} className={styles.hostRow}>
-      <button
-        type="button"
-        data-host-open={row.hostId}
-        className={styles.hostRowButton}
-        onClick={props.onOpen}
-      >
-        <span className={styles.hostNameCell}>
-          <span
-            data-host-status={tone}
-            className={styles.hostStatusDot}
-            title={word}
-            aria-label={word}
-            role="img"
-          />
-          <strong data-host-name="" className={styles.hostName}>{row.name}</strong>
-        </span>
-        <span data-host-connection="" className={styles.hostConnection} title={word}>{word}</span>
-        <span data-host-ip="" className={styles.hostIp} title={ip ?? undefined}>{ip ?? '—'}</span>
-        {/* 设置按钮是这一行的动作（打开主机的设置页）。整行都是这个按钮，
-            这里的 span 是它的第三列外观，不是又一个独立控件。 */}
-        <span data-host-settings="" className={styles.rowSettings} aria-hidden="true">{props.t('panel.button.settings')}</span>
-      </button>
+      <div className={styles.hostRowLine}>
+        {/* 有入口的主机用链接：整页切过去（可中键/新标签打开），没有入口的
+            主机与「设置」都走面板内的详情页。 */}
+        {props.href === undefined
+          ? (
+              <button
+                type="button"
+                data-host-open={row.hostId}
+                className={styles.hostRowButton}
+                onClick={props.onOpen}
+              >{content}</button>
+            )
+          : (
+              <a
+                data-host-open={row.hostId}
+                className={styles.hostRowButton}
+                href={props.href}
+              >{content}</a>
+            )}
+        <button
+          type="button"
+          data-host-settings=""
+          className={styles.rowSettings}
+          onClick={props.onSettings}
+        >{props.t('panel.button.settings')}</button>
+      </div>
     </div>
   )
 }
@@ -1423,7 +1450,7 @@ function SshDeploySection(props: {
               <code className={styles.launchUrlText}>{deployed.launchUrl}</code>
               <div className={styles.formActions}>
                 <button type="button" className={styles.action} data-action="copy-launch-url" onClick={copyLaunchUrl}>{props.t('panel.button.copyLink')}</button>
-                <a className={styles.actionPrimary} data-action="open-launch-url" href={gatewayPagePath(effectiveHostId())} target="_blank" rel="noreferrer">{props.t('panel.ssh.open')}</a>
+                <a className={styles.actionPrimary} data-action="open-launch-url" href={gatewayPagePath(effectiveHostId())}>{props.t('panel.ssh.open')}</a>
               </div>
             </div>
           )
@@ -1486,7 +1513,7 @@ function HostUseSection(props: {
               <p data-use-tunnel={props.tunnel} className={styles.stateLine}>{tunnelWord}</p>
               <div className={styles.formActions}>
                 {launchUrl !== undefined
-                  ? <a className={styles.action} data-action="open-page" href={gatewayPagePath(props.hostId)} target="_blank" rel="noreferrer">{props.t('panel.use.open')}</a>
+                  ? <a className={styles.action} data-action="open-page" href={gatewayPagePath(props.hostId)}>{props.t('panel.use.open')}</a>
                   : undefined}
                 {/* 「检查隧道」并进了详情页按钮表的 check-reach（都问登记里
                     那个地址）；这里只留状态行与打开/连接两个动作。 */}
@@ -1871,6 +1898,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   )
   const [probes, setProbes] = useState<ReadonlyMap<string, ProbeRunState>>(new Map())
   const [view, setView] = useState<PanelView>({ page: 'list' })
+  const navigate = props.navigate ?? ((url: string): void => { window.location.assign(url) })
   const [, setIdentityRevision] = useState(0)
   const [registryRevision, setRegistryRevision] = useState(0)
   const [formMessage, setFormMessage] = useState<{ readonly tone: 'ok' | 'bad'; readonly text: string } | undefined>(undefined)
@@ -1954,6 +1982,28 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
     setConfirmingRemove(false)
     setApproveAndReadId(undefined)
     setView({ page: 'list' })
+  }
+  const openDetail = (hostId: string): void => {
+    setFormMessage(undefined)
+    setConfirmingRemove(false)
+    setApproveAndReadId(undefined)
+    setView({ page: 'detail', hostId })
+  }
+  // 登记里带了入口的主机整页切过去（本机网关代理那台自己的界面，顶部有主机
+  // 切换器，换到别台不用回这一页）；没有入口——本机、路过的标签页、还没部署
+  // 的登记——就进设置页，那里是补地址、部署、连接的地方。
+  const launchHref = (row: HostListRow): string | undefined => {
+    if (row.self) return undefined
+    const registration = props.registry.list().find(entry => entry.hostId === row.hostId)
+    return registration?.launchUrl === undefined ? undefined : gatewayPagePath(row.hostId)
+  }
+  const enterHost = (row: HostListRow): void => {
+    const href = launchHref(row)
+    if (href !== undefined) {
+      navigate(href)
+      return
+    }
+    openDetail(row.hostId)
   }
   const confirmAdd = (values: HostFormValues): boolean => {
     // 显示名已撤销（2026-10-13）：hostTitle 落库留空，存储层回落到 hostId，
@@ -2196,7 +2246,9 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
         ...(facts === undefined ? {} : { ssh: facts }),
       })
       if (edit.ok) setRegistryRevision(revision => revision + 1)
-      window.open(gatewayPagePath(registration.hostId), '_blank', 'noopener')
+      // 连上就整页进入那台主机，和从主机行点进去是同一条路：顶部切换器能去
+      // 别的机器，也能回本机。新标签页会留下两套并行的界面。
+      navigate(gatewayPagePath(registration.hostId))
     })
   }
 
@@ -2413,7 +2465,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                       {registration.launchUrl !== undefined
                         ? (
                             <p data-registry-launch="" className={styles.stateLine}>
-                              <a className={styles.actionPrimary} data-action="open-registry" href={gatewayPagePath(registration.hostId)} target="_blank" rel="noreferrer">{props.t('panel.registry.launchLink')}</a>
+                              <a className={styles.actionPrimary} data-action="open-registry" href={gatewayPagePath(registration.hostId)}>{props.t('panel.registry.launchLink')}</a>
                               <button
                                 type="button"
                                 className={styles.action}
@@ -2580,7 +2632,9 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                 <HostRow
                   key={row.hostId}
                   row={row}
-                  onOpen={() => { setFormMessage(undefined); setConfirmingRemove(false); setView({ page: 'detail', hostId: row.hostId }) }}
+                  href={launchHref(row)}
+                  onOpen={() => { enterHost(row) }}
+                  onSettings={() => { openDetail(row.hostId) }}
                   t={props.t}
                 />
               ))}

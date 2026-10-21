@@ -17,9 +17,10 @@ import {
   PairingPanel,
   createPairingStore,
   requestPairUrl,
+  saveAccessOriginDraft,
   startPairingSurface,
 } from '../src/pairing-panel.ts'
-import type { PairingSlotHost, PairingStore, PairUrlOutcome } from '../src/pairing-panel.ts'
+import type { PairingAccessOrigin, PairingOriginPort, PairingSlotHost, PairingStore, PairUrlOutcome } from '../src/pairing-panel.ts'
 import { zh } from '../src/locales.ts'
 import type { ClientLocaleKey } from '../src/locales.ts'
 
@@ -126,6 +127,16 @@ describe('pair-url 的同源取回', () => {
     expect(outcome).toEqual({ ok: true, url: PAIR_URL })
   })
 
+  it('宿主给了来源与回环标记就带上；老宿主只回网址也照常', async () => {
+    const withExtras = await requestPairUrl(async () => ({
+      status: 200,
+      json: async () => ({ url: PAIR_URL, origin: 'http://127.0.0.1:3080', loopback: true }),
+    }))
+    expect(withExtras).toEqual({ ok: true, url: PAIR_URL, origin: 'http://127.0.0.1:3080', loopback: true })
+    const oldHost = await requestPairUrl(async () => ({ status: 200, json: async () => ({ url: PAIR_URL }) }))
+    expect(oldHost).toEqual({ ok: true, url: PAIR_URL })
+  })
+
   it('500 mobile-origin-unset 映射成「配置缺失」的指引态', async () => {
     const outcome = await requestPairUrl(async () => ({ status: 500, json: async () => ({ error: 'mobile-origin-unset' }) }))
     expect(outcome).toEqual({ ok: false, kind: 'origin-unset', detail: 'HTTP 500' })
@@ -143,11 +154,11 @@ describe('pair-url 的同源取回', () => {
     expect(emptyUrl).toMatchObject({ ok: false, kind: 'unavailable' })
   })
 
-  it('请求打在宿主注册的 pair-url 路径上（与 dsh-mobile-entry 的常量互为孪生）', async () => {
+  it('请求打在 federation 注册的 pair-url 路径上（不与旧中转页的路径同名）', async () => {
     const { fetchLike, paths } = fakeFetch({ status: 200, body: { url: PAIR_URL } })
     await requestPairUrl(fetchLike)
-    expect(paths).toEqual(['/threadharbor/mobile/pair-url'])
-    expect(PAIR_URL_PATH).toBe('/threadharbor/mobile/pair-url')
+    expect(paths).toEqual(['/threadharbor/federation/pair-url'])
+    expect(PAIR_URL_PATH).toBe('/threadharbor/federation/pair-url')
   })
 })
 
@@ -170,7 +181,7 @@ describe('面板的三个状态（renderToString，无 DOM）', () => {
     expect(html).toContain('data-pairing-guidance')
     expect(html).toContain(zhT('pairing.guidance.originTitle'))
     expect(html).toContain(zhT('pairing.guidance.origin'))
-    expect(html).toContain('mobileOrigin')
+    expect(html).toContain('手机访问地址')
     expect(html).toContain('HTTP 500')
     expect(html).not.toContain('data-pairing-qr')
     expect(html).not.toContain(PAIR_URL)
@@ -193,6 +204,141 @@ describe('面板的三个状态（renderToString，无 DOM）', () => {
     expect(html).toContain('data-pairing-state="loading"')
     expect(html).toContain(zhT('pairing.loading'))
   })
+
+  it('回环来源：二维码照画，另点一句手机到不了', async () => {
+    const { surface } = await surfaceWith(
+      { status: 200, body: { url: 'http://127.0.0.1:3080/?token=t', origin: 'http://127.0.0.1:3080', loopback: true } },
+      { renderQr: async () => FAKE_QR },
+    )
+    const html = renderPairing(surface.store)
+    expect(html).toContain('data-pairing-qr')
+    expect(html).toContain('data-pairing-loopback')
+    expect(html).toContain(zhT('pairing.ready.loopback', { origin: 'http://127.0.0.1:3080' }))
+    surface.dispose()
+  })
+
+  it('非回环来源不画那句警告', async () => {
+    const { surface } = await surfaceWith(
+      { status: 200, body: { url: PAIR_URL, origin: 'https://mac1.example.ts.net', loopback: false } },
+      { renderQr: async () => FAKE_QR },
+    )
+    expect(renderPairing(surface.store)).not.toContain('data-pairing-loopback')
+    surface.dispose()
+  })
+})
+
+describe('手机访问地址的校验与保存', () => {
+  function fakeOrigin(initial: string | undefined): PairingAccessOrigin & { saves: (string | undefined)[] } {
+    let current = initial
+    const saves: (string | undefined)[] = []
+    return {
+      saves,
+      load: async () => current,
+      save: async value => { saves.push(value); current = value },
+    }
+  }
+
+  it('空串是清除，保存 undefined', async () => {
+    const port = fakeOrigin('http://192.168.1.20:3080')
+    const outcome = await saveAccessOriginDraft(port, '   ')
+    expect(outcome).toEqual({ ok: true, value: undefined, slug: 'cleared' })
+    expect(port.saves).toEqual([undefined])
+  })
+
+  it('带路径、查询的地址规范成 origin 再保存', async () => {
+    const port = fakeOrigin(undefined)
+    const outcome = await saveAccessOriginDraft(port, ' https://mac1.example.ts.net/app?x=1 ')
+    expect(outcome).toEqual({ ok: true, value: 'https://mac1.example.ts.net', slug: 'saved' })
+    expect(port.saves).toEqual(['https://mac1.example.ts.net'])
+  })
+
+  it('没有协议的地址不碰宿主，返回 syntax', async () => {
+    const port = fakeOrigin(undefined)
+    const outcome = await saveAccessOriginDraft(port, 'mac1.example.ts.net')
+    expect(outcome).toEqual({ ok: false, kind: 'invalid', reason: 'syntax' })
+    expect(port.saves).toEqual([])
+  })
+
+  it('非 http/https 与带账号的地址各自返回原因', async () => {
+    const port = fakeOrigin(undefined)
+    expect(await saveAccessOriginDraft(port, 'ftp://mac1.example.ts.net')).toEqual({ ok: false, kind: 'invalid', reason: 'protocol' })
+    expect(await saveAccessOriginDraft(port, 'https://user:pass@mac1.example.ts.net')).toEqual({ ok: false, kind: 'invalid', reason: 'credentials' })
+    expect(port.saves).toEqual([])
+  })
+
+  it('宿主写入失败：返回 save-failed 与原因', async () => {
+    const outcome = await saveAccessOriginDraft({
+      load: async () => undefined,
+      save: async () => { throw new Error('设置服务拒绝了写入') },
+    }, 'https://mac1.example.ts.net')
+    expect(outcome).toEqual({ ok: false, kind: 'save-failed', detail: '设置服务拒绝了写入' })
+  })
+})
+
+describe('编辑区与重新取回', () => {
+  it('装配时带上访问地址读写面，面板因此画出编辑区', async () => {
+    const core = new SlotCore()
+    seedShell(core)
+    const faces: unknown[] = []
+    const host: PairingSlotHost = {
+      inject: (key, callback) => {
+        if (core.specDynamic(key) === undefined) throw new Error(`slot ${key} is not declared`)
+        return callback()
+      },
+      register: (options, component) => {
+        const face = (options as { inject?: () => unknown }).inject?.()
+        if (face !== undefined) faces.push(face)
+        return core.register(options, component)
+      },
+    }
+    const origin: PairingAccessOrigin = { load: async () => 'http://192.168.1.20:3080', save: async () => {} }
+    const surface = startPairingSurface({
+      slots: host,
+      label: () => zhT('pairing.label'),
+      requestPairUrl: async () => ({ ok: true, url: PAIR_URL }),
+      renderQr: async () => FAKE_QR,
+      accessOrigin: origin,
+    })
+    await untilLanded(surface.store)
+    const face = faces.find(entry => (entry as { accessOrigin?: unknown }).accessOrigin !== undefined) as { accessOrigin: PairingOriginPort } | undefined
+    expect(face).toBeDefined()
+    expect(await face?.accessOrigin.load()).toBe('http://192.168.1.20:3080')
+    const html = renderToString(createElement(PairingPanel, { pairing: surface.store, accessOrigin: face!.accessOrigin, t: zhT }))
+    expect(html).toContain('data-pairing-origin')
+    expect(html).toContain('data-pairing-origin-input')
+    expect(html).toContain('data-pairing-origin-save')
+    surface.dispose()
+  })
+
+  it('没有设置通道（不给访问地址面）时不画编辑区', async () => {
+    const { surface } = await surfaceWith({ status: 200, body: { url: PAIR_URL } }, { renderQr: async () => FAKE_QR })
+    expect(renderPairing(surface.store)).not.toContain('data-pairing-origin')
+    surface.dispose()
+  })
+
+  it('reload 重新取一次配对网址，新地址立刻生效', async () => {
+    const core = new SlotCore()
+    seedShell(core)
+    const urls = ['http://127.0.0.1:3080/?token=a', 'https://mac1.example.ts.net/?token=b']
+    let calls = 0
+    const surface = startPairingSurface({
+      slots: slotHost(core),
+      label: () => zhT('pairing.label'),
+      requestPairUrl: async () => {
+        const url = urls[Math.min(calls, urls.length - 1)]!
+        calls += 1
+        return { ok: true, url }
+      },
+      renderQr: async () => FAKE_QR,
+    })
+    await untilLanded(surface.store)
+    expect(surface.store.getSnapshot()).toMatchObject({ kind: 'ready', url: urls[0] })
+    surface.reload()
+    await untilLanded(surface.store)
+    expect(surface.store.getSnapshot()).toMatchObject({ kind: 'ready', url: urls[1] })
+    expect(calls).toBe(2)
+    surface.dispose()
+  })
 })
 
 describe('默认装配走真件', () => {
@@ -207,7 +353,7 @@ describe('默认装配走真件', () => {
       seedShell(core)
       const surface = startPairingSurface({ slots: slotHost(core), label: () => zhT('pairing.label'), renderQr: async () => FAKE_QR })
       await untilLanded(surface.store)
-      expect(calls).toEqual(['/threadharbor/mobile/pair-url'])
+      expect(calls).toEqual(['/threadharbor/federation/pair-url'])
       expect(surface.store.getSnapshot()).toMatchObject({ kind: 'ready', url: PAIR_URL })
       surface.dispose()
     } finally {

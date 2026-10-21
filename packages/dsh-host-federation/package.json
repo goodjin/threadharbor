@@ -26,6 +26,10 @@
       "types": "./src/host-gateway.ts",
       "default": "./src/host-gateway.ts"
     },
+    "./federation-sync": {
+      "types": "./src/federation-sync.ts",
+      "default": "./src/federation-sync.ts"
+    },
     "./ssh/manager": {
       "types": "./src/ssh/manager.ts",
       "default": "./src/ssh/manager.ts"

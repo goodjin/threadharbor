@@ -149,7 +149,7 @@ export function hostRegistry(storage: RegistryStorage, now: () => number = Date.
     if (!Array.isArray(parsed)) return []
     const entries: HostRegistration[] = []
     for (const item of parsed) {
-      const entry = parseEntry(item)
+      const entry = parseRegistration(item)
       if (entry !== undefined) entries.push(entry)
     }
     return entries
@@ -218,7 +218,12 @@ export function hostRegistry(storage: RegistryStorage, now: () => number = Date.
   }
 }
 
-function parseEntry(item: unknown): HostRegistration | undefined {
+/**
+ * Tolerant read-side parse of one registry entry. Exported because the
+ * federation merge must judge peer-supplied entries with the same rules the
+ * local registry uses, rather than inventing a second, looser vocabulary.
+ */
+export function parseRegistration(item: unknown): HostRegistration | undefined {
   if (typeof item !== 'object' || item === null) return undefined
   const record = item as Record<string, unknown>
   const hostId = record['hostId']
@@ -320,7 +325,7 @@ function parseSshInfo(item: unknown): HostSshInfo | undefined {
   }
 }
 
-function normalizeLaunchUrl(input: string, expectedOrigin: string): { readonly ok: true; readonly url: string } | { readonly ok: false; readonly detail: string } {
+export function normalizeLaunchUrl(input: string, expectedOrigin: string): { readonly ok: true; readonly url: string } | { readonly ok: false; readonly detail: string } {
   let parsed: URL
   try {
     parsed = new URL(input.trim())

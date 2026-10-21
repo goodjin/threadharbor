@@ -3,10 +3,10 @@
  *
  * 数据面只有一条同源 GET（ssh-deploy.ts 是同一个路数：路径字面量 + 裸
  * fetch，同源默认带上的会话 cookie 就是准入凭证）：宿主的 pair-url 接口
- * 应答 200 `{url}`，`url` 里铸着进程配对令牌——它只进这条面板的状态、
- * 只画给这个已准入的桌面会话看，从不进日志。宿主没配 mobileOrigin 时
- * 应答 500 `mobile-origin-unset`，网络断了也一样：面板把这些落成配置
- * 指引文案，说明原因，而不是空着或者炸掉。
+ * 应答 200 `{url, origin, loopback}`，`url` 里铸着进程配对令牌——它只进
+ * 这条面板的状态、只画给这个已准入的桌面会话看，从不进日志。`loopback`
+ * 为真说明地址只在本机有效，面板据此提示操作者去改「手机访问地址」。
+ * 打不通、应答不成形都落成指引文案，而不是空着或者炸掉。
  *
  * 注册面就是主机面板在用的那一套（client/index.ts 的 registerPanelSlots）：
  * `sidebar.panellist` 出行、`main` 出面板体，一个 id 配一个 key。组件从
@@ -18,8 +18,9 @@
 // 混进浏览器包就把整页带崩。打包侧在 tsdown 配置里把 qrcode 定点映射到包自带的
 // 浏览器入口（canvas 渲染，无 fs），源码与 Node 测试继续走正常入口。
 import { toDataURL } from 'qrcode'
-import { createElement, useSyncExternalStore } from 'react'
-import type { CSSProperties } from 'react'
+import { createElement, useEffect, useState, useSyncExternalStore } from 'react'
+import type { ChangeEvent, CSSProperties } from 'react'
+import { FULL_UI_PAIR_PATH, normalizeAccessOrigin } from '@threadharbor/dsh-host-federation'
 // Type-only: ui-layout declares `main`，ui-sidebar 声明 `sidebar.panellist`，
 // 槽位名拼错了在这里就是编译错误，而不是静默的白页。
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
@@ -28,21 +29,32 @@ import type { PropsLocale, PropsRuntime, SlotCore } from '@deepseek-ai/dsh-clien
 import { NAMESPACE } from './locales.ts'
 
 /**
- * pair-url 的路径，与 dsh-mobile-entry/src/pair-url.ts 的 `PAIR_URL_PATH`
- * 互为孪生常量——宿主注册用那边这份，这边按字面量取同源接口；改名时两处
- * 一起 grep（tests/pairing-panel.spec.ts 把字面量钉在测试里）。
+ * pair-url 的路径。取的是 federation 那份常量：旧 mobile-entry / 中转的
+ * `/threadharbor/mobile/pair-url` 出的是精简中转页，而且删不掉（中转装载
+ * 时会注册），两个 exact 路由同名会让插件装载失败。这里的接口出的是完整
+ * DSH 界面，手机进来之后能经主机栏切到其他主机。
  */
-export const PAIR_URL_PATH = '/threadharbor/mobile/pair-url'
+export const PAIR_URL_PATH = FULL_UI_PAIR_PATH
 
 /** 侧栏行与主面板共用的 id；主机面板是 threadharbor-rollup，这是第二条。 */
 export const PAIRING_PANEL_ID = 'threadharbor-pairing'
 /** 行序：100 是「各主机」，手机配对跟在它下面。 */
 export const PAIRING_PANEL_ORDER = 101
 
-/** 面板的四个状态：取回中、就绪（二维码 + 网址）、两种指引。 */
+/**
+ * 面板的四个状态：取回中、就绪（二维码 + 网址）、两种指引。就绪态带上
+ * 宿主铸网址用的来源：`loopback` 为真说明手机根本访问不到，得让操作者
+ * 在下面的「手机访问地址」里换一个。
+ */
 export type PairingState =
   | { readonly kind: 'loading' }
-  | { readonly kind: 'ready'; readonly url: string; readonly qrDataUrl: string }
+  | {
+      readonly kind: 'ready'
+      readonly url: string
+      readonly qrDataUrl: string
+      readonly origin?: string
+      readonly loopback?: boolean
+    }
   | { readonly kind: 'origin-unset'; readonly detail: string }
   | { readonly kind: 'unavailable'; readonly detail: string }
 
@@ -76,10 +88,29 @@ export function createPairingStore(): PairingStoreWriter {
 /** 同源取回的最小面：真 fetch 满足它，测试塞假件。 */
 export type SameOriginFetch = (path: string) => Promise<{ status: number; json(): Promise<unknown> }>
 
-/** pair-url 一次取回的结论：网址，或两种失败之一（都不含网址本身）。 */
+/**
+ * pair-url 一次取回的结论：网址，或两种失败之一（都不含网址本身）。来源与
+ * loopback 只在宿主明确给出时带上；老宿主只回 `{url}`，面板照常画码。
+ */
 export type PairUrlOutcome =
-  | { readonly ok: true; readonly url: string }
+  | { readonly ok: true; readonly url: string; readonly origin?: string; readonly loopback?: boolean }
   | { readonly ok: false; readonly kind: 'origin-unset' | 'unavailable'; readonly detail: string }
+
+/**
+ * 「手机访问地址」的读写面：存在宿主设置文档的
+ * `HOST_ACCESS_ORIGIN_KEY` 下，宿主铸配对网址时优先用它。`save(undefined)`
+ * 是清除，让宿主回到按请求来源铸网址。
+ */
+export type PairingAccessOrigin = {
+  load(): Promise<string | undefined>
+  save(value: string | undefined): Promise<void>
+}
+
+/**
+ * 面板拿到的读写面：保存成功后重新取一次配对网址——新地址要立刻生效，
+ * 不能让人再刷新一次页面才知道有没有用。
+ */
+export type PairingOriginPort = PairingAccessOrigin & { reload(): void }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null
@@ -111,9 +142,52 @@ export async function requestPairUrl(fetchLike: SameOriginFetch = sameOriginFetc
   }
   const url = isRecord(body) ? body['url'] : undefined
   if (response.status === 200 && typeof url === 'string' && url !== '') {
-    return { ok: true, url }
+    const origin = isRecord(body) && typeof body['origin'] === 'string' && body['origin'] !== ''
+      ? body['origin']
+      : undefined
+    const loopback = isRecord(body) && typeof body['loopback'] === 'boolean' ? body['loopback'] : undefined
+    return {
+      ok: true,
+      url,
+      ...(origin === undefined ? {} : { origin }),
+      ...(loopback === undefined ? {} : { loopback }),
+    }
   }
   return { ok: false, kind: 'unavailable', detail: `HTTP ${response.status}：应答不是约定的形状` }
+}
+
+/** 一次「手机访问地址」保存的结论：规范化后的值，或者为什么没存。 */
+export type AccessOriginSaveOutcome =
+  | { readonly ok: true; readonly value: string | undefined; readonly slug: 'saved' | 'cleared' }
+  | { readonly ok: false; readonly kind: 'invalid'; readonly reason: 'syntax' | 'protocol' | 'credentials' }
+  | { readonly ok: false; readonly kind: 'save-failed'; readonly detail: string }
+
+/**
+ * 校验并保存编辑框里的原文：空串是清除，其余先规范成 origin（协议、
+ * 不带路径/账号），再交给宿主写文档。校验失败不碰宿主，原因用代码返回，
+ * 由面板按活动语言说。
+ */
+export async function saveAccessOriginDraft(
+  accessOrigin: PairingAccessOrigin,
+  raw: string,
+): Promise<AccessOriginSaveOutcome> {
+  const trimmed = raw.trim()
+  let value: string | undefined
+  if (trimmed !== '') {
+    const normalized = normalizeAccessOrigin(trimmed)
+    if (!normalized.ok) {
+      return normalized.reason === 'empty'
+        ? { ok: false, kind: 'invalid', reason: 'syntax' }
+        : { ok: false, kind: 'invalid', reason: normalized.reason }
+    }
+    value = normalized.origin
+  }
+  try {
+    await accessOrigin.save(value)
+  } catch (error: unknown) {
+    return { ok: false, kind: 'save-failed', detail: messageOf(error) }
+  }
+  return { ok: true, value, slug: value === undefined ? 'cleared' : 'saved' }
 }
 
 /** 网址 → 二维码图片（PNG data URL）；真件是 qrcode，测试可注入假件。 */
@@ -130,6 +204,8 @@ export type PairingSlotHost = {
 /** 起好之后交还的东西：状态给组件读，dispose 撤注册、晾着迟到的取回。 */
 export type PairingSurface = {
   readonly store: PairingStore
+  /** 重新取一次配对网址（保存访问地址之后由面板调用）。 */
+  reload(): void
   dispose(): void
 }
 
@@ -142,6 +218,11 @@ export type PairingSurfaceParams = {
   requestPairUrl?: () => Promise<PairUrlOutcome>
   /** 二维码渲染；缺省用 qrcode 画 PNG data URL。 */
   renderQr?: PairQrRenderer
+  /**
+   * 「手机访问地址」的读写面；缺省（没有设置通道、或老装配）不画编辑区，
+   * 面板只负责显示宿主当前铸出的网址。
+   */
+  accessOrigin?: PairingAccessOrigin
   /** 失败原因的去处；缺省吞掉（面板上会说）。绝不收带令牌的网址。 */
   log?: (message: string) => void
 }
@@ -166,9 +247,28 @@ export function startPairingSurface(params: PairingSurfaceParams): PairingSurfac
     store.publish(next)
   }
 
+  const reload = (): void => {
+    publish({ kind: 'loading' })
+    void load()
+  }
+
+  const accessOrigin = params.accessOrigin
+  const originPort: PairingOriginPort | undefined = accessOrigin === undefined
+    ? undefined
+    : {
+        load: () => accessOrigin.load(),
+        save: value => accessOrigin.save(value),
+        reload,
+      }
+
   const disposeMain = params.slots.inject('main', () => params.slots.register(
-    // locale 声明让框架给组件合成 t 座位；store 从 inject 面递进去。
-    { name: 'main', key: PAIRING_PANEL_ID, locale: NAMESPACE, inject: () => ({ pairing: store }) },
+    // locale 声明让框架给组件合成 t 座位；store 与访问地址读写面从 inject 递进去。
+    {
+      name: 'main',
+      key: PAIRING_PANEL_ID,
+      locale: NAMESPACE,
+      inject: () => ({ pairing: store, ...(originPort === undefined ? {} : { accessOrigin: originPort }) }),
+    },
     PairingPanel,
   ))
   const disposeRow = params.slots.inject('sidebar.panellist', () => params.slots.register(
@@ -193,7 +293,13 @@ export function startPairingSurface(params: PairingSurfaceParams): PairingSurfac
         publish({ kind: 'unavailable', detail: messageOf(error) })
         return
       }
-      publish({ kind: 'ready', url: outcome.url, qrDataUrl })
+      publish({
+        kind: 'ready',
+        url: outcome.url,
+        qrDataUrl,
+        ...(outcome.origin === undefined ? {} : { origin: outcome.origin }),
+        ...(outcome.loopback === undefined ? {} : { loopback: outcome.loopback }),
+      })
       return
     }
     // 日志只说原因（HTTP 状态、错误消息），网址与令牌一个字都不出现。
@@ -204,6 +310,7 @@ export function startPairingSurface(params: PairingSurfaceParams): PairingSurfac
 
   return {
     store,
+    reload,
     dispose: () => {
       disposed = true
       disposeMain()
@@ -212,30 +319,34 @@ export function startPairingSurface(params: PairingSurfaceParams): PairingSurfac
   }
 }
 
-/** 组件的 props：注册注入的 store，加框架合成的 t 座位。 */
+/** 组件的 props：注册注入的 store 与访问地址读写面，加框架合成的 t 座位。 */
 export type PairingPanelProps = {
   readonly pairing: PairingStore
+  readonly accessOrigin?: PairingOriginPort
 } & PropsLocale<typeof NAMESPACE>
 
 const urlStyle: CSSProperties = { wordBreak: 'break-all', userSelect: 'all', margin: '8px 0' }
 const detailStyle: CSSProperties = { opacity: 0.75, fontSize: '0.9em' }
+const inputStyle: CSSProperties = { width: '100%', boxSizing: 'border-box', margin: '4px 0 8px' }
 
 /**
- * 面板体：取回中一句话；就绪画二维码 + 网址；两种失败各自说清原因和
- * 下一步。所有文案走词典（locales.ts），这里只有结构。
+ * 面板体：取回中一句话；就绪画二维码 + 网址（回环地址再点一句「手机到
+ * 不了」）；两种失败各自说清原因和下一步。访问地址编辑区跟在任何一种
+ * 状态后面都画——配对网址正是它改的，出错时更需要它。所有文案走词典
+ * （locales.ts），这里只有结构。
  */
 export function PairingPanel(props: PairingPanelProps): ReturnType<typeof createElement> {
   const state = useSyncExternalStore(props.pairing.subscribe, props.pairing.getSnapshot, props.pairing.getSnapshot)
   const t = props.t
+  let body: ReturnType<typeof createElement>
   if (state.kind === 'loading') {
-    return createElement(
+    body = createElement(
       'div',
       { 'data-pairing-state': 'loading' },
       createElement('p', { role: 'status' }, t('pairing.loading')),
     )
-  }
-  if (state.kind === 'ready') {
-    return createElement(
+  } else if (state.kind === 'ready') {
+    body = createElement(
       'div',
       { 'data-pairing-state': 'ready' },
       createElement('h2', null, t('pairing.ready.title')),
@@ -246,14 +357,111 @@ export function PairingPanel(props: PairingPanelProps): ReturnType<typeof create
       ),
       createElement('p', null, t('pairing.url.hint')),
       createElement('p', { 'data-pair-url': '', style: urlStyle }, state.url),
+      state.loopback === true
+        ? createElement('p', { 'data-pairing-loopback': '', style: detailStyle }, t('pairing.ready.loopback', { origin: state.origin ?? '' }))
+        : null,
+    )
+  } else {
+    body = createElement(
+      'div',
+      { 'data-pairing-state': state.kind, 'data-pairing-guidance': '' },
+      createElement('h2', null, state.kind === 'origin-unset' ? t('pairing.guidance.originTitle') : t('pairing.guidance.unreachableTitle')),
+      createElement('p', null, state.kind === 'origin-unset' ? t('pairing.guidance.origin') : t('pairing.guidance.unreachable')),
+      createElement('p', { 'data-pairing-detail': '', style: detailStyle }, t('pairing.guidance.detail', { detail: state.detail })),
     )
   }
+  if (props.accessOrigin === undefined) return body
   return createElement(
     'div',
-    { 'data-pairing-state': state.kind, 'data-pairing-guidance': '' },
-    createElement('h2', null, state.kind === 'origin-unset' ? t('pairing.guidance.originTitle') : t('pairing.guidance.unreachableTitle')),
-    createElement('p', null, state.kind === 'origin-unset' ? t('pairing.guidance.origin') : t('pairing.guidance.unreachable')),
-    createElement('p', { 'data-pairing-detail': '', style: detailStyle }, t('pairing.guidance.detail', { detail: state.detail })),
+    { 'data-pairing-panel': '' },
+    body,
+    createElement(PairingOriginEditor, { accessOrigin: props.accessOrigin, t }),
+  )
+}
+
+type OriginMessage = { readonly tone: 'ok' | 'bad'; readonly text: string }
+
+/**
+ * 访问地址编辑区：进面板读当前值，保存（或清空）后立刻重取配对网址。
+ * 校验在 {@link saveAccessOriginDraft} 里做，失败不碰宿主文档。
+ */
+function PairingOriginEditor(
+  props: Pick<PairingPanelProps, 't'> & { readonly accessOrigin: PairingOriginPort },
+): ReturnType<typeof createElement> {
+  const { accessOrigin, t } = props
+  const [value, setValue] = useState('')
+  const [loaded, setLoaded] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState<OriginMessage | undefined>(undefined)
+
+  useEffect(() => {
+    let live = true
+    void accessOrigin.load().then(current => {
+      if (!live) return
+      setValue(current ?? '')
+      setLoaded(true)
+    }).catch((error: unknown) => {
+      if (!live) return
+      setLoaded(true)
+      setMessage({ tone: 'bad', text: t('pairing.origin.loadFailed', { detail: messageOf(error) }) })
+    })
+    return () => { live = false }
+    // t 随语言变化，但读值只该发生在挂载（或 port 换人）时：不跟 t 重跑，
+    // 否则切语言会把正在输入的草稿重置掉。
+  }, [accessOrigin]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const save = async (): Promise<void> => {
+    setBusy(true)
+    setMessage(undefined)
+    const outcome = await saveAccessOriginDraft(accessOrigin, value)
+    setBusy(false)
+    if (!outcome.ok) {
+      const text = outcome.kind === 'save-failed'
+        ? t('pairing.origin.saveFailed', { detail: outcome.detail })
+        : t(outcome.reason === 'syntax'
+          ? 'pairing.origin.badSyntax'
+          : outcome.reason === 'protocol' ? 'pairing.origin.badProtocol' : 'pairing.origin.badCredentials')
+      setMessage({ tone: 'bad', text })
+      return
+    }
+    setValue(outcome.value ?? '')
+    setMessage({
+      tone: 'ok',
+      text: outcome.slug === 'cleared'
+        ? t('pairing.origin.cleared')
+        : t('pairing.origin.saved', { origin: outcome.value ?? '' }),
+    })
+    accessOrigin.reload()
+  }
+
+  return createElement(
+    'section',
+    { 'data-pairing-origin': '' },
+    createElement('h3', null, t('pairing.origin.title')),
+    createElement('p', { style: detailStyle }, t('pairing.origin.hint')),
+    createElement('input', {
+      'data-pairing-origin-input': '',
+      type: 'text',
+      inputMode: 'url',
+      placeholder: t('pairing.origin.placeholder'),
+      value,
+      disabled: !loaded || busy,
+      onChange: (event: ChangeEvent<HTMLInputElement>) => { setValue(event.target.value) },
+      style: inputStyle,
+    }),
+    createElement(
+      'button',
+      {
+        'data-pairing-origin-save': '',
+        type: 'button',
+        disabled: !loaded || busy,
+        onClick: () => { void save() },
+      },
+      busy ? t('pairing.origin.saving') : t('pairing.origin.save'),
+    ),
+    message === undefined
+      ? null
+      : createElement('p', { 'data-pairing-origin-message': message.tone, style: detailStyle }, message.text),
   )
 }
 

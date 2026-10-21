@@ -98,7 +98,7 @@ dsh --profile web --dump-config
 
 ## 手机通道（Android，经 Tailscale）
 
-手机装上 Tailscale 加入同一私网后，可以打开某台机器的 `https://<机器名>.<tailnet>.ts.net/threadharbor/mobile/`：看那台机器的会话、发消息、批权限、停止回合。手机页的界面与配对体验见 [mobile-client.zh.md](./mobile-client.zh.md)，下面是一次性配置。
+手机装上 Tailscale 加入同一私网后，配对一次，就能打开某台机器的 `https://<机器名>.<tailnet>.ts.net/`：看到的是和桌面端同一套完整界面——看会话、发消息、批权限、停止回合，也能从主机面板或顶部切换器进入其余已部署的主机。手机上的界面与配对体验见 [mobile-client.zh.md](./mobile-client.zh.md)，下面是一次性配置。
 
 ### 一次性配置
 
@@ -108,7 +108,7 @@ dsh --profile web --dump-config
    scripts/mobile-setup.sh <dsh端口>
    ```
 
-   脚本读本机 Tailscale 的 DNS 名，执行 `tailscale serve --bg <dsh端口>`（把回环端口发布为 `https://<机器名>.<tailnet>.ts.net/`，仅 tailnet 内可达），并把第 2、3 步要抄的配置原样打印出来；tailscale 不可用时非零退出并说明原因。撤销发布用 `tailscale serve reset`。
+   脚本读本机 Tailscale 的 DNS 名，执行 `tailscale serve --bg <dsh端口>`（把回环端口发布为 `https://<机器名>.<tailnet>.ts.net/`，仅 tailnet 内可达），并把第 2 步要抄的配置与第 3 步要填的地址原样打印出来；tailscale 不可用时非零退出并说明原因。撤销发布用 `tailscale serve reset`。
 
    想手工做，等价命令是 `tailscale serve --bg <dsh端口>`；本机 ts.net 名用 `tailscale status --json` 里 `Self.DNSName` 查（注意它结尾带一个点，抄进配置时不要带）。
 
@@ -124,23 +124,21 @@ dsh --profile web --dump-config
    THREADHARBOR_TRUSTED_HOST=<机器名>.<tailnet>.ts.net scripts/dev.sh restart web
    ```
 
-3. **配置 mobileOrigin。** 在 profile 的 cordis.patch.yml（`$DSH_HOME/profiles/web/cordis.patch.yml`）里加一条指向入口行的配置覆盖：
+3. **填「手机访问地址」。** 在桌面端打开侧栏「手机配对」面板，在「手机访问地址」里填这台机器对手机/其他电脑的源：
 
-   ```yaml
-   - id: threadharbor-mobile-entry
-     config:
-       mobileOrigin: https://<机器名>.<tailnet>.ts.net
+   ```text
+   https://<机器名>.<tailnet>.ts.net
    ```
 
-   该字段只收 https 源：不带路径、查询、结尾斜杠；写错时 DSH 装载即失败并说明原因（能解析但不规范的形式，如带冗余端口，会报出规范化写法）。改完重启 `dsh --profile web`，可用 `dsh --profile web --dump-config` 核对该字段已生效。
+   保存即生效，不用改 `cordis.patch.yml`，也不用重启 DSH；配对网址会立刻按这个地址重新生成。只填源（协议、主机、端口），不带路径、查询或结尾斜杠；支持 http/https，推荐 https。留空则按当前页面地址生成——页面是 `localhost` 时面板会提示「这个地址只在本机有效」。面板保存的是 `dsh.host.accessOrigin` 这个设置键，跟这台机器走。
 
 ### 配对
 
-每台机器各自配对一次：在该机的桌面端打开侧栏「手机配对」面板，用手机扫面板上的二维码（内容是该机 `/threadharbor/mobile/pair-url` 返回的带令牌网址）。首次配对、换手机、凭据过期都重新扫一次。二维码与网址含进程凭据，勿截图外传。serve 的发布由 tailscaled 持久保存（一般电脑重启后仍有效）；若重启后手机连不上，重跑一遍发布命令即可。dsh 端口变更后需重跑一次发布命令。
+在要直连的机器上配对一次：在该机的桌面端打开侧栏「手机配对」面板，用手机扫面板上的二维码（内容是该机 `/threadharbor/federation/pair-url` 返回的**完整 DSH 界面**带令牌网址）。扫码后手机打开的是和桌面端同一套界面；只配对一台也够用，用它的主机面板或顶部切换器去其余主机（其余机器需要已经打开过一次、有打开地址）。首次配对、换手机、凭据过期都重新扫一次。二维码与网址含进程凭据，勿截图外传。serve 的发布由 tailscaled 持久保存（一般电脑重启后仍有效）；若重启后手机连不上，重跑一遍发布命令即可。dsh 端口变更后需重跑一次发布命令。
 
 ### 备用通道：SSH 隧道
 
-`tailscale serve` 不可用时的临时替代：在与主机同一网络里的手机上（例如 Termux）把本机 DSH 端口经 SSH 转发出来，`ssh -L <本地端口>:127.0.0.1:<dsh端口> <主机>`，然后在手机浏览器打开 `http://127.0.0.1:<本地端口>/`，用桌面端启动时打印的带 `?token=…` 的官方网址完成首次登录（把其中的端口换成 `<本地端口>`）。这条通道通向桌面样式的页面入口，没有手机页的扫码配对——配对二维码依赖的 `mobileOrigin` 只收 https 源，隧道地址不参与它。
+`tailscale serve` 不可用时的临时替代：在与主机同一网络里的手机上（例如 Termux）把本机 DSH 端口经 SSH 转发出来，`ssh -L <本地端口>:127.0.0.1:<dsh端口> <主机>`，然后在手机浏览器打开 `http://127.0.0.1:<本地端口>/`，用桌面端启动时打印的带 `?token=…` 的官方网址完成首次登录（把其中的端口换成 `<本地端口>`）。这条通道直接通向完整界面，不需要扫码配对；隧道地址只在手机本机有效，不参与「手机访问地址」。
 
 ## 云主机通道（手机不装 Tailscale）
 
@@ -180,7 +178,7 @@ dsh --profile web --dump-config
 
 2. **把片段加进云主机的 `cordis.patch.yml`**。`statePath` 挑一个重启后还在的路径：它存端口分配、凭据与各机器最后一次被联系上的时刻，换路径等于端口重分、全部 cookie 失效。
 
-3. **手机页以中转模式发布**：给 **`threadharbor-mobile-entry`** 那一行加 `mode: hub`（不是中转包那一行——中转包不碰手机页路由，写在那里没人读，手机页会静默停在直连模式）。服务端在返回手机页时把模式注入页面（静态页没有构建步骤，配置只能由服务端注入）。
+3. **手机页由中转自己发布**：`threadharbor-mobile-relay` 是云主机上唯一要挂的手机行，它自己注册精简版手机页、`pair-url` 与 `peers`，并固定以 hub 模式运行——不需要再给 `threadharbor-mobile-entry` 加配置（直连那套已取消，完整界面走上面第一节的通道）。
 
 4. **启动 DSH 时带上中转域名**：`dsh --profile web --no-open --port 3080 --host 127.0.0.1 --trusted-host <中转域名>`。不加的话中转自己的一律 403。
 
@@ -192,7 +190,7 @@ dsh --profile web --dump-config
 
 1. 启动 `dsh --profile web` 并打开页面。
 2. 在侧栏 **各主机** 中登记本机与其他主机（手动填写地址，或使用 **SSH 自动部署** 在远端安装 DSH + ThreadHarbor，详见 [ssh-deploy.zh.md](./ssh-deploy.zh.md)）。
-3. 每台主机在各自的浏览器标签页打开（`dsh web` 打印的 URL 与 `?token=…`）；跨标签页频道只汇总 **在线/心跳**，会话仍在各主机自己的页面操作。
+3. 每台主机至少打开一次它自己的页面（`dsh web` 打印的 URL 与 `?token=…`），让这台主机报到；此后任意一台的主机面板都能整页进入其余主机，远端页顶部的切换器可直接换主机，不必给每台各留一个标签页。
 4. 在本机 profile 中配置需要的 ACP agent preset；远端主机上的 agent 需在目标机自行安装并在该机的 profile 中配置。
 
 Claude Code / Codex / Grok 的安装与登录方式见 [install-plugins.zh.md](./install-plugins.zh.md)。

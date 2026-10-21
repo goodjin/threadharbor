@@ -6,11 +6,11 @@
  */
 
 import { beforeEach, describe, expect, it } from 'vitest'
-import { gatewayClientScript } from '../src/host-gateway-path.ts'
+import { gatewayClientScript, type GatewayPeer } from '../src/host-gateway-path.ts'
 
 /** 在 jsdom 里真正执行注入脚本（IIFE 同步挂条）。 */
-function run(hostId: string, hostTitle: string): void {
-  new Function(gatewayClientScript(hostId, hostTitle))()
+function run(hostId: string, hostTitle: string, peers: readonly GatewayPeer[] = []): void {
+  new Function(gatewayClientScript(hostId, hostTitle, peers))()
 }
 
 /** 让 MutationObserver 回调（微任务）先跑完。 */
@@ -38,10 +38,34 @@ describe('网关注入脚本', () => {
     run('mini', '小机器')
     const bar = document.getElementById('th-host-bar')
     expect(bar).not.toBeNull()
-    expect(bar?.querySelector('span')?.textContent).toContain('小机器')
+    const picker = document.getElementById('th-host-picker') as HTMLSelectElement | null
+    expect(picker).not.toBeNull()
+    expect(picker?.options[0]?.textContent).toContain('小机器')
     const link = document.getElementById('th-back-home') as HTMLAnchorElement | null
     expect(link).not.toBeNull()
     expect(link?.getAttribute('href')).toBe('/')
+  })
+
+  it('切换器列出本机、当前主机与其余已登记主机，并为条子留出高度', () => {
+    run('mini', '小机器', [
+      { hostId: 'far', hostTitle: '远端' },
+      { hostId: 'mini', hostTitle: '不应重复' },
+    ])
+    const picker = document.getElementById('th-host-picker') as HTMLSelectElement | null
+    expect(picker).not.toBeNull()
+    expect([...(picker?.options ?? [])].map(option => option.textContent)).toEqual([
+      '小机器（当前）',
+      '本机',
+      '远端',
+    ])
+    expect([...(picker?.options ?? [])].map(option => option.value)).toEqual([
+      '/threadharbor/gateway/mini/',
+      '/',
+      '/threadharbor/gateway/mini/far/',
+    ])
+    const style = document.getElementById('th-host-bar-style')
+    expect(style?.textContent).toContain('--th-host-bar-h')
+    expect(style?.textContent).toContain('padding-top:var(--th-host-bar-h)')
   })
 
   it('对方页面已有切换器时不插条', () => {

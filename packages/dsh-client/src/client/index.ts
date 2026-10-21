@@ -61,14 +61,16 @@ import { registerModelLabel } from '../model-label.tsx'
 import { registerSessionIdBar } from '../session-id-bar.ts'
 import { createQuotaPoller, registerQuotaDockPills, routeQuotaFetcher } from '../quota-pill.ts'
 import { registerInterruptedTurnRecovery } from '../interrupted-turn-recovery.ts'
-import { HOST_REGISTRY_KEY, HOST_STORE_ENTRY_ID, TAILSCALE_ERROR_KEY, TAILSCALE_PEERS_KEY, TAILSCALE_REFRESHED_KEY, TAILSCALE_REFRESH_KEY, hostRegistry } from '@threadharbor/dsh-host-federation'
+import { HOST_ACCESS_ORIGIN_KEY, HOST_REGISTRY_KEY, HOST_STORE_ENTRY_ID, TAILSCALE_ERROR_KEY, TAILSCALE_PEERS_KEY, TAILSCALE_REFRESHED_KEY, TAILSCALE_REFRESH_KEY, hostRegistry } from '@threadharbor/dsh-host-federation'
 import type { TailscalePeer } from '@threadharbor/dsh-host-federation'
 import { startHostStore } from '../host-store.ts'
 import type { HostStoreChannel, HostStoreDeps, StoreOp } from '../host-store.ts'
+import { startMobileLayout } from '../mobile-layout.ts'
 import { startRollUpSection } from '../rollup-section.ts'
 import { buildHostSessions, readSessionSources } from '../session-source.ts'
 import type { SectionSession, SessionRead } from '../session-source.ts'
 import { startPairingSurface } from '../pairing-panel.ts'
+import { startFederationAnnounce } from '../federation-announce.ts'
 import { startAcpVisibility } from '../acp-visibility.ts'
 import type { AcpVisibilityStore } from '../acp-visibility.ts'
 import { createAcpCatalogStore } from '../acp-visibility-catalog.ts'
@@ -130,8 +132,10 @@ export {
 export type { ConfiguredIdentity, IdentitySettings, IdentityStorage } from '../settings-source.ts'
 export { startRollUpSection } from '../rollup-section.ts'
 export type { RollUpSection, RollUpSectionDeps } from '../rollup-section.ts'
-export { PAIRING_PANEL_ID, PAIRING_PANEL_ORDER, PAIR_URL_PATH, PairingIcon, PairingPanel, createPairingStore, requestPairUrl, startPairingSurface } from '../pairing-panel.ts'
-export type { PairingPanelProps, PairingSlotHost, PairingState, PairingStore, PairingStoreWriter, PairingSurface, PairingSurfaceParams, PairQrRenderer, PairUrlOutcome, SameOriginFetch } from '../pairing-panel.ts'
+export { ANNOUNCE_INTERVAL_MS, startFederationAnnounce } from '../federation-announce.ts'
+export type { AnnounceFetch, AnnounceIdentity, FederationAnnounceParams, FederationAnnouncer } from '../federation-announce.ts'
+export { PAIRING_PANEL_ID, PAIRING_PANEL_ORDER, PAIR_URL_PATH, PairingIcon, PairingPanel, createPairingStore, requestPairUrl, saveAccessOriginDraft, startPairingSurface } from '../pairing-panel.ts'
+export type { AccessOriginSaveOutcome, PairingAccessOrigin, PairingOriginPort, PairingPanelProps, PairingSlotHost, PairingState, PairingStore, PairingStoreWriter, PairingSurface, PairingSurfaceParams, PairQrRenderer, PairUrlOutcome, SameOriginFetch } from '../pairing-panel.ts'
 export { mergeHostRows, heartbeatWord, richSegments } from '../panel.tsx'
 export type { HostListRow, PanelT } from '../panel.tsx'
 export { AgentPanel, AgentRow, runProbe } from '../panel.tsx'
@@ -376,6 +380,9 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // fallback reads the dictionary's source text so the ports work unchanged
   // without a locale service.
   const t: RuntimeT = locale?.bind(NAMESPACE) ?? fallbackT
+  // 手机窄屏：侧栏展开时改浮层 + 遮罩（DSH 默认会把它挤进主列），点遮罩
+  // 或侧栏导航后自动收起；桌面宽度下这段样式与监听都不生效。
+  ctx.effect(() => startMobileLayout({ log: message => { log.warn(message) } }).dispose, 'threadharbor: mobile layout')
   // The registry and the default identity follow the machine that served
   // this page (2026-10-12 用户要求：名单当然应该跟着本机的设置走): both go
   // through ONE settings channel whenever that channel exists, including when
@@ -404,6 +411,18 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // from an empty storage and must take the configured one the moment it
   // appears (same path as an explicit save).
   ctx.effect(() => hostStore.subscribe(() => { section.rereadIdentity() }), 'threadharbor: identity re-read on host storage hydration')
+  // 主机互通：把这份身份（id + 显示名）报到宿主侧，宿主据此铸出带令牌入口，
+  // 再把「自己 + 登记簿」推给其余主机。身份变更立即重报，另有慢轮询刷新
+  // 进程重启后的令牌。请求失败只是一条日志，页面照常。
+  const announcer = startFederationAnnounce({
+    identity: () => {
+      const current = section.identity()
+      return { hostId: current.hostId, hostTitle: current.hostTitle }
+    },
+    subscribe: listener => section.subscribe(() => { listener() }),
+    log: message => { log.warn(message) },
+  })
+  ctx.effect(() => () => { announcer.dispose() }, 'threadharbor: federation announce')
   // Another tab of this host writing the document says so on the settings
   // channel; re-read so this tab's list and names follow.
   ctx.effect(() => settingsInvalidation(ctx, () => { hostStore.refresh() }), 'threadharbor: host storage invalidation')
@@ -554,9 +573,39 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // 手机配对 section：和主机面板同一套侧栏注册面（sidebar.panellist + main），
   // 数据只有一条同源 GET（pair-url）。带令牌的网址只进面板状态、只画在这台
   // 已准入会话的屏幕上——log 只收失败原因，一个字都不提网址。
+  // 「手机访问地址」存进同一份机器文档：宿主铸配对网址时优先读它。没有
+  // 设置通道时不给这条编辑区——存了也落不到机器上，宁可不说。
+  const pairingChannel = hostStoreDepsResult.channel
   const pairing = startPairingSurface({
     slots: ctx.slots,
     label: () => t('pairing.label'),
+    ...(pairingChannel === undefined
+      ? {}
+      : {
+          accessOrigin: {
+            async load() {
+              const doc = await pairingChannel.loadDocument()
+              return doc?.[HOST_ACCESS_ORIGIN_KEY]
+            },
+            async save(value: string | undefined) {
+              const doc = await pairingChannel.loadDocument()
+              const existing = doc?.[HOST_ACCESS_ORIGIN_KEY]
+              // 值没变就不写：设置服务的 unset 打在不存在的数据上会报错，
+              // 而用户这次什么也没改。
+              if (value === undefined) {
+                if (existing === undefined) return
+                await pairingChannel.mutateDocument([{ kind: 'unset', key: HOST_ACCESS_ORIGIN_KEY }])
+              } else {
+                if (existing === value) return
+                await pairingChannel.mutateDocument([{ kind: 'set', key: HOST_ACCESS_ORIGIN_KEY, value }])
+              }
+              // 宿主铸配对网址、以及把 self 推给对端时都读这份文档：立刻
+              // 重报一次，新地址不必等下一轮慢轮询。
+              hostStore.refresh()
+              announcer.announce()
+            },
+          },
+        }),
     log: message => { log.warn(message) },
   })
   ctx.effect(() => () => { pairing.dispose() }, 'threadharbor: pairing surface')

@@ -31,6 +31,44 @@ export type LaunchTarget =
   | { readonly ok: true; readonly origin: string; readonly token: string; readonly hostTitle: string }
   | { readonly ok: false; readonly status: 404; readonly message: string }
 
+/** One host the injected bar can jump to. */
+export type GatewayPeer = {
+  readonly hostId: string
+  readonly hostTitle: string
+}
+
+/**
+ * The hosts a remote page's switcher offers: every registry entry that has a
+ * launch URL (without one the gateway cannot open it), minus the host being
+ * framed right now. Duplicate ids collapse to the first entry.
+ */
+export function listGatewayHosts(registryJson: string | undefined, currentHostId?: string): readonly GatewayPeer[] {
+  if (registryJson === undefined || registryJson.trim() === '') return []
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(registryJson)
+  } catch {
+    return []
+  }
+  if (!Array.isArray(parsed)) return []
+  const seen = new Set<string>()
+  const peers: GatewayPeer[] = []
+  for (const item of parsed) {
+    if (!isRecord(item)) continue
+    const hostId = item['hostId']
+    if (typeof hostId !== 'string' || hostId === '' || hostId === currentHostId) continue
+    if (seen.has(hostId)) continue
+    if (typeof item['launchUrl'] !== 'string' || item['launchUrl'].trim() === '') continue
+    seen.add(hostId)
+    const rawTitle = item['hostTitle']
+    peers.push({
+      hostId,
+      hostTitle: typeof rawTitle === 'string' && rawTitle.trim() !== '' ? rawTitle.trim() : hostId,
+    })
+  }
+  return peers
+}
+
 /** Page URL the iframe loads for one registered host. */
 export function gatewayPagePath(hostId: string): string {
   return `${GATEWAY_PREFIX}/${encodeURIComponent(hostId)}/`
@@ -171,8 +209,14 @@ export function rewriteKind(contentType: string | undefined): RewriteKind | unde
 export const GATEWAY_REWRITE_LIMIT_BYTES = REWRITE_LIMIT_BYTES
 
 /** Rewrite one text body. Callers skip this when the body is over the limit. */
-export function rewriteBody(kind: RewriteKind, body: string, hostId: string, hostTitle: string): string {
-  if (kind === 'html') return rewriteHtml(body, hostId, hostTitle)
+export function rewriteBody(
+  kind: RewriteKind,
+  body: string,
+  hostId: string,
+  hostTitle: string,
+  peers: readonly GatewayPeer[] = [],
+): string {
+  if (kind === 'html') return rewriteHtml(body, hostId, hostTitle, peers)
   if (kind === 'css') return rewriteCss(body, hostId)
   return rewriteJs(body, hostId)
 }
@@ -182,13 +226,13 @@ export function rewriteBody(kind: RewriteKind, body: string, hostId: string, hos
  * fetches and the mux socket through this gateway, and keeps the framed app's
  * storage off the parent page's keys.
  */
-export function rewriteHtml(html: string, hostId: string, hostTitle: string): string {
+export function rewriteHtml(html: string, hostId: string, hostTitle: string, peers: readonly GatewayPeer[] = []): string {
   const root = gatewayPagePath(hostId)
   const rewritten = html.replace(
     /(\s(?:src|href|action|poster)\s*=\s*)(['"])\/(?!\/)/gi,
     (_match, lead: string, quote: string) => `${lead}${quote}${root}`,
   )
-  const inject = `<base href="${root}"><script>${gatewayClientScript(hostId, hostTitle)}</script>`
+  const inject = `<base href="${root}"><script>${gatewayClientScript(hostId, hostTitle, peers)}</script>`
   if (/<head\b[^>]*>/i.test(rewritten)) {
     return rewritten.replace(/<head\b[^>]*>/i, match => `${match}${inject}`)
   }
@@ -217,20 +261,25 @@ export function rewriteJs(js: string, hostId: string): string {
  * Runs in the framed page before the remote app.
  * Root-absolute URLs are prefixed; the mux WebSocket is sent to {@link GATEWAY_WS_PATH}.
  * Storage, cookies, and service workers stay in this frame so they cannot overwrite the parent page.
- * Once the document is ready it also mounts a small `#th-host-bar` with the host
- * title and a `#th-back-home` link to this machine, unless the remote page already
- * renders its own switcher (`[data-host-switcher]`).
+ * Once the document is ready it also mounts a small `#th-host-bar`: a host
+ * picker (this machine, the host being viewed, and every other registered
+ * host) plus a `#th-back-home` link, unless the remote page already renders
+ * its own switcher (`[data-host-switcher]`). The bar reserves its height at
+ * the top of the document, so the remote layout is not hidden underneath it.
  */
-export function gatewayClientScript(hostId: string, hostTitle: string): string {
+export function gatewayClientScript(hostId: string, hostTitle: string, peers: readonly GatewayPeer[] = []): string {
   const prefix = scriptLiteral(gatewayPagePath(hostId).replace(/\/$/, ''))
   const id = scriptLiteral(hostId)
   const wsPath = scriptLiteral(GATEWAY_WS_PATH)
   const title = scriptLiteral(hostTitle)
+  const peersJson = scriptLiteral(JSON.stringify(peers.map(peer => ({ hostId: peer.hostId, hostTitle: peer.hostTitle }))))
   return `(function(){
 var prefix=${prefix};
 var hostId=${id};
 var wsPath=${wsPath};
 var title=${title};
+var peers=[];
+try{peers=JSON.parse(${peersJson});}catch(e){peers=[];}
 var mark="thgw:"+hostId+":";
 var realLocal=null;
 var realSession=null;
@@ -363,24 +412,50 @@ window.addEventListener("hashchange",function(){opened="";arm();});
 arm();
 function switcherOn(){return !!document.querySelector("[data-host-switcher]");}
 function removeBar(){var b=document.getElementById("th-host-bar");if(b&&b.parentNode)b.parentNode.removeChild(b);}
+function styleOnce(){
+if(document.getElementById("th-host-bar-style"))return;
+var style=document.createElement("style");
+style.id="th-host-bar-style";
+style.textContent=":root{--th-host-bar-h:38px}html,body{height:100%;}body{padding-top:var(--th-host-bar-h)!important;box-sizing:border-box!important;}#root{height:100%!important;}@media(max-width:640px){:root{--th-host-bar-h:44px}#th-host-label{display:none}#th-host-bar{padding:0 8px;gap:6px}#th-host-picker{font-size:16px;padding:6px}#th-back-home{padding:10px 2px}}";
+if(document.head)document.head.appendChild(style);
+}
 function insertBar(){
+if(document.getElementById("th-host-bar"))return;
 var bar=document.createElement("div");
 bar.id="th-host-bar";
-bar.setAttribute("style","position:fixed;top:0;left:0;right:0;z-index:2147483647;display:flex;align-items:center;gap:12px;padding:7px 14px;background:#151a24;color:#e6e9ef;font:13px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;box-shadow:0 1px 4px rgba(0,0,0,.35);");
+bar.setAttribute("style","position:fixed;top:0;left:0;right:0;z-index:2147483647;display:flex;align-items:center;gap:8px;padding:6px 10px;background:#151a24;color:#e6e9ef;font:13px/1.4 system-ui,-apple-system,Segoe UI,sans-serif;box-shadow:0 1px 4px rgba(0,0,0,.35);box-sizing:border-box;height:var(--th-host-bar-h);");
 var label=document.createElement("span");
-label.textContent="当前主机 "+title;
+label.id="th-host-label";
+label.textContent="主机";
+label.setAttribute("style","opacity:.7;flex:none;");
+var picker=document.createElement("select");
+picker.id="th-host-picker";
+picker.setAttribute("aria-label","切换主机");
+picker.setAttribute("style","flex:1;min-width:0;max-width:420px;background:#0f131c;color:#e6e9ef;border:1px solid #3a4252;border-radius:6px;padding:3px 6px;font:inherit;");
+function addOption(value,text,selected){var option=document.createElement("option");option.value=value;option.textContent=text;option.selected=selected;picker.appendChild(option);}
+addOption(prefix+"/",title+"（当前）",true);
+addOption("/","本机",false);
+for(var i=0;i<peers.length;i++){
+var peer=peers[i];
+if(!peer||typeof peer.hostId!=="string")continue;
+if(peer.hostId===hostId)continue;
+addOption(prefix+"/"+encodeURIComponent(peer.hostId)+"/",String(peer.hostTitle||peer.hostId),false);
+}
+picker.addEventListener("change",function(){if(picker.value)location.assign(picker.value);});
 var link=document.createElement("a");
 link.id="th-back-home";
 link.href="/";
 link.textContent="回本机";
-link.setAttribute("style","color:#8ab4ff;text-decoration:none;font-weight:600;");
+link.setAttribute("style","color:#8ab4ff;text-decoration:none;font-weight:600;flex:none;");
 bar.appendChild(label);
+bar.appendChild(picker);
 bar.appendChild(link);
 if(document.body)document.body.insertBefore(bar,document.body.firstChild);
 }
 function start(){
 try{
 if(!document.body||switcherOn())return;
+styleOnce();
 insertBar();
 if(typeof MutationObserver==="function"){
 var watcher=new MutationObserver(function(){

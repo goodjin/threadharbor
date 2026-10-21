@@ -52,6 +52,12 @@ export type RollUpSection = {
    * moment it appears, retiring the derived one it started with.
    */
   rereadIdentity(): void
+  /**
+   * Called after every identity re-read, whether the id changed or only the
+   * name. The host-side federation entry needs the title, which lives here and
+   * nowhere else; returns the unsubscribe.
+   */
+  subscribe(listener: (identity: HostIdentity) => void): () => void
   /** The section's rendered rows; rebuilt per call from the live host list. */
   element(): HTMLElement
   /** Standing notes under the list. */
@@ -71,6 +77,7 @@ const CHANNEL_NAME = 'dsh-host-federation'
 export function startRollUpSection(deps: RollUpSectionDeps): RollUpSection {
   let identity = resolveIdentity()
   let federation = open(identity)
+  const identityListeners = new Set<(identity: HostIdentity) => void>()
   // Announced up front: a tab that only said hello would leave its own row
   // empty in every other tab, and nothing is going to come and ask.
   federation.start()
@@ -162,6 +169,10 @@ export function startRollUpSection(deps: RollUpSectionDeps): RollUpSection {
     rereadIdentity: () => {
       applyIdentity()
     },
+    subscribe: listener => {
+      identityListeners.add(listener)
+      return () => { identityListeners.delete(listener) }
+    },
     dispose: () => {
       // The timer first: a heartbeat left running after the panel is gone
       // would keep announcing a host nobody is listening for.
@@ -187,12 +198,24 @@ export function startRollUpSection(deps: RollUpSectionDeps): RollUpSection {
         federation.renameSelf(next.hostTitle)
       }
       identity = next
+      notifyIdentity()
       return
     }
     federation.dispose()
     identity = next
     federation = open(identity)
     federation.start()
+    notifyIdentity()
+  }
+
+  function notifyIdentity(): void {
+    for (const listener of [...identityListeners]) {
+      try {
+        listener(identity)
+      } catch (error: unknown) {
+        deps.report(`host identity listener failed: ${messageOf(error)}`)
+      }
+    }
   }
 }
 

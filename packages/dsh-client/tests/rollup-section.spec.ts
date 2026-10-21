@@ -187,6 +187,33 @@ describe('身份变更', () => {
     expect(derivedId).not.toBe('workstation')
     section.dispose()
   })
+
+  it('subscribe：每次身份重读都通知，退订后不再通知', () => {
+    const { section } = setup()
+    const seen: string[] = []
+    const unsubscribe = section.subscribe(identity => { seen.push(`${identity.hostId}/${identity.hostTitle}`) })
+    section.setIdentity({ hostId: 'alpha', hostTitle: '新名字' })
+    section.setIdentity({ hostId: 'gamma' })
+    // 未配置显示名时按主机名回落到页面来源，id 必须换成 gamma。
+    expect(seen[0]).toBe('alpha/新名字')
+    expect(seen[1]?.startsWith('gamma/')).toBe(true)
+    unsubscribe()
+    section.setIdentity({ hostId: 'delta' })
+    expect(seen).toHaveLength(2)
+    section.dispose()
+  })
+
+  it('订阅者抛错只留一条报告，不改身份也不拦别的订阅者', () => {
+    const warnings: string[] = []
+    const { section } = setup({ report: message => { warnings.push(message) } })
+    const seen: string[] = []
+    section.subscribe(() => { throw new Error('listener gone') })
+    section.subscribe(identity => { seen.push(identity.hostId) })
+    section.setIdentity({ hostId: 'gamma' })
+    expect(seen).toEqual(['gamma'])
+    expect(warnings.some(message => message.includes('identity listener'))).toBe(true)
+    section.dispose()
+  })
 })
 
 /** 一个跟任何词典文案都不同的 `t`：译文即调用痕迹，断言不用猜。 */
