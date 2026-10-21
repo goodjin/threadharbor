@@ -261,7 +261,11 @@ export function installAcpVisibilityFilter(
       // 占位文案），选择器列出全部 provider（不筛选），而崩溃没有了。
       if (!shapeReported) {
         shapeReported = true
-        report(`acp visibility: the model directory service is gone (${describeError(error)}) — the pickers keep working, unfiltered`)
+        const note = `acp visibility: the model directory service is gone (${describeError(error)}) — the pickers keep working, unfiltered`
+        report(note)
+        // 宿主日志在浏览器里看不见，而这一档正是用户在浏览器控制台里排查的那一档：
+        // 不留一条，症状就只剩「模型列表空了」，没有任何线索（2026-10-20 桌面版）。
+        console.warn(`[threadharbor] ${note}`)
       }
       return degradedDirectory()
     }

@@ -281,7 +281,10 @@ function directoryStoreOf(
   if (service === undefined) return undefined
   try {
     return service.directoryFor(sessionId)?.store
-  } catch {
+  } catch (error) {
+    // 宿主日志在浏览器里看不见；这一档的线索只能留在这里（模型列表同时空着，
+    // 胶囊是唯一会说「连接已经断了」的地方）。
+    console.warn(`[threadharbor] zcode quota: the model directory service is gone (${error instanceof Error ? error.message : String(error)}) — the pills are hidden`)
     return undefined
   }
 }
