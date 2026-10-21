@@ -36,6 +36,15 @@ describe('resolveHostIdentity', () => {
     expect(one.hostId).toBe(two.hostId)
   })
 
+  it('gives every browser on one machine the same id', () => {
+    // Desktop shell and phone browser are one host. If the user agent leaked
+    // into the id, each browser would announce a different host and overwrite
+    // the other's self record — a visible flip-flop in every host list.
+    const shell = resolveHostIdentity(ALPHA({ configuredHostId: undefined, userAgent: 'ThreadHarborDesktop/1.0' }))
+    const phone = resolveHostIdentity(ALPHA({ configuredHostId: undefined, userAgent: 'Mobile Safari/605.1.15' }))
+    expect(shell.hostId).toBe(phone.hostId)
+  })
+
   it('gives different machines different ids', () => {
     const one = resolveHostIdentity(ALPHA({ configuredHostId: undefined, origin: 'http://a.example:8080' }))
     const two = resolveHostIdentity(ALPHA({ configuredHostId: undefined, origin: 'http://b.example:8080' }))

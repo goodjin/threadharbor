@@ -53,9 +53,11 @@ export type RollUpSection = {
    */
   rereadIdentity(): void
   /**
-   * Called after every identity re-read, whether the id changed or only the
-   * name. The host-side federation entry needs the title, which lives here and
-   * nowhere else; returns the unsubscribe.
+   * Called after every identity change: a different id, or a new display name.
+   * Plain re-reads that resolve to the same identity stay silent on purpose —
+   * the host store notifies for unrelated settings changes, and announcing on
+   * each one writes the self record, which notifies again: a feedback loop
+   * between two browsers, each re-announcing the other's write.
    */
   subscribe(listener: (identity: HostIdentity) => void): () => void
   /** The section's rendered rows; rebuilt per call from the live host list. */
@@ -196,9 +198,12 @@ export function startRollUpSection(deps: RollUpSectionDeps): RollUpSection {
       // heartbeat tells other tabs — no bye/hello churn.
       if (next.hostTitle !== identity.hostTitle) {
         federation.renameSelf(next.hostTitle)
+        identity = next
+        notifyIdentity()
+        return
       }
+      // A re-read that lands on the identity we already hold is not news.
       identity = next
-      notifyIdentity()
       return
     }
     federation.dispose()

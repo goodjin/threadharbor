@@ -153,7 +153,6 @@ export function startHostStore(deps: HostStoreDeps, t: RuntimeT = fallbackT): Ho
   async function hydrate(initial: boolean): Promise<void> {
     try {
       const loaded = await deps.channel?.loadDocument()
-      deps.log(`[vtrace] hydrate loaded=${JSON.stringify(loaded)}`)
       // The read has landed: held writes may merge against it and flush from
       // here on, whatever the rest of this function goes on to do.
       if (initial) markReady()
@@ -233,7 +232,6 @@ export function startHostStore(deps: HostStoreDeps, t: RuntimeT = fallbackT): Ho
   /** Push every touched key that differs from the machine's document. */
   async function flushDirty(): Promise<void> {
     if (flushing || !ready || !isHostMode()) return
-    if (dirty.size > 0) deps.log(`[vtrace] flush start dirty=${JSON.stringify([...dirty])} doc=${JSON.stringify(doc)}`)
     const ops: StoreOp[] = []
     for (const key of dirty) {
       const local = mirror.get(key)
@@ -247,7 +245,6 @@ export function startHostStore(deps: HostStoreDeps, t: RuntimeT = fallbackT): Ho
         dirty.delete(key)
       }
     }
-    deps.log(`[vtrace] flush ops=${JSON.stringify(ops)} dirtyLeft=${JSON.stringify([...dirty])}`)
     if (ops.length === 0) {
       // Nothing owed to the machine — which, right after hydration, is the
       // normal case: the read itself is what proves host storage works.

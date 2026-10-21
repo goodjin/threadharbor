@@ -188,7 +188,7 @@ describe('身份变更', () => {
     section.dispose()
   })
 
-  it('subscribe：每次身份重读都通知，退订后不再通知', () => {
+  it('subscribe：身份变了才通知，退订后不再通知', () => {
     const { section } = setup()
     const seen: string[] = []
     const unsubscribe = section.subscribe(identity => { seen.push(`${identity.hostId}/${identity.hostTitle}`) })
@@ -200,6 +200,18 @@ describe('身份变更', () => {
     unsubscribe()
     section.setIdentity({ hostId: 'delta' })
     expect(seen).toHaveLength(2)
+    section.dispose()
+  })
+
+  it('subscribe：重读落到同一身份保持沉默（否则公告会形成回环）', () => {
+    // 主机存储为无关设置的变化也会发通知，接线每次都会 rereadIdentity。
+    // 若这里照常通知，announce 就写自述、写自述又发通知——两个浏览器
+    // 各自广播，日志里每秒几十条。
+    const { section } = setup()
+    const seen: string[] = []
+    section.subscribe(identity => { seen.push(identity.hostId) })
+    section.rereadIdentity()
+    expect(seen).toEqual([])
     section.dispose()
   })
 

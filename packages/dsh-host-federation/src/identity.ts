@@ -16,6 +16,11 @@ export type IdentitySources = {
   /** Enough about this page to distinguish one machine's origin from another's. */
   readonly origin: string
   readonly pathname: string
+  /**
+   * The visiting browser. Deliberately not part of the derived id: the desktop
+   * shell and a phone browser reaching one deployment are the same host, and
+   * deriving per browser would make them overwrite each other's self record.
+   */
   readonly userAgent: string
 }
 
@@ -67,13 +72,17 @@ export function resolveHostIdentity(sources: IdentitySources): HostIdentity {
 }
 
 /**
- * Derive a stable id from what distinguishes one page from another.
+ * Derive a stable id from what distinguishes one machine from another.
+ *
+ * Only the origin goes in. Every browser reaching the same deployment is the
+ * same host; keying on the user agent would let the desktop shell and a phone
+ * announce two different ids for one machine and overwrite each other.
  *
  * A short digest rather than the raw origin, so the id keeps one shape however
  * long the origin is and stays safe to use as a key.
  */
 function deriveId(sources: IdentitySources): string {
-  const material = [sources.origin, sources.userAgent].join(' ')
+  const material = sources.origin
   let hash = 0x811c9dc5
   for (let index = 0; index < material.length; index++) {
     hash ^= material.charCodeAt(index)
