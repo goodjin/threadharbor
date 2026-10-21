@@ -223,6 +223,31 @@ describe('registerQuotaDockPills（dock 注册）', () => {
     expect(face['visible']).toBe(true)
   })
 
+  it('目录服务已经没了时不把异常抛给座位：dock 条目照常', () => {
+    // 2026-10-20 桌面版：连接重建后旧的服务实例被处置，一调就抛「inactive
+    // context」；异常从这里冒出去，崩的是 **dock 座位条目**。取不到就当没有
+    // 目录：胶囊不画，别的照常。
+    let captured: ((sessionId: string) => Record<string, unknown>) | undefined
+    const slots = {
+      inject: (_key: string, callback: () => unknown): void => { void callback() },
+      register: (options: { inject?: (sessionId: string) => Record<string, unknown> }): (() => void) => {
+        captured = options.inject
+        return () => {}
+      },
+    }
+    const poller = createQuotaPoller({ fetchQuota: async () => ({ ok: true as const, quota: WINDOWS }) })
+    registerQuotaDockPills(slots as never, poller, {
+      modelDirectories: {
+        directoryFor: () => { throw new Error('cannot get required service "remote.session" in inactive context') },
+      },
+      sessions: { subagentAddress: () => undefined },
+    })
+    expect(captured).toBeDefined()
+    const face = captured!('session-top')
+    expect(face['visible']).toBe(true)
+    expect(face['hooks']).toEqual({ zcodeQuota: poller })
+  })
+
   it('子代理会话隐藏；目录服务缺席时不带目录钩子', () => {
     let captured: ((sessionId: string) => Record<string, unknown>) | undefined
     const slots = {

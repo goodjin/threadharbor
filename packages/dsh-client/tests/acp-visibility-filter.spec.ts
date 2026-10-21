@@ -253,6 +253,31 @@ describe('目录包装', () => {
     expect(service.directoryFor).toBe(original)
   })
 
+  it('服务已经没了时不把异常抛给调用方：座位照常渲染', async () => {
+    // 2026-10-20 桌面版：连接重建后旧的服务实例被处置，它的原方法一调就抛
+    // 「cannot get required service "remote.session" in inactive context」；
+    // 异常顺着官方那个模型座位的 inject 冒上去，崩的是**座位条目**——输入框的
+    // 模型入口整个消失。这一档必须自己兜住：给一个什么都不答的目录，并说清原因。
+    const reports: string[] = []
+    const service = {
+      directoryFor(): unknown {
+        throw new Error('cannot get required service "remote.session" in inactive context')
+      },
+    }
+    installAcpVisibilityFilter(service, fakeVisibility(), message => { reports.push(message) })
+
+    const directory = service.directoryFor('s1') as ProxiedDirectory
+    expect(directory).toBeDefined()
+    expect(typeof directory.store.getSnapshot).toBe('function')
+    expect(typeof directory.store.subscribe).toBe('function')
+    expect(typeof directory.load).toBe('function')
+    expect(typeof directory.select).toBe('function')
+    // 目录是空的：座位退回占位文案，选择器列出全部 provider。
+    expect(directory.store.getSnapshot()).toBeUndefined()
+    await expect(directory.load()).resolves.toBeUndefined()
+    expect(reports.some(message => message.includes('inactive context'))).toBe(true)
+  })
+
   it('拿不到 directoryFor 或目录形状不对时不动手，并说清原因', async () => {
     const reported: string[] = []
     expect(installAcpVisibilityFilter({}, fakeVisibility(), message => { reported.push(message) }))

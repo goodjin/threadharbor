@@ -63,6 +63,29 @@ function isDirectoryLike(value: unknown): value is DirectoryLike {
     && typeof value['load'] === 'function'
 }
 
+/**
+ * 一个什么都不答的目录，给「服务已经没了」的那一档用。
+ *
+ * 形状与真目录一致（store / load / select），所以座位与选择器都能照常渲染：
+ * 目录是空的，触发按钮退回占位文案，选择器列出全部 provider（不筛选）。
+ */
+function degradedDirectory(): DirectoryLike {
+  return {
+    store: {
+      getSnapshot: () => undefined as unknown as ModelDirectoryState,
+      subscribe: () => () => {},
+    },
+    load: async () => undefined,
+    select: async () => undefined,
+  }
+}
+
+/** 一句话说明这次失败是什么（给报告用，不带堆栈）。 */
+function describeError(error: unknown): string {
+  if (error instanceof Error) return error.message
+  return String(error)
+}
+
 function sameReasoning(left: ModelReasoning | undefined, right: ModelReasoning | undefined): boolean {
   if (left === right) return true
   if (left === undefined || right === undefined) return false
@@ -225,7 +248,23 @@ export function installAcpVisibilityFilter(
   const cache = new WeakMap<object, DirectoryLike>()
   let shapeReported = false
   const wrapper = (...args: unknown[]): unknown => {
-    const raw = original.apply(service, args)
+    let raw: unknown
+    try {
+      raw = original.apply(service, args)
+    } catch (error) {
+      // 服务没了（连接重建后旧实例被处置，它的上下文已失效）：原方法一调就抛
+      // 「cannot get required service "remote.session" in inactive context」。
+      // 异常顺着调用方冒上去，崩的是**座位条目**——2026-10-20 桌面版：官方那个
+      // 模型座位崩了，输入框的模型入口整个消失。
+      //
+      // 这里给一个「什么都不答」的目录：座位照常渲染（目录是空的，触发按钮退回
+      // 占位文案），选择器列出全部 provider（不筛选），而崩溃没有了。
+      if (!shapeReported) {
+        shapeReported = true
+        report(`acp visibility: the model directory service is gone (${describeError(error)}) — the pickers keep working, unfiltered`)
+      }
+      return degradedDirectory()
+    }
     if (!isDirectoryLike(raw)) {
       if (!shapeReported) {
         shapeReported = true

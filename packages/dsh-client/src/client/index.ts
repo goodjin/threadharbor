@@ -531,10 +531,25 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
     () => () => { window.removeEventListener('visibilitychange', refreshQuotaOnVisible) },
     'threadharbor: zcode quota visibility refresh',
   )
-  ctx.effect(() => registerQuotaDockPills(seatHost, quotaPoller, {
-    modelDirectories: ctx.get('modelDirectories') as never,
-    sessions: ctx.get('sessions') as never,
-  }), 'threadharbor: zcode quota pills')
+  // 服务经 inject 绑，不经一次性 ctx.get：模型目录服务随连接重建被替换，
+  // 一次性拿到的引用随后就是死的——它一被调用就抛「inactive context」，崩的是
+  // 座位条目（2026-10-20 桌面版：输入框下面的 dock 崩了）。inject 会在服务被
+  // 替换时重跑回调，胶囊因此始终绑着当下那一个。
+  const bindQuotaPills = (modelDirectories: unknown, sessions: unknown): void => {
+    ctx.effect(() => registerQuotaDockPills(seatHost, quotaPoller, {
+      modelDirectories: modelDirectories as never,
+      sessions: sessions as never,
+    }), 'threadharbor: zcode quota pills')
+  }
+  const quotaInjector = ctx.inject
+  if (typeof quotaInjector === 'function') {
+    quotaInjector.call(ctx, ['modelDirectories', 'sessions'], (child: unknown) => {
+      bindQuotaPills(propertyOf(child, 'modelDirectories'), propertyOf(child, 'sessions'))
+    })
+  } else {
+    // 没有 inject 的宿主（测试用的假上下文）：立刻绑一次当下这两个服务。
+    bindQuotaPills(ctx.get('modelDirectories'), ctx.get('sessions'))
+  }
 
   // 手机配对 section：和主机面板同一套侧栏注册面（sidebar.panellist + main），
   // 数据只有一条同源 GET（pair-url）。带令牌的网址只进面板状态、只画在这台

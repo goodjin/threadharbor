@@ -268,6 +268,25 @@ export interface QuotaPillServices {
 }
 
 /**
+ * 一次会话的目录 store；服务已经没了就当没有目录。
+ *
+ * @param service - the model directory service, if the host still has one.
+ * @param sessionId - the session whose directory is wanted.
+ * @returns the directory's store, or undefined when there is none to read.
+ */
+function directoryStoreOf(
+  service: QuotaPillServices['modelDirectories'],
+  sessionId: string,
+): unknown {
+  if (service === undefined) return undefined
+  try {
+    return service.directoryFor(sessionId)?.store
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Register the quota pills into the composer dock (a list slot, session scope),
  * next to the official stats pills. The inject face hands the renderer two bare
  * observables (quota poller, model directory) plus the subagent visibility
@@ -290,7 +309,11 @@ export function registerQuotaDockPills(
       order: QUOTA_DOCK_ORDER,
       locale: NAMESPACE,
       inject: (sessionId: string) => {
-        const directory = services.modelDirectories?.directoryFor(sessionId)?.store
+        // 服务可能已经没了（连接重建后旧实例被处置）：一调就抛「inactive
+        // context」，而这里抛出去，崩的是**座位条目**——2026-10-20 桌面版：
+        // 输入框下面的 dock 崩了，连带座位一起带走。取不到就当没有目录：
+        // 胶囊不画，其它照常。
+        const directory = directoryStoreOf(services.modelDirectories, sessionId)
         const visible = services.sessions?.subagentAddress(sessionId) === undefined
         return {
           visible,
