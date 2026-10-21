@@ -217,7 +217,8 @@ type Patch = {
 const patches = new WeakMap<object, Patch>()
 
 /**
- * The service instance of the CURRENT generation.
+ * The service instance of the CURRENT generation — shared across module
+ * instances, because the client graph can be hot-swapped underneath us.
  *
  * 客户端图被热替换（宿主重建了客户端包，SSE 把新图推给开着的页签）之后，
  * 上一代的服务实例已被处置：它的原方法一调就抛「inactive context」。而官方那个
@@ -225,10 +226,25 @@ const patches = new WeakMap<object, Patch>()
  * 缝）——座位条目就此崩掉，输入框的模型入口整个消失，而页签不会自愈
  * （2026-10-20 桌面版现场：空白首页没事，有会话的窗口就废了）。
  *
- * 所以每个包装层在调用时都转到**当下这一代**的服务：旧实例上装的包装层照样
- * 服务当下的目录，模型就回来了。安装时更新这里的指向即可（每次安装都是新一代）。
+ * 所以每个包装层在调用时都转到**当下这一代**的服务。可「当下这一代」不能住在
+ * 模块变量里：热替换会把模块**重新求值**，新的一份模块变量是空的，而旧的那份
+ * （还装在旧实例上、还被座位攥着）停在上一代——两边对不上，就地再死一次
+ * （2026-10-21 桌面版现场：每次宿主侧的插件一动，页签里的模型名就消失）。
+ *
+ * 这个指针因此住在页面的全局上（`Symbol.for` 的全局注册表），新旧两份模块
+ * 看到的是同一份。
  */
-let currentService: object | undefined
+const CURRENT_SERVICE_KEY = Symbol.for('threadharbor.acpVisibility.currentService')
+
+/** The one slot every module instance of this module shares. */
+function currentServiceSlot(): { service?: object } {
+  const scope = globalThis as unknown as Record<symbol, { service?: object } | undefined>
+  const existing = scope[CURRENT_SERVICE_KEY]
+  if (existing !== undefined) return existing
+  const created: { service?: object } = {}
+  scope[CURRENT_SERVICE_KEY] = created
+  return created
+}
 
 /** 一个实例上未被包装的 `directoryFor`（装过就用装前那个，免得叠层）。 */
 function pristineOf(instance: object): ((...args: unknown[]) => unknown) | undefined {
@@ -263,21 +279,36 @@ export function installAcpVisibilityFilter(
     return undefined
   }
   const original = candidate as (...args: unknown[]) => unknown
-  // 这一代就是当下这一代：后面装的（新一代的）会覆盖它。
-  currentService = service
+  // 这一代就是当下这一代：后面装的（新一代的）会覆盖同一个槽位。
+  currentServiceSlot().service = service
   // Weak refs: this installation must not keep every session's directory
   // alive. Dead refs are pruned whenever the choice changes.
   const live = new Set<WeakRef<FilteredStore>>()
   const cache = new WeakMap<object, DirectoryLike>()
   let shapeReported = false
   const wrapper = (...args: unknown[]): unknown => {
-    // 先找当下这一代的服务：图被热替换后，这个实例可能已经是上一代的了。
-    const target = currentService ?? service
-    const targetOriginal = target === service ? original : pristineOf(target)
+    // 先找当下这一代的服务：图被热替换后，这个实例可能已经是上一代的了
+    // （而上一代已被处置，一调就抛）。当下这一代取不到或取不到能用的，就退回
+    // 自己这个实例。
+    const shared = currentServiceSlot().service
+    const candidates = shared === undefined || shared === service ? [service] : [shared, service]
     let raw: unknown
-    try {
-      raw = targetOriginal === undefined ? undefined : targetOriginal.apply(target, args)
-    } catch (error) {
+    let failed = false
+    let failure: unknown
+    for (const target of candidates) {
+      const targetOriginal = target === service ? original : pristineOf(target)
+      if (targetOriginal === undefined) continue
+      try {
+        raw = targetOriginal.apply(target, args)
+        failed = false
+        break
+      } catch (error) {
+        failed = true
+        failure = error
+      }
+    }
+    if (failed) {
+      const error = failure
       // 服务没了（连接重建后旧实例被处置，它的上下文已失效）：原方法一调就抛
       // 「cannot get required service "remote.session" in inactive context」。
       // 异常顺着调用方冒上去，崩的是**座位条目**——2026-10-20 桌面版：官方那个

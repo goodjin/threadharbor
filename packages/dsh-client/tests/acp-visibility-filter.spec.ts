@@ -8,7 +8,7 @@
  * promise that every other directory member still reaches the raw instance.
  */
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import {
   emptyAcpVisibility,
@@ -274,6 +274,35 @@ describe('目录包装', () => {
     expect(viaStale).toBeDefined()
     // 旧实例上的调用给的是**当下这一代**的目录（不是它自己那份旧的）。
     expect(viaStale.store.getSnapshot()?.groups.map(group => group.id)).toEqual(['acp:next-gen'])
+  })
+
+  it('热替换之后：旧模块装的那层也认得当下这一代的服务', async () => {
+    // 客户端图被热替换（宿主重建了客户端包，SSE 把新图推给开着的页签）时，
+    // **模块本身会被重新求值**：旧模块里那份「当前服务」的指针停在上一代
+    // （已被处置、调用即抛）的实例上 → 座位调到它 → 死 → 模型入口消失。
+    //
+    // 所以「当前这一代」不能住在模块变量里：它得住在一个跨模块实例共享的地方
+    // （页面的全局），新旧两份模块都看同一份。
+    vi.resetModules()
+    const fresh = await import('../src/acp-visibility-filter.ts')
+    // 上一代：已被处置——它的原方法一调就抛（inactive context）。
+    const disposed = {
+      directoryFor(): unknown {
+        throw new Error('cannot get required service "remote.session" in inactive context')
+      },
+    }
+    fresh.installAcpVisibilityFilter(disposed, fakeVisibility())
+    // 新一代：模块被重新求值（新的一份），包装装到新实例上。
+    vi.resetModules()
+    const newer = await import('../src/acp-visibility-filter.ts')
+    const live = fakeService(fakeDirectory())
+    newer.installAcpVisibilityFilter(live, fakeVisibility())
+
+    // 旧模块装的那层（旧实例上的包装）仍要给出**当下这一代**的目录，
+    // 而不是退化成「什么都不答」的空目录。
+    const viaOld = disposed.directoryFor('s1') as ProxiedDirectory
+    expect(viaOld).toBeDefined()
+    expect(viaOld.store.getSnapshot()?.groups.map(group => group.id)).toContain('acp:codex')
   })
 
   it('服务已经没了时不把异常抛给调用方：座位照常渲染', async () => {
