@@ -301,6 +301,16 @@
   gap: 10px;
 }
 
+/* 主机信息之下的部署信息框：独立一块，部署中的异常也落在框内。 */
+.deploySection {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+
 .sshKeys {
   display: flex;
   flex-direction: column;

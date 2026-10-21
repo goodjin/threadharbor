@@ -245,7 +245,7 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
     }
   })
 
-  it('点路过的主机（同源在线、未登记）进详情页：名称和 IP 可填，保存即登记', async () => {
+  it('点路过的主机（同源在线、未登记）进详情页：默认只读，点编辑后可填，保存即登记', async () => {
     const registry = makeRegistry()
     const { container, root } = await mountPanel(
       registry,
@@ -258,7 +258,10 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
     try {
       click(container, '[data-host-open="peer"]')
       expect(q(container, '[data-panel-page="detail"]')).toBeTruthy()
-      // 路过的主机也可填：名称和 IP 是 input，不是只读 span。
+      // 设置界面默认不能改（2026-10-21 用户要求）：先是只读文本，靠编辑按钮进可改界面。
+      expect(q(container, '[data-form-field-id=""]').tagName).toBe('SPAN')
+      expect(container.querySelector('[data-form-confirm]')).toBeNull()
+      click(container, '[data-action="edit-host"]')
       expect(q(container, '[data-form-field-id=""]').tagName).toBe('INPUT')
       expect(q(container, '[data-form-field-address=""]').tagName).toBe('INPUT')
       expect(q(container, '[data-form-confirm]').textContent).toContain('保存')
@@ -267,7 +270,7 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
     }
   })
 
-  it('点登记行进详情页：事实区说未连接，表单可编辑；没有 agent 区', async () => {
+  it('点登记行进详情页：事实区说未连接，默认只读；没有 agent 区', async () => {
     const { container, root } = await mountPanel(makeRegistry([
       { hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' },
     ]))
@@ -275,7 +278,10 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
       click(container, '[data-host-open="bench"]')
       expect(q(container, '[data-panel-page="detail"]')).toBeTruthy()
       expect(q(container, '[data-reported-facts]').textContent).toContain('未连接')
-      expect(q(container, '[data-form-field-address]')).toBeTruthy()
+      expect(q(container, '[data-form-field-address]').tagName).toBe('SPAN')
+      expect(container.querySelector('[data-form-confirm]')).toBeNull()
+      click(container, '[data-action="edit-host"]')
+      expect(q(container, '[data-form-field-address]').tagName).toBe('INPUT')
       expect(q(container, '[data-form-confirm]').textContent).toContain('保存')
       expect(container.querySelector('[data-agent-section]')).toBeNull()
     } finally {
@@ -309,6 +315,7 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
     const { container, root } = await mountPanel(registry)
     try {
       click(container, '[data-host-open="bench"]')
+      click(container, '[data-action="edit-host"]')
       type(container, '[data-form-field-id]', '甲板机')
       click(container, '[data-form-confirm]')
 
@@ -328,6 +335,7 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
     const { container, root } = await mountPanel(registry)
     try {
       click(container, '[data-host-open="bench"]')
+      click(container, '[data-action="edit-host"]')
       type(container, '[data-form-field-id]', 'bench-x')
       click(container, '[data-form-confirm]')
 
@@ -346,6 +354,7 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
     const { container, root } = await mountPanel(registry)
     try {
       click(container, '[data-host-open="bench"]')
+      click(container, '[data-action="edit-host"]')
       type(container, '[data-form-field-address]', '不是 地址')
       click(container, '[data-form-confirm]')
 
@@ -366,6 +375,7 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
     const { container, root } = await mountPanel(makeRegistry(), store)
     try {
       click(container, '[data-host-open="self-host"]')
+      click(container, '[data-action="edit-host"]')
       type(container, '[data-form-field-id]', '工作站甲')
       // 真实序列：登记写入 → 存储通知 → 面板重读身份 → 表单若重挂，草稿就丢了
       await act(async () => { store.become({ kind: 'host' }) })
@@ -383,6 +393,7 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
     const { container, root } = await mountPanel(makeRegistry())
     try {
       click(container, '[data-host-open="self-host"]')
+      click(container, '[data-action="edit-host"]')
       type(container, '[data-form-field-id]', '工作室主机')
       click(container, '[data-form-confirm]')
 
@@ -399,6 +410,11 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
     const { container, root } = await mountPanel(registry)
     try {
       click(container, '[data-host-open="bench"]')
+      // 删除在卡片右上角（2026-10-21 用户要求）：卡片里、表单之前，一个小按钮。
+      const removeAsk = q(container, '[data-registry-remove-ask]')
+      expect(q(container, '[data-form-card]').contains(removeAsk)).toBe(true)
+      const form = q(container, '[data-host-form]')
+      expect(removeAsk.compareDocumentPosition(form) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
       click(container, '[data-registry-remove-ask]')
       expect(q(container, '[data-registry-remove-confirm]')).toBeTruthy()
       click(container, '[data-registry-remove-confirm]')
@@ -411,7 +427,7 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
     }
   })
 
-  it('添加：列表页点按钮进表单页，没有事实区；确定后新行以未验证出现', async () => {
+  it('添加：列表页点按钮进表单页，没有事实区；添加后进设置页，返回列表时新行以未验证出现', async () => {
     const registry = makeRegistry()
     const { container, root } = await mountPanel(registry)
     try {
@@ -421,7 +437,7 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
       // 表单只有两个字段：名称、IP；没有显示名。
       expect(container.querySelectorAll('[data-host-form] input')).toHaveLength(2)
       expect(container.querySelector('[data-form-field-title]')).toBeNull()
-      expect(q(container, '[data-form-confirm]').textContent).toContain('确定')
+      expect(q(container, '[data-form-confirm]').textContent).toContain('添加')
       expect(q(container, '[data-form-cancel-bottom]').textContent).toContain('取消')
       // 确定和取消下面没有内容（说明文字已去掉）。
       expect(container.querySelector('[data-add-notes]')).toBeNull()
@@ -430,6 +446,10 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
       type(container, '[data-form-field-address]', '192.168.1.30:3081')
       type(container, '[data-form-field-id]', 'gamma')
       click(container, '[data-form-confirm]')
+
+      // 添加成功随即进设置界面（2026-10-21 用户要求：部署在添加成功后的设置里）。
+      expect(q(container, '[data-panel-page="detail"]')).toBeTruthy()
+      click(container, '[data-form-cancel-bottom]')
 
       expect(q(container, '[data-panel-page="list"]')).toBeTruthy()
       const row = q(container, '[data-host-row="gamma"]')
@@ -444,6 +464,39 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
       expect(registry.list()).toMatchObject([
         { hostId: 'gamma', hostTitle: 'gamma', address: 'http://192.168.1.30:3081' },
       ])
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('添加只填 IP 也能保存：名称留空时由 IP 推导主机标识', async () => {
+    const registry = makeRegistry()
+    const { container, root } = await mountPanel(registry)
+    try {
+      click(container, '[data-action="add-host"]')
+      // 名称留空，只填对方 IP。
+      type(container, '[data-form-field-address]', '192.168.1.40:3081')
+      click(container, '[data-form-confirm]')
+
+      expect(q(container, '[data-panel-page="detail"]')).toBeTruthy()
+      expect(registry.list()).toMatchObject([
+        { hostId: '192-168-1-40', hostTitle: '192-168-1-40', address: 'http://192.168.1.40:3081' },
+      ])
+    } finally {
+      await unmount(root)
+    }
+  })
+
+  it('添加连 IP 都不填：留在表单页，明说要填对方 IP', async () => {
+    const registry = makeRegistry()
+    const { container, root } = await mountPanel(registry)
+    try {
+      click(container, '[data-action="add-host"]')
+      click(container, '[data-form-confirm]')
+
+      expect(q(container, '[data-panel-page="add"]')).toBeTruthy()
+      expect(q(container, '[data-form-message="bad"]').textContent).toContain('IP')
+      expect(registry.list()).toHaveLength(0)
     } finally {
       await unmount(root)
     }
@@ -566,7 +619,7 @@ describe('从 Tailscale 选：表单前面的选择器', () => {
     })
   }
 
-  it('添加页「从 Tailscale 选」在表单前面；列出 peers（名字+IP+在线徽标），选一台只填名称与 SSH 目标、地址栏留空，选择器收起', async () => {
+  it('添加页「从 Tailscale 选」在表单前面；列出 peers（名字+IP+在线徽标），选一台填上名称与 IP，选择器收起', async () => {
     const { container, root } = await mountPanel(makeRegistry(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
     try {
       click(container, '[data-action="add-host"]')
@@ -588,17 +641,13 @@ describe('从 Tailscale 选：表单前面的选择器', () => {
       expect(q(container, '[data-tailscale-peer="labbox"]').getAttribute('data-tailscale-online')).toBe('false')
 
       click(container, '[data-tailscale-peer="bench.tail-scale.ts.net"]')
-      // 选中只填名称与 SSH 目标：Tailscale 的对端只是 SSH 目标，它的 DSH web
-      // 在网上并不直接可达，地址栏留空、由部署或连接成功后写回。
+      // 添加页选中：名称与 IP 一起填上——填好 IP 就能直接保存（2026-10-21）。
       const name = q(container, '[data-form-field-id]')
       if (!(name instanceof HTMLInputElement)) throw new Error('name input missing')
       const address = q(container, '[data-form-field-address]')
       if (!(address instanceof HTMLInputElement)) throw new Error('address input missing')
       expect(name.value).toBe('bench.tail-scale.ts.net')
-      expect(address.value).toBe('')
-      const target = q(container, '[data-ssh-target]')
-      if (!(target instanceof HTMLInputElement)) throw new Error('ssh target input missing')
-      expect(target.value).toBe('100.101.1.7')
+      expect(address.value).toBe('100.101.1.7')
       expect(container.querySelector('[data-tailscale-picker]')).toBeNull()
       expect(picker).toBeTruthy()
     } finally {
@@ -606,7 +655,7 @@ describe('从 Tailscale 选：表单前面的选择器', () => {
     }
   })
 
-  it('离线主机置灰但仍可选：点了照样填名称和 SSH 目标，地址栏照旧留空', async () => {
+  it('离线主机置灰但仍可选：点了照样填名称和 IP', async () => {
     const { container, root } = await mountPanel(makeRegistry(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
     try {
       click(container, '[data-action="add-host"]')
@@ -617,62 +666,59 @@ describe('从 Tailscale 选：表单前面的选择器', () => {
       click(container, '[data-tailscale-peer="labbox"]')
       const name = q(container, '[data-form-field-id]')
       const address = q(container, '[data-form-field-address]')
-      const target = q(container, '[data-ssh-target]')
-      if (!(name instanceof HTMLInputElement) || !(address instanceof HTMLInputElement) || !(target instanceof HTMLInputElement)) throw new Error('inputs missing')
+      if (!(name instanceof HTMLInputElement) || !(address instanceof HTMLInputElement)) throw new Error('inputs missing')
       expect(name.value).toBe('labbox')
-      expect(target.value).toBe('100.101.2.9')
-      expect(address.value).toBe('')
+      expect(address.value).toBe('100.101.2.9')
     } finally {
       await unmount(root)
     }
   })
 
-  it('添加页选中后自动切到 SSH 部署区：IP 进目标栏，名称跟着进主机名栏', async () => {
-    // 探测 HEAD 打通＝部署区可用；选择器选中后 addMode 才真的切得过去。
+  it('添加页没有 SSH 部署区：部署信息只在添加成功后的设置界面里', async () => {
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       if (String(input).endsWith('/api/threadharbor.host-ssh.operation') && init?.method === 'HEAD') return new Response('', { status: 200 })
       return new Response(JSON.stringify({ ok: false, error: 'no route' }), { status: 404 })
     }) as unknown as typeof fetch
-    const { container, root } = await mountPanel(makeRegistry(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
+    const registry = makeRegistry()
+    const { container, root } = await mountPanel(registry, undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
     try {
       await settle()
       click(container, '[data-action="add-host"]')
       click(container, '[data-action="tailscale-pick"]')
       await settle()
       click(container, '[data-tailscale-peer="bench.tail-scale.ts.net"]')
-      expect(container.querySelector('[data-ssh-deploy]')).not.toBeNull()
+      // 添加页只填两栏；部署区去掉，保存后进设置界面才出现。
+      expect(container.querySelector('[data-ssh-deploy]')).toBeNull()
+      click(container, '[data-form-confirm]')
+
+      expect(q(container, '[data-panel-page="detail"]')).toBeTruthy()
+      expect(q(container, '[data-deploy-section]').textContent).toContain('部署信息')
+      expect(container.querySelector('[data-ssh-target]')).not.toBeNull()
       const target = q(container, '[data-ssh-target]')
       if (!(target instanceof HTMLInputElement)) throw new Error('ssh target input missing')
-      expect(target.value).toBe('100.101.1.7')
-      const hostId = q(container, '[data-ssh-hostid]')
-      if (!(hostId instanceof HTMLInputElement)) throw new Error('hostId input missing')
-      expect(hostId.value).toBe('bench.tail-scale.ts.net')
+      // 新登记还没有 SSH 凭据：目标栏空着，等操作者填或从 Tailscale 选。
+      expect(target.value).toBe('')
     } finally {
       await unmount(root)
       delete (globalThis as { fetch?: unknown }).fetch
     }
   })
 
-  it('详情页选中不改已登记的地址：输入框原样，登记里 address 前后一致', async () => {
+  it('详情页选中不改登记：只读界面原样，登记里 address 前后一致', async () => {
     const registry = makeRegistry([{ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' }])
     const { container, root } = await mountPanel(registry, undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
     try {
       click(container, '[data-host-open="bench"]')
       const before = registry.list().find(entry => entry.hostId === 'bench')?.address
       const address = q(container, '[data-form-field-address]')
-      if (!(address instanceof HTMLInputElement)) throw new Error('address input missing')
-      expect(address.value).toBe('192.168.1.20:3081')
+      expect(address.textContent).toBe('192.168.1.20:3081')
 
       click(container, '[data-action="tailscale-pick"]')
       await settle()
       click(container, '[data-tailscale-peer="bench.tail-scale.ts.net"]')
-      // 名称栏照填（可编辑），地址输入框一个字都不动，登记簿也不动。
-      const name = q(container, '[data-form-field-id]')
-      if (!(name instanceof HTMLInputElement)) throw new Error('name input missing')
-      expect(name.value).toBe('bench.tail-scale.ts.net')
-      const after = q(container, '[data-form-field-address]')
-      if (!(after instanceof HTMLInputElement)) throw new Error('address input missing')
-      expect(after.value).toBe('192.168.1.20:3081')
+      // 详情页选点只作为部署目标：名称与地址都不动，登记簿也不动。
+      expect(q(container, '[data-form-field-id]').textContent).toBe('bench')
+      expect(q(container, '[data-form-field-address]').textContent).toBe('192.168.1.20:3081')
       expect(registry.list().find(entry => entry.hostId === 'bench')?.address).toBe(before)
       expect(before).toBe('http://192.168.1.20:3081')
     } finally {
@@ -711,16 +757,6 @@ describe('从 Tailscale 选：表单前面的选择器', () => {
           launchUrl: 'http://192.168.1.10:3081/?token=abc',
         },
       ])
-    } finally {
-      await unmount(root)
-    }
-  })
-
-  it('地址栏旁的注记把话说在面上：留空由部署写入，已可达的地址可以直接粘贴', async () => {
-    const { container, root } = await mountPanel(makeRegistry(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
-    try {
-      click(container, '[data-action="add-host"]')
-      expect(q(container, '[data-address-empty-note]').textContent).toBe('留空则由部署写入。IP 已经能访问时，粘贴带 ?token= 的完整地址即可，不需要 Tailscale。')
     } finally {
       await unmount(root)
     }
@@ -850,7 +886,7 @@ describe('主机详情：使用这台主机 + 远程部署（状态机如实呈�
     return { calls }
   }
 
-  it('未存连接方式：使用区块说明现状并给出「填写连接方式」，部署区块默认收起、点开可填', async () => {
+  it('未存连接方式：使用区块说明现状并给出「填写连接方式」，部署信息默认展开可填', async () => {
     const { calls } = stubFetch({})
     const registry = makeRegistry([{ hostId: 'bench', hostTitle: '测试机', address: 'http://192.168.1.20:3081' }])
     const { container, root } = await mountPanel(registry)
@@ -858,7 +894,8 @@ describe('主机详情：使用这台主机 + 远程部署（状态机如实呈�
       click(container, '[data-host-open="bench"]')
       const use = q(container, '[data-use-section]')
       expect(use.textContent).toContain('尚未保存')
-      click(container, '[data-action="open-deploy"]')
+      // 2026-10-21 用户要求：部署就在设置界面里，默认展开、不用再点开。
+      expect(q(container, '[data-deploy-section]').textContent).toContain('部署信息')
       expect(container.querySelector('[data-ssh-deploy]')).not.toBeNull()
       expect(calls.length).toBeGreaterThanOrEqual(0)
     } finally {
@@ -937,7 +974,6 @@ describe('主机详情：使用这台主机 + 远程部署（状态机如实呈�
     const { container, root } = await mountPanel(registry)
     try {
       click(container, '[data-host-open="bench"]')
-      click(container, '[data-action="open-deploy"]')
       expect(container.querySelector('[data-ssh-deploy] [data-ssh-hostid]')).toBeNull()
       expect((q(container, '[data-ssh-access="host-ip"]') as HTMLInputElement).checked).toBe(true)
       expect(container.querySelector('[data-ssh-bind-host]')).not.toBeNull()
@@ -954,6 +990,9 @@ describe('主机详情：使用这台主机 + 远程部署（状态机如实呈�
       await act(async () => { await new Promise(resolve => setTimeout(resolve, 900)) })
       const errorBox = q(container, '[data-ssh-error]')
       expect(errorBox.textContent).toContain('远端安装失败：tar: Unexpected EOF in archive')
+      // 部署里的异常只落在部署信息框内，不往页面上方冒。
+      expect(q(container, '[data-deploy-section]').contains(errorBox)).toBe(true)
+      expect(container.querySelector('[data-form-message]')).toBeNull()
       expect(container.querySelector('[data-action="ssh-deploy-retry"]')).not.toBeNull()
     } finally {
       await unmount(root)
@@ -975,12 +1014,52 @@ describe('主机详情：使用这台主机 + 远程部署（状态机如实呈�
     return registry
   }
 
-  it('没有选点时已存凭据的目标照旧优先：展开部署区，目标栏是登记里的地址', async () => {
+  it('部署信息可以收起再展开：收起后字段不在面上，展开回来', async () => {
     stubFetch({})
     const { container, root } = await mountPanel(registryWithSsh())
     try {
       click(container, '[data-host-open="bench"]')
+      expect(container.querySelector('[data-ssh-deploy]')).not.toBeNull()
+      click(container, '[data-action="close-deploy"]')
+      expect(container.querySelector('[data-ssh-deploy]')).toBeNull()
+      expect(q(container, '[data-deploy-section]').textContent).toContain('部署信息')
       click(container, '[data-action="open-deploy"]')
+      expect(container.querySelector('[data-ssh-deploy]')).not.toBeNull()
+    } finally {
+      await unmount(root)
+      delete (globalThis as { fetch?: unknown }).fetch
+    }
+  })
+
+  it('私钥路径：主机侧清单作为可选项，路径仍可手填', async () => {
+    stubFetch({
+      'host-ssh.keys': { ok: true, value: { keys: ['/home/u/.ssh/id_ed25519', '/home/u/.ssh/id_rsa'] } },
+    })
+    const { container, root } = await mountPanel(registryWithSsh())
+    try {
+      click(container, '[data-host-open="bench"]')
+      await flush(2)
+      const input = q(container, '[data-ssh-identity-file]')
+      if (!(input instanceof HTMLInputElement)) throw new Error('identity input missing')
+      const listId = input.getAttribute('list')
+      expect(listId).toBeTruthy()
+      expect(q(container, '[data-ssh-identity-options]').getAttribute('id')).toBe(listId)
+      const options = [...container.querySelectorAll('[data-ssh-identity-options] option')]
+      expect(options.map(option => option.getAttribute('value'))).toEqual(['/home/u/.ssh/id_ed25519', '/home/u/.ssh/id_rsa'])
+      // 清单只是建议：手填别的路径照样能进值。
+      type(container, '[data-ssh-identity-file]', '/custom/keys/deploy')
+      expect((q(container, '[data-ssh-identity-file]') as HTMLInputElement).value).toBe('/custom/keys/deploy')
+    } finally {
+      await unmount(root)
+      delete (globalThis as { fetch?: unknown }).fetch
+    }
+  })
+
+  it('没有选点时已存凭据的目标照旧优先：部署信息默认展开，目标栏是登记里的地址', async () => {
+    stubFetch({})
+    const { container, root } = await mountPanel(registryWithSsh())
+    try {
+      click(container, '[data-host-open="bench"]')
       const target = q(container, '[data-ssh-deploy] [data-ssh-target]')
       if (!(target instanceof HTMLInputElement)) throw new Error('ssh target input missing')
       expect(target.value).toBe(SSH_SEED.target)
@@ -1023,7 +1102,6 @@ describe('主机详情：使用这台主机 + 远程部署（状态机如实呈�
     const { container, root } = await mountPanel(withUnapproved)
     try {
       click(container, '[data-host-open="bench"]')
-      click(container, '[data-action="open-deploy"]')
       const connect = q(container, '[data-action="ssh-connect"]')
       if (!(connect instanceof HTMLButtonElement)) throw new Error('connect-only button missing')
       // 标记不算批准：按钮进不去，点了也不发连接。

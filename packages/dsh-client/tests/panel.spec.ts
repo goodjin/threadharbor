@@ -337,7 +337,7 @@ describe('主机表单页：新增和详情是同一套东西的两种模式', (
     t: zhT,
   } as const
 
-  it('新增模式：两个字段（名称、IP）和确定/取消；主机报的字段一概不出现；按钮下面没有内容', () => {
+  it('新增模式：两个字段（名称、IP）和添加/取消；主机报的字段一概不出现；按钮下面没有内容', () => {
     const html = renderToString(createElement(HostFormPage, {
       mode: 'new',
       heading: '添加新主机',
@@ -350,7 +350,8 @@ describe('主机表单页：新增和详情是同一套东西的两种模式', (
     expect(html).toContain('data-form-field-id=""')
     expect(html).toContain('data-form-field-address=""')
     expect(html).toContain('data-form-confirm=""')
-    expect(html).toContain('确定')
+    // 2026-10-21 用户要求：保存改名叫「添加」。
+    expect(html).toContain('添加')
     expect(html).toContain('data-form-cancel=""')
     expect(html).toContain('取消')
     expect(html).not.toContain('data-reported-facts')
@@ -381,7 +382,7 @@ describe('主机表单页：新增和详情是同一套东西的两种模式', (
     expect(cardAt).toBeGreaterThan(navAt)
   })
 
-  it('详情模式：同一套字段之外，主机自报的事实也在（在线、心跳、自报标识）', () => {
+  it('详情模式：同一套字段默认只读，编辑按钮在；主机自报的事实也在（在线、心跳、自报标识）', () => {
     const html = renderToString(createElement(HostFormPage, {
       ...viewProps,
       reported: {
@@ -398,7 +399,9 @@ describe('主机表单页：新增和详情是同一套东西的两种模式', (
     expect(html).toContain('在线')
     expect(html).toContain('最近心跳')
     expect(html).toContain('data-fact-reported-id=""')
-    expect(html).toContain('data-form-confirm=""')
+    // 2026-10-21 用户要求：设置界面默认不能改，靠「编辑」按钮进入可改状态。
+    expect(html).toContain('data-action="edit-host"')
+    expect(html).not.toContain('data-form-confirm=""')
     expect(html).toContain('data-form-cancel=""')
   })
 

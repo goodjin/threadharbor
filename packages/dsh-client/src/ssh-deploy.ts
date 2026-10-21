@@ -15,6 +15,7 @@ export const ROUTE_CHECK = '/api/threadharbor.host-ssh.check'
 export const ROUTE_SERVE = '/api/threadharbor.host-ssh.serve'
 export const ROUTE_SERVICE = '/api/threadharbor.host-ssh.service'
 export const ROUTE_START = '/api/threadharbor.host-ssh.start'
+export const ROUTE_KEYS = '/api/threadharbor.host-ssh.keys'
 export const ROUTE_REMOTE_SESSIONS = '/api/threadharbor.host-remote.sessions'
 export const ROUTE_REMOTE_OP = '/api/threadharbor.host-remote.op'
 
@@ -46,6 +47,16 @@ async function getJson<T>(path: string, t: RuntimeT = fallbackT): Promise<ApiRes
 
 export async function inspectSshHost(ssh: SshConnectionInput, t: RuntimeT = fallbackT): Promise<ApiResult<{ readonly keys: readonly SshHostKeyCandidate[] }>> {
   return await postJson(ROUTE_INSPECT, { ssh }, t)
+}
+
+/**
+ * Private-key paths on the serving host (`~/.ssh`) to offer as suggestions.
+ * A missing route or unreadable directory is an empty list, not an error: the
+ * path field still accepts whatever the operator types.
+ */
+export async function listSshIdentityFiles(t: RuntimeT = fallbackT): Promise<readonly string[]> {
+  const result = await postJson<{ readonly keys?: readonly string[] }>(ROUTE_KEYS, {}, t)
+  return result.ok && Array.isArray(result.value.keys) ? result.value.keys : []
 }
 
 export async function readRemotePeer(

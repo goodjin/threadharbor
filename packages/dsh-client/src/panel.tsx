@@ -25,7 +25,7 @@
  * dead connections and rebuilds on the next turn.
  */
 
-import { createElement, useEffect, useState } from 'react'
+import { createElement, useEffect, useId, useState } from 'react'
 import type { ReactNode } from 'react'
 import { describeVerdict } from './verdict.ts'
 import type { ProbeVerdict } from './verdict.ts'
@@ -47,6 +47,7 @@ import {
   configureRemoteServe,
   controlRemoteService,
   inspectSshHost,
+  listSshIdentityFiles,
   probeSshDeployApi,
   readRemotePeer,
   startSshDeploy,
@@ -508,6 +509,25 @@ export function addressFromHostPart(value: string): string {
 }
 
 /**
+ * The identifier a host gets when the operator filled in only the IP: the
+ * address's host, lower-cased and reduced to `[a-z0-9-]`. The registry keeps
+ * ids stable and URL-safe, and the name is editable later on the settings page.
+ * @param value - what the IP field holds.
+ * @returns a valid host id, or `''` when the field holds no usable host.
+ */
+export function deriveHostIdFromAddress(value: string): string {
+  const raw = addressFromHostPart(value)
+  if (raw === '') return ''
+  let host = raw
+  try {
+    host = new URL(raw).hostname
+  } catch {
+    // Not parseable as a URL: sanitize what was typed.
+  }
+  return host.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64)
+}
+
+/**
  * Split what the IP field holds into the registry's origin and, when the
  * operator pasted a running service's `?token=` URL, the launch URL.
  * The registry drops query strings from the address, so the token has to be
@@ -889,18 +909,17 @@ function SshDeploySection(props: {
   readonly hostTitle: string
   readonly onHostIdChange: (value: string) => void
   readonly onHostTitleChange: (value: string) => void
-  readonly onDeployed: (result: SshDeployResult, sshFacts: SshSeedFacts) => void
-  readonly onError: (message: string) => void
+  /**
+   * A deploy that reached the registry. Returning a message means the registry
+   * refused the write; it is shown inside this deploy box like every other
+   * deploy failure, never on the page above it.
+   */
+  readonly onDeployed: (result: SshDeployResult, sshFacts: SshSeedFacts) => string | undefined
   /** Pre-fill from a stored registration (detail page); absent on first add. */
   readonly initial?: SshSeedFacts | undefined
   /**
-   * 选择器带进来的 SSH 目标初值（AgentPanel 的 sshTargetDraft）：挂载这一次
-   * 落进 target；已存的登记凭据（initial.target）优先于它，不被草稿盖掉。
-   */
-  readonly initialTarget?: string | undefined
-  /**
    * 详情页显式选点的一次性覆盖：只在该次重挂里当 target 初值，压过已存的
-   * initial.target。没有它时优先级不变——已存凭据仍优先于草稿初值。
+   * initial.target。
    */
   readonly pickedTarget?: string | undefined
   /** Detail page locks the host identity: no hostId/hostTitle inputs. */
@@ -917,12 +936,13 @@ function SshDeploySection(props: {
   /**
    * When provided, the peer status checklist (tailscale serve flow) is shown
    * and its save button hands back the ts.net launch URL plus the host id to use.
+   * A returned message (registry refusal) is shown inside this box.
    */
-  readonly onServeReady?: ((launchUrl: string, facts: SshSeedFacts, hostId: string) => void) | undefined
+  readonly onServeReady?: ((launchUrl: string, facts: SshSeedFacts, hostId: string) => string | undefined) | undefined
   /** The locale seat, threaded from the panel. */
   readonly t: PanelT
 }): ReactNode {
-  const [target, setTarget] = useState(props.pickedTarget ?? props.initial?.target ?? props.initialTarget ?? '')
+  const [target, setTarget] = useState(props.pickedTarget ?? props.initial?.target ?? '')
   const [port, setPort] = useState(props.initial?.port === undefined ? '22' : String(props.initial.port))
   const [user, setUser] = useState(props.initial?.user ?? '')
   const [proxyJump, setProxyJump] = useState(props.initial?.proxyJump ?? '')
@@ -944,7 +964,11 @@ function SshDeploySection(props: {
   const [busy, setBusy] = useState<'inspect' | 'peer' | 'deploy' | undefined>(undefined)
   // 部署过程逐行留痕：不是只显示最后一行，每一阶段的原话都留在面上。
   const [progressLog, setProgressLog] = useState<readonly SshDeployProgress[]>([])
-  const [opError, setOpError] = useState<string | undefined>(undefined)
+  // 部署里的任何异常都只落在这个框里（2026-10-21 用户要求）：检查密钥、
+  // 读取、检测清单、部署本身，一个都不往页面上方冒。
+  const [errorText, setErrorText] = useState<string | undefined>(undefined)
+  const [identityOptions, setIdentityOptions] = useState<readonly string[]>([])
+  const identityListId = useId()
   const [peer, setPeer] = useState<PeerStatus | undefined>(undefined)
   const [deployed, setDeployed] = useState<SshDeployResult | undefined>(undefined)
   const [remoteAgents, setRemoteAgents] = useState<RemoteAgentDeploySelection>(() => (
@@ -976,12 +1000,13 @@ function SshDeploySection(props: {
 
   const runInspect = (): void => {
     setBusy('inspect')
+    setErrorText(undefined)
     setKeys([])
     setApprovedFingerprint('')
     void inspectSshHost(sshPayload(), props.t).then(result => {
       setBusy(undefined)
       if (!result.ok) {
-        props.onError(result.error)
+        setErrorText(result.error)
         return
       }
       setKeys(result.value.keys)
@@ -1002,16 +1027,28 @@ function SshDeploySection(props: {
     // 只在挂载这一刻自动检查；表单草稿的变化不该反复发起检查。
   }, [])
 
+  // 私钥路径的建议列表：读一次本机 ~/.ssh。读不到就是空清单——输入框照样
+  // 能接受手填的绝对路径，不在部署框里添一条无关的报错。
+  useEffect(() => {
+    let cancelled = false
+    void listSshIdentityFiles(props.t).then(paths => {
+      if (!cancelled) setIdentityOptions(paths)
+    })
+    return () => { cancelled = true }
+    // 清单是主机侧静态事实，挂载时读一次即可。
+  }, [])
+
   const runReadPeer = (): void => {
     if (approvedFingerprint === '') {
-      props.onError(props.t('panel.ssh.approveFingerprintFirst'))
+      setErrorText(props.t('panel.ssh.approveFingerprintFirst'))
       return
     }
     setBusy('peer')
+    setErrorText(undefined)
     void readRemotePeer({ ...sshPayload(), hostKeyFingerprint: approvedFingerprint }, props.t).then(result => {
       setBusy(undefined)
       if (!result.ok) {
-        props.onError(result.error)
+        setErrorText(result.error)
         return
       }
       setPeer(result.value)
@@ -1029,14 +1066,15 @@ function SshDeploySection(props: {
 
   const runCheck = (fingerprint: string = approvedFingerprint): void => {
     if (fingerprint === '') {
-      props.onError(props.t('panel.ssh.approveFingerprintFirst'))
+      setErrorText(props.t('panel.ssh.approveFingerprintFirst'))
       return
     }
     setCheckBusy('check')
+    setErrorText(undefined)
     void checkRemotePeer({ ...sshPayload(), hostKeyFingerprint: fingerprint }, remotePortValue(), props.t).then(result => {
       setCheckBusy(undefined)
       if (!result.ok) {
-        props.onError(result.error)
+        setErrorText(result.error)
         return
       }
       setCheckReport(result.value)
@@ -1054,12 +1092,13 @@ function SshDeploySection(props: {
     }
     const ssh = { ...sshPayload(), hostKeyFingerprint: approvedFingerprint }
     setCheckBusy(action)
+    setErrorText(undefined)
     if (action === 'start' || action === 'restart') {
       // 轻量：systemctl start/restart 已部署的服务，并从日志回读令牌写回 peer.json。
       void controlRemoteService(ssh, action, remotePortValue(), props.t).then(result => {
         setCheckBusy(undefined)
         if (!result.ok) {
-          props.onError(result.error)
+          setErrorText(result.error)
           return
         }
         setCheckReport(result.value.report)
@@ -1070,7 +1109,7 @@ function SshDeploySection(props: {
     void configureRemoteServe(ssh, remotePortValue(), props.t).then(result => {
       setCheckBusy(undefined)
       if (!result.ok) {
-        props.onError(result.error)
+        setErrorText(result.error)
         return
       }
       setCheckReport(result.value.report)
@@ -1080,19 +1119,19 @@ function SshDeploySection(props: {
 
   const runDeploy = (options: { readonly upgrade?: boolean; readonly fromCheck?: boolean } = {}): void => {
     if (approvedFingerprint === '') {
-      props.onError(props.t('panel.ssh.approveFingerprintFirst'))
+      setErrorText(props.t('panel.ssh.approveFingerprintFirst'))
       return
     }
     const fromCheck = options.fromCheck === true
     const hostId = fromCheck ? effectiveHostId() : props.hostId.trim()
     if (hostId === '') {
-      props.onError(props.t('panel.ssh.hostIdRequired'))
+      setErrorText(props.t('panel.ssh.hostIdRequired'))
       return
     }
     setBusy('deploy')
     if (fromCheck) setCheckBusy('deploy')
     setProgressLog([])
-    setOpError(undefined)
+    setErrorText(undefined)
     const finishCheck = (): void => {
       if (!fromCheck) return
       setCheckBusy(undefined)
@@ -1112,8 +1151,7 @@ function SshDeploySection(props: {
       if (!started.ok) {
         setBusy(undefined)
         if (fromCheck) setCheckBusy(undefined)
-        setOpError(started.error)
-        props.onError(started.error)
+        setErrorText(started.error)
         return
       }
       void waitSshDeployOperation(started.value.operationId, view => {
@@ -1128,19 +1166,19 @@ function SshDeploySection(props: {
         setBusy(undefined)
         finishCheck()
         if (!done.ok) {
-          setOpError(done.error)
-          props.onError(done.error)
+          setErrorText(done.error)
           return
         }
         if (done.value.status !== 'succeeded' || done.value.result === undefined) {
-          setOpError(done.value.error ?? props.t('panel.ssh.deployFailed'))
+          setErrorText(done.value.error ?? props.t('panel.ssh.deployFailed'))
           return
         }
-        setOpError(undefined)
+        setErrorText(undefined)
         // 检测清单里触发的部署只是修复一步：登记等清单全部通过后用 ts.net 地址做。
         if (fromCheck) return
         setDeployed(done.value.result)
-        props.onDeployed(done.value.result, seedFacts())
+        const refused = props.onDeployed(done.value.result, seedFacts())
+        if (refused !== undefined) setErrorText(refused)
       })
     })
   }
@@ -1196,7 +1234,17 @@ function SshDeploySection(props: {
           ? (
               <label className={styles.field}>
                 {props.t('panel.ssh.identityFileLabel')}
-                <input data-ssh-identity-file="" className={styles.input} value={identityFile} onChange={event => { setIdentityFile(event.target.value) }} placeholder={props.t('panel.ssh.identityFilePlaceholder')} />
+                <input
+                  data-ssh-identity-file=""
+                  className={styles.input}
+                  value={identityFile}
+                  list={identityListId}
+                  onChange={event => { setIdentityFile(event.target.value) }}
+                  placeholder={props.t('panel.ssh.identityFilePlaceholder')}
+                />
+                <datalist id={identityListId} data-ssh-identity-options="">
+                  {identityOptions.map(path => <option key={path} value={path} />)}
+                </datalist>
               </label>
             )
           : authMode === 'identityPem'
@@ -1328,7 +1376,10 @@ function SshDeploySection(props: {
               disabled={busy !== undefined && checkBusy === undefined}
               onCheck={() => { runCheck() }}
               onAction={runCheckAction}
-              onSave={launchUrl => { props.onServeReady?.(launchUrl, seedFacts(), effectiveHostId()) }}
+              onSave={launchUrl => {
+                const refused = props.onServeReady?.(launchUrl, seedFacts(), effectiveHostId())
+                if (refused !== undefined) setErrorText(refused)
+              }}
               t={props.t}
             />
           )
@@ -1354,13 +1405,13 @@ function SshDeploySection(props: {
             </div>
           )
         : undefined}
-      {opError !== undefined
+      {errorText !== undefined
         ? (
-            <div data-ssh-error="" className={styles.launchUrlBox}>
+            <div data-ssh-error="" data-deploy-error="" className={styles.launchUrlBox}>
               <p className={styles.stateBad}>{props.t('panel.ssh.failedTitle')}</p>
-              <code className={styles.launchUrlText}>{opError}</code>
+              <code className={styles.launchUrlText}>{errorText}</code>
               <div className={styles.formActions}>
-                <button type="button" className={styles.action} data-action="ssh-deploy-retry" disabled={busy !== undefined} onClick={() => { runDeploy() }}>{props.t('panel.ssh.retry')}</button>
+                <button type="button" className={styles.action} data-action="ssh-deploy-retry" disabled={busy !== undefined} onClick={() => { setErrorText(undefined); runDeploy() }}>{props.t('panel.ssh.retry')}</button>
               </div>
             </div>
           )
@@ -1471,13 +1522,14 @@ function HostUseSection(props: {
 /**
  * The form page both adding and viewing share — one component, two modes, so
  * a field changes in one place. Mode `new` collects the two operator-filled
- * fields (名称、IP) over 确定/取消, with 「从 Tailscale 选」 sitting before
- * the form to fill both at once. Mode `view` shows the same fields (minus the
- * ones this page has no business editing) plus the facts the host itself
- * reports — status, heartbeat, and the id the host announces, laid beside
- * what was filled in, with mismatches named out loud instead of silently
- * resolved. The back button lives outside the card: the card frames the
- * form, navigation is not part of it (2026-10-13 用户反馈).
+ * fields (名称、IP) over 添加/取消, with 「从 Tailscale 选」 sitting before
+ * the form to fill both at once. Mode `view` opens read-only: 主机信息 reads
+ * as text until 编辑 turns the same fields into inputs (2026-10-21 用户要求),
+ * and saving returns to the read-only view instead of leaving the settings
+ * page. The facts the host itself reports sit beside what was filled in, with
+ * mismatches named out loud instead of silently resolved. The back button
+ * lives outside the card: the card frames the form, navigation is not part of
+ * it (2026-10-13 用户反馈).
  *
  * @param props - mode, initial values, field policy, the reported facts
  *   (view only), confirm/cancel handlers, and optional sections.
@@ -1492,43 +1544,74 @@ export function HostFormPage(props: {
   readonly message?: { readonly tone: 'ok' | 'bad'; readonly text: string } | undefined
   readonly agents?: ReactNode
   readonly footer?: ReactNode
+  /** The deploy box; it sits directly under 主机信息 (2026-10-21 用户要求). */
+  readonly sections?: ReactNode
   readonly notes?: ReactNode
   /** The storage posture line; the page renders it under the form. */
   readonly postureNote?: ReactNode
+  /** 右上角的小动作（详情页的删除）；添加页没有。 */
+  readonly headActions?: ReactNode
   readonly onConfirm: (values: HostFormValues) => boolean
+  /** After a successful save: stay and drop back to read-only, or leave the page. */
+  readonly onSaved?: (values: HostFormValues) => void
   readonly onCancel: () => void
   /** 从 Tailscale 选的口（表单前面的入口）；缺省就不显示那个按钮。 */
   readonly tailscale?: TailscalePort | undefined
-  /** 面板持有的 SSH 目标草稿：添加页的目标输入框显示它，选择器往里写。 */
-  readonly sshTargetDraft?: string | undefined
-  readonly onSshTargetChange?: (value: string) => void
-  /** 选中一台对端：面板把 IP 落进 sshTargetDraft（添加页顺带切到 SSH 部署区）。 */
+  /** 选中一台对端：添加页把它的 IP 填进地址栏；详情页只当作部署目标。 */
   readonly onPickedPeer?: (peer: TailscalePeer) => void
   /** The locale seat, threaded from the panel. */
   readonly t: PanelT
 }): ReactNode {
+  const [editing, setEditing] = useState(props.mode === 'new')
   const [idDraft, setIdDraft] = useState(props.values.hostId)
   // IP 字段里放的是去协议的主机（可带端口）；入库前补协议，出库时剥掉。
   const [ipDraft, setIpDraft] = useState(hostPartOfAddress(props.values.address))
+  const [localError, setLocalError] = useState<string | undefined>(undefined)
   const { reported } = props
-  const fields = props.mode === 'new' ? ALL_FIELDS : props.fields ?? ALL_FIELDS
+  const fields = props.fields ?? ALL_FIELDS
+  const editable = props.mode === 'new' || editing
+  const canEdit = fields.id || fields.address
+  const resetDrafts = (): void => {
+    setIdDraft(props.values.hostId)
+    setIpDraft(hostPartOfAddress(props.values.address))
+    setLocalError(undefined)
+  }
   const confirm = (): void => {
-    // onConfirm 回 true＝保存成功，页面关掉回列表（列表本身就是保存结果的
-    // 反馈：新行以「未连接」出现、名字换成新的）；回 false＝留在本页看错误。
-    const parsed = registrationAddress(ipDraft)
-    const close = props.onConfirm({
-      hostId: idDraft.trim(),
+    // 名称留空就由 IP 推出一个主机标识（2026-10-21 用户要求：填好 IP 就能保存）。
+    // 本机没有地址栏（它的地址就是这个标签页），IP 必填只约束有地址栏的页面。
+    const addressValue = editable && fields.address ? ipDraft : props.values.address
+    const parsed = registrationAddress(addressValue)
+    if (fields.address && parsed.address === '') {
+      setLocalError(props.t('panel.form.addressRequired'))
+      return
+    }
+    setLocalError(undefined)
+    const values: HostFormValues = {
+      hostId: idDraft.trim() !== '' ? idDraft.trim() : deriveHostIdFromAddress(ipDraft),
       address: parsed.address,
       ...(parsed.launchUrl === undefined ? {} : { launchUrl: parsed.launchUrl }),
-    })
-    if (close) props.onCancel()
+    }
+    // onConfirm 回 true＝保存成功：添加页由 onSaved 带去设置页；详情页回到
+    // 只读视图（保存失败则留在可改界面看错误）。
+    if (!props.onConfirm(values)) return
+    if (props.mode === 'new') {
+      if (props.onSaved !== undefined) props.onSaved(values)
+      else props.onCancel()
+      return
+    }
+    setIdDraft(values.hostId)
+    setEditing(false)
+    props.onSaved?.(values)
   }
   // 自报标识与填写的名称当场比对（跟着输入走），不一致就明说，两边都保留。
   const idMatch = reported?.reportedId === undefined ? undefined : reported.reportedId === idDraft.trim()
   const addressHidden = props.mode === 'view' && !fields.address && props.values.address === ''
+  const message = localError !== undefined
+    ? { tone: 'bad' as const, text: localError }
+    : props.message
 
   // 从 Tailscale 选（表单前面的入口）：点开→读清单→列出；选一台→名称填上、
-  // IP 交给 SSH 目标＋收起（地址栏不动）；刷新让主机侧重跑一次；收起只关不填。
+  // 添加页把它的 IP 填进地址栏；刷新让主机侧重跑一次；收起只关不填。
   const [picker, setPicker] = useState<{ open: boolean; result?: TailscalePeersResult | undefined }>({ open: false })
   const canPickAddress = props.tailscale !== undefined && fields.address
   const openPicker = async (): Promise<void> => {
@@ -1544,10 +1627,12 @@ export function HostFormPage(props: {
     setPicker({ open: true, result })
   }
   const pickPeer = (peer: TailscalePeer): void => {
-    // 选中只填两处：名称栏填 peer 名，IP 交给面板的 SSH 目标草稿
-    // （onPickedPeer）；地址栏不动。Tailscale 在这里只是一条 SSH 路径，
-    // 用来部署插件；打开地址由部署绑到可达 IP 后写回，或由操作者粘贴。
-    setIdDraft(peer.name)
+    // 添加页：名称与 IP 一起填上，IP 就可以直接保存；详情页：选点只作为
+    // 部署目标，登记的名称与地址都不动（onPickedPeer 展开部署区）。
+    if (props.mode === 'new') {
+      setIdDraft(peer.name)
+      setIpDraft(peer.ip)
+    }
     props.onPickedPeer?.(peer)
     setPicker({ open: false })
   }
@@ -1570,6 +1655,17 @@ export function HostFormPage(props: {
               下面的主机信息（自报标识、状态、登记字段）是其中一个栏目。 */}
           <span data-host-management-heading="" className={styles.managementTag}>{props.t('panel.title.management')}</span>
           <span className={styles.spacer} />
+          {props.mode === 'view' && canEdit && !editing
+            ? (
+                <button
+                  type="button"
+                  data-action="edit-host"
+                  className={styles.action}
+                  onClick={() => { resetDrafts(); setEditing(true) }}
+                >{props.t('panel.button.edit')}</button>
+              )
+            : undefined}
+          {props.headActions}
         </div>
         {reported === undefined
           ? undefined
@@ -1665,6 +1761,9 @@ export function HostFormPage(props: {
               </div>
             )
           : undefined}
+        <div className={styles.sectionHead}>
+          <h3 className={styles.sectionTitle}>{props.t('panel.title.hostInfo')}</h3>
+        </div>
         <form
           data-host-form=""
           className={styles.formGrid}
@@ -1675,13 +1774,13 @@ export function HostFormPage(props: {
         >
           <label className={styles.field}>
             {props.t('panel.form.fieldName')}
-            {fields.id
+            {editable && fields.id
               ? (
                   <input
                     value={idDraft}
                     data-form-field-id=""
                     className={styles.input}
-                    onChange={event => { setIdDraft(event.target.value) }}
+                    onChange={event => { setIdDraft(event.target.value); setLocalError(undefined) }}
                     placeholder={props.mode === 'new' ? props.t('panel.form.fieldNamePlaceholder') : undefined}
                   />
                 )
@@ -1692,58 +1791,59 @@ export function HostFormPage(props: {
             : (
                 <label className={styles.field}>
                   {props.t('panel.form.fieldIp')}
-                  {fields.address
-                    ? <span data-address-empty-note="" className={styles.note}>{props.t('panel.form.addressEmptyNote')}</span>
-                    : undefined}
-                  {fields.address
+                  {editable && fields.address
                     ? (
                         <input
                           value={ipDraft}
                           data-form-field-address=""
                           className={styles.input}
-                          onChange={event => { setIpDraft(event.target.value) }}
+                          onChange={event => { setIpDraft(event.target.value); setLocalError(undefined) }}
                           placeholder={props.t('panel.form.ipPlaceholder')}
                         />
                       )
-                    : <span data-form-field-address="" className={styles.readonlyValue}>{hostPartOfAddress(props.values.address)}</span>}
+                    : <span data-form-field-address="" className={styles.readonlyValue}>{hostPartOfAddress(props.values.address) || '—'}</span>}
                 </label>
               )}
         </form>
-        {/* 添加页的 SSH 目标输入：选择器写的草稿在这里显示，也供人手填；
-            部署区挂载时以它为初值（initialTarget）。放在 host form 外面——
-            主机的登记字段只有名称和地址两个（表单字段的钉子测试守着这条），
-            SSH 目标是部署区的草稿，不是登记字段。详情页不渲染——那里的部署
-            区有自己的初值来源（登记凭据）。 */}
-        {props.mode === 'new'
-          ? (
-              <label className={styles.field}>
-                {props.t('panel.ssh.targetLabel')}
-                <input
-                  value={props.sshTargetDraft ?? ''}
-                  data-ssh-target=""
-                  className={styles.input}
-                  onChange={event => { props.onSshTargetChange?.(event.target.value) }}
-                  placeholder={props.t('panel.ssh.targetPlaceholder')}
-                />
-              </label>
-            )
-          : undefined}
-        {props.message === undefined
+        {message === undefined
           ? undefined
-          : <p data-form-message={props.message.tone} className={props.message.tone === 'ok' ? styles.stateLine : styles.stateBad}>{props.message.text}</p>}
+          : <p data-form-message={message.tone} className={message.tone === 'ok' ? styles.stateLine : styles.stateBad}>{message.text}</p>}
         {props.postureNote}
         <div className={styles.formActions}>
-          {props.mode === 'new' || fields.id || fields.address
+          {props.mode === 'new'
             ? (
-                <button type="button" data-form-confirm="" className={styles.actionPrimary} onClick={confirm}>
-                  {props.mode === 'new' ? props.t('panel.button.confirm') : props.t('panel.button.save')}
-                </button>
+                <>
+                  <button type="button" data-form-confirm="" className={styles.actionPrimary} onClick={confirm}>
+                    {props.t('panel.button.add')}
+                  </button>
+                  <button type="button" data-form-cancel-bottom="" className={styles.action} onClick={props.onCancel}>
+                    {props.t('panel.button.cancel')}
+                  </button>
+                </>
               )
-            : undefined}
-          <button type="button" data-form-cancel-bottom="" className={styles.action} onClick={props.onCancel}>
-            {props.mode === 'new' ? props.t('panel.button.cancel') : props.t('panel.button.backToList')}
-          </button>
+            : editing
+              ? (
+                  <>
+                    <button type="button" data-form-confirm="" className={styles.actionPrimary} onClick={confirm}>
+                      {props.t('panel.button.save')}
+                    </button>
+                    <button
+                      type="button"
+                      data-form-cancel-bottom=""
+                      className={styles.action}
+                      onClick={() => { resetDrafts(); setEditing(false) }}
+                    >
+                      {props.t('panel.button.cancel')}
+                    </button>
+                  </>
+                )
+              : (
+                  <button type="button" data-form-cancel-bottom="" className={styles.action} onClick={props.onCancel}>
+                    {props.t('panel.button.backToList')}
+                  </button>
+                )}
         </div>
+        {props.sections}
         {props.footer}
         {props.agents}
         {props.notes}
@@ -1774,13 +1874,8 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   const [, setIdentityRevision] = useState(0)
   const [registryRevision, setRegistryRevision] = useState(0)
   const [formMessage, setFormMessage] = useState<{ readonly tone: 'ok' | 'bad'; readonly text: string } | undefined>(undefined)
-  const [addMode, setAddMode] = useState<'manual' | 'ssh'>('manual')
   const [addIdDraft, setAddIdDraft] = useState('')
-  const [addTitleDraft, setAddTitleDraft] = useState('')
   const [addAddressDraft, setAddAddressDraft] = useState('')
-  // 选择器写、部署区读的 SSH 目标草稿：一份在面板手里，添加页的输入框和
-  // 部署区的初值都从它来（选中的对端只是 SSH 目标，地址留给部署/连接写）。
-  const [sshTargetDraft, setSshTargetDraft] = useState('')
   const [sshDeployAvailable, setSshDeployAvailable] = useState(false)
   useEffect(() => {
     void probeSshDeployApi().then(setSshDeployAvailable)
@@ -1916,13 +2011,30 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   const [tunnelChecks, setTunnelChecks] = useState<ReadonlyMap<string, 'checking' | 'online' | 'offline'>>(new Map())
   const [connectBusyId, setConnectBusyId] = useState<string | undefined>(undefined)
   const [connectError, setConnectError] = useState<{ readonly hostId: string; readonly text: string } | undefined>(undefined)
-  const [deployOpenId, setDeployOpenId] = useState<string | undefined>(undefined)
+  // 部署信息默认展开（2026-10-21 用户要求：部署就在设置界面里）；折叠是
+  // 操作者的选择，approve-and-read 这类显式流程会把它重新打开。
+  const [deployCollapsed, setDeployCollapsed] = useState<ReadonlySet<string>>(new Set())
   // 详情页选点的一次性覆盖：详情页换目标部署是受支持的动作（目标栏可编辑、
   // 部署成功就改写登记），显式选点必须赢过已存目标。只记「哪台主机、第几次
   // 选点、选了什么」：序号进部署区的 key 推动重挂，目标作为该次挂载的初值
-  // 压过已存凭据。它与 sshTargetDraft（面板级草稿）刻意分开——草稿不翻转
-  // 优先级，添加页留下的旧草稿盖不掉已存的好凭据；部署区一关覆盖即作废。
+  // 压过已存凭据。部署区收起或离开详情页即作废。
   const [deployPick, setDeployPick] = useState<{ readonly hostId: string; readonly serial: number; readonly target: string } | undefined>(undefined)
+  const openDeploy = (hostId: string): void => {
+    setDeployCollapsed(previous => {
+      if (!previous.has(hostId)) return previous
+      const next = new Set(previous)
+      next.delete(hostId)
+      return next
+    })
+  }
+  const toggleDeploy = (hostId: string): void => {
+    setDeployCollapsed(previous => {
+      const next = new Set(previous)
+      if (next.has(hostId)) next.delete(hostId)
+      else next.add(hostId)
+      return next
+    })
+  }
 
   const storedSshInput = (info: HostSshInfo): (SshConnectionInput & { readonly hostKeyFingerprint: string }) | undefined => {
     // 可读性与事实装配同一把尺子（storedSshUsable）：密码/粘贴私钥不落盘。
@@ -2004,7 +2116,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
    */
   const approveAndRead = (registration: HostRegistration): void => {
     setApproveAndReadId(registration.hostId)
-    setDeployOpenId(registration.hostId)
+    openDeploy(registration.hostId)
   }
 
   /** 详情页按钮表的统一出口：动作标识符到既有流程的映射，不新增流程。 */
@@ -2013,7 +2125,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
       case 'deploy':
       case 'redeploy':
       case 'fill-ssh':
-        setDeployOpenId(registration.hostId)
+        openDeploy(registration.hostId)
         break
       case 'read-peer':
       case 'retry-read':
@@ -2044,11 +2156,11 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
     if (registration !== undefined) readPeer(registration)
   }, [view])
 
-  // 选点覆盖只用这一程：部署区收起或离开详情页就作废，下次展开仍是已存优先。
+  // 选点覆盖只用这一程：离开详情页就作废，下次进页面仍是已存优先。
   useEffect(() => {
     if (deployPick === undefined) return
-    if (view.page !== 'detail' || deployOpenId !== deployPick.hostId) setDeployPick(undefined)
-  }, [view, deployOpenId, deployPick])
+    if (view.page !== 'detail') setDeployPick(undefined)
+  }, [view, deployPick])
 
   const runConnect = (
     registration: HostRegistration,
@@ -2064,7 +2176,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
     if (ssh === undefined) {
       // 没有可直接复用的凭据（未存方式，或密码/私钥）：如实说明并指去部署区块。
       setConnectError({ hostId: registration.hostId, text: props.t('panel.use.noCredential') })
-      setDeployOpenId(registration.hostId)
+      openDeploy(registration.hostId)
       return
     }
     setConnectBusyId(registration.hostId)
@@ -2102,60 +2214,6 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   )
 
   if (view.page === 'add') {
-    if (sshDeployAvailable && addMode === 'ssh') {
-      return (
-        <div data-threadharbor-panel="" className={styles.root}>
-          <section data-panel-page="add-ssh" className={styles.card}>
-            <div className={styles.cardHead}>
-              <button type="button" className={styles.action} onClick={openList}>{props.t('panel.button.back')}</button>
-              <h2 className={styles.title}>{props.t('panel.ssh.title')}</h2>
-              <span className={styles.spacer} />
-              <button type="button" className={styles.action} onClick={() => { setAddMode('manual'); setFormMessage(undefined) }}>{props.t('panel.ssh.manualEntry')}</button>
-            </div>
-            <StoragePostureLine posture={props.hostStore?.posture()} t={props.t} />
-            {formMessage !== undefined
-              ? <p data-form-message={formMessage.tone} className={formMessage.tone === 'ok' ? styles.stateLine : styles.stateBad}>{formMessage.text}</p>
-              : undefined}
-            <SshDeploySection
-              hostId={addIdDraft}
-              hostTitle={addTitleDraft}
-              onHostIdChange={setAddIdDraft}
-              onHostTitleChange={setAddTitleDraft}
-              initialTarget={sshTargetDraft}
-              onError={message => { setFormMessage({ tone: 'bad', text: message }) }}
-              onDeployed={(deployResult, sshFacts) => {
-                const result = props.registry.add({
-                  hostId: addIdDraft.trim(),
-                  hostTitle: addTitleDraft.trim(),
-                  address: deployResult.endpoint,
-                  launchUrl: deployResult.launchUrl,
-                  ssh: sshFacts,
-                })
-                if (!result.ok) {
-                  setFormMessage({ tone: 'bad', text: result.error.detail })
-                  return
-                }
-                setRegistryRevision(revision => revision + 1)
-                setFormMessage({
-                  tone: 'ok',
-                  text: props.t('panel.ssh.registered', { endpoint: deployResult.endpoint }),
-                })
-              }}
-              onServeReady={(launchUrl, sshFacts, hostId) => {
-                const saved = saveServeRegistration(props.registry, hostId, addTitleDraft.trim(), launchUrl, sshFacts)
-                if (!saved.ok) {
-                  setFormMessage({ tone: 'bad', text: saved.error.detail })
-                  return
-                }
-                setRegistryRevision(revision => revision + 1)
-                setFormMessage({ tone: 'ok', text: props.t('panel.check.saved', { url: new URL(launchUrl).origin }) })
-              }}
-              t={props.t}
-            />
-          </section>
-        </div>
-      )
-    }
     return (
       <div data-threadharbor-panel="" className={styles.root}>
         <HostFormPage
@@ -2165,29 +2223,21 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
           values={{ hostId: addIdDraft, address: addAddressDraft }}
           message={formMessage}
           postureNote={<StoragePostureLine posture={props.hostStore?.posture()} t={props.t} />}
-          footer={sshDeployAvailable
-            ? (
-                <p className={styles.note}>
-                  {props.t('panel.ssh.addFooterPrefix')}
-                  <button type="button" data-action="add-host-ssh" className={styles.action} onClick={() => { setAddMode('ssh'); setFormMessage(undefined) }}>{props.t('panel.ssh.title')}</button>
-                </p>
-              )
-            : undefined}
           onConfirm={values => {
             setAddIdDraft(values.hostId)
             setAddAddressDraft(values.address)
             return confirmAdd(values)
           }}
+          // 添加成功就进这台主机的设置界面：主机信息只读，下面就是部署信息
+          // （2026-10-21 用户要求：部署不再挂在添加页）。
+          onSaved={values => { setFormMessage(undefined); setView({ page: 'detail', hostId: values.hostId }) }}
           onCancel={openList}
           tailscale={props.tailscale}
-          sshTargetDraft={sshTargetDraft}
-          onSshTargetChange={setSshTargetDraft}
           onPickedPeer={peer => {
-            // 添加页选中：名称进部署区的主机名、IP 进目标栏，顺带切到部署区
-            // （不可用时留在本页，草稿仍在）；地址没人碰。
+            // 添加页选中：名称与 IP 一起填上（表单里本地状态也同步填好），
+            // 地址具备就能直接保存。
             setAddIdDraft(peer.name)
-            setSshTargetDraft(peer.ip)
-            setAddMode('ssh')
+            setAddAddressDraft(peer.ip)
           }}
           t={props.t}
         />
@@ -2257,11 +2307,9 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
             onCancel={openList}
             tailscale={props.tailscale}
             onPickedPeer={peer => {
-              // 详情页选中：IP 只落进草稿，登记的地址与名称都不动——这里不切
-              // 模式。选点是显式意图：展开部署区并重挂一次（序号进 key），让
-              // 选中的地址成为这次挂载的目标初值，已存凭据的旧目标不压它。
-              setSshTargetDraft(peer.ip)
-              setDeployOpenId(row.hostId)
+              // 详情页选中：IP 只作为这次部署的目标，登记的地址与名称都不动。
+              // 选点是显式意图：展开部署区并重挂一次（序号进 key）。
+              openDeploy(row.hostId)
               setDeployPick(previous => ({
                 hostId: row.hostId,
                 serial: (previous?.serial ?? 0) + 1,
@@ -2269,6 +2317,87 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
               }))
             }}
             t={props.t}
+            // 删除放在卡片右上角，一个小按钮（2026-10-21 用户要求）。
+            headActions={registration !== undefined
+              ? (!confirmingRemove
+                  ? (
+                      <button
+                        type="button"
+                        data-registry-remove-ask=""
+                        className={styles.action}
+                        onClick={() => { setConfirmingRemove(true) }}
+                      >{props.t('panel.button.deleteHost')}</button>
+                    )
+                  : (
+                      <span data-registry-confirm="" className={styles.confirmBox}>
+                        <button type="button" data-registry-remove-confirm="" className={styles.action} onClick={() => { removeRegistration(row.hostId); openList() }}>{props.t('panel.button.confirmRemove')}</button>
+                        <button type="button" data-registry-remove-cancel="" className={styles.action} onClick={() => { setConfirmingRemove(false) }}>{props.t('panel.button.cancel')}</button>
+                      </span>
+                    ))
+              : undefined}
+            // 主机信息下面就是部署信息；部署里的异常也只在这个框里出现。
+            sections={sshDeployAvailable && !row.self && registration !== undefined
+              ? (
+                  <section data-deploy-section="" className={styles.deploySection}>
+                    <div className={styles.sectionHead}>
+                      <h3 className={styles.sectionTitle}>{props.t('panel.title.deployInfo')}</h3>
+                      <span className={styles.spacer} />
+                      <button
+                        type="button"
+                        className={styles.action}
+                        data-action={deployCollapsed.has(row.hostId) ? 'open-deploy' : 'close-deploy'}
+                        onClick={() => { toggleDeploy(row.hostId) }}
+                      >{deployCollapsed.has(row.hostId) ? props.t('panel.deploy.expand') : props.t('panel.deploy.collapse')}</button>
+                    </div>
+                    {deployCollapsed.has(row.hostId)
+                      ? undefined
+                      : (
+                          <SshDeploySection
+                            // key 带上 approve-and-read 标记：从「批准并读取」
+                            // 打开时重挂一次，自动检查密钥的 effect 才会跑。
+                            // 末段是选点序号：只由详情页选点推动，选点重挂
+                            // 一次带上新目标；不挂草稿值，免得输入被冲掉。
+                            key={`deploy-${row.hostId}-${approveAndReadId === row.hostId}-${pickedDeploy === undefined ? 0 : pickedDeploy.serial}`}
+                            hostId={row.hostId}
+                            hostTitle={row.name}
+                            lockHost
+                            initial={registration.ssh}
+                            pickedTarget={pickedDeploy?.target}
+                            autoInspect={approveAndReadId === row.hostId}
+                            onApproved={approveAndReadId === row.hostId
+                              ? ssh => {
+                                  // 认完指纹接着读：approve-and-read 的后半段，
+                                  // 用的就是这次批准的指纹。
+                                  readPeerWith(registration, ssh)
+                                }
+                              : undefined}
+                            onHostIdChange={() => undefined}
+                            onHostTitleChange={() => undefined}
+                            onDeployed={(result, facts) => {
+                              const edit = applyRegistrationEdit(props.registry, row.hostId, {
+                                address: result.endpoint,
+                                launchUrl: result.launchUrl,
+                                ssh: facts,
+                              })
+                              if (!edit.ok) return edit.error.detail
+                              setRegistryRevision(revision => revision + 1)
+                              setTunnelChecks(previous => new Map(previous).set(row.hostId, 'online'))
+                              return undefined
+                            }}
+                            onConnect={(ssh, facts) => { runConnect(registration, ssh, facts) }}
+                            onServeReady={(launchUrl, facts) => {
+                              const saved = saveServeRegistration(props.registry, row.hostId, '', launchUrl, facts)
+                              if (!saved.ok) return saved.error.detail
+                              setRegistryRevision(revision => revision + 1)
+                              setTunnelChecks(previous => new Map(previous).set(row.hostId, 'online'))
+                              return undefined
+                            }}
+                            t={props.t}
+                          />
+                        )}
+                  </section>
+                )
+              : undefined}
             footer={registration !== undefined
               ? (
                   <>
@@ -2293,17 +2422,6 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                             </p>
                           )
                         : undefined}
-                      {!confirmingRemove
-                        ? (
-                            <button type="button" data-registry-remove-ask="" className={styles.action} onClick={() => { setConfirmingRemove(true) }}>{props.t('panel.button.deleteRegistration')}</button>
-                          )
-                        : (
-                            <span data-registry-confirm="" className={styles.confirmBox}>
-                              {props.t('panel.registry.removeNote')}
-                              <button type="button" data-registry-remove-confirm="" className={styles.action} onClick={() => { removeRegistration(row.hostId); openList() }}>{props.t('panel.button.confirmRemove')}</button>
-                              <button type="button" data-registry-remove-cancel="" className={styles.action} onClick={() => { setConfirmingRemove(false) }}>{props.t('panel.button.cancel')}</button>
-                            </span>
-                          )}
                     </div>
                     {!row.self
                       ? (
@@ -2369,77 +2487,9 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                             connecting={connectBusyId === row.hostId}
                             error={connectError?.hostId === row.hostId ? connectError.text : undefined}
                             onConnect={() => { runConnect(registration) }}
-                            onOpenDeploy={() => { setDeployOpenId(deployOpenId === row.hostId ? undefined : row.hostId) }}
+                            onOpenDeploy={() => { openDeploy(row.hostId) }}
                             t={props.t}
                           />
-                        )
-                      : undefined}
-                    {sshDeployAvailable && !row.self
-                      ? (
-                          <section data-deploy-section="" className={styles.sshSection}>
-                            <div className={styles.formActions}>
-                              <button
-                                type="button"
-                                className={deployOpenId === row.hostId ? styles.action : styles.actionPrimary}
-                                data-action={deployOpenId === row.hostId ? 'close-deploy' : 'open-deploy'}
-                                onClick={() => { setDeployOpenId(deployOpenId === row.hostId ? undefined : row.hostId) }}
-                              >{deployOpenId === row.hostId ? props.t('panel.deploy.collapse') : props.t('panel.deploy.expand')}</button>
-                            </div>
-                            {deployOpenId === row.hostId
-                              ? (
-                                  <SshDeploySection
-                                    // key 带上 approve-and-read 标记：从「批准并读取」
-                                    // 打开时重挂一次，自动检查密钥的 effect 才会跑。
-                                    // 末段是选点序号：只由详情页选点推动，选点重挂
-                                    // 一次带上新目标；不挂草稿值，免得输入被冲掉。
-                                    key={`deploy-${row.hostId}-${approveAndReadId === row.hostId}-${pickedDeploy === undefined ? 0 : pickedDeploy.serial}`}
-                                    hostId={row.hostId}
-                                    hostTitle={row.name}
-                                    lockHost
-                                    initial={registration.ssh}
-                                    initialTarget={sshTargetDraft}
-                                    pickedTarget={pickedDeploy?.target}
-                                    autoInspect={approveAndReadId === row.hostId}
-                                    onApproved={approveAndReadId === row.hostId
-                                      ? ssh => {
-                                          // 认完指纹接着读：approve-and-read 的后半段，
-                                          // 用的就是这次批准的指纹。
-                                          readPeerWith(registration, ssh)
-                                        }
-                                      : undefined}
-                                    onHostIdChange={() => undefined}
-                                    onHostTitleChange={() => undefined}
-                                    onDeployed={(result, facts) => {
-                                      const edit = applyRegistrationEdit(props.registry, row.hostId, {
-                                        address: result.endpoint,
-                                        launchUrl: result.launchUrl,
-                                        ssh: facts,
-                                      })
-                                      if (!edit.ok) {
-                                        setFormMessage({ tone: 'bad', text: edit.error.detail })
-                                        return
-                                      }
-                                      setRegistryRevision(revision => revision + 1)
-                                      setTunnelChecks(previous => new Map(previous).set(row.hostId, 'online'))
-                                      setFormMessage(undefined)
-                                    }}
-                                    onConnect={(ssh, facts) => { runConnect(registration, ssh, facts) }}
-                                    onServeReady={(launchUrl, facts) => {
-                                      const saved = saveServeRegistration(props.registry, row.hostId, '', launchUrl, facts)
-                                      if (!saved.ok) {
-                                        setFormMessage({ tone: 'bad', text: saved.error.detail })
-                                        return
-                                      }
-                                      setRegistryRevision(revision => revision + 1)
-                                      setTunnelChecks(previous => new Map(previous).set(row.hostId, 'online'))
-                                      setFormMessage({ tone: 'ok', text: props.t('panel.check.saved', { url: new URL(launchUrl).origin }) })
-                                    }}
-                                    onError={message => { setFormMessage({ tone: 'bad', text: message }) }}
-                                    t={props.t}
-                                  />
-                                )
-                              : undefined}
-                          </section>
                         )
                       : undefined}
                   </>

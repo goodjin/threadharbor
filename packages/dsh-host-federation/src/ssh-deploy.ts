@@ -7,6 +7,7 @@
  */
 
 import Schema from '@deepseek-ai/schemastery'
+import { readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { DshSshManager } from './ssh/manager.ts'
@@ -36,6 +37,7 @@ export const ROUTE_CHECK = '/api/threadharbor.host-ssh.check'
 export const ROUTE_SERVE = '/api/threadharbor.host-ssh.serve'
 export const ROUTE_SERVICE = '/api/threadharbor.host-ssh.service'
 export const ROUTE_START = '/api/threadharbor.host-ssh.start'
+export const ROUTE_KEYS = '/api/threadharbor.host-ssh.keys'
 
 export type Config = {
   knownHostsPath?: string
@@ -222,6 +224,10 @@ export function apply(ctx: unknown, config: Config = {}): void {
     return { keys }
   })
 
+  // 私钥路径的可选清单：只读本机 ~/.ssh 里的文件名，拿不到密码、也不读内容。
+  // 面板把它当输入框的建议项，填不填仍由操作者决定。
+  register(ROUTE_KEYS, async () => ({ keys: listIdentityFiles() }))
+
   register(ROUTE_DEPLOY, async body => {
     const record = body as Record<string, unknown>
     const request = parseDeployRequest(record)
@@ -266,6 +272,26 @@ function portOf(value: unknown): number | undefined {
   if (value === undefined || value === null) return undefined
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 65_535) throw new Error('remoteWebPort 无效')
   return value
+}
+
+/**
+ * Absolute paths of files in the Web host's `~/.ssh` that could be a private
+ * key. The list is only advice for the path field: public halves and ssh's own
+ * bookkeeping files are skipped, everything else is offered as typed.
+ */
+function listIdentityFiles(): string[] {
+  const directory = join(homedir(), '.ssh')
+  const metadata = new Set(['config', 'known_hosts', 'authorized_keys', 'environment', 'rc'])
+  try {
+    return readdirSync(directory, { withFileTypes: true })
+      .filter(entry => entry.isFile() || entry.isSymbolicLink())
+      .map(entry => entry.name)
+      .filter(name => !name.startsWith('.') && !name.endsWith('.pub') && !metadata.has(name) && !name.startsWith('known_hosts'))
+      .sort()
+      .map(name => join(directory, name))
+  } catch {
+    return []
+  }
 }
 
 function parseDeployRequest(record: Record<string, unknown>): SshDeployRequest {
