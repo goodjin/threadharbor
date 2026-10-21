@@ -94,18 +94,34 @@ for (const entry of ENTRIES) {
     // fail on its own; do not pre-empt it with a freshness complaint.
     continue
   }
-  const emittedMtime = statSync(join(ROOT, entry.emitted)).mtimeMs
   for (const source of reachableSources(entry.entrySource)) {
     if (!existsSync(source)) continue
     const emitted = emittedFor(source)
     if (!existsSync(emitted)) continue // not emitted (e.g. CSS, or a type-only path)
+    // **每个源文件跟它自己的编译产物比**，不是跟入口的产物比。
+    //
+    // 入口比法（2026-10-20 之前）是错的：`tsc` 增量编译不重写内容没变的入口
+    // 文件，于是「改了一个叶子文件」就会让入口的产物比那个叶子旧——门禁误报
+    // 「产物过期」，逼人清库重建。清库期间 `lib/` 是空的：桌面版从磁盘现读现服务
+    // 客户端包，那个窗口里刷新页面就会读到半成品，整个客户端插件装载失败
+    // （2026-10-20 桌面版现场：输入框连模型都不见了）。
+    //
+    // 逐文件比才是这道门禁本来的意思：源比它自己的产物新，就是它没被编译过。
+    // 入口自己的产物仍旧单独看一眼（它就是打包的输入）。
     const sourceMtime = statSync(source).mtimeMs
-    if (sourceMtime > emittedMtime) {
+    if (sourceMtime > statSync(emitted).mtimeMs) {
       problems.push(
-        `${relative(ROOT, source)} is newer than ${relative(ROOT, entry.emitted)} — ` +
+        `${relative(ROOT, source)} is newer than ${relative(ROOT, emitted)} — ` +
           `packaging would bundle stale code. Run \`pnpm build\` (tsc before tsdown).`,
       )
     }
+  }
+  const entrySourceMtime = statSync(entry.entrySource).mtimeMs
+  if (entrySourceMtime > statSync(join(ROOT, entry.emitted)).mtimeMs) {
+    problems.push(
+      `${relative(ROOT, entry.entrySource)} is newer than ${relative(ROOT, entry.emitted)} — ` +
+        `packaging would bundle stale code. Run \`pnpm build\` (tsc before tsdown).`,
+    )
   }
 }
 
