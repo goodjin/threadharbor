@@ -93,14 +93,18 @@ export type ModelLabelProps = {
  * 保持裸模型名——这个歧义是「把会话交给第三方 agent」带来的，给所有 provider
  * 都加前缀等于给每个人凭空加噪音。
  *
+ * 外部 agent 的前缀**一律加**，不看模型名里是否已经出现过 agent 名字。模型名
+ * 是配置来的纯模型标识（Grok 4.7、M3.1 Flash 这种），它跟 agent 名恰好相同只是
+ * 巧合，不是「已经带了前缀」的信号。去重会让前缀规则随命名漂移——Grok 4.7
+ * 因为以 Grok 开头就掉了前缀，别的模型却带着，规范不统一。宁可显示成
+ * `Grok · Grok 4.7`，也不让规则看字符串脸色。
+ *
  * @param provider - 标签座位给的那个 provider 组。
  * @param model - 标签座位给的那个模型。
  * @returns 带分隔符的前缀，或空串。
  */
-export function agentPrefix(provider: LabelProvider, model: LabelModel): string {
+export function agentPrefix(provider: LabelProvider, _model: LabelModel): string {
   if (!provider.id.startsWith(EXTERNAL_ROUTE_PREFIX)) return ''
-  // 模型显示名是配置来的，可能已经带了 agent 名字。
-  if (provider.name !== '' && model.name.startsWith(provider.name)) return ''
   return `${provider.name} · `
 }
 

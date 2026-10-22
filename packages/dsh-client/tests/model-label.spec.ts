@@ -127,8 +127,12 @@ describe('模型名上的 agent 前缀', () => {
     expect(agentPrefix(provider('zai-coding-cn', 'GLM'), model('GLM-5.3', 'GLM-5.3'))).toBe('')
   })
 
-  it('模型显示名已经带了 agent 名字就不再加一遍', () => {
-    expect(agentPrefix(provider('acp:acp-zcode', 'ZCode'), model('GLM-5.3', 'ZCode GLM-5.3'))).toBe('')
+  it('模型名里碰巧出现 agent 名字也照加前缀：规则不看字符串脸色', () => {
+    // Grok 4.7 这个模型名只是恰好以 Grok 开头，不是「已经带了前缀」的信号。
+    // 去重会让前缀随命名漂移（Grok 掉了、别的带着），规范不统一——宁可显示成
+    // Grok · Grok 4.7，也不让规则去猜。
+    expect(agentPrefix(provider('acp:acp-grok', 'Grok'), model('grok-4.7', 'Grok 4.7')))
+      .toBe('Grok · ')
   })
 
   it('渲染出来的那行字就是「前缀 + 模型名」', () => {
