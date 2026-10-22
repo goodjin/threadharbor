@@ -431,6 +431,69 @@ describe('AcpTurnRunner', () => {
       .toBeUndefined()
   })
 
+  it('ends a codex turn whose model the agent no longer lists with a re-select message', async () => {
+    // codex set_model answers an id outside availableModels with an opaque
+    // -32603 "Unknown model …" (live probe 2026-10-22). Sending the session's
+    // stale pick only buys that; end locally and let the user pick from the
+    // list session/new just reported.
+    const client = fakeClient()
+    client.request = async (method, params) => {
+      client.calls.push({ method, params })
+      if (method === 'session/new') {
+        return { sessionId: 's1', models: { availableModels: [
+          { modelId: 'gpt-6-astra[low]', name: 'GPT-6-Astra' },
+          { modelId: 'gpt-6-astra[high]', name: 'GPT-6-Astra' },
+        ] } }
+      }
+      if (method === 'session/prompt') return { stopReason: 'end_turn' }
+      return {}
+    }
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: codexDialect })
+    const result = await runner.run(DECISION, {
+      sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1, modelId: 'gpt-6-astra[ultra]',
+    })
+
+    expect(result.end.kind).toBe('error')
+    const error = (result.end as { error: { code: string; message: string } }).error
+    expect(error.code).toBe('ACP_INTERNAL')
+    expect(error.message).toContain('gpt-6-astra[ultra]')
+    expect(error.message).toContain('重新选择')
+    expect(client.calls.some(call => call.method === 'session/set_model')).toBe(false)
+    expect(client.calls.some(call => call.method === 'session/prompt')).toBe(false)
+  })
+
+  it('asks for an effort when a codex pick names only the base model', async () => {
+    // The catalog collapses codex's per-effort ids into one base row and lets
+    // the effort ride separately; a pick that carries no effort reaches
+    // set_model as the bare base, which codex rejects ("Expected:
+    // modelId[effort]", live probe 2026-10-22). That is not a stale model, so
+    // the message names the missing effort instead.
+    const client = fakeClient()
+    client.request = async (method, params) => {
+      client.calls.push({ method, params })
+      if (method === 'session/new') {
+        return { sessionId: 's1', models: { availableModels: [
+          { modelId: 'gpt-6-astra[low]', name: 'GPT-6-Astra' },
+          { modelId: 'gpt-6-astra[high]', name: 'GPT-6-Astra' },
+        ] } }
+      }
+      if (method === 'session/prompt') return { stopReason: 'end_turn' }
+      return {}
+    }
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: codexDialect })
+    const result = await runner.run(DECISION, {
+      sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1, modelId: 'gpt-6-astra',
+    })
+
+    expect(result.end.kind).toBe('error')
+    const error = (result.end as { error: { code: string; message: string } }).error
+    expect(error.code).toBe('ACP_INTERNAL')
+    expect(error.message).toContain('gpt-6-astra')
+    expect(error.message).toContain('推理档位')
+    expect(client.calls.some(call => call.method === 'session/set_model')).toBe(false)
+    expect(client.calls.some(call => call.method === 'session/prompt')).toBe(false)
+  })
+
   it("claude sends the pick through its published model config option", async () => {
     const client = fakeClient()
     client.request = async (method, params) => {

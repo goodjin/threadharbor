@@ -9,6 +9,7 @@
 
 import type { AcpStepResult, StepDecisionLike, StepEndReason, TurnContext, TurnStreamHandle } from './dispatch.ts'
 import { RAW_OUTPUT, UNDELIVERED } from './content-writer.ts'
+import { baseIdOf } from './selection.ts'
 import { RawOutputAggregator } from '@threadharbor/dsh-acp-agent'
 import type { RawOutputBlock } from '@threadharbor/dsh-acp-agent'
 import type { UndeliveredAttachment } from './content-writer.ts'
@@ -213,6 +214,20 @@ function resolveConfigValue(aliases: Map<string, string> | undefined, modelId: s
   if (direct !== undefined) return direct
   const bracket = modelId.indexOf('[')
   return bracket > 0 ? aliases.get(modelId.slice(0, bracket)) : undefined
+}
+
+/**
+ * The model ids the same reply advertised, or undefined when it named none.
+ *
+ * `set_model` has no selector names or values to alias against — its argument
+ * is the exact wire id — so this set is the whole test of whether a session's
+ * pick still exists on the agent's side. A reply that named no models leaves
+ * the pick unjudged rather than rejected.
+ */
+function reportedModelIds(reply: unknown, dialect: AcpDialect | undefined): ReadonlySet<string> | undefined {
+  if (dialect === undefined) return undefined
+  const models = dialect.readModels(reply)
+  return models.length === 0 ? undefined : new Set(models.map(model => model.id))
 }
 
 function textOf(content: unknown): string {
@@ -574,6 +589,13 @@ export class AcpTurnRunner {
    * plain `grok-4.7`) into the value the live agent advertises.
    */
   private modelConfigValues: Map<string, string> | undefined
+  /**
+   * The model ids the current session's reply advertised. `set_model` takes an
+   * exact wire id, so a pick outside this set is either stale (the agent's list
+   * moved on) or a bare base that is missing an effort suffix. Undefined when
+   * the reply named no models: then there is nothing to judge against.
+   */
+  private modelWireIds: ReadonlySet<string> | undefined
   /**
    * The modelId last applied to the current external session via
    * `session/set_config_option`. Keyed to the session, not the turn: the
@@ -1753,6 +1775,7 @@ export class AcpTurnRunner {
         this.appliedModelId = undefined
         this.modelConfigId = this.options.dialect?.modelConfigId?.(resumed)
         this.modelConfigValues = configValueAliases(resumed, this.modelConfigId)
+        this.modelWireIds = reportedModelIds(resumed, this.options.dialect)
         if (this.options.dialect !== undefined && this.options.onModels !== undefined) {
           this.options.onModels(this.options.dialect.readModels(resumed))
         }
@@ -1788,6 +1811,7 @@ export class AcpTurnRunner {
     this.appliedModelId = undefined
     this.modelConfigId = this.options.dialect?.modelConfigId?.(reply)
     this.modelConfigValues = configValueAliases(reply, this.modelConfigId)
+    this.modelWireIds = reportedModelIds(reply, this.options.dialect)
     // The picker serves what the agent reported; the dialect knows where the
     // list lives. Reported even when empty — an agent that serves nothing must
     // be able to replace whatever was believed before.
@@ -1816,6 +1840,23 @@ export class AcpTurnRunner {
     if (modelId === this.appliedModelId) return
     const via = this.options.dialect?.modelVia
     if (via === 'set_model') {
+      const ids = this.modelWireIds
+      if (ids !== undefined && !ids.has(modelId)) {
+        const base = baseIdOf(modelId)
+        // codex advertises one entry per effort (`gpt-6-astra[low]`) and its
+        // set_model rejects the bare base (live probe 2026-10-22: -32603
+        // "Unsupported format ... Expected: modelId[effort]"). A bare pick
+        // whose base is still served is not stale — it is missing the effort,
+        // and only the user can choose one.
+        if (base === modelId && [...ids].some(id => baseIdOf(id) === base)) {
+          throw new Error(
+            `模型 ${modelId} 需要先选择推理档位（agent 只接受带档位的模型 id）`,
+          )
+        }
+        throw new Error(
+          `模型 ${modelId} 已不在 agent 当前提供的模型列表中，请重新选择模型`,
+        )
+      }
       await this.client.request('session/set_model', { sessionId, modelId })
     } else if (via === 'config_option' && this.modelConfigId !== undefined) {
       const value = resolveConfigValue(this.modelConfigValues, modelId)
