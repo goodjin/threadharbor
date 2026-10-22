@@ -154,6 +154,76 @@ describe('native subagent frames', () => {
   })
 })
 
+/**
+ * cursor publishes one delegation twice (bundle 2026.10.01, measured
+ * 2026-10-21): a `task` tool call with the full prompt and agent name, and a
+ * native `subagent_spawned`/`subagent_state_update` pair whose `task` is
+ * truncated. `_meta.cursor.toolCallId` joins them (in the same newline-joined
+ * form the tool frames use — cursor joins two ids). One card, one child.
+ */
+describe('cursor delegation published twice', () => {
+  const RAW_ID = 'call-1\nfc-1_0'
+  const CALL_ID = 'call-1fc-1_0'
+
+  const dispatch = rootUpdate({
+    sessionUpdate: 'tool_call',
+    toolCallId: RAW_ID,
+    kind: 'other',
+    status: 'pending',
+    rawInput: { _toolName: 'task', prompt: 'build the thing', description: 'design-work' },
+  })
+  const dispatchDone = rootUpdate({
+    sessionUpdate: 'tool_call_update',
+    toolCallId: RAW_ID,
+    status: 'completed',
+  })
+  const cursorSpawn = rootUpdate({
+    sessionUpdate: 'subagent_spawned',
+    subagentSessionId: CHILD,
+    name: 'generalPurpose',
+    task: 'build the',
+    capabilities: {},
+    _meta: { cursor: { toolCallId: RAW_ID } },
+  })
+
+  it('keeps one card, joined by _meta.cursor.toolCallId, with the dispatch’s full task', () => {
+    const events = projectStepContent(
+      [dispatch, cursorSpawn, dispatchDone, childReply('done'), settled('completed')],
+      { turn: 1, step: 1, dialect: cursorDialect },
+    )
+
+    const calls = events.filter(event => event.type === 'tool/call')
+    expect(calls).toHaveLength(1)
+    const card = calls[0]!.payload as CallPayload
+    expect(card.callId).toBe(CALL_ID)
+    expect(card.name).toBe('subagent')
+    expect(JSON.parse(card.arguments)).toEqual({ prompt: 'build the thing', agent: 'design-work' })
+  })
+
+  it('settles on the native state, not on the dispatch call’s completed frame', () => {
+    const events = projectStepContent(
+      [dispatch, cursorSpawn, dispatchDone, childReply('done'), settled('completed')],
+      { turn: 1, step: 1, dialect: cursorDialect },
+    )
+
+    const results = events.filter(event => event.type === 'tool/result')
+    expect(results).toHaveLength(1)
+    expect((results[0]!.payload as ResultPayload).message.content.map(part => part.text).join('')).toBe('done')
+    expect((results[0]!.payload as ResultPayload).message.isError).toBe(false)
+  })
+
+  it('reports still running when only the dispatch call completed', () => {
+    const events = projectStepContent(
+      [dispatch, cursorSpawn, dispatchDone, childReply('working')],
+      { turn: 1, step: 1, dialect: cursorDialect },
+    )
+
+    const text = (resultOf(events).message.content).map(part => part.text).join('')
+    expect(text).toContain('[still running]')
+    expect(text).toContain('working')
+  })
+})
+
 describe('async task frames', () => {
   const TASK = 'task-7'
 

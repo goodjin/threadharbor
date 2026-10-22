@@ -20,6 +20,20 @@
  *   - **`authenticateMethodId: 'cursor_login'`** — the runner must call
  *     `authenticate` between `initialize` and `session/new`; skip it and the
  *     session/new fails.
+ *   - **Subagent capability lives under `_meta`.** Cursor checks
+ *     `clientCapabilities.subagents || clientCapabilities._meta.subagents`
+ *     (bundle 2026.10.01), and the released SDK strips the top-level draft
+ *     field, so only the meta spelling reaches it. With the capability on, a
+ *     delegation sends `subagent_spawned` / `subagent_state_update` and the
+ *     parent session resumes when the child finishes.
+ *   - **Delegations arrive twice**: a `task` tool call (full prompt in
+ *     `rawInput`) and a native spawned frame (child session id, truncated
+ *     task). `spawnToolCallId` joins them on `_meta.cursor.toolCallId`.
+ *   - **The model picker is written through `session/set_config_option`**
+ *     (`configId: "model"`), the only path Cursor implements.
+ *   - **No `session/resume`.** `initialize` advertises `loadSession: true`,
+ *     but a `session/resume` probe returns -32601; only `session/load` exists,
+ *     which the runner's journal does not use yet.
  *
  * Models come from `session/new` `.models.availableModels` like codex, but the
  * ids carry a config suffix (`grok-4.7[context=256k,reasoning_effort=high,
@@ -67,6 +81,41 @@ export const cursorDialect: AcpDialect = {
     toolNameMap: {
       execute: 'bash',
     },
+    // Cursor reads the ACP subagent draft capability from
+    // `clientCapabilities._meta.subagents` — the top-level draft field is
+    // stripped by the released SDK before it reaches the agent (measured
+    // 2026-10-21). With it, a delegation produces `subagent_spawned` /
+    // `subagent_state_update` and the parent resumes after the child's
+    // completion; without it those frames never come.
+    metaSubagents: true,
+    // The same delegation also appears as a `task` tool call that completes at
+    // dispatch time. The native frames describe the run, so they own the card
+    // and the child session; the tool call is only their join key.
+    nativeSubagentFrames: true,
+  },
+
+  // The user's pick rides `session/set_config_option` — cursor publishes the
+  // model selector in `session/new` (configOptions, id/category "model") and
+  // implements `unstable_setSessionModel` on exactly that path. A modelId on
+  // session/prompt is not part of the protocol and Cursor does not read it.
+  modelVia: 'config_option',
+
+  modelConfigId(reply) {
+    const options = record(reply)['configOptions']
+    if (!Array.isArray(options)) return undefined
+    const entry = options
+      .map(record)
+      .find(option => option['category'] === 'model' || option['id'] === 'model')
+    const id = record(entry)['id']
+    return typeof id === 'string' ? id : undefined
+  },
+
+  // The native spawn frame and the dispatching `task` tool call carry the same
+  // id under `_meta.cursor.toolCallId` (the same newline-joined form the tool
+  // frames use), so the join runs through the same single-line collapse.
+  spawnToolCallId(update) {
+    const id = record(record(update['_meta'])['cursor'])['toolCallId']
+    return typeof id === 'string' ? singleLineId(id) : undefined
   },
 
   foldTool(carried, update) {

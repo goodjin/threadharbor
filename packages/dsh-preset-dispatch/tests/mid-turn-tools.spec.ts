@@ -595,3 +595,64 @@ describe('Cursor 的编辑过程使用真实帧', () => {
     await h.run()
   })
 })
+
+describe('Cursor 的子代理派发只写一张卡', () => {
+  const rawId = 'call-1\nfc-1_0'
+  const foldedId = 'call-1fc-1_0'
+  const childFrame = (update: Record<string, unknown>): AcpFrame => ({
+    jsonrpc: '2.0',
+    method: 'session/update',
+    params: { sessionId: 'child-1', update },
+  })
+
+  it('task 工具与原生出生帧共用一张卡，结果等原生终态才落', async () => {
+    const h = harness({ dialect: cursorDialect })
+    await h.started()
+    h.push([
+      {
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: update({
+          sessionUpdate: 'tool_call', toolCallId: rawId, title: 'Task: design-work', kind: 'other', status: 'pending',
+          rawInput: { _toolName: 'task', prompt: '设计统一方案', description: 'design-work' },
+        }),
+      },
+      {
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: update({
+          sessionUpdate: 'subagent_spawned', subagentSessionId: 'child-1', name: 'generalPurpose', task: '设计统一', capabilities: {},
+          _meta: { cursor: { toolCallId: rawId } },
+        }),
+      },
+      // The dispatch call completes at dispatch time — not the run's end.
+      {
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: update({ sessionUpdate: 'tool_call_update', toolCallId: rawId, status: 'completed' }),
+      },
+    ])
+
+    const cards = h.appends.filter(a => a.type === 'tool/call')
+    expect(cards).toHaveLength(1)
+    expect(cards[0]!.payload).toMatchObject({ callId: foldedId, name: 'subagent' })
+    expect(h.appends.filter(a => a.type === 'tool/result')).toHaveLength(0)
+
+    h.push([
+      childFrame({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '方案好了' } }),
+      {
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: update({ sessionUpdate: 'subagent_state_update', subagentSessionId: 'child-1', state: 'completed' }),
+      },
+    ])
+    h.release()
+    await h.run()
+
+    expect(h.appends.filter(a => a.type === 'tool/call')).toHaveLength(1)
+    const results = h.appends.filter(a => a.type === 'tool/result')
+    expect(results).toHaveLength(1)
+    expect(results[0]!.payload).toMatchObject({ message: { toolCallId: foldedId } })
+    expect(JSON.stringify(results[0]!.payload)).toContain('方案好了')
+  })
+})

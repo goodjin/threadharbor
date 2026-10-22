@@ -12,7 +12,7 @@ import { RAW_OUTPUT, UNDELIVERED } from './content-writer.ts'
 import { RawOutputAggregator } from '@threadharbor/dsh-acp-agent'
 import type { RawOutputBlock } from '@threadharbor/dsh-acp-agent'
 import type { UndeliveredAttachment } from './content-writer.ts'
-import { AcpSegmenter, projectToolCallAnnouncement, projectToolCallFrame, projectToolResultFrame, projectSpawnedResult, readSpawnedFrame, stillRunningText } from '@threadharbor/dsh-acp-agent'
+import { AcpSegmenter, projectToolCall, projectToolCallAnnouncement, projectToolCallFrame, projectToolResultFrame, projectSpawnedResult, readSpawnedFrame, stillRunningText } from '@threadharbor/dsh-acp-agent'
 import { SubagentSessions } from './subagent-sessions.ts'
 import type { SubagentSessionHost } from './subagent-sessions.ts'
 import type { AcpDialect, AcpFrame, ProjectionEvent, ToolCall } from '@threadharbor/dsh-acp-agent'
@@ -391,8 +391,8 @@ type LiveCards = {
  */
 type SpawnedTrack = {
   readonly callId: string
-  /** 出生帧：补卡时按帧重投影，保证与实时写卡同一 payload。 */
-  readonly frame: AcpFrame
+  /** The child session whose frames feed this run's output. */
+  readonly childSessionId: string
   /** 折叠中的调用：output 随子会话帧累积，status 随收尾帧落定。 */
   readonly call: ToolCall
   settled: boolean
@@ -444,6 +444,33 @@ export class AcpTurnRunner {
    * 整回合的帧在一个列表里，投影自己折叠得出来。
    */
   private spawnedRuns: Map<string, SpawnedTrack> | undefined
+  /**
+   * Child session id → the spawned run its frames belong to.
+   *
+   * The map above is keyed by the card id; for a delegation cursor publishes
+   * twice, the card id is the dispatching tool call's, not the child session's
+   * (the native spawned frame is the join). Child text frames name the child
+   * session, so they need this second index.
+   */
+  private readonly spawnedByChild = new Map<string, SpawnedTrack>()
+  /**
+   * The folded `task` tool calls cursor dispatched subagents from, keyed by
+   * their single-line call id. The native `subagent_spawned` frame carries only
+   * a truncated task and a generic agent name; the tool call has the full
+   * prompt and the description the user saw. `_meta.cursor.toolCallId` joins
+   * the two, and this is what makes the join possible when the frame arrives.
+   */
+  private readonly subagentTools = new Map<string, ToolCall>()
+  /**
+   * Call ids whose opening card already reached the log this prompt.
+   *
+   * `liveCards.written` is per segment; a spawned run's birth frame can land in
+   * a later segment than the tool call that opened its card (cursor publishes
+   * the two in one burst today, but the pump must not depend on it). This
+   * prompt-level set tells the birth record its card is already there, so the
+   * segment close does not write the same card again.
+   */
+  private readonly writtenCards = new Set<string>()
   /**
    * 外部 agent 自己的委托运行（子代理 / 后台任务）里还开着的那几个。
    *
@@ -640,12 +667,22 @@ export class AcpTurnRunner {
     const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
     if (kind === 'subagent_spawned') {
       const id = typeof update['subagentSessionId'] === 'string' ? update['subagentSessionId'] : undefined
-      const task = typeof update['task'] === 'string' ? update['task'] : ''
+      // cursor publishes the delegation as a `task` tool call too; that call
+      // carries the full prompt and the agent name the user saw, while the
+      // frame's `task` is truncated. Join on `_meta.cursor.toolCallId`.
+      const linkedId = dialect.spawnToolCallId?.(update)
+      const linked = linkedId === undefined ? undefined : this.subagentTools.get(linkedId)
+      const args = recordOf(linked?.arguments)
+      const task = typeof args['prompt'] === 'string'
+        ? args['prompt']
+        : typeof update['task'] === 'string' ? update['task'] : ''
       const firstLine = task.split('\n')[0]?.trim() ?? ''
-      const label = typeof update['name'] === 'string' ? update['name']
-        : firstLine !== '' ? firstLine
-          : typeof update['description'] === 'string' ? update['description']
-            : id ?? ''
+      const agent = typeof args['agent'] === 'string' && args['agent'] !== '' ? args['agent'] : undefined
+      const label = agent
+        ?? (typeof update['name'] === 'string' ? update['name']
+          : firstLine !== '' ? firstLine
+            : typeof update['description'] === 'string' ? update['description']
+              : id ?? '')
       sessions.spawn(parentId, id, label, task)
       return
     }
@@ -685,21 +722,34 @@ export class AcpTurnRunner {
     const reading = readSpawnedFrame(dialect, update)
     if (reading === undefined) return undefined
     if (reading.kind === 'spawn') {
+      // cursor's native spawn names the `task` tool call it was dispatched
+      // from. That call already opened the card (full prompt, agent name), so
+      // the run reuses its id and this frame only starts the lifecycle.
+      const linkedId = dialect.spawnToolCallId?.(update)
+      const linked = linkedId === undefined ? undefined : this.subagentTools.get(linkedId)
+      const callId = linked?.callId ?? reading.call.callId
+      const childSessionId = reading.call.callId
       // 同一出生帧只建一次档，与 foldSubagentUpdate 的去重一致。
-      if (runs.has(reading.call.callId)) return undefined
+      if (runs.has(callId)) return undefined
+      const call = linked === undefined
+        ? reading.call
+        // The tool's own terminal frame fires at dispatch time; the run is not
+        // over until the native state frame says so, so the card starts open.
+        : { ...linked, name: 'subagent', status: undefined } satisfies ToolCall
       const record: SpawnedTrack = {
-        callId: reading.call.callId,
-        frame,
-        call: reading.call,
+        callId,
+        childSessionId,
+        call,
         settled: false,
-        cardOnLog: false,
+        cardOnLog: this.writtenCards.has(callId),
         resultOnLog: false,
         openInSegment: true,
       }
       runs.set(record.callId, record)
+      this.spawnedByChild.set(childSessionId, record)
       return record
     }
-    const record = runs.get(reading.callId)
+    const record = runs.get(reading.callId) ?? this.spawnedByChild.get(reading.callId)
     if (record === undefined) return undefined
     if (reading.kind === 'progress') {
       if (reading.summary !== undefined) record.call.output = reading.summary
@@ -750,8 +800,7 @@ export class AcpTurnRunner {
 
   /** 子会话帧：文本累积进 spawned 档案的输出（accumulate 的子代路由同款）。 */
   private trackChildChunk(frame: AcpFrame, childSessionId: string): void {
-
-    const record = this.spawnedRuns?.get(childSessionId)
+    const record = this.spawnedByChild.get(childSessionId)
     if (record === undefined) return
     const update = this.frameUpdateOf(frame)
     if (update === undefined) return
@@ -812,6 +861,9 @@ export class AcpTurnRunner {
       ? new AcpSegmenter(this.options.dialect)
       : undefined
     this.spawnedRuns = mode === 'steps' && this.options.dialect !== undefined ? new Map() : undefined
+    this.spawnedByChild.clear()
+    this.subagentTools.clear()
+    this.writtenCards.clear()
     // 委托运行的账本随 prompt 重开：上一回合的子代理属于上一回合。
     this.delegatedRuns.clear()
     this.aborted = false
@@ -839,6 +891,7 @@ export class AcpTurnRunner {
     const isTool = frame.method === 'session/update'
       && (update['sessionUpdate'] === 'tool_call' || update['sessionUpdate'] === 'tool_call_update')
     const carried = isTool && typeof rawId === 'string' ? live.tools.get(rawId) : undefined
+    let nativeSubagent = false
     if (isTool && typeof rawId === 'string') {
       const folded = dialect.foldTool(carried, update)
       live.tools.set(rawId, folded)
@@ -846,7 +899,14 @@ export class AcpTurnRunner {
       // kind "other" + rawInput._toolName "task"），也要开一个影子子会话——否则
       // 界面上只有一张卡片，子会话列表里没有它（ACP 草案的 subagent_spawned 帧
       // 那条路由 routeSubagentFrame 负责，两条路现在都有子会话）。
-      this.trackSubagentTool(rawId, folded)
+      //
+      // cursor 同时发原生子代理帧时，这条工具调用只是派发凭据：子会话由
+      // routeSubagentFrame 按子会话 id 建，卡片由原生帧落定。记下它供出生帧
+      // 关联全量 prompt/代理名，但不再自己建子会话——否则同一个子代理会多出
+      // 一个空的影子会话。工具调用在派发瞬间就报 completed，结果也不能在这里
+      // 落：那时子代理才刚开工。
+      this.trackSubagentTool(folded)
+      nativeSubagent = dialect.capabilities.nativeSubagentFrames === true && folded.name === 'subagent'
       // A placeholder frame announces the call before its arguments exist
       // (cursor's pending edit, codex's read). The card is immutable, so
       // writing it now would freeze `{}` in place of the real input. Wait for
@@ -854,6 +914,13 @@ export class AcpTurnRunner {
       // a call that genuinely has no arguments still gets its card.
       if (folded.status !== 'completed' && folded.status !== 'failed'
         && Object.keys(recordOf(folded.arguments)).length === 0) return
+    }
+    // The native spawn of a delegation the `task` tool call already opened:
+    // that call's card is the run's card, so a second one would show the same
+    // subagent twice.
+    if (!isTool && update['sessionUpdate'] === 'subagent_spawned') {
+      const linkedId = dialect.spawnToolCallId?.(update)
+      if (linkedId !== undefined && this.subagentTools.has(linkedId)) return
     }
     const options = { turn: live.turn, step: live.step, dialect, ...(carried === undefined ? {} : { carried }) }
     const event = projectToolCallFrame(frame, options)
@@ -869,8 +936,12 @@ export class AcpTurnRunner {
         return
       }
       live.written.add(callId)
+      this.writtenCards.add(callId)
     }
     if (live.settled.has(callId)) return
+    // The dispatch call's terminal frame is not the run's end: the native
+    // state frame settles this card (trackSpawnedFrame → writeSpawnedResult).
+    if (nativeSubagent) return
     const result = projectToolResultFrame(frame, options)
     if (result === undefined) return
     try {
@@ -889,24 +960,31 @@ export class AcpTurnRunner {
    *
    * cursor 的子代理派发就是这么来的（真机抓帧 2026-10-21）：一条 `kind: "other"`
    * 的工具调用，`rawInput._toolName` 是 "task"，任务在 `prompt`，代理名在
-   * `description`。dialect 把它认成 `subagent` 卡片，这里再把它认成一个子会话。
+   * `description`。dialect 把它认成 `subagent` 卡片。
    *
-   * @param callId - the tool call's id; it is the child's identity too.
-   * @param folded - the folded tool call.
+   * 当同一个派发还会发原生子代理帧时（`nativeSubagentFrames`），这条调用只
+   * 登记下来供出生帧关联全量 prompt 与代理名：子会话与卡片都由原生帧负责，
+   * 这里再建一个只会多出一个永远不会收到子代帧的影子会话。
+   *
+   * @param folded - the folded tool call; its single-line id is the join key.
    */
-  private trackSubagentTool(callId: string, folded: ToolCall): void {
+  private trackSubagentTool(folded: ToolCall): void {
+    if (folded.name !== 'subagent') return
+    if (this.options.dialect?.capabilities.nativeSubagentFrames === true) {
+      this.subagentTools.set(folded.callId, folded)
+      return
+    }
     const sessions = this.subagents
     const parentId = this.parentSessionId
     if (sessions === undefined || parentId === undefined) return
-    if (folded.name !== 'subagent') return
     const args = recordOf(folded.arguments)
     const task = typeof args['prompt'] === 'string' ? args['prompt'] : ''
     const label = typeof args['agent'] === 'string' && args['agent'] !== '' ? args['agent'] : 'subagent'
     if (folded.status === 'completed' || folded.status === 'failed') {
-      sessions.terminal(parentId, callId, folded.status === 'completed' ? 'completed' : 'failed', folded.output)
+      sessions.terminal(parentId, folded.callId, folded.status === 'completed' ? 'completed' : 'failed', folded.output)
       return
     }
-    sessions.spawn(parentId, callId, label, task)
+    sessions.spawn(parentId, folded.callId, label, task)
   }
 
   /** Feed one frame's text to the live stream. */
@@ -1305,11 +1383,27 @@ export class AcpTurnRunner {
    *   仍未收尾的合成 [still running]（此刻才允许，回合都要收场了）。卡不在
    *   日志时连卡一起补（防御：正常路径出生段已补过）。
    */
-  private spawnedCloseBookkeeping(turn: TurnContext, final: boolean): { readonly ids: ReadonlySet<string>; readonly tail: readonly ProjectionEvent[] } | undefined {
+  private spawnedCloseBookkeeping(turn: TurnContext, final: boolean): {
+    readonly ids: ReadonlySet<string>
+    readonly pending: ReadonlySet<string>
+    readonly tail: readonly ProjectionEvent[]
+  } | undefined {
     const runs = this.spawnedRuns
     if (runs === undefined) return undefined
     const position = turn.position
     const tail: ProjectionEvent[] = []
+    // A native delegation's `task` call can close its segment before the
+    // spawned frame arrives (the dispatch call settles at dispatch time).
+    // Until then its card/result belong to the run, not to the segment
+    // projection — otherwise a premature result lands on the log. At the final
+    // segment no birth can arrive any more, so an unpaired dispatch call is
+    // projected normally instead of being dropped.
+    const pendingNative = new Set<string>()
+    if (!final) {
+      for (const callId of this.subagentTools.keys()) {
+        if (!runs.has(callId)) pendingNative.add(callId)
+      }
+    }
     if (position !== undefined) {
       for (const record of runs.values()) {
         if (!record.openInSegment || record.cardOnLog) continue
@@ -1333,16 +1427,17 @@ export class AcpTurnRunner {
       }
     }
     for (const record of runs.values()) record.openInSegment = false
-    return { ids: new Set(runs.keys()), tail }
+    return { ids: new Set([...runs.keys(), ...pendingNative]), pending: pendingNative, tail }
   }
 
   /** 出生段收段时的补对：卡 + 此刻结果。公告由段消息自带的那块承担——未实时写的 id 的块会留在段消息里，且先于补卡。 */
   private spawnedBirthPair(record: SpawnedTrack, position: { readonly turn: number; readonly step: number }): readonly ProjectionEvent[] {
     const dialect = this.options.dialect
     if (dialect === undefined) return []
+    // The record's call, not the birth frame: a delegation cursor dispatched
+    // through a `task` call reuses that call's id/arguments here.
     const options = { turn: position.turn, step: position.step, dialect }
-    const card = projectToolCallFrame(record.frame, options)
-    if (card === undefined) return []
+    const card = projectToolCall(record.call, options)
     const result = projectSpawnedResult(
       record.settled ? record.call : { ...record.call, output: stillRunningText(record.call.output) },
       position,
@@ -1366,7 +1461,7 @@ export class AcpTurnRunner {
     stream: TurnStreamHandle | undefined,
     liveCards: LiveCards | undefined,
     end: StepEndReason,
-    spawned?: { readonly ids: ReadonlySet<string>; readonly tail: readonly ProjectionEvent[] },
+    spawned?: { readonly ids: ReadonlySet<string>; readonly pending?: ReadonlySet<string>; readonly tail: readonly ProjectionEvent[] },
     final = false,
   ): void {
     const position = turn.position
@@ -1405,9 +1500,12 @@ export class AcpTurnRunner {
     }
     const produced = turn.produce(result)
     const filtered = liveCards === undefined ? produced : withoutLiveWritten(produced, liveCards)
+    const owned = spawned === undefined ? filtered : withoutSpawnedRuns(filtered, spawned.ids)
     const events = [
       ...notice,
-      ...(spawned === undefined ? filtered : withoutSpawnedRuns(filtered, spawned.ids)),
+      // A pending native delegation's card is not written in this segment, so
+      // its tool-call block must not be announced here either.
+      ...(spawned?.pending === undefined ? owned : withoutAnnouncedIds(owned, spawned.pending)),
       ...(spawned?.tail ?? []),
     ]
     const seq = turn.write(events)
@@ -1537,13 +1635,14 @@ export class AcpTurnRunner {
   }
 
   private async doOpen(onStage: (stage: string) => void): Promise<string> {
+    const capabilities = this.options.dialect?.capabilities
     const initializeResult = await this.client.request('initialize', {
       protocolVersion: 1,
       // `subagents` opts into the ACP subagent draft (#1992): adapters that
       // implement it (codex-acp, claude-agent-acp) then report subagent and
       // async-task lifecycle as native frames instead of folding the whole
       // run into one opaque tool call. Agents without the draft ignore the
-      // field, so grok and cursor are unaffected.
+      // field, so grok is unaffected.
       //
       // The released @agentclientprotocol/sdk STRIPS the draft field off
       // clientCapabilities at initialize (measured 2026-10-20: with only this
@@ -1552,11 +1651,20 @@ export class AcpTurnRunner {
       // extension — version 1 plus a capability list — which the schema
       // passes through, so both spellings ride the handshake: the meta one
       // works today, the canonical one wins once the SDK ships it.
+      //
+      // Cursor reads neither of those: it checks `clientCapabilities.subagents
+      // || clientCapabilities._meta.subagents` (bundle 2026.10.01). Measured
+      // 2026-10-21: only `_meta.subagents` turns on its spawn/state frames and
+      // the parent's post-child resume; the top-level field alone is dropped
+      // by the SDK before Cursor sees it. Sent for the dialects that read it.
       clientCapabilities: {
         fs: { readTextFile: true, writeTextFile: true },
         terminal: true,
         subagents: {},
-        _meta: { jetbrains: { air: { version: 1, capabilities: ['nativeSubagentSessions', 'asyncTasks'] } } },
+        _meta: {
+          ...(capabilities?.metaSubagents === true ? { subagents: {} } : {}),
+          jetbrains: { air: { version: 1, capabilities: ['nativeSubagentSessions', 'asyncTasks'] } },
+        },
       },
     })
     this.client.notify('initialized', {})
@@ -1734,6 +1842,18 @@ function withoutSpawnedRuns(events: readonly ProjectionEvent[], ids: ReadonlySet
     }
     return true
   })
+}
+
+/**
+ * Strip the tool-call blocks of the given calls from assistant messages.
+ *
+ * The counterpart of `withoutLiveWritten` for calls whose card is deferred to
+ * a later segment: the card event is stripped from this segment, so the block
+ * that announces it must go too, or the step advertises a call it never files.
+ */
+function withoutAnnouncedIds(events: readonly ProjectionEvent[], ids: ReadonlySet<string>): readonly ProjectionEvent[] {
+  if (ids.size === 0) return events
+  return events.flatMap(event => event.type === 'assistant/message' ? withoutAnnouncedToolBlocks(event, ids) : [event])
 }
 
 /**

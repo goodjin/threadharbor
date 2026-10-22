@@ -45,9 +45,10 @@ const MAPPED_KINDS = new Set([
 /** 自带卡片/审批展示的请求：由各自的面板负责，不是未知输出。 */
 /**
  * cursor 通知方法的可读格式化（字段结构来自官方文档 cursor.com/docs/cli/acp.md，
- * 2026-10-19 核对）。三种通知都不需要应答，但值得看：待办更新是过程计划的
- * 唯一来源；task 是 cursor 子代理的唯一线索（它不发 ACP 子代理帧）；
- * generate_image 报告图片产物。
+ * 2026-10-21 核对）。待办更新是过程计划的唯一来源；generate_image 报告图片产物。
+ * `cursor/task` 不在此列：真机上它既是一张派发工具卡、又有原生
+ * `subagent_spawned` 帧，再展示一条「任务完成」既重复又把派发时延说成完成
+ * （durationMs 在派发帧上只有 0.1–1s）——归类为专用方法，由子代理卡片承担。
  */
 const CURSOR_NOTIFICATION_FORMATTERS: Readonly<Record<string, {
   readonly kind: string
@@ -68,15 +69,6 @@ const CURSOR_NOTIFICATION_FORMATTERS: Readonly<Record<string, {
       return `待办（${merge}）：${items.join('  ')}`
     },
   },
-  'cursor/task': {
-    kind: 'cursor 子代理任务',
-    format: params => {
-      const description = typeof params['description'] === 'string' ? params['description'] : ''
-      const type = typeof params['subagentType'] === 'string' ? params['subagentType'] : ''
-      const durationMs = typeof params['durationMs'] === 'number' ? `，${String(Math.round(params['durationMs'] / 100) / 10)}s` : ''
-      return `子代理任务完成：${description}（${type}${durationMs}）`
-    },
-  },
   'cursor/generate_image': {
     kind: 'cursor 生成图片',
     format: params => {
@@ -93,6 +85,10 @@ const DEDICATED_METHODS = new Set([
   // 不是「看不懂的输出」，不能进未知块。
   'cursor/ask_question',
   'cursor/create_plan',
+  // 子代理派发有卡片（task 工具 + 原生 spawned 帧），不是未知输出。真机上
+  // 它虽以请求形式到达（2026-10-21），factory 也已应答；通知形式按契约无需
+  // 应答，同样不该在过程区留一块。
+  'cursor/task',
 ])
 
 /** 默认单块上限：超过就在同一连续段内切块，转录不会被一行巨物撑爆。 */

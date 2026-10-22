@@ -203,6 +203,13 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
       // this opener's DSH session when the frame itself does not, because the
       // host resolves the live agent — and with it the conversation the
       // question card belongs to — by session.
+      //
+      // The documented notification methods (`cursor/update_todos`,
+      // `cursor/task`, `cursor/generate_image`) arrive as JSON-RPC REQUESTS on
+      // cursor 2026.10.01 (measured 2026-10-21: `cursor/task` carries an id and
+      // blocks until answered). They are fire-and-forget by contract, so an
+      // empty result acknowledges them without claiming an outcome; one that
+      // really is a notification needs no reply and stays unreplied.
       if (preset.agent === 'cursor') {
         if (deps.answerAskQuestion !== undefined) {
           client.onAskQuestion = async request => await deps.answerAskQuestion!(
@@ -215,6 +222,12 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
           if (typeof frame.id !== 'number') return false
           if (frame.method === 'cursor/ask_question') { client.reply(frame.id, { outcome: { outcome: 'skipped' } }); return true }
           if (frame.method === 'cursor/create_plan') { client.reply(frame.id, { outcome: { outcome: 'cancelled' } }); return true }
+          if (frame.method === 'cursor/task'
+            || frame.method === 'cursor/update_todos'
+            || frame.method === 'cursor/generate_image') {
+            client.reply(frame.id, {})
+            return true
+          }
           return false
         }
       }

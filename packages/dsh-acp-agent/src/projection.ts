@@ -43,6 +43,14 @@ type Accumulator = {
   thought: readonly string[]
   text: readonly string[]
   readonly tools: Map<string, ToolCall>
+  /**
+   * Tool calls whose card is owned by a spawned run: cursor publishes a
+   * delegation as both a `task` tool call and native subagent frames, and the
+   * frames carry the run's real lifecycle. The tool call still supplies the
+   * card's title and arguments, but the spawned run renders it (same callId)
+   * and settles it — so it is skipped in the plain tool loops.
+   */
+  readonly linkedTools: Set<string>
   /** Subagent and async-task runs, keyed like the cards that render them. */
   readonly spawned: Map<string, SpawnedRun>
   /** Session ids whose frames belong to a spawned subagent, not the parent. */
@@ -369,6 +377,21 @@ export function projectToolCallFrame(
 }
 
 /**
+ * The opening card of a call the caller already holds, for mid-turn writing.
+ *
+ * `projectToolCallFrame` re-folds the frame; a caller that has been tracking a
+ * run (the segmenting pump) already owns the folded call — including one whose
+ * card id is a dispatching tool call's. This writes exactly the payload that
+ * frame would have produced.
+ */
+export function projectToolCall(
+  call: ToolCall,
+  options: { readonly turn: number; readonly step: number; readonly dialect: AcpDialect },
+): ProjectionEvent {
+  return toolCallEvent(options.dialect, call, options.turn, options.step)
+}
+
+/**
  * The announcement message that must precede a `tool/call`, for the live path.
  *
  * The end-of-turn projection folds every call's block into the step's one
@@ -424,6 +447,7 @@ function accumulate(frames: readonly AcpFrame[], dialect: AcpDialect): Accumulat
   const thought: string[] = []
   const text: string[] = []
   const tools = new Map<string, ToolCall>()
+  const linkedTools = new Set<string>()
   const spawned = new Map<string, SpawnedRun>()
   const childSessions = new Set<string>()
   let usage: TurnUsage | undefined
@@ -466,13 +490,13 @@ function accumulate(frames: readonly AcpFrame[], dialect: AcpDialect): Accumulat
     } else if (subagentUpdateOf(dialect, update) !== undefined) {
       // A spawned-run lifecycle update: one of the draft's own kinds, or a
       // vendor vocabulary the dialect normalized onto them (grok's).
-      foldSubagentUpdate(subagentUpdateOf(dialect, update)!, spawned, childSessions)
+      foldSubagentUpdate(dialect, subagentUpdateOf(dialect, update)!, spawned, childSessions, tools, linkedTools)
     } else if (!dialect.isContent(update)) {
       // chatter — setup phases, command lists, context-window updates
     }
   }
 
-  return { thought, text, tools, spawned, childSessions, usage }
+  return { thought, text, tools, linkedTools, spawned, childSessions, usage }
 }
 
 /**
@@ -497,12 +521,37 @@ function subagentUpdateOf(
 
 /** Fold one draft-shaped subagent lifecycle update into the spawned runs. */
 function foldSubagentUpdate(
+  dialect: AcpDialect,
   update: Record<string, unknown>,
   spawned: Map<string, SpawnedRun>,
   childSessions: Set<string>,
+  tools: Map<string, ToolCall>,
+  linkedTools: Set<string>,
 ): void {
   const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
   if (kind === 'subagent_spawned' || kind === 'async_task_spawned') {
+    const childId = typeof update['subagentSessionId'] === 'string' ? update['subagentSessionId'] : undefined
+    // cursor's delegation is a tool call plus native frames. When the frame
+    // names the tool call it was dispatched from, that call already owns the
+    // card (full prompt, agent name) — reuse it instead of opening a second
+    // card, and let the native run settle it. Child frames still route by the
+    // child session id, which is the map key.
+    const linkedId = kind === 'subagent_spawned' ? dialect.spawnToolCallId?.(update) : undefined
+    // `tools` is keyed by the RAW wire id (frames must fold onto the same
+    // entry), while the join key is the folded single-line id; match on the
+    // call's own id, not the map key.
+    const linked = linkedId === undefined
+      ? undefined
+      : [...tools.values()].find(tool => tool.callId === linkedId)
+    if (childId !== undefined && linked !== undefined && !spawned.has(childId)) {
+      // The tool's own terminal frame fires at dispatch time; the run is not
+      // over until the native state frame says so, so the card starts open.
+      const call: ToolCall = { ...linked, name: 'subagent', status: undefined }
+      spawned.set(childId, { kind: 'subagent', settled: false, call })
+      linkedTools.add(linked.callId)
+      childSessions.add(childId)
+      return
+    }
     const call = spawnedCallOf(update)
     if (call !== undefined && !spawned.has(call.callId)) {
       spawned.set(call.callId, { kind: kind === 'subagent_spawned' ? 'subagent' : 'task', settled: false, call })
@@ -670,13 +719,17 @@ function contentEvents(
   if (options.stream !== undefined) acc.stream = options.stream
   const { thought, text, tools, spawned } = acc
   const events: ProjectionEvent[] = []
+  // A linked tool call's card is rendered by its spawned run: same callId,
+  // but the run's state is the live one. Counting the tool too would announce
+  // the same id twice, which the log rejects.
+  const toolCards = [...tools.values()].filter(tool => !acc.linkedTools.has(tool.callId))
   // One message per step, in the canonical native shape: the ordered blocks
   // carry the reasoning first, then the answer, then the tool-call blocks the
   // `tool/call` events below must have been announced by. Two separate messages
   // would survive in the log, but the conversation view folds each step's
   // message into one node by keeping the LAST assistant/message — a second
   // message would erase the first on screen.
-  const runs = [...tools.values(), ...[...spawned.values()].map(run => run.call)]
+  const runs = [...toolCards, ...[...spawned.values()].map(run => run.call)]
   // Each block mirrors its `tool/call` exactly (same name mapping, same
   // serialization) — the validator compares the two, and a divergence is the
   // "does not match one advertised tool call" rejection.
@@ -691,7 +744,7 @@ function contentEvents(
     })),
   ]
   if (content.length > 0) events.push(assistantEvent(dialect, acc, content, turn, step))
-  for (const tool of tools.values()) {
+  for (const tool of toolCards) {
     events.push(toolCallEvent(dialect, tool, turn, step))
     events.push(toolResultEvent(tool, turn, step))
   }

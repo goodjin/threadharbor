@@ -333,6 +333,28 @@ describe('把 agent 的提问接到 host 的提问服务', () => {
     })
   })
 
+  it('文档写成通知的三个扩展方法按请求到达时回空结果，agent 不会停等', async () => {
+    // 2026-10-21 实测：cursor 2026.10.01 给 update_todos / task /
+    // generate_image 都带 JSON-RPC id，按请求发来；不回会让回合停住。
+    const transport = recordingTransport()
+    const factory = makeSessionFactory(
+      { presets: { 'acp-cursor': { agent: 'cursor', url: 'ws://127.0.0.1:2419' } } },
+      { ...deps, transport: () => transport },
+    )
+    await factory.open('acp-cursor', { cwd: '/tmp' })
+    const frames = [
+      { jsonrpc: '2.0', id: 41, method: 'cursor/update_todos', params: { toolCallId: 'c', todos: [], merge: true } },
+      { jsonrpc: '2.0', id: 42, method: 'cursor/task', params: { toolCallId: 'c', description: 'Explore', prompt: 'Find auth', subagentType: 'explore' } },
+      { jsonrpc: '2.0', id: 43, method: 'cursor/generate_image', params: { toolCallId: 'c', description: 'Icon' } },
+    ]
+    for (const frame of frames) transport.receive(JSON.stringify(frame))
+    await flush()
+
+    const replies = transport.sent.map(line => JSON.parse(line) as { id: number; result: unknown })
+    expect(replies.map(reply => reply.id)).toEqual([41, 42, 43])
+    expect(replies.map(reply => reply.result)).toEqual([{}, {}, {}])
+  })
+
   it('host 接不到时维持现状：扩展钩子的自动应答照旧生效', async () => {
     // No-regression pin: without a host ask bridge, cursor's question gets the
     // benign skip it has always gotten, and the turn proceeds.

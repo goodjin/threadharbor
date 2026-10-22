@@ -185,6 +185,42 @@ describe('cursor dialect', () => {
     expect(next.callId).toBe(opening.callId)
   })
 
+  it('declares the subagent capability under _meta, and lets native frames own the run', () => {
+    // Cursor's check is `clientCapabilities.subagents ||
+    // clientCapabilities._meta.subagents`; the released SDK strips the
+    // top-level draft field, so only the meta spelling reaches it.
+    expect(cursorDialect.capabilities.metaSubagents).toBe(true)
+    // A native-spawned delegation is also published as a `task` tool call;
+    // the tool call is only the dispatch, not a second run.
+    expect(cursorDialect.capabilities.nativeSubagentFrames).toBe(true)
+  })
+
+  it('joins a spawned frame to its task tool call on _meta.cursor.toolCallId', () => {
+    // Cursor joins two ids with a newline on both sides of the join; the
+    // folded tool call id is the single-line form, so the join applies the
+    // same collapse.
+    expect(cursorDialect.spawnToolCallId!({
+      sessionUpdate: 'subagent_spawned',
+      _meta: { cursor: { toolCallId: 'call-1\nfc-1_0' } },
+    })).toBe('call-1fc-1_0')
+    expect(cursorDialect.spawnToolCallId!({ sessionUpdate: 'subagent_spawned' })).toBeUndefined()
+    expect(cursorDialect.spawnToolCallId!({ _meta: {} })).toBeUndefined()
+  })
+
+  it('writes the model pick through the model config option cursor publishes', () => {
+    // `session/new` publishes configOptions[id=model]; `unstable_setSessionModel`
+    // is implemented on exactly that path. session/prompt has no modelId.
+    expect(cursorDialect.modelVia).toBe('config_option')
+    expect(cursorDialect.modelConfigId!({
+      configOptions: [
+        { id: 'mode', category: 'mode' },
+        { id: 'model', category: 'model', options: [] },
+      ],
+    })).toBe('model')
+    expect(cursorDialect.modelConfigId!({ models: { availableModels: [] } })).toBeUndefined()
+    expect(cursorDialect.modelConfigId!({})).toBeUndefined()
+  })
+
   it('reports no token usage — cursor never sends it over ACP', () => {
     expect(cursorDialect.readReplyUsage(cursorCaptured['promptReply'])).toBeUndefined()
     expect(cursorDialect.readReplyUsage({ stopReason: 'end_turn' })).toBeUndefined()

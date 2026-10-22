@@ -12,8 +12,8 @@
  * - 实时结果写前带 settled 自守卫，同一 callId 的第二个收尾帧不再重复写。
  */
 
-import type { AcpFrame } from '@threadharbor/dsh-acp-agent'
-import { claudeDialect, projectStepContent } from '@threadharbor/dsh-acp-agent'
+import type { AcpDialect, AcpFrame } from '@threadharbor/dsh-acp-agent'
+import { claudeDialect, cursorDialect, projectStepContent } from '@threadharbor/dsh-acp-agent'
 import { describe, expect, it } from 'vitest'
 import type { StepDecisionLike, TurnContext, TurnStreamHandle } from '../src/dispatch.ts'
 import { makeContentWriter } from '../src/content-writer.ts'
@@ -52,6 +52,37 @@ const childChunk = (childId: string, text: string): AcpFrame => ({
 const childSettled = (childId: string): AcpFrame => ({
   jsonrpc: '2.0', method: 'session/update',
   params: update({ sessionUpdate: 'subagent_state_update', subagentSessionId: childId, state: 'completed' }),
+})
+/**
+ * cursor 的子代理派发：`task` 工具调用（全量 prompt/代理名）与原生出生帧
+ * （子会话 id、截断的 task）。两边由 `_meta.cursor.toolCallId` 关联，工具调用
+ * 的 id 与帧里的 id 都带一个换行（cursor 拼接两个 id），折叠后才是卡片 id。
+ */
+const CURSOR_TASK_ID = 'call-1\nfc-1_0'
+const cursorTaskOpen = (): AcpFrame => ({
+  jsonrpc: '2.0', method: 'session/update',
+  params: update({
+    sessionUpdate: 'tool_call',
+    toolCallId: CURSOR_TASK_ID,
+    kind: 'other',
+    title: 'Task',
+    status: 'in_progress',
+    rawInput: { _toolName: 'task', prompt: 'Explore the repo thoroughly', description: 'explore' },
+  }),
+})
+const cursorTaskDone = (): AcpFrame => ({
+  jsonrpc: '2.0', method: 'session/update',
+  params: update({ sessionUpdate: 'tool_call_update', toolCallId: CURSOR_TASK_ID, status: 'completed' }),
+})
+const cursorSpawn = (childId: string): AcpFrame => ({
+  jsonrpc: '2.0', method: 'session/update',
+  params: update({
+    sessionUpdate: 'subagent_spawned',
+    subagentSessionId: childId,
+    name: 'general-purpose',
+    task: 'Explore the repo…',
+    _meta: { cursor: { toolCallId: CURSOR_TASK_ID } },
+  }),
 })
 /**
  * `session/prompt` 的应答帧。真实客户端在解决 request promise 之前先把它镜像给
@@ -151,14 +182,15 @@ type Harness = {
   started: () => Promise<void>
 }
 
-/** 真投影（claude 方言、真 projectStepContent）+ 记录写入器 + 记录流句柄。 */
-function segmentHarness(options: { abort?: () => AbortSignal; primer?: RunnerOptions['primer']; failures?: string[] } = {}): Harness {
+/** 真投影（默认 claude 方言、真 projectStepContent）+ 记录写入器 + 记录流句柄。 */
+function segmentHarness(options: { abort?: () => AbortSignal; primer?: RunnerOptions['primer']; failures?: string[]; dialect?: AcpDialect } = {}): Harness {
+  const dialect = options.dialect ?? claudeDialect
   const fake = fakePromptClient()
   const { write, appends } = recordingWrite(options.failures)
   const streams: ReturnType<typeof recordingStream>[] = []
   const runner = new AcpTurnRunner(fake.client, {
     cwd: '/tmp',
-    dialect: claudeDialect,
+    dialect,
     ...(options.abort === undefined ? {} : { abort: options.abort }),
     ...(options.primer === undefined ? {} : { primer: options.primer }),
   })
@@ -168,7 +200,7 @@ function segmentHarness(options: { abort?: () => AbortSignal; primer?: RunnerOpt
     produce: result => projectStepContent(result.frames, {
       turn: 4,
       step,
-      dialect: claudeDialect,
+      dialect,
       ...(result.stream === undefined ? {} : { stream: result.stream }),
     }),
     write,
@@ -477,6 +509,88 @@ describe('runSteps — spawned 跨段生命周期', () => {
     expect(messageTexts.join('|')).not.toContain('child reply')
     expect(h.streams[0]!.log.deltas).toEqual(['a'])
     expect(h.streams[1]!.log.deltas).toEqual(['b'])
+  })
+
+  it('cursor 原生派发帧接管 task 卡：跨段只有一张卡、一个结果，派发时的 completed 不算收尾', async () => {
+    const h = segmentHarness({ dialect: cursorDialect })
+    const first = h.runner.runSteps(DECISION, h.turnOf(1), { first: true })
+    await h.started()
+    h.deliver(textFrame('plan'))
+    h.deliver(cursorTaskOpen())
+    // 工具调用在派发瞬间就报 completed；原生状态帧才是真正的收尾信号。
+    h.deliver(cursorTaskDone())
+    h.deliver(cursorSpawn('child-1'))
+    h.deliver(childChunk('child-1', 'child reply'))
+    h.deliver(textFrame('after'))
+    expect(await first).toBeNull()
+
+    // 卡只有一张，id 是折叠后的工具调用 id；prompt/代理名取自全量的工具调用，
+    // 不是原生帧里截断的 task 与通用 name。派发的 completed 不写结果。
+    const cards = h.appends.filter(append => append.type === 'tool/call')
+    expect(cards).toHaveLength(1)
+    expect(cards[0]!.payload['callId']).toBe('call-1fc-1_0')
+    expect(cards[0]!.payload['step']).toBe(1)
+    expect(JSON.parse(cards[0]!.payload['arguments'] as string)).toEqual({ prompt: 'Explore the repo thoroughly', agent: 'explore' })
+    expect(h.appends.filter(append => append.type === 'tool/result')).toHaveLength(0)
+
+    // 收尾帧落在第二段：结果在这里实时写出，带子代累积文本。
+    h.deliver(childSettled('child-1'))
+    const second = h.runner.runSteps(DECISION, h.turnOf(2), { first: false })
+    h.deliver(replyFrame())
+    h.resolvePrompt()
+    expect(await second).toEqual({ kind: 'completed' })
+
+    expect(h.appends.filter(append => append.type === 'tool/call')).toHaveLength(1)
+    const results = h.appends.filter(append => append.type === 'tool/result')
+    expect(results).toHaveLength(1)
+    expect((results[0]!.payload as { message: { toolCallId: string } }).message.toolCallId).toBe('call-1fc-1_0')
+    expect(results[0]!.payload['step']).toBe(2)
+    expect((results[0]!.payload as { message: { content: { text: string }[] } }).message.content)
+      .toEqual([{ type: 'text', text: 'child reply' }])
+    expect(JSON.stringify(h.appends)).not.toContain('[still running]')
+    // 子代文本不进父段流。
+    expect(h.streams[0]!.log.deltas).toEqual(['plan'])
+    expect(h.streams[1]!.log.deltas).toEqual(['after'])
+  })
+
+  it('cursor 的 task 卡与出生帧分属两段：段中不补第二张卡，结果仍等原生终态', async () => {
+    const h = segmentHarness({ dialect: cursorDialect })
+    const first = h.runner.runSteps(DECISION, h.turnOf(1), { first: true })
+    await h.started()
+    h.deliver(textFrame('plan'))
+    h.deliver(cursorTaskOpen())
+    h.deliver(cursorTaskDone())
+    // 父代理在出生帧之前又说了话：段 1 在这里闭合，task 卡已在段 1 落盘。
+    h.deliver(textFrame('mid'))
+    expect(await first).toBeNull()
+    expect(h.appends.filter(append => append.type === 'tool/call' && append.payload['callId'] === 'call-1fc-1_0')).toHaveLength(1)
+
+    // 出生帧落在段 2；父代理接着开了一组普通工具并收尾，段 2 才闭合。
+    h.deliver(cursorSpawn('child-1'))
+    h.deliver(childChunk('child-1', 'child reply'))
+    h.deliver(toolOpen('t2'))
+    h.deliver(toolDone('t2', 'ok'))
+    h.deliver(textFrame('after'))
+    expect(await h.runner.runSteps(DECISION, h.turnOf(2), { first: false })).toBeNull()
+
+    // 收段时不得按出生帧补第二张卡，也不得在派发阶段提前落结果。
+    expect(h.appends.filter(append => append.type === 'tool/call' && append.payload['callId'] === 'call-1fc-1_0')).toHaveLength(1)
+    expect(h.appends.filter(append => append.type === 'tool/result' && (append.payload as { message?: { toolCallId?: string } }).message?.toolCallId === 'call-1fc-1_0')).toHaveLength(0)
+
+    // 原生终态落在段 3：结果挂段 3 的步骤号。
+    h.deliver(childSettled('child-1'))
+    const third = h.runner.runSteps(DECISION, h.turnOf(3), { first: false })
+    h.deliver(replyFrame())
+    h.resolvePrompt()
+    expect(await third).toEqual({ kind: 'completed' })
+
+    const results = h.appends.filter(
+      append => append.type === 'tool/result' && (append.payload as { message?: { toolCallId?: string } }).message?.toolCallId === 'call-1fc-1_0',
+    )
+    expect(results).toHaveLength(1)
+    expect(results[0]!.payload['step']).toBe(3)
+    expect((results[0]!.payload as { message: { content: { text: string }[] } }).message.content)
+      .toEqual([{ type: 'text', text: 'child reply' }])
   })
 
   it('run 从不收尾：[still running] 只在末段合成一次，挂末段步骤号，带子代已到输出', async () => {

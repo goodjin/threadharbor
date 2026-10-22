@@ -105,39 +105,53 @@ describe('子代理帧接线（run）', () => {
     expect(emitted.filter(entry => entry.type === 'end')).toHaveLength(1)
   })
 
-  it('经工具调用派发的子代理（cursor 的 task 工具）也建子会话', async () => {
-    // 2026-10-21 真机抓帧：cursor 的子代理派发是一条 `kind: "other"` 的工具
-    // 调用，rawInput._toolName 是 "task"，任务在 prompt、代理名在 description。
-    // dialect 把它认成 subagent 卡片，这里再把它认成一个子会话——否则界面上
-    // 只有一张卡片，子会话列表里没有它。
+  it('cursor 的 task 工具调用与原生出生帧关联，只开一个子会话', async () => {
+    // 2026-10-21 真机抓帧：cursor 的子代理派发会发两遍——一条 `kind: "other"`
+    // 的 `task` 工具调用（全量 prompt 与代理名），以及一条原生
+    // `subagent_spawned`（子会话 id，task 被截断）。两者用
+    // `_meta.cursor.toolCallId` 关联；子会话只能按原生帧建一次，否则界面上
+    // 会多出一个永远收不到子代帧的影子会话。
     const client = fakeClient()
     const { host, opened, parentEvents, childAppends } = fakeHost()
     const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: cursorDialect, subagents: host })
     const turn = { sessionId: 'dsh-1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 }
     const running = runner.run(DECISION, turn)
     await new Promise(resolve => { setTimeout(resolve, 0) })
+    const toolCallId = 'call-1\nfc-1_0'
     client.deliver(parentUpdate({
       sessionUpdate: 'tool_call',
-      toolCallId: 'call-1',
+      toolCallId,
       title: 'Task: 写探测文件到 /tmp',
       kind: 'other',
       status: 'pending',
       rawInput: { _toolName: 'task', prompt: '在 /tmp 写 ok', description: '写探测文件到 /tmp' },
     }))
     client.deliver(parentUpdate({
+      sessionUpdate: 'subagent_spawned',
+      subagentSessionId: 'c1',
+      name: 'generalPurpose',
+      task: '在 /tmp 写',
+      capabilities: {},
+      _meta: { cursor: { toolCallId } },
+    }))
+    // The dispatch call reports completed the moment the child starts; it is
+    // not the run's end.
+    client.deliver(parentUpdate({
       sessionUpdate: 'tool_call_update',
-      toolCallId: 'call-1',
+      toolCallId,
       status: 'completed',
       rawOutput: { durationMs: 10893, isBackground: false },
     }))
+    client.deliver(childUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'wrote it' } }))
+    client.deliver(parentUpdate({ sessionUpdate: 'subagent_state_update', subagentSessionId: 'c1', state: 'completed' }))
     client.releaseReply()
     await running
 
-    expect(opened).toEqual(['acp-sub-call-1'])
+    expect(opened).toEqual(['acp-sub-c1'])
     expect(parentEvents.map(entry => entry.type)).toEqual(['subagent/catalog'])
     expect(parentEvents[0]!.payload).toMatchObject({ label: '写探测文件到 /tmp' })
-    // 子会话随调用收尾（不是一直开着）。
-    expect(childAppends.get('acp-sub-call-1')!.map(entry => entry.type)).toContain('turn/end')
+    // 子会话随原生终态收尾（不是随派发工具调用的 completed）。
+    expect(childAppends.get('acp-sub-c1')!.map(entry => entry.type)).toContain('turn/end')
   })
 
   it('无端口时零调用，回合照常收尾', async () => {

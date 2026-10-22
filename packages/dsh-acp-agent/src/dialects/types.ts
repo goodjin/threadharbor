@@ -71,6 +71,17 @@ export type TurnUsage = {
  *                        kept server-side (its initialize advertised
  *                        `loadSession`). Absent means unmeasured — the runner
  *                        then never resumes, exactly as before.
+ *   metaSubagents        the agent reads the ACP subagent draft capability
+ *                        from `clientCapabilities._meta.subagents`, not from
+ *                        the draft's top-level field (cursor, measured
+ *                        2026-10-21). The runner then sends both spellings.
+ *   nativeSubagentFrames the agent reports a delegation BOTH as an ordinary
+ *                        tool call and as native subagent frames; the frames
+ *                        are the run's lifecycle, the tool call only its
+ *                        dispatch (cursor, measured 2026-10-21). The runner
+ *                        then lets the native frames own the child session
+ *                        and the card instead of treating the tool call as a
+ *                        second, independent run.
  */
 export type AcpCapabilities = {
   readonly cancelsTurns: boolean
@@ -79,6 +90,8 @@ export type AcpCapabilities = {
   readonly commandVia: 'tool_frame'
   readonly toolNameMap: Readonly<Record<string, string>>
   readonly supportsSessionResume?: boolean | undefined
+  readonly metaSubagents?: boolean | undefined
+  readonly nativeSubagentFrames?: boolean | undefined
 }
 
 export interface AcpDialect {
@@ -212,4 +225,17 @@ export interface AcpDialect {
    * update then flows through the shared projection's draft branches.
    */
   normalizeSubagentUpdate?(update: Record<string, unknown>): Record<string, unknown> | undefined
+
+  /**
+   * The parent tool call a `subagent_spawned` update was dispatched from.
+   *
+   * cursor publishes a delegation twice: a `task` tool call (full prompt, the
+   * agent name in `description`) and a native `subagent_spawned` frame (child
+   * session id, a truncated task, a generic agent name). Its `_meta.cursor
+   * .toolCallId` is the join key between the two. Returning the tool call's
+   * folded id lets the caller keep ONE card and one child session instead of
+   * rendering the same delegation twice. Absent for agents that publish only
+   * one of the two forms.
+   */
+  spawnToolCallId?(update: Record<string, unknown>): string | undefined
 }

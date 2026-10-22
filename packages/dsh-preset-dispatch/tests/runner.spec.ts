@@ -8,7 +8,7 @@
  */
 
 import type { AcpFrame } from '@threadharbor/dsh-acp-agent'
-import { codexDialect, grokDialect, qoderDialect } from '@threadharbor/dsh-acp-agent'
+import { codexDialect, cursorDialect, grokDialect, qoderDialect } from '@threadharbor/dsh-acp-agent'
 import { describe, expect, it } from 'vitest'
 import { AcpTurnRunner } from '../src/runner.ts'
 import type { AcpClientPort } from '../src/runner.ts'
@@ -209,6 +209,21 @@ describe('AcpTurnRunner', () => {
     expect(air).toEqual({ version: 1, capabilities: ['nativeSubagentSessions', 'asyncTasks'] })
   })
 
+  it('cursor reads the subagent capability under _meta, where its own check looks', async () => {
+    // Measured 2026-10-21 against cursor 2026.10.01: `subagentsEnabled` is
+    // `clientCapabilities.subagents || clientCapabilities._meta.subagents`,
+    // and the released SDK strips the top-level field before it reaches the
+    // agent. Only the meta spelling makes cursor send subagent frames and
+    // resume the parent after the child finishes.
+    const client = fakeClient()
+    await new AcpTurnRunner(client, { cwd: '/tmp', dialect: cursorDialect })
+      .run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
+
+    const init = client.calls.find(call => call.method === 'initialize')!
+    const capabilities = (init.params as { clientCapabilities: { _meta?: Record<string, unknown> } }).clientCapabilities
+    expect(capabilities._meta?.['subagents']).toEqual({})
+  })
+
   it('sends the user’s text as the prompt', async () => {
     const client = fakeClient()
     await new AcpTurnRunner(client, { cwd: '/tmp' }).run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
@@ -262,6 +277,35 @@ describe('AcpTurnRunner', () => {
       .toEqual({ sessionId: 's1', configId: 'model', value: 'gmodel' })
     // The nonstandard prompt param stays out: this agent has no documented use for it.
     expect((client.calls.find(call => call.method === 'session/prompt')!.params as { modelId?: string }).modelId).toBeUndefined()
+  })
+
+  it('cursor’s model pick rides set_config_option with configId "model"', async () => {
+    // Cursor publishes configOptions[id=model] in session/new and implements
+    // unstable_setSessionModel on that path; the prompt-side modelId param is
+    // not part of the protocol and Cursor never reads it.
+    const client = fakeClient()
+    client.request = async (method, params) => {
+      client.calls.push({ method, params })
+      if (method === 'session/new') {
+        return {
+          sessionId: 's1',
+          models: { availableModels: [{ modelId: 'grok-4.7[]', name: 'grok-4.7' }] },
+          configOptions: [{ id: 'model', category: 'model', currentValue: 'default[]',
+            options: [{ value: 'default[]', name: 'Auto' }, { value: 'grok-4.7[]', name: 'grok-4.7' }] }],
+        }
+      }
+      if (method === 'session/prompt') return { stopReason: 'end_turn' }
+      return {}
+    }
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: cursorDialect })
+    await runner.run(DECISION, {
+      sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1, modelId: 'grok-4.7[]',
+    })
+
+    expect(client.calls.find(call => call.method === 'session/set_config_option')!.params)
+      .toEqual({ sessionId: 's1', configId: 'model', value: 'grok-4.7[]' })
+    expect((client.calls.find(call => call.method === 'session/prompt')!.params as { modelId?: string }).modelId)
+      .toBeUndefined()
   })
 
   it('applies a config-option pick once per change, not once per turn', async () => {

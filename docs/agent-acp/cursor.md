@@ -1,12 +1,14 @@
 # Cursor 的 ACP 对接
 
-> 核对时间：2026-09-14（2026-10-13 复核接入状态）
+> 核对时间：2026-09-14（2026-10-13 复核接入状态；2026-10-21/22 补核子代理能力、模型选择与扩展方法）
 > 来源：官方文档 <https://cursor.com/docs/cli/acp.md> + **本机实机探测**（`cursor-agent-sea` 构建 2026.10.01-e373342，已完成登录）
-> 状态：**已实现，已实测。** cursor dialect（`packages/dsh-acp-agent/src/dialects/cursor.ts`）与 `acp-cursor` 预设行已落地并有测试覆盖；authenticate 前置与权限请求 id=0 两个坑都在客户端里处理掉了。
+> 状态：**已实现，已实测。** cursor dialect（`packages/dsh-acp-agent/src/dialects/cursor.ts`）与 `acp-cursor` 预设行已落地并有测试覆盖；authenticate 前置、权限请求 id=0、原生子代理帧与模型配置项都在客户端里处理掉了。
 
 ## 一句话结论
 
 Cursor 的帧形状**最接近 codex**：工具名在 `kind`、输出在 `rawOutput`。但它有两条别家没有的东西——**必须先 `authenticate` 才能建会话**，以及**权限请求的 id 是 0**。后者足以让「按 id 判断是否为请求」的代码漏掉它，然后挂死。
+
+子代理上它的做法也独一份：**能力要发在 `clientCapabilities._meta.subagents`**；同一次委派会**发两遍**（`task` 工具调用 + 原生 `subagent_spawned`），工具调用在派发瞬间就报 `completed`，真正的完成信号是原生 `subagent_state_update`。
 
 ## 装机器时的两个坑
 
@@ -19,11 +21,12 @@ Cursor 的帧形状**最接近 codex**：工具名在 `kind`、输出在 `rawOut
 ## 流程：多一道硬门槛
 
 ```
-1. initialize                        ← 能过
+1. initialize                        ← clientCapabilities 里要带 _meta.subagents，否则子代理帧不来
 2. authenticate  methodId:"cursor_login"   ← 不做这步，下一步直接失败
 3. session/new
-4. session/set_mode  （可选）
-5. session/prompt
+4. session/set_mode          （可选）
+5. session/set_config_option （换模型时；configId 取 session/new 报的模型选择项）
+6. session/prompt
 ```
 
 **实测未登录时的表现：**
@@ -59,7 +62,34 @@ agent --auth-token "$CURSOR_AUTH_TOKEN" acp
   "authMethods": [ { "id": "cursor_login", "name": "Cursor Login", ... } ] }
 ```
 
-没有 `subagents`：Cursor 不实现子代理草案。客户端握手里的 `clientCapabilities.subagents` 是它不认识的字段，按协议应忽略；**对 Cursor 的实际影响未实测**（跑 `live.spec.ts` 的 Cursor 用例即可验证，握手已带该字段）。委派类活动如果 Cursor 内部发生，ACP 上不可见。
+### 子代理能力：只认 `_meta.subagents`
+
+`agentCapabilities` 里**没有** `subagents`（不声明草案的服务端能力），但这不代表它不做委派。2026-10-21 逐项实测（构建 2026.10.01）：
+
+| 客户端握手写法 | 结果 |
+|---|---|
+| 只发 `clientCapabilities.subagents: {}` | ❌ 没有原生帧；委派只剩一张 `task` 工具卡，子代理完成后父回合不被唤醒 |
+| 只发 `clientCapabilities._meta.subagents: {}` | ✅ `subagent_spawned` / `subagent_state_update` 到达，子代理完成后父回合继续 |
+| 两种都发 | 与只发 `_meta` 相同 |
+
+原因在 Cursor 的读法：它检查 `clientCapabilities.subagents || clientCapabilities._meta.subagents`（bundle 2026.10.01），而已发布的 `@agentclientprotocol/sdk` 在 initialize 时会把顶层草案字段剥掉——能到达它的只有 `_meta` 这一份。本项目只对声明了 `metaSubagents` 的方言发这一项。
+
+能力打开后 Cursor 的行为（bundle + 真机抓帧）：
+
+- 子代理的 `session/update` 带 `params.sessionId = 子会话 id`，按会话 id 路由即可；
+- 子代理完成时发 `subagent_state_update`，并在**同一个 `session/prompt` 内**自动唤醒父代理继续，客户端不需要补发 prompt；
+- 关闭能力时这些帧与自动续跑都不存在——子代理跑完父代理不知道，回合停在半路（2026-10-20 的慢会话就是这种形态）。
+
+#### 一次委派，两条消息
+
+真机抓帧（2026-10-21）：
+
+1. **`task` 工具调用**：`kind: "other"`，`rawInput._toolName: "task"`，`prompt` 是全量任务，`description` 是用户看到的代理名；
+2. **原生 `subagent_spawned`**：`subagentSessionId` 是子会话 id，`task` 是**截断**的任务文本，`name` 是通用名。
+
+两条通过 `_meta.cursor.toolCallId` 关联，值同样是换行拼接的 id（见下文的坑）。`task` 工具调用在派发后 0.1–1 秒就报 `status: "completed"`——那是**派发完成**，不是子代理完成；真正的终态只认 `subagent_state_update`。
+
+本项目的处理：只开一张卡，id 取 `task` 工具调用折叠后的 id、参数取全量 `prompt` / `description`；`task` 的 `completed` 不落结果；子代文本按 `params.sessionId` 累积；`subagent_state_update` 到达时才落结果、关卡片。投影（`linkedTools`）与分段泵（`subagentTools` / `spawnedByChild`）两条路径同一套规则。
 
 ### session/new 返回（实测）
 
@@ -67,7 +97,8 @@ agent --auth-token "$CURSOR_AUTH_TOKEN" acp
 { sessionId,
   models: { currentModelId, availableModels: [ { modelId, name }, … ] },
   modes: { currentModeId: "agent", availableModes: [agent, plan, ask] },
-  configOptions: [ { id: "mode", … } ] }
+  configOptions: [ { id: "mode", category: "mode", … },
+                   { id: "model", category: "model", … } ] }
 ```
 
 **模型列表就在 `models.availableModels`，字段名与 grok / codex 一致**（`modelId` / `name`）。实测 29 个，含 grok、claude、gpt、gemini 等多厂商——**注意 `modelId` 里带了参数后缀**，例如：
@@ -78,6 +109,20 @@ claude-opus-5-5[context=300k,effort=medium,fast=false]
 ```
 
 即**同一个模型的不同配置是不同的 modelId**。界面展示时需把方括号部分剥掉，提交时原样带回。
+
+### 换模型：走 `session/set_config_option`
+
+`session/prompt` **没有**文档化的 `modelId` 参数，Cursor 也不读它。换模型只有一条路：
+
+```
+session/set_config_option { sessionId, configId: "model", value: "<modelId 原样>" }
+```
+
+`configId` 取 `session/new` 的 `configOptions` 里 `category: "model"`（或 `id: "model"`）那一项，不要写死。实测（2026-10-21）：调用成功，后续回合按新模型跑；`value` 必须是 `models.availableModels` 里的完整 id（含方括号后缀）。本项目由 `modelVia: 'config_option'` + `modelConfigId` 走这条路，同一会话只在选择真正变化时发一次。
+
+### 会话恢复：`session/resume` 不支持
+
+`initialize` 声明 `loadSession: true`，但 **`session/resume` 探针返回 `-32601`（方法不存在）**，只有 `session/load` 存在。本项目的日志恢复路径用 `session/resume`，所以 Cursor 方言**不能声明 `supportsSessionResume`**；恢复时按文本回灌走，而不是指望 agent 端保留会话。`session/load` 的实际加载行为未测。
 
 ## 工具帧（实测）
 
@@ -162,11 +207,17 @@ params.toolCall = { toolCallId, title, kind, status, content }
 | `cursor/ask_question` | 多选提问 | `{outcome:{outcome:"answered", answers:[{questionId, selectedOptionIds}]}}`，或 `skipped` / `cancelled` |
 | `cursor/create_plan` | 请求批准计划 | `{outcome:{outcome:"accepted", planUri?}}`，或 `rejected` / `cancelled` |
 
-**通知式**（不回无妨）：`cursor/update_todos`、`cursor/task`、`cursor/generate_image`。
+**文档上的通知式**：`cursor/update_todos`、`cursor/task`、`cursor/generate_image`。
 
-其中 `cursor/update_todos` 值得单独接——DSH 会话界面本来就有 todo 展示。
+**实测（2026-10-21，构建 2026.10.01）：这三个也带 JSON-RPC `id`，是按请求发来的，不回会让 agent 停等。** `cursor/task` 直接参与子代理派发，载荷形如：
 
-> **未实测**：本次探测的提示词没有触发这两个扩展方法，实际触发时机与帧形状需在真实使用中补抓。
+```
+{ toolCallId, description, prompt, subagentType, durationMs }
+```
+
+本项目对这三个一律回空结果 `{}`——按约定它们是发射后不管的，空结果只表示「收到了」，不冒充任何业务结论。`cursor/task` 不再单独渲染成「子代理任务完成」行：它和 `subagent_spawned` 是同一次委派，展示归子代理卡片（见上文），原始输出层把它列为专属方法丢弃。
+
+两个阻塞式方法 `cursor/ask_question` / `cursor/create_plan` 早已接上，默认分别回 `skipped` / `cancelled`；宿主能问用户时，提问会走 `answerAskQuestion` 交给真人。**这两个的真实触发形状仍未实测**。
 
 ## 与桌面版的关系：ACP 看不到桌面版的对话
 
@@ -190,22 +241,26 @@ params.toolCall = { toolCallId, title, kind, status, content }
 - **不支持** dashboard 上配置的团队级 MCP（ACP 模式下）
 - 从项目目录启动 `agent`，并批准要用的 server
 
-## 接进本项目要改的地方
+## 接进本项目要改的地方（均已落地）
 
 1. **新增 `dialects/cursor.ts`**：工具名取 `kind`；输出取 `rawOutput.stdout`；模型取 `models.availableModels`；token 恒为 `undefined`
 2. **在 `factory.ts` 的 `DIALECTS` 登记**
-3. **补 `authenticate` 步骤**——现有 `AcpClient` 流程里没有这一步，直接 `session/new` 会失败
-4. **确认客户端按 `typeof id === 'number'` 判断**（本项目已如此，Cursor 的 id=0 不会漏）
-5. **实现两个阻塞式扩展方法**
-6. **`toolCallId` 里的换行符**要处理，否则日志和单行协议会出问题
+3. **补 `authenticate` 步骤**——直接 `session/new` 会失败
+4. **确认客户端按 `typeof id === 'number'` 判断**（Cursor 的权限请求 id=0 不会漏）
+5. **实现两个阻塞式扩展方法**；另外三个「通知式」方法实测也带 id，按请求回 `{}`
+6. **`toolCallId` 里的换行符**折叠一次，日志、协议与关联键都用折叠后的 id
 7. **可执行文件路径做成配置项**，避开 `~/.local/bin/agent` 冲突
+8. **子代理**：握手发 `_meta.subagents`；`task` 工具调用与原生帧按 `_meta.cursor.toolCallId` 关联；只开一张卡、一个子会话；`task` 派发时的 `completed` 不落结果；完成以 `subagent_state_update` 为准
+9. **模型选择**：`modelVia: 'config_option'`，配置项 id 从 `session/new` 读，不再往 `session/prompt` 塞 `modelId`
 
-其中第 3 条最容易被漏——其余几家都不需要它（Qoder 也只在被拒时认证，见 [qoder.md](./qoder.md)）。
+其中第 3 条最容易被漏——其余几家都不需要它（Qoder 也只在被拒时认证，见 [qoder.md](./qoder.md)）。第 8 条是本轮补的：能力发错位置时没有任何报错，只是子代理完成后父回合永远等不到通知。
 
 ## 证据
 
 **已实测**：initialize 返回、authenticate 成功、`session/new` 的完整返回（含 29 个模型）、`session/list` 的实际结果、完整工具调用三帧、权限请求的形状与回应、回合正常走完（`stopReason: end_turn`）、token 缺失。
 
-**抓到的原始帧已存为夹具**：`packages/dsh-acp-agent/tests/fixtures/captured-frames.cursor.json`，写 dialect 时直接照它写。
+2026-10-21/22 补测：`_meta.subagents` 的能力开关（四种写法对照）、`subagent_spawned` / `subagent_state_update` 与子会话帧、`task` 工具调用的双发与派发即 `completed`、`session/set_config_option` 切模型、`session/resume → -32601`、三个「通知式」扩展方法按请求到达。
 
-**未实测**：两个 `cursor/*` 扩展方法的实际触发；失败工具的 `status` 取值；`session/load` 加载旧会话的行为。
+**抓到的原始帧已存为夹具**：`packages/dsh-acp-agent/tests/fixtures/captured-frames.cursor.json`（基础帧）。子代理的双发形状按真机抓帧写进 `tests/subagent-frames.spec.ts` 的 `cursor delegation published twice` 组，泵内去重由 `subagent-wiring.spec.ts`、`mid-turn-tools.spec.ts` 与 `runsteps.spec.ts` 分别钉住。
+
+**未实测**：`cursor/ask_question` / `cursor/create_plan` 的真实触发形状；失败工具的 `status` 取值；`session/load` 加载旧会话的行为；多层委派（子代理再开子代理）。

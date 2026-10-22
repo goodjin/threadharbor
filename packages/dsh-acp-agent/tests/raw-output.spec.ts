@@ -206,15 +206,12 @@ describe('RawOutputAggregator', () => {
     expect((classified as { line: string }).line).toContain('合并')
   })
 
-  it('cursor/task 格式化为子代理任务行', () => {
+  it('cursor/task 是专用方法：派发已有子代理卡片，不再出一块「任务完成」', () => {
     const frame = {
       method: 'cursor/task',
       params: { toolCallId: 'call_126', description: 'Explore codebase', prompt: 'Find auth paths.', subagentType: 'explore', durationMs: 12300 },
     }
-    const classified = classifyRawOutput(frame as never, { childSession: false })
-    expect(classified).toMatchObject({ kind: 'cursor 子代理任务', format: 'text' })
-    expect((classified as { line: string }).line).toContain('Explore codebase')
-    expect((classified as { line: string }).line).toContain('explore')
+    expect(classifyRawOutput(frame as never, { childSession: false })).toBeUndefined()
   })
 
   it('cursor/generate_image 格式化为生成图片行', () => {
