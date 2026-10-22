@@ -15,6 +15,7 @@ describe('parseSshInput', () => {
     writeFileSync(identityFile, 'key\n', { mode: 0o600 })
     expect(parseSshInput({
       target: 'example.test',
+      user: 'deploy',
       identityFile,
     }, false).target).toBe('example.test')
   })
@@ -22,7 +23,15 @@ describe('parseSshInput', () => {
   it('requires fingerprint when approved', () => {
     expect(() => parseSshInput({
       target: 'example.test',
+      user: 'deploy',
       identityPem: '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n',
     }, true)).toThrow(/hostKeyFingerprint/)
+  })
+
+  it('requires user when the host plugin enforces it', () => {
+    expect(() => parseSshInput({
+      target: 'example.test',
+      identityPem: '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n',
+    }, false, true)).toThrow(/user/)
   })
 })

@@ -72,11 +72,11 @@ export class DshSshManager {
   }
 
   parseInspectionConfig(value: unknown): SshConnectionConfig {
-    return parseSshInput(value, false)
+    return parseSshInput(value, false, true)
   }
 
   parseApprovedConfig(value: unknown): SshConnectionConfig {
-    return parseSshInput(value, true)
+    return parseSshInput(value, true, true)
   }
 
   async inspect(config: SshConnectionConfig): Promise<SshHostKeyCandidate> {

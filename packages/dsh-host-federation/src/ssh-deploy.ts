@@ -19,6 +19,7 @@ import { performRemoteOp } from './host-remote-ops.ts'
 import { parseAccessMode, validateBindHost } from './ssh/access.ts'
 import { DEFAULT_REMOTE_DSH_PLUGINS, normalizePluginSpecs } from './ssh/deploy-plugins.ts'
 import { parseRemoteAgentSelection } from './ssh/remote-agents.ts'
+import { listLocalIdentityFiles, listSshConfigHosts, pickLocalIdentityFile } from './ssh/local-assets.ts'
 
 export { SSH_DEPLOY_ENTRY_ID } from './ssh-deploy-id.ts'
 
@@ -36,6 +37,8 @@ export const ROUTE_CHECK = '/api/threadharbor.host-ssh.check'
 export const ROUTE_SERVE = '/api/threadharbor.host-ssh.serve'
 export const ROUTE_SERVICE = '/api/threadharbor.host-ssh.service'
 export const ROUTE_START = '/api/threadharbor.host-ssh.start'
+export const ROUTE_LOCAL_ASSETS = '/api/threadharbor.host-ssh.local.assets'
+export const ROUTE_LOCAL_PICK_IDENTITY = '/api/threadharbor.host-ssh.local.pick-identity'
 
 export type Config = {
   knownHostsPath?: string
@@ -117,6 +120,28 @@ export function apply(ctx: unknown, config: Config = {}): void {
   const connection = connectionOf(ctx)
 
   const disposers: Array<() => void> = []
+
+  const registerGet = (
+    path: string,
+    handler: () => Promise<unknown>,
+  ): void => {
+    disposers.push(connection.fetch.register({
+      path,
+      methods: ['GET', 'HEAD'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        if (request.method === 'HEAD') return new Response(null, { status: 200 })
+        try {
+          const value = await handler()
+          return Response.json({ ok: true, value })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          log.warn(`route ${path} failed`, { error: message })
+          return Response.json({ ok: false, error: message }, { status: 400 })
+        }
+      },
+    }))
+  }
 
   const register = (
     path: string,
@@ -213,6 +238,17 @@ export function apply(ctx: unknown, config: Config = {}): void {
     if (!started.ok) throw new Error(started.reason)
     log.info('ssh peer started', { target: ssh.target, port: started.port })
     return { port: started.port }
+  })
+
+  registerGet(ROUTE_LOCAL_ASSETS, async () => ({
+    configHosts: listSshConfigHosts(),
+    identityFiles: listLocalIdentityFiles(),
+  }))
+
+  register(ROUTE_LOCAL_PICK_IDENTITY, async () => {
+    const path = pickLocalIdentityFile()
+    if (path === undefined) return { cancelled: true }
+    return { cancelled: false, path }
   })
 
   register(ROUTE_INSPECT, async body => {

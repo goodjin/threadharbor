@@ -32,6 +32,20 @@ export type SshHostKeyCandidate = {
   readonly algorithm: string
 }
 
+/** One `Host` alias from the Web service machine's OpenSSH config. */
+export type SshConfigHostEntry = {
+  readonly alias: string
+  readonly hostName?: string
+  readonly user?: string
+  readonly identityFile?: string
+  readonly port?: number
+}
+
+export type SshLocalAssets = {
+  readonly configHosts: readonly SshConfigHostEntry[]
+  readonly identityFiles: readonly string[]
+}
+
 export type SshDeployPhase =
   | 'queued'
   | 'connecting'
