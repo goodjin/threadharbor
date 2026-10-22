@@ -35,6 +35,8 @@
 
 **共用的一条铁律**：工具名必须**锁定**——各家都会在后续帧覆写名字或标题，不锁定就会被冲掉。
 
+**模型列表以 agent 最新一次 `session/new` / `session/resume` 报告为准**：模型选择器和每回合的选择门读同一份报告，不再用配置里的静态清单判账。agent 新增的模型选中后能直接放行；已被淘汰的 id 在写入前被本地拦下，回合以「请重新选择模型」结束，而不是把注定失败的请求送给 agent。只有还没拿到报告时才退回配置清单。
+
 **Cursor、Qoder 与 codex 最像**（工具名不取 `title`、输出取 `rawOutput`），但**字段名不同**（Cursor 是 `rawOutput.stdout`，Qoder 是字符串 `rawOutput`，codex 是 `rawOutput.formatted_output`），仍需各自的 dialect。
 
 > **关于「未观察到 terminal/*」**：意思是实测的几轮里没发起过，不等于永远不发起。实机测试里只有 grok 挂载了终端服务，codex/claude/cursor/qoder 跑的是同一条 shell 提示词且**在没有终端服务的情况下通过**——这是「那次没用到」的证据，不是「用不到」的证明。生产代码目前对所有 preset 都挂载了终端服务（见 `factory.ts`），这个默认是对的，别因为某家「未观察到」就去掉。

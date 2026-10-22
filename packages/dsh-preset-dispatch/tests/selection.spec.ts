@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { decideSelection, pendingSelectionOf, selectionOf } from '../src/selection.ts'
+import { decideSelection, pendingSelectionOf, selectionModelsOf, selectionOf } from '../src/selection.ts'
 
 const CONFIG = {
   presetId: 'acp-grok',
@@ -33,6 +33,28 @@ describe('pendingSelectionOf', () => {
     expect(pendingSelectionOf(undefined)).toBeUndefined()
     expect(pendingSelectionOf('nope')).toBeUndefined()
     expect(pendingSelectionOf({ pending: { provider: 1 } })).toBeUndefined()
+  })
+})
+
+describe('selectionModelsOf', () => {
+  it('judges against the live report once the agent has given one', () => {
+    // The picker serves what `session/new` reported. A model added after this
+    // row mounted is in the picker but not in the configured list; judging by
+    // the configured list would refuse a pick the user can see.
+    const models = selectionModelsOf(CONFIG.models, [{ id: 'grok-9' }])
+    expect(decideSelection({ presetId: 'acp-grok', models }, { provider: 'acp:acp-grok', model: 'grok-9' }))
+      .toEqual({ kind: 'own', modelId: 'grok-9' })
+  })
+
+  it('lets an empty report replace the configured list', () => {
+    // An agent that reported no models serves none; keeping the configured
+    // guess alive would send a pick the agent no longer has.
+    expect(selectionModelsOf(CONFIG.models, [])).toEqual([])
+  })
+
+  it('falls back to the configured list before the first report', () => {
+    expect(selectionModelsOf(CONFIG.models, undefined)).toBe(CONFIG.models)
+    expect(selectionModelsOf(undefined, undefined)).toEqual([])
   })
 })
 

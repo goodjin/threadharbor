@@ -37,7 +37,8 @@ import { markRosterHidden } from './roster-marks.ts'
 import { makeContentWriter } from './content-writer.ts'
 import type { SessionAppend } from './content-writer.ts'
 import type { GatewaySessionAppend } from './gateway.ts'
-import { decideSelection, pendingSelectionOf, selectionOf } from './selection.ts'
+import { decideSelection, pendingSelectionOf, selectionModelsOf, selectionOf } from './selection.ts'
+import { runtimeModels } from './catalog-registration.ts'
 import type { SelectionSource } from './selection.ts'
 import { switchDrivenSession } from './switch-mount.ts'
 import { switchShared } from './switch-shared.ts'
@@ -259,6 +260,10 @@ export function apply(ctx: unknown, config: Config): void {
   const defaultModel = host.get?.('agentDefaultModel') as
     | { currentSelection?(this: unknown): unknown }
     | undefined
+  // The runner records each agent's live `session/new` model list here, and the
+  // catalog serves the picker from it. The per-turn gate reads the same ledger:
+  // judging against the configured list would refuse a model the picker shows.
+  const runtimeModelReports = runtimeModels()
   const turnModel = async (
     agent: AgentLike,
     decision: { readonly messages: readonly unknown[] },
@@ -279,7 +284,10 @@ export function apply(ctx: unknown, config: Config): void {
       source = 'host-default'
     }
     if (selection === undefined) return { kind: 'none' }
-    const decided = decideSelection({ presetId: config.presetId, models: config.models ?? [] }, selection, source)
+    const decided = decideSelection({
+      presetId: config.presetId,
+      models: selectionModelsOf(config.models, runtimeModelReports.modelsOf(config.presetId)),
+    }, selection, source)
     if (decided.kind !== 'refuse') return decided
     // A pick this preset cannot serve. When it names ANOTHER preset's model,
     // and that preset is mounted on this host, this is the §9.2 switch: it is
@@ -352,6 +360,7 @@ export function apply(ctx: unknown, config: Config): void {
   const sessionPositionOf = readSessionPosition(host)
 
   applyAcpPlugin(host, config.presetId, preset, {
+    runtimeModels: runtimeModelReports,
     ...(readProjection(host) === undefined ? {} : { presetOf: readProjection(host) }),
     ...(sessionAppend === undefined ? {} : { sessionAppend }),
     ...(sessionPositionOf === undefined ? {} : { sessionPositionOf }),

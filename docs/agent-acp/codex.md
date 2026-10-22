@@ -83,7 +83,7 @@ rawOutput.exit_code           // 退出码
 - 送列表里没有的组合 id（如 `definitely-removed-model[low]`）→ `-32603 Internal error`，`data.details: "Unknown model …"`。
 - 送裸基础 id（如 `gpt-6-astra`）→ 同样 `-32603`，`data.details: "Unsupported format of modelId: … Expected: modelId[effort]."`——**`set_model` 只收带档位的组合 id**。
 
-因此 runner 在写入前用同一份 `session/new` 报告的 id 集合校验：不在集合里 → 本地以「模型 … 已不在 agent 当前提供的模型列表中，请重新选择模型」结束；裸基础 id 且该模型仍有可用档位 → 本地提示「需要先选择推理档位」。两种情况都**不再把注定失败的请求送给 agent**。报告为空（agent 不公布模型）时不校验，保持原样透传。
+因此 runner 在写入前用同一份 `session/new` 报告的 id 集合校验：不在集合里 → 本地以「模型 … 已不在 agent 当前提供的模型列表中，请重新选择模型」结束；裸基础 id 且该模型仍有可用档位 → 本地提示「需要先选择推理档位」。两种情况都**不再把注定失败的请求送给 agent**。报告为空（agent 不公布模型）时不校验，保持原样透传。**每回合的选择门同样按这份最新报告判账**，而不是配置里的静态清单：报告里有、配置里没有的 id 能直接选中；报告为空时才退回配置清单。
 
 > 历史记录：旧版 codex-acp 的 `session/set_model` 曾返回 `-32603 Internal error`，实机测试用 `.catch(() => {})` 把错误吞掉，导致“选型从未生效”被藏了很久。1.10.0 已恢复；接新版本时必须重新验证，别让错误再被 catch 掉。
 

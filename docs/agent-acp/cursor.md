@@ -120,7 +120,7 @@ session/set_config_option { sessionId, configId: "model", value: "<modelId 原�
 
 `configId` 取 `session/new` 的 `configOptions` 里 `category: "model"`（或 `id: "model"`）那一项，不要写死。实测（2026-10-21）：调用成功，后续回合按新模型跑；`value` 必须是 `configOptions[id=model].options[].value` 里的完整 id（含方括号后缀）。本项目由 `modelVia: 'config_option'` + `modelConfigId` 走这条路，同一会话只在选择真正变化时发一次。
 
-**旧会话可能存着不带后缀的 id**（2026-10-22 实测）：某个会话落的是 `grok-4.7`，而 cursor 当前可用值是 `grok-4.7[context=256k,reasoning_effort=high,fast=true]`；直接写入会回 `-32602 Invalid model value: grok-4.7`，整个回合失败。本项目在写入前先精确匹配 `value`，再按选项的 `name` 和 `[` 前的基础 id 解析旧值；三者都匹配不上，说明模型列表已经更新、会话里的选择已被淘汰——此时**不再把无效值送给 agent**，回合直接在本地以「模型 … 已不在 agent 当前提供的模型列表中，请重新选择模型」结束。本轮 `session/new` 已把 agent 的最新列表上报到模型目录，用户从刷新后的列表重选即可。
+**旧会话可能存着不带后缀的 id**（2026-10-22 实测）：某个会话落的是 `grok-4.7`，而 cursor 当前可用值是 `grok-4.7[context=256k,reasoning_effort=high,fast=true]`；直接写入会回 `-32602 Invalid model value: grok-4.7`，整个回合失败。本项目在写入前先精确匹配 `value`，再按选项的 `name` 和 `[` 前的基础 id 解析旧值；三者都匹配不上，说明模型列表已经更新、会话里的选择已被淘汰——此时**不再把无效值送给 agent**，回合直接在本地以「模型 … 已不在 agent 当前提供的模型列表中，请重新选择模型」结束。本轮 `session/new` 已把 agent 的最新列表上报到模型目录，用户从刷新后的列表重选即可。**每回合的选择门也读这份最新报告**（不是配置里的静态清单）：agent 新增的模型在 picker 选中后能直接放行；旧 id 交由上面的写入前校验兜底。
 
 ### 会话恢复：`session/resume` 不支持
 

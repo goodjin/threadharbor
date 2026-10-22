@@ -17,6 +17,7 @@ import { forgetSession, rememberStepPosition } from '../src/step-position.ts'
 import type { AcpTransport } from '@threadharbor/dsh-acp-agent'
 import { installAcpDispatch } from '../src/dispatch.ts'
 import { switchShared } from '../src/switch-shared.ts'
+import { runtimeModels } from '../src/catalog-registration.ts'
 import type { AcpPresetBinding } from '../src/dispatch.ts'
 
 /** A context carrying only what this entry touches. */
@@ -677,12 +678,16 @@ describe('加载路径的模型报告真的进目录（applyAcpPlugin 端到端�
     })
 
     const transport = scriptedTransport()
+    // The same ledger the standalone entry's per-turn gate reads: the report
+    // must land HERE, or the picker and the gate would judge different lists.
+    const reports = runtimeModels()
     applyAcpPlugin(withRegistry, 'acp-grok', {
       agent: 'grok',
       url: 'ws://127.0.0.1:2419',
       // A configured guess the report must replace once it lands.
       models: [{ id: 'configured-guess', name: 'Configured guess' }],
     }, {
+      runtimeModels: reports,
       install: (agent, _presetId, _dialect, table) => {
         installAcpDispatch(agent as never, table, {
           produce: () => [],
@@ -721,6 +726,7 @@ describe('加载路径的模型报告真的进目录（applyAcpPlugin 端到端�
     // loaded path, not a side door.
     expect(models.map(model => model.id)).toEqual(['m1'])
     expect(models[0]?.name).toBe('M1')
+    expect(reports.modelsOf('acp-grok')?.map(model => model.id)).toEqual(['m1'])
   })
 })
 

@@ -149,6 +149,15 @@ export type AcpPluginDeps = {
    * command, which is what every real deployment wants.
    */
   transport?(preset: { url?: string; command?: string }): AcpTransport
+  /**
+   * The ledger live model reports are recorded in.
+   *
+   * Supplying it lets the caller read the same list the picker is served from:
+   * the standalone entry judges each turn's model selection against it, so a
+   * model the agent added after startup is not refused before the turn runs.
+   * Omitted uses a private ledger, as a plain plugin mount needs nothing more.
+   */
+  runtimeModels?: import('./catalog-registration.ts').RuntimeModels
 }
 
 /**
@@ -193,7 +202,9 @@ export function applyAcpPlugin(
   // the loaded entry actually calls — a report recorded anywhere else is the
   // catalogue bug again: the runner would drop every `session/new` model list
   // and `listModels` would silently degrade to the configured list forever.
-  const runtimeModelReports = runtimeModels()
+  // The entry may supply the ledger so its per-turn selection gate reads the
+  // same reports the catalog serves.
+  const runtimeModelReports = deps.runtimeModels ?? runtimeModels()
   const factory = makeSessionFactory(presets, {
     // Refusing without asking is the safe default and the honest one when there
     // is nowhere to ask. Where there IS a host that answers, use it — a row

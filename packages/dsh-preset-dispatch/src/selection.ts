@@ -92,6 +92,23 @@ export type SelectionConfig = {
 export type SelectionSource = 'picker' | 'host-default'
 
 /**
+ * The models a turn's selection is judged against.
+ *
+ * The picker serves the agent's latest `session/new` report, so judging
+ * against the configured list would refuse a model the user can plainly see —
+ * or silently match one suffix to another through the base id. A report
+ * replaces the configured list even when it is empty: an agent that reported
+ * no models serves none. Before the first report there is nothing better than
+ * the configured list.
+ */
+export function selectionModelsOf(
+  configured: readonly { readonly id: string }[] | undefined,
+  reported: readonly { readonly id: string }[] | undefined,
+): readonly { readonly id: string }[] {
+  return reported ?? configured ?? []
+}
+
+/**
  * Read the pending selection out of a projection state value.
  *
  * Absent, malformed, or already-consumed (null) states all read as "nothing
