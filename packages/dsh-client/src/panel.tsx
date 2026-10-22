@@ -2961,3 +2961,9 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                   onSettings={() => { openDetail(row.hostId) }}
                   t={props.t}
                 />
+              ))}
+        </div>
+      </div>
+    </div>
+  )
+}
