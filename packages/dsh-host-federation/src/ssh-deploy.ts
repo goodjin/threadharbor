@@ -7,7 +7,6 @@
  */
 
 import Schema from '@deepseek-ai/schemastery'
-import { readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { DshSshManager } from './ssh/manager.ts'
@@ -20,6 +19,7 @@ import { performRemoteOp } from './host-remote-ops.ts'
 import { parseAccessMode, validateBindHost } from './ssh/access.ts'
 import { DEFAULT_REMOTE_DSH_PLUGINS, normalizePluginSpecs } from './ssh/deploy-plugins.ts'
 import { parseRemoteAgentSelection } from './ssh/remote-agents.ts'
+import { listLocalIdentityFiles, listSshConfigHosts, pickLocalIdentityFile } from './ssh/local-assets.ts'
 
 export { SSH_DEPLOY_ENTRY_ID } from './ssh-deploy-id.ts'
 
@@ -37,7 +37,8 @@ export const ROUTE_CHECK = '/api/threadharbor.host-ssh.check'
 export const ROUTE_SERVE = '/api/threadharbor.host-ssh.serve'
 export const ROUTE_SERVICE = '/api/threadharbor.host-ssh.service'
 export const ROUTE_START = '/api/threadharbor.host-ssh.start'
-export const ROUTE_KEYS = '/api/threadharbor.host-ssh.keys'
+export const ROUTE_LOCAL_ASSETS = '/api/threadharbor.host-ssh.local.assets'
+export const ROUTE_LOCAL_PICK_IDENTITY = '/api/threadharbor.host-ssh.local.pick-identity'
 
 export type Config = {
   knownHostsPath?: string
@@ -119,6 +120,28 @@ export function apply(ctx: unknown, config: Config = {}): void {
   const connection = connectionOf(ctx)
 
   const disposers: Array<() => void> = []
+
+  const registerGet = (
+    path: string,
+    handler: () => Promise<unknown>,
+  ): void => {
+    disposers.push(connection.fetch.register({
+      path,
+      methods: ['GET', 'HEAD'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        if (request.method === 'HEAD') return new Response(null, { status: 200 })
+        try {
+          const value = await handler()
+          return Response.json({ ok: true, value })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          log.warn(`route ${path} failed`, { error: message })
+          return Response.json({ ok: false, error: message }, { status: 400 })
+        }
+      },
+    }))
+  }
 
   const register = (
     path: string,
@@ -217,16 +240,23 @@ export function apply(ctx: unknown, config: Config = {}): void {
     return { port: started.port }
   })
 
+  registerGet(ROUTE_LOCAL_ASSETS, async () => ({
+    configHosts: listSshConfigHosts(),
+    identityFiles: listLocalIdentityFiles(),
+  }))
+
+  register(ROUTE_LOCAL_PICK_IDENTITY, async () => {
+    const path = pickLocalIdentityFile()
+    if (path === undefined) return { cancelled: true }
+    return { cancelled: false, path }
+  })
+
   register(ROUTE_INSPECT, async body => {
     const ssh = manager.parseInspectionConfig((body as Record<string, unknown>)['ssh'])
     const keys = await manager.inspectAll(ssh)
     log.info('ssh inspect', redactSshForLog(ssh))
     return { keys }
   })
-
-  // 私钥路径的可选清单：只读本机 ~/.ssh 里的文件名，拿不到密码、也不读内容。
-  // 面板把它当输入框的建议项，填不填仍由操作者决定。
-  register(ROUTE_KEYS, async () => ({ keys: listIdentityFiles() }))
 
   register(ROUTE_DEPLOY, async body => {
     const record = body as Record<string, unknown>
@@ -272,26 +302,6 @@ function portOf(value: unknown): number | undefined {
   if (value === undefined || value === null) return undefined
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 65_535) throw new Error('remoteWebPort 无效')
   return value
-}
-
-/**
- * Absolute paths of files in the Web host's `~/.ssh` that could be a private
- * key. The list is only advice for the path field: public halves and ssh's own
- * bookkeeping files are skipped, everything else is offered as typed.
- */
-function listIdentityFiles(): string[] {
-  const directory = join(homedir(), '.ssh')
-  const metadata = new Set(['config', 'known_hosts', 'authorized_keys', 'environment', 'rc'])
-  try {
-    return readdirSync(directory, { withFileTypes: true })
-      .filter(entry => entry.isFile() || entry.isSymbolicLink())
-      .map(entry => entry.name)
-      .filter(name => !name.startsWith('.') && !name.endsWith('.pub') && !metadata.has(name) && !name.startsWith('known_hosts'))
-      .sort()
-      .map(name => join(directory, name))
-  } catch {
-    return []
-  }
 }
 
 function parseDeployRequest(record: Record<string, unknown>): SshDeployRequest {

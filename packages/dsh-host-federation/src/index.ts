@@ -58,6 +58,8 @@ export type {
   SshDeployRequest,
   SshDeployResult,
   SshHostKeyCandidate,
+  SshConfigHostEntry,
+  SshLocalAssets,
 } from './ssh/types.ts'
 export type { PeerListen, PeerStatus } from './ssh/peer-status.ts'
 export type { PeerReport } from './ssh/liveness.ts'

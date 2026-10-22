@@ -11,6 +11,9 @@ import type { ReactNode } from 'react'
 import type { PeerCheckAction, PeerCheckReport, PeerCheckStep } from '@threadharbor/dsh-host-federation'
 import type { ClientLocaleKey, RuntimeT } from './locales.ts'
 import type { ServeFailure } from './ssh-deploy.ts'
+import type { OpsAiHostContext } from './copy-for-ai.ts'
+import { buildPeerCheckAiPrompt } from './copy-for-ai.ts'
+import { CopyForAiButton } from './copy-for-ai-button.tsx'
 import styles from './panel.module.css'
 
 /** One rendered row: localized label, state word, reason and the actions. */
@@ -59,10 +62,14 @@ export function PeerCheckList(props: {
   readonly onCheck: () => void
   readonly onAction: (action: PeerCheckAction) => void
   readonly onSave: (launchUrl: string) => void
+  readonly aiHostContext?: OpsAiHostContext | undefined
+  readonly onCopied?: (() => void) | undefined
+  readonly onCopyFailed?: (() => void) | undefined
   readonly t: RuntimeT
 }): ReactNode {
   const { report, t } = props
   const rows = report?.steps === undefined ? [] : peerCheckRows(report, t)
+  const aiPrompt = buildPeerCheckAiPrompt(report, props.serveFailure, props.aiHostContext ?? {})
   return (
     <div data-peer-check="" className={styles.sshKeys}>
       <p className={styles.summary}>{t('panel.check.title')}</p>
@@ -110,6 +117,17 @@ export function PeerCheckList(props: {
           )
         : undefined}
       <div className={styles.formActions}>
+        {aiPrompt !== undefined
+          ? (
+              <CopyForAiButton
+                prompt={aiPrompt}
+                t={t}
+                dataAction="peer-copy-for-ai"
+                onCopied={props.onCopied}
+                onCopyFailed={props.onCopyFailed}
+              />
+            )
+          : undefined}
         <button
           type="button"
           className={styles.action}

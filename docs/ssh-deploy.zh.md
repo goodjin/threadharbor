@@ -1,5 +1,7 @@
 # SSH 自动部署远端 DSH
 
+> **运维入口**：添加主机、SSH 表单、部署/检测进度与「复制给 AI」所引用的稳定手册见 **[ops.zh.md](./ops.zh.md)**。本文偏 API 与状态机细节。
+
 每台主机地位相同。任意一台已经在跑 ThreadHarbor 的机器，都可以 SSH 到另一台：读取对方是否装好插件和带 token 的地址，再通过本机 SSH 隧道打开页面。也可以在对方还没装的时候直接部署。对方的 DSH 只听 `127.0.0.1`。
 
 ## 前置条件
@@ -39,8 +41,8 @@
 
 ## 使用步骤
 
-1. 侧栏 **各主机** → **添加新主机** → **SSH 自动部署**。
-2. 填写 SSH 与认证，批准主机密钥后可点 **通过 SSH 读取对方状态**：读 `$HOME/.local/state/threadharbor/peer.json`（插件是否已装、`launchUrl`）。没有这份文件就还没装好。
+1. 侧栏 **各主机** → **添加新主机** → 选 **通过 SSH 部署 / 接管**（或先 **从 Tailscale 选** 再进 SSH 表单）。
+2. **SSH 主机** 可手输或从本机 `~/.ssh/config` 的 Host 列表选；选中有 `User` / `IdentityFile` 的块会预填。**用户名** 必填，不会默认本机用户。**本机私钥路径** 可从 `~/.ssh` 列表选、浏览文件或手输。填写 SSH 与认证后，批准主机密钥后可点 **通过 SSH 读取对方状态**：读 `$HOME/.local/state/threadharbor/peer.json`（插件是否已装、`launchUrl`）。没有这份文件就还没装好。
 3. 勾选要启用的 ACP preset，再 **部署 DSH 并登记**。对方只听 `127.0.0.1`，连接方打开本机隧道。部署成功时对方会写下 `peer.json`，之后任何主机都能用同一条 SSH 读到。
 4. 使用界面上的 **带 token 链接** 复制或打开；`launchUrl` 写入登记簿。
 5. 左侧会话树会随本机/远端数据刷新；远端约每 30 秒重拉一次。
@@ -53,7 +55,9 @@
 
 | 路径 | 方法 | 作用 |
 |------|------|------|
-| `/api/threadharbor.host-ssh.inspect` | POST | 扫描主机密钥 |
+| `/api/threadharbor.host-ssh.local.assets` | GET | 本机 `~/.ssh/config` 的 Host 列表与 `~/.ssh` 下候选私钥路径 |
+| `/api/threadharbor.host-ssh.local.pick-identity` | POST | 打开原生文件选择器，返回私钥路径（取消则 `cancelled: true`） |
+| `/api/threadharbor.host-ssh.inspect` | POST | 扫描主机密钥（body 里 `ssh.user` 必填） |
 | `/api/threadharbor.host-ssh.peer` | POST | SSH 读取对方 `peer.json`（插件与 URL） |
 | `/api/threadharbor.host-ssh.deploy` | POST | 异步部署（对方只听回环，连接方建 SSH 隧道） |
 | `/api/threadharbor.host-ssh.operation` | GET | 进度；`result.launchUrl` |

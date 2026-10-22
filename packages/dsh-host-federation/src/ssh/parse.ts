@@ -20,7 +20,7 @@ function sshPort(value: unknown): number | undefined {
   return value as number
 }
 
-export function parseSshInput(value: unknown, requireFingerprint: boolean): SshConnectionConfig {
+export function parseSshInput(value: unknown, requireFingerprint: boolean, requireUser = false): SshConnectionConfig {
   if (value === null || Array.isArray(value) || typeof value !== 'object') throw new Error('ssh must be an object')
   const record = value as Record<string, unknown>
   const identityFile = optionalText(record['identityFile'], 'ssh.identityFile')
@@ -36,6 +36,7 @@ export function parseSshInput(value: unknown, requireFingerprint: boolean): SshC
   if (requireFingerprint && fingerprint === undefined) throw new Error('ssh.hostKeyFingerprint is required')
   const port = sshPort(record['port'])
   const user = optionalText(record['user'], 'ssh.user')
+  if (requireUser && user === undefined) throw new Error('ssh.user 必填')
   const proxyJump = optionalText(record['proxyJump'], 'ssh.proxyJump')
   if (identityFile === undefined && identityPem === undefined && password === undefined) {
     throw new Error('ssh authentication requires identityFile, identityPem, or password')
