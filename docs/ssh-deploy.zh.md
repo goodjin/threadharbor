@@ -81,7 +81,7 @@
 
 | 路径 | 方法 | 作用 |
 |------|------|------|
-| `/api/threadharbor.host-ssh.check` | POST | body: `{ ssh, remoteWebPort? }`，返回逐项检测报告 |
+| `/api/threadharbor.host-ssh.check` | POST | body: `{ ssh, remoteWebPort? }`，返回 `{ operationId }`；进度与逐项报告通过 `host-ssh.operation` 轮询（`kind: check`，`checkReport` 在远端 SSH 读完后会先出现一版缺 HTTPS 的阶段性结果） |
 | `/api/threadharbor.host-ssh.serve` | POST | 在对方配置 `tailscale serve` 后重新检测；失败时返回 `failure.manualCommands` |
 | `/api/threadharbor.host-ssh.service` | POST | body: `{ ssh, action: start\|restart, remoteWebPort? }`，systemctl 启停并刷新令牌后重新检测 |
 

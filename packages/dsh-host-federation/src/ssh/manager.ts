@@ -152,10 +152,16 @@ export class DshSshManager {
    * from this machine. Never throws for a missing piece — only for SSH trust
    * or credential failures, which the UI shows on the `ssh` step.
    */
-  async checkPeer(config: SshConnectionConfig, remoteWebPort?: number): Promise<PeerCheckReport> {
+  async checkPeer(
+    config: SshConnectionConfig,
+    remoteWebPort?: number,
+    onProgress: (progress: SshDeployProgress, partialReport?: PeerCheckReport) => void = () => undefined,
+  ): Promise<PeerCheckReport> {
     const port = remoteWebPort ?? this.options.defaultRemoteWebPort
+    onProgress({ phase: 'connecting', detail: '正在验证 SSH 并连接对方。' })
     const materialized = await this.trustAndMaterialize(config)
     try {
+      onProgress({ phase: 'check-remote', detail: '正在通过 SSH 读取对方环境（Tailscale、Node、DSH、插件、服务）。' })
       const probe = await this.remoteExec(materialized, buildPeerCheckScript(port), this.handshakeBudgetMs())
       if (probe.code === 255) {
         throw new Error(`无法使用当前 SSH 凭据连接目标主机：${probe.stderr.trim() || 'ssh 退出码 255'}`)
@@ -166,8 +172,17 @@ export class DshSshManager {
         const again = await this.remoteExec(materialized, buildPeerCheckScript(facts.peer.port), this.handshakeBudgetMs())
         if (again.code === 0) facts = parsePeerCheckOutput(again.stdout, facts.peer.port)
       }
-      const https = facts.serveUrl === undefined ? undefined : await probeServeHttps(facts.serveUrl, launchToken(facts.peer))
-      return derivePeerCheckSteps(facts, https)
+      const beforeHttps = derivePeerCheckSteps(facts, undefined)
+      onProgress({ phase: 'check-remote', detail: '远端环境已读取，正在整理逐项结果。' }, beforeHttps)
+      const https = facts.serveUrl === undefined
+        ? undefined
+        : await (async () => {
+            onProgress({ phase: 'check-https', detail: `正在从本机访问 ${facts.serveUrl} 验证令牌。` }, beforeHttps)
+            return await probeServeHttps(facts.serveUrl!, launchToken(facts.peer))
+          })()
+      const report = derivePeerCheckSteps(facts, https)
+      onProgress({ phase: 'succeeded', detail: '检测完成。' }, report)
+      return report
     } finally {
       this.cleanupTempKeys()
     }

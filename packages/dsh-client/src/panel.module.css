@@ -370,6 +370,53 @@
   background: var(--dsw-alias-settings-card-fill);
 }
 
+.bindProgressSticky {
+  composes: sshKeys;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  box-shadow: 0 1px 0 var(--dsw-alias-settings-card-stroke);
+}
+
+.progressCurrent {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+
+.progressRunning {
+  composes: stateLine;
+  color: var(--dsw-alias-brand-primary);
+  font-weight: 600;
+}
+
+.bindFailureBox {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: var(--dsw-radius-sm);
+  border: 1px solid var(--dsw-alias-state-error-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 8%, transparent);
+}
+
+.bindNextAction {
+  margin: 0;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.progressLogDetails {
+  margin: 0;
+  font-size: 12px;
+}
+
+.progressLogDetails summary {
+  cursor: pointer;
+  color: var(--dsw-alias-label-caption);
+}
+
 .sshKeyRow {
   display: flex;
   gap: 8px;

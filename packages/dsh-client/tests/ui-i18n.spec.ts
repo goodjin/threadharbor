@@ -40,6 +40,7 @@ const OWNED_SOURCES = [
   'packages/dsh-client/src/handover-card.ts',
   'packages/dsh-client/src/panel.tsx',
   'packages/dsh-client/src/host-check.tsx',
+  'packages/dsh-client/src/ssh-bind-progress-ui.tsx',
   'packages/dsh-client/src/acp-visibility-panel.tsx',
 ] as const
 
@@ -47,7 +48,7 @@ describe('verify-client-ui-i18n over this plugin', () => {
   it('covers the locale-owned surfaces, plus the dictionary owner', () => {
     // The reference gate refuses a narrowed corpus so a discovery bug cannot
     // read as a pass; the same guard applies here at this scope's scale.
-    expect(OWNED_SOURCES).toHaveLength(6)
+    expect(OWNED_SOURCES).toHaveLength(7)
     for (const file of OWNED_SOURCES) {
       expect(() => readFileSync(join(CLIENT_SRC, file.slice('packages/dsh-client/src/'.length)), 'utf8')).not.toThrow()
     }

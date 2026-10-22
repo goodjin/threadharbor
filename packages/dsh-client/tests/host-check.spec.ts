@@ -35,7 +35,7 @@ describe('peer check rows', () => {
     const ids = ['ssh', 'tailscale', 'node', 'dsh', 'plugins', 'running', 'serve', 'https']
     const keys = [
       ...ids.map(id => `panel.check.step.${id}`),
-      ...['ok', 'fail', 'warn', 'skip'].map(state => `panel.check.state.${state}`),
+      ...['ok', 'fail', 'warn', 'skip', 'pending', 'running'].map(state => `panel.check.state.${state}`),
       ...['unreachable', 'not-installed', 'logged-out', 'no-magicdns', 'node-too-old', 'not-deployed', 'not-running', 'other-port', 'not-configured', 'not-checked', 'auth-failed', 'no-token'].map(reason => `panel.check.reason.${reason}`),
       ...['deploy', 'start', 'restart', 'serve', 'retry'].map(action => `panel.check.action.${action}`),
     ] as ClientLocaleKey[]
