@@ -13,7 +13,7 @@
  * @vitest-environment jsdom
  */
 
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
@@ -188,6 +188,19 @@ function click(container: HTMLElement, selector: string): void {
   act(() => {
     el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
   })
+}
+
+/** 添加页：有 SSH 部署能力时先过连接方式选择器，再进手动登记表单。 */
+function openManualAdd(container: HTMLElement): void {
+  click(container, '[data-action="add-host"]')
+  if (container.querySelector('[data-panel-page="add-chooser"]') !== null) {
+    click(container, '[data-action="add-method-manual"]')
+  }
+}
+
+function openTailscaleFromChooser(container: HTMLElement): void {
+  click(container, '[data-action="add-host"]')
+  click(container, '[data-action="add-method-tailscale"]')
 }
 
 function type(container: HTMLElement, selector: string, value: string): void {
@@ -415,7 +428,7 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
     const registry = makeRegistry()
     const { container, root } = await mountPanel(registry)
     try {
-      click(container, '[data-action="add-host"]')
+      openManualAdd(container)
       expect(q(container, '[data-panel-page="add"]')).toBeTruthy()
       expect(container.querySelector('[data-reported-facts]')).toBeNull()
       // 表单只有两个字段：名称、IP；没有显示名。
@@ -453,7 +466,7 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
     const registry = makeRegistry()
     const { container, root } = await mountPanel(registry)
     try {
-      click(container, '[data-action="add-host"]')
+      openManualAdd(container)
       type(container, '[data-form-field-id]', 'gamma')
       click(container, '[data-form-cancel-bottom]')
 
@@ -469,7 +482,7 @@ describe('面板点击行为：列表、详情、添加三个界面', () => {
     const registry = makeRegistry()
     const { container, root } = await mountPanel(registry)
     try {
-      click(container, '[data-action="add-host"]')
+      openManualAdd(container)
       type(container, '[data-form-field-address]', '不是 地址')
       type(container, '[data-form-field-id]', 'gamma')
       click(container, '[data-form-confirm]')
@@ -548,7 +561,7 @@ describe('存储姿态行：跟状态走，加页也在', () => {
     const store = new FakeHostStore({ kind: 'memory', reason: 'remote-page' } satisfies HostStorePosture)
     const { container, root } = await mountPanel(makeRegistry(), store)
     try {
-      click(container, '[data-action="add-host"]')
+      openManualAdd(container)
       const addPage = q(container, '[data-panel-page="add"]')
       expect(addPage.contains(container.querySelector('[data-storage-posture="memory"]'))).toBe(true)
       expect(addPage.textContent).toContain('远程机器')
@@ -558,88 +571,51 @@ describe('存储姿态行：跟状态走，加页也在', () => {
   })
 })
 
-describe('从 Tailscale 选：表单前面的选择器', () => {
+describe('从 Tailscale 选：连接方式选择器里的入口', () => {
+  beforeEach(() => {
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/api/threadharbor.host-ssh.operation') && init?.method === 'HEAD') return new Response('', { status: 200 })
+      return new Response(JSON.stringify({ ok: false, error: 'no route' }), { status: 404 })
+    }) as unknown as typeof fetch
+  })
+  afterEach(() => {
+    delete (globalThis as { fetch?: unknown }).fetch
+  })
+
   /** 点开按钮后把 loadPeers 的异步落地等完（选择器状态是异步置的）。 */
   async function settle(): Promise<void> {
     await act(async () => {
       await Promise.resolve()
+      await Promise.resolve()
     })
   }
 
-  it('添加页「从 Tailscale 选」在表单前面；列出 peers（名字+IP+在线徽标），选一台只填名称与 SSH 目标、地址栏留空，选择器收起', async () => {
-    const { container, root } = await mountPanel(makeRegistry(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
-    try {
-      click(container, '[data-action="add-host"]')
-      // 入口在表单前面（2026-10-13 用户反馈），不是地址旁的小按钮。
-      expect(container.querySelector('[data-action="tailscale-pick"]')).not.toBeNull()
-      const section = q(container, '[data-tailscale-section]')
-      const form = q(container, '[data-host-form]')
-      expect(section.compareDocumentPosition(form) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  function openTailscaleChooser(container: HTMLElement): void {
+    click(container, '[data-action="add-host"]')
+    click(container, '[data-action="add-method-tailscale"]')
+  }
 
-      click(container, '[data-action="tailscale-pick"]')
-      await settle()
-
-      const picker = q(container, '[data-tailscale-picker]')
-      const bench = q(container, '[data-tailscale-peer="bench.tail-scale.ts.net"]')
-      expect(bench.textContent).toContain('100.101.1.7')
-      expect(bench.textContent).toContain('在线')
-      expect(q(container, '[data-tailscale-peer="labbox"]').textContent).toContain('未连接')
-      expect(bench.getAttribute('data-tailscale-online')).toBe('true')
-      expect(q(container, '[data-tailscale-peer="labbox"]').getAttribute('data-tailscale-online')).toBe('false')
-
-      click(container, '[data-tailscale-peer="bench.tail-scale.ts.net"]')
-      // 选中只填名称与 SSH 目标：Tailscale 的对端只是 SSH 目标，它的 DSH web
-      // 在网上并不直接可达，地址栏留空、由部署或连接成功后写回。
-      const name = q(container, '[data-form-field-id]')
-      if (!(name instanceof HTMLInputElement)) throw new Error('name input missing')
-      const address = q(container, '[data-form-field-address]')
-      if (!(address instanceof HTMLInputElement)) throw new Error('address input missing')
-      expect(name.value).toBe('bench.tail-scale.ts.net')
-      expect(address.value).toBe('')
-      const target = q(container, '[data-ssh-target]')
-      if (!(target instanceof HTMLInputElement)) throw new Error('ssh target input missing')
-      expect(target.value).toBe('100.101.1.7')
-      expect(container.querySelector('[data-tailscale-picker]')).toBeNull()
-      expect(picker).toBeTruthy()
-    } finally {
-      await unmount(root)
-    }
-  })
-
-  it('离线主机置灰但仍可选：点了照样填名称和 SSH 目标，地址栏照旧留空', async () => {
-    const { container, root } = await mountPanel(makeRegistry(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
-    try {
-      click(container, '[data-action="add-host"]')
-      click(container, '[data-action="tailscale-pick"]')
-      await settle()
-      const labbox = q(container, '[data-tailscale-peer="labbox"]')
-      expect(labbox.getAttribute('data-tailscale-online')).toBe('false')
-      click(container, '[data-tailscale-peer="labbox"]')
-      const name = q(container, '[data-form-field-id]')
-      const address = q(container, '[data-form-field-address]')
-      const target = q(container, '[data-ssh-target]')
-      if (!(name instanceof HTMLInputElement) || !(address instanceof HTMLInputElement) || !(target instanceof HTMLInputElement)) throw new Error('inputs missing')
-      expect(name.value).toBe('labbox')
-      expect(target.value).toBe('100.101.2.9')
-      expect(address.value).toBe('')
-    } finally {
-      await unmount(root)
-    }
-  })
-
-  it('添加页选中后自动切到 SSH 部署区：IP 进目标栏，名称跟着进主机名栏', async () => {
-    // 探测 HEAD 打通＝部署区可用；选择器选中后 addMode 才真的切得过去。
+  it('添加页连接方式里列出 peers（名字+IP+在线徽标），选一台进 SSH 部署区并带上目标 IP', async () => {
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       if (String(input).endsWith('/api/threadharbor.host-ssh.operation') && init?.method === 'HEAD') return new Response('', { status: 200 })
+      if (String(input).includes('host-ssh.local.assets')) {
+        return new Response(JSON.stringify({ ok: true, value: { configHosts: [], identityFiles: [] } }), { status: 200 })
+      }
       return new Response(JSON.stringify({ ok: false, error: 'no route' }), { status: 404 })
     }) as unknown as typeof fetch
     const { container, root } = await mountPanel(makeRegistry(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
     try {
       await settle()
-      click(container, '[data-action="add-host"]')
-      click(container, '[data-action="tailscale-pick"]')
+      openTailscaleChooser(container)
       await settle()
+
+      const bench = q(container, '[data-tailscale-peer="bench.tail-scale.ts.net"]')
+      expect(bench.textContent).toContain('100.101.1.7')
+      expect(bench.textContent).toContain('在线')
+      expect(q(container, '[data-tailscale-peer="labbox"]').textContent).toContain('未连接')
+
       click(container, '[data-tailscale-peer="bench.tail-scale.ts.net"]')
+      await settle()
       expect(container.querySelector('[data-ssh-deploy]')).not.toBeNull()
       const target = q(container, '[data-ssh-target]')
       if (!(target instanceof HTMLInputElement)) throw new Error('ssh target input missing')
@@ -647,6 +623,32 @@ describe('从 Tailscale 选：表单前面的选择器', () => {
       const hostId = q(container, '[data-ssh-hostid]')
       if (!(hostId instanceof HTMLInputElement)) throw new Error('hostId input missing')
       expect(hostId.value).toBe('bench.tail-scale.ts.net')
+    } finally {
+      await unmount(root)
+      delete (globalThis as { fetch?: unknown }).fetch
+    }
+  })
+
+  it('离线主机置灰但仍可选：点了照样进 SSH 部署区并带上 IP', async () => {
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/api/threadharbor.host-ssh.operation') && init?.method === 'HEAD') return new Response('', { status: 200 })
+      if (String(input).includes('host-ssh.local.assets')) {
+        return new Response(JSON.stringify({ ok: true, value: { configHosts: [], identityFiles: [] } }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ ok: false, error: 'no route' }), { status: 404 })
+    }) as unknown as typeof fetch
+    const { container, root } = await mountPanel(makeRegistry(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
+    try {
+      await settle()
+      openTailscaleChooser(container)
+      await settle()
+      const labbox = q(container, '[data-tailscale-peer="labbox"]')
+      expect(labbox.getAttribute('data-tailscale-online')).toBe('false')
+      click(container, '[data-tailscale-peer="labbox"]')
+      await settle()
+      const target = q(container, '[data-ssh-target]')
+      if (!(target instanceof HTMLInputElement)) throw new Error('ssh target input missing')
+      expect(target.value).toBe('100.101.2.9')
     } finally {
       await unmount(root)
       delete (globalThis as { fetch?: unknown }).fetch
@@ -684,7 +686,7 @@ describe('从 Tailscale 选：表单前面的选择器', () => {
     const registry = makeRegistry()
     const { container, root } = await mountPanel(registry)
     try {
-      click(container, '[data-action="add-host"]')
+      openManualAdd(container)
       type(container, '[data-form-field-id]', 'bench.tail-scale.ts.net')
       type(container, '[data-form-field-address]', '100.101.1.7')
       click(container, '[data-form-confirm]')
@@ -700,7 +702,7 @@ describe('从 Tailscale 选：表单前面的选择器', () => {
     const registry = makeRegistry()
     const { container, root } = await mountPanel(registry)
     try {
-      click(container, '[data-action="add-host"]')
+      openManualAdd(container)
       type(container, '[data-form-field-id]', 'lan-box')
       type(container, '[data-form-field-address]', 'http://192.168.1.10:3081/?token=abc')
       click(container, '[data-form-confirm]')
@@ -719,7 +721,7 @@ describe('从 Tailscale 选：表单前面的选择器', () => {
   it('地址栏旁的注记把话说在面上：留空由部署写入，已可达的地址可以直接粘贴', async () => {
     const { container, root } = await mountPanel(makeRegistry(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
     try {
-      click(container, '[data-action="add-host"]')
+      openManualAdd(container)
       expect(q(container, '[data-address-empty-note]').textContent).toBe('留空则由部署写入。IP 已经能访问时，粘贴带 ?token= 的完整地址即可，不需要 Tailscale。')
     } finally {
       await unmount(root)
@@ -729,16 +731,11 @@ describe('从 Tailscale 选：表单前面的选择器', () => {
   it('点「收起」只关清单不填字段', async () => {
     const { container, root } = await mountPanel(makeRegistry(), undefined, undefined, new FakeTailscale({ ok: true, peers: TWO_PEERS }))
     try {
-      click(container, '[data-action="add-host"]')
-      click(container, '[data-action="tailscale-pick"]')
+      openTailscaleFromChooser(container)
       await settle()
       click(container, '[data-action="tailscale-close"]')
       expect(container.querySelector('[data-tailscale-picker]')).toBeNull()
-      const name = q(container, '[data-form-field-id]')
-      const ip = q(container, '[data-form-field-address]')
-      if (!(name instanceof HTMLInputElement) || !(ip instanceof HTMLInputElement)) throw new Error('inputs missing')
-      expect(name.value).toBe('')
-      expect(ip.value).toBe('')
+      expect(container.querySelector('[data-panel-page="add-chooser"]')).not.toBeNull()
     } finally {
       await unmount(root)
     }
@@ -752,8 +749,7 @@ describe('从 Tailscale 选：表单前面的选择器', () => {
     )
     const { container, root } = await mountPanel(makeRegistry(), undefined, undefined, port)
     try {
-      click(container, '[data-action="add-host"]')
-      click(container, '[data-action="tailscale-pick"]')
+      openTailscaleFromChooser(container)
       await settle()
       expect(container.querySelector('[data-tailscale-peer="newbox"]')).toBeNull()
 
@@ -775,8 +771,7 @@ describe('从 Tailscale 选：表单前面的选择器', () => {
       new FakeTailscale({ ok: false, message: '这台机器没有提供设置通道（remote.settings）' }),
     )
     try {
-      click(container, '[data-action="add-host"]')
-      click(container, '[data-action="tailscale-pick"]')
+      openTailscaleFromChooser(container)
       await settle()
       expect(q(container, '[data-tailscale-state="failed"]').textContent).toContain('设置通道')
     } finally {
@@ -792,8 +787,8 @@ describe('从 Tailscale 选：表单前面的选择器', () => {
       new FakeTailscale({ ok: true, peers: [], note: 'tailscale status --json 失败：未登录' }),
     )
     try {
-      click(container, '[data-action="add-host"]')
-      click(container, '[data-action="tailscale-pick"]')
+      await settle()
+      openTailscaleFromChooser(container)
       await settle()
       expect(q(container, '[data-tailscale-note]').textContent).toContain('未登录')
       expect(q(container, '[data-tailscale-state="empty"]').textContent).toContain('只有本机')
@@ -839,6 +834,9 @@ describe('主机详情：使用这台主机 + 远程部署（状态机如实呈�
       calls.push({ url, ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }) })
       if (url.endsWith('/api/threadharbor.host-ssh.operation') && init?.method === 'HEAD') {
         return new Response('', { status: 200 })
+      }
+      if (url.includes('host-ssh.local.assets')) {
+        return new Response(JSON.stringify({ ok: true, value: { configHosts: [], identityFiles: [] } }), { status: 200, headers: { 'content-type': 'application/json' } })
       }
       for (const [suffix, payload] of Object.entries(routes)) {
         if (!url.includes(suffix)) continue
@@ -942,6 +940,7 @@ describe('主机详情：使用这台主机 + 远程部署（状态机如实呈�
       expect((q(container, '[data-ssh-access="host-ip"]') as HTMLInputElement).checked).toBe(true)
       expect(container.querySelector('[data-ssh-bind-host]')).not.toBeNull()
       type(container, '[data-ssh-deploy] [data-ssh-target]', 'mini.tailb6790d.ts.net')
+      type(container, '[data-ssh-deploy] [data-ssh-user]', 'good')
       type(container, '[data-ssh-deploy] [data-ssh-identity-file]', '/Users/good/.ssh/id_ed25519')
       click(container, '[data-action="ssh-inspect"]')
       await act(async () => { await Promise.resolve() })
@@ -1227,6 +1226,7 @@ class ScriptedRemote implements RemotePort {
 describe('详情页按钮表与对方状态读取（hostActions 出按钮，remote 口出读数）', () => {
   const SSH = {
     target: 'mini.tailb6790d.ts.net',
+    user: 'jin',
     authMode: 'identityFile' as const,
     identityFile: '/Users/good/.ssh/id_ed25519',
     hostKeyFingerprint: 'SHA256:abc',
@@ -1443,6 +1443,9 @@ describe('详情页按钮表与对方状态读取（hostActions 出按钮，remo
       if (String(input).includes('host-ssh.inspect')) {
         remote.note('inspect')
         return { status: 200, json: async () => ({ ok: true, value: { keys: [approvedKey] } }) }
+      }
+      if (String(input).includes('host-ssh.local.assets')) {
+        return { status: 200, json: async () => ({ ok: true, value: { configHosts: [], identityFiles: [] } }) }
       }
       return { status: 200, json: async () => ({ ok: true, value: {} }) }
     }))

@@ -25,7 +25,7 @@
  * dead connections and rebuilds on the next turn.
  */
 
-import { createElement, useEffect, useState } from 'react'
+import { createElement, useEffect, useId, useState } from 'react'
 import type { ReactNode } from 'react'
 import { describeVerdict } from './verdict.ts'
 import type { ProbeVerdict } from './verdict.ts'
@@ -37,7 +37,7 @@ import { probeReach } from './reach.ts'
 import type { ReachOutcome } from './reach.ts'
 import { hostActions, hostStatus } from './host-state.ts'
 import type { HostAction, HostFacts, HostReach, HostStatus, RemoteDeployment, RemoteLiveness } from './host-state.ts'
-import type { HostIdentity, HostRegistration, HostSshInfo, PeerReport, PeerStatus, RegistrationResult, RemoteAgentDeploySelection, RemoteReport, SshConnectionInput, SshDeployResult, SshHostKeyCandidate } from '@threadharbor/dsh-host-federation'
+import type { HostIdentity, HostRegistration, HostSshInfo, PeerReport, PeerStatus, RegistrationResult, RemoteAgentDeploySelection, RemoteReport, SshConfigHostEntry, SshConnectionInput, SshDeployResult, SshHostKeyCandidate, SshLocalAssets } from '@threadharbor/dsh-host-federation'
 import { REMOTE_DEPLOY_AGENT_SPECS, gatewayPagePath } from '@threadharbor/dsh-host-federation'
 import type { HostSnapshot } from '@threadharbor/dsh-host-federation'
 import type { HostStorePosture } from './host-store.ts'
@@ -53,6 +53,7 @@ import {
   waitSshDeployOperation,
 } from './ssh-deploy.ts'
 import type { ServeFailure } from './ssh-deploy.ts'
+import { loadSshLocalAssets, pickSshIdentityFile } from './ssh-local.ts'
 import type { PeerCheckAction, PeerCheckReport, SshDeployOperationView, SshDeployProgress } from '@threadharbor/dsh-host-federation'
 import { PeerCheckList } from './host-check.tsx'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
@@ -884,6 +885,63 @@ export function derivePeerHostId(magicDnsName: string | undefined, target: strin
   return source.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '')
 }
 
+function SshComboField(props: {
+  readonly label: ReactNode
+  readonly value: string
+  readonly onChange: (value: string) => void
+  readonly placeholder?: string | undefined
+  readonly options: readonly string[]
+  readonly listId: string
+  readonly dataSshTarget?: boolean | undefined
+  readonly dataSshIdentityFile?: boolean | undefined
+  readonly trailingAction?: ReactNode
+}): ReactNode {
+  return (
+    <label className={styles.field}>
+      {props.label}
+      <div className={styles.comboRow}>
+        <input
+          list={props.listId}
+          data-ssh-combo=""
+          {...(props.dataSshTarget === true ? { 'data-ssh-target': '' } : {})}
+          {...(props.dataSshIdentityFile === true ? { 'data-ssh-identity-file': '' } : {})}
+          className={styles.input}
+          value={props.value}
+          onChange={event => { props.onChange(event.target.value) }}
+          placeholder={props.placeholder}
+        />
+        <datalist id={props.listId}>
+          {props.options.map(option => (
+            <option key={option} value={option} />
+          ))}
+        </datalist>
+        {props.trailingAction}
+      </div>
+    </label>
+  )
+}
+
+function applyConfigHost(entry: SshConfigHostEntry): {
+  readonly target: string
+  readonly user?: string
+  readonly port?: string
+  readonly identityFile?: string
+} {
+  const target = entry.hostName ?? entry.alias
+  return {
+    target,
+    ...(entry.user === undefined ? {} : { user: entry.user }),
+    ...(entry.port === undefined ? {} : { port: String(entry.port) }),
+    ...(entry.identityFile === undefined ? {} : { identityFile: entry.identityFile }),
+  }
+}
+
+function configHostForAlias(assets: SshLocalAssets | undefined, alias: string): SshConfigHostEntry | undefined {
+  if (assets === undefined) return undefined
+  const trimmed = alias.trim()
+  return assets.configHosts.find(entry => entry.alias === trimmed)
+}
+
 function SshDeploySection(props: {
   readonly hostId: string
   readonly hostTitle: string
@@ -919,10 +977,15 @@ function SshDeploySection(props: {
    * and its save button hands back the ts.net launch URL plus the host id to use.
    */
   readonly onServeReady?: ((launchUrl: string, facts: SshSeedFacts, hostId: string) => void) | undefined
+  /** Add-host flow: primary action copy matches the wireframe. */
+  readonly fromAddHost?: boolean | undefined
   /** The locale seat, threaded from the panel. */
   readonly t: PanelT
 }): ReactNode {
+  const configHostsListId = useId()
+  const identityFilesListId = useId()
   const [target, setTarget] = useState(props.pickedTarget ?? props.initial?.target ?? props.initialTarget ?? '')
+  const [localAssets, setLocalAssets] = useState<SshLocalAssets | undefined>(undefined)
   const [port, setPort] = useState(props.initial?.port === undefined ? '22' : String(props.initial.port))
   const [user, setUser] = useState(props.initial?.user ?? '')
   const [proxyJump, setProxyJump] = useState(props.initial?.proxyJump ?? '')
@@ -955,6 +1018,48 @@ function SshDeploySection(props: {
   const [checkBusy, setCheckBusy] = useState<'check' | PeerCheckAction | undefined>(undefined)
   const [serveFailure, setServeFailure] = useState<ServeFailure | undefined>(undefined)
 
+  useEffect(() => {
+    void loadSshLocalAssets(props.t).then(result => {
+      if (!result.ok) {
+        setLocalAssets({ configHosts: [], identityFiles: [] })
+        return
+      }
+      setLocalAssets(result.value)
+    })
+  }, [props.t])
+
+  const configHostAliases = localAssets?.configHosts?.map(entry => entry.alias) ?? []
+  const identityOptions = localAssets?.identityFiles ?? []
+
+  const pickConfigHost = (value: string): void => {
+    setTarget(value)
+    const entry = configHostForAlias(localAssets, value)
+    if (entry === undefined) return
+    const applied = applyConfigHost(entry)
+    setTarget(applied.target)
+    if (applied.user !== undefined) setUser(applied.user)
+    if (applied.port !== undefined) setPort(applied.port)
+    if (applied.identityFile !== undefined) setIdentityFile(applied.identityFile)
+  }
+
+  const requireUser = (): boolean => {
+    if (user.trim() !== '') return true
+    props.onError(props.t('panel.ssh.userRequired'))
+    return false
+  }
+
+  const browseIdentityFile = (): void => {
+    void pickSshIdentityFile(props.t).then(result => {
+      if (!result.ok) {
+        props.onError(result.error)
+        return
+      }
+      if (result.value.cancelled || result.value.path === undefined) return
+      setIdentityFile(result.value.path)
+      setAuthMode('identityFile')
+    })
+  }
+
   const sshPayload = (): SshConnectionInput => {
     const base: SshConnectionInput = { target: target.trim() }
     const withPort = port.trim() === '' ? base : { ...base, port: Number(port) }
@@ -975,6 +1080,7 @@ function SshDeploySection(props: {
   }
 
   const runInspect = (): void => {
+    if (!requireUser()) return
     setBusy('inspect')
     setKeys([])
     setApprovedFingerprint('')
@@ -1003,6 +1109,7 @@ function SshDeploySection(props: {
   }, [])
 
   const runReadPeer = (): void => {
+    if (!requireUser()) return
     if (approvedFingerprint === '') {
       props.onError(props.t('panel.ssh.approveFingerprintFirst'))
       return
@@ -1028,6 +1135,7 @@ function SshDeploySection(props: {
   }
 
   const runCheck = (fingerprint: string = approvedFingerprint): void => {
+    if (!requireUser()) return
     if (fingerprint === '') {
       props.onError(props.t('panel.ssh.approveFingerprintFirst'))
       return
@@ -1079,6 +1187,7 @@ function SshDeploySection(props: {
   }
 
   const runDeploy = (options: { readonly upgrade?: boolean; readonly fromCheck?: boolean } = {}): void => {
+    if (!requireUser()) return
     if (approvedFingerprint === '') {
       props.onError(props.t('panel.ssh.approveFingerprintFirst'))
       return
@@ -1168,50 +1277,91 @@ function SshDeploySection(props: {
         {richSegments(props.t('panel.ssh.intro'), 'strong')}
       </p>
       <div className={styles.formGrid}>
-        <label className={styles.field}>
-          {props.t('panel.ssh.targetLabel')}
-          <input data-ssh-target="" className={styles.input} value={target} onChange={event => { setTarget(event.target.value) }} placeholder={props.t('panel.ssh.targetPlaceholder')} />
-        </label>
+        <SshComboField
+          label={props.t('panel.ssh.targetLabel')}
+          listId={configHostsListId}
+          value={target}
+          onChange={pickConfigHost}
+          placeholder={props.t('panel.ssh.targetComboPlaceholder')}
+          options={configHostAliases}
+          dataSshTarget={true}
+        />
         <label className={styles.field}>
           {props.t('panel.ssh.portLabel')}
           <input className={styles.input} value={port} onChange={event => { setPort(event.target.value) }} />
         </label>
         <label className={styles.field}>
-          {props.t('panel.ssh.userLabel')}
-          <input className={styles.input} value={user} onChange={event => { setUser(event.target.value) }} placeholder={props.t('panel.ssh.userPlaceholder')} />
+          {props.t('panel.ssh.userRequiredLabel')}
+          <input
+            data-ssh-user=""
+            className={styles.input}
+            value={user}
+            onChange={event => { setUser(event.target.value) }}
+            placeholder={props.t('panel.ssh.userRequiredPlaceholder')}
+            required={true}
+          />
+          <span className={styles.note}>{props.t('panel.ssh.userRequiredHint')}</span>
         </label>
         <label className={styles.field}>
           {props.t('panel.ssh.proxyJumpLabel')}
           <input className={styles.input} value={proxyJump} onChange={event => { setProxyJump(event.target.value) }} />
         </label>
-        <label className={styles.field}>
-          {props.t('panel.ssh.authModeLabel')}
-          <select className={styles.input} value={authMode} onChange={event => { setAuthMode(event.target.value as SshAuthMode) }}>
-            <option value="identityFile">{props.t('panel.ssh.authIdentityFile')}</option>
-            <option value="identityPem">{props.t('panel.ssh.authIdentityPem')}</option>
-            <option value="password">{props.t('panel.ssh.authPassword')}</option>
-          </select>
-        </label>
         {authMode === 'identityFile'
           ? (
+              <SshComboField
+                label={props.t('panel.ssh.identityFileLabel')}
+                listId={identityFilesListId}
+                value={identityFile}
+                onChange={setIdentityFile}
+                placeholder={props.t('panel.ssh.identityFileComboPlaceholder')}
+                options={identityOptions}
+                dataSshIdentityFile={true}
+                trailingAction={(
+                  <button type="button" className={styles.action} data-action="ssh-browse-identity" onClick={browseIdentityFile}>
+                    {props.t('panel.ssh.browseIdentityFile')}
+                  </button>
+                )}
+              />
+            )
+          : undefined}
+        <div className={styles.field}>
+          <span className={styles.summary}>{props.t('panel.ssh.authModeLabel')}</span>
+          <div className={styles.segmented} data-ssh-auth-mode="">
+            <button
+              type="button"
+              className={authMode === 'identityFile' ? styles.segmentedActive : styles.segmentedItem}
+              data-ssh-auth="identityFile"
+              onClick={() => { setAuthMode('identityFile') }}
+            >{props.t('panel.ssh.authIdentityShort')}</button>
+            <button
+              type="button"
+              className={authMode === 'identityPem' ? styles.segmentedActive : styles.segmentedItem}
+              data-ssh-auth="identityPem"
+              onClick={() => { setAuthMode('identityPem') }}
+            >{props.t('panel.ssh.authIdentityPemShort')}</button>
+            <button
+              type="button"
+              className={authMode === 'password' ? styles.segmentedActive : styles.segmentedItem}
+              data-ssh-auth="password"
+              onClick={() => { setAuthMode('password') }}
+            >{props.t('panel.ssh.authPasswordShort')}</button>
+          </div>
+        </div>
+        {authMode === 'identityPem'
+          ? (
               <label className={styles.field}>
-                {props.t('panel.ssh.identityFileLabel')}
-                <input data-ssh-identity-file="" className={styles.input} value={identityFile} onChange={event => { setIdentityFile(event.target.value) }} placeholder={props.t('panel.ssh.identityFilePlaceholder')} />
+                {props.t('panel.ssh.identityPemLabel')}
+                <textarea className={styles.textarea} value={identityPem} onChange={event => { setIdentityPem(event.target.value) }} rows={4} />
               </label>
             )
-          : authMode === 'identityPem'
+          : authMode === 'password'
             ? (
-                <label className={styles.field}>
-                  {props.t('panel.ssh.identityPemLabel')}
-                  <textarea className={styles.textarea} value={identityPem} onChange={event => { setIdentityPem(event.target.value) }} rows={4} />
-                </label>
-              )
-            : (
                 <label className={styles.field}>
                   {props.t('panel.ssh.passwordLabel')}
                   <input type="password" className={styles.input} value={password} onChange={event => { setPassword(event.target.value) }} autoComplete="off" />
                 </label>
-              )}
+              )
+            : undefined}
         <label className={styles.field}>
           {props.t('panel.ssh.remotePortLabel')}
           <input className={styles.input} value={remoteWebPort} onChange={event => { setRemoteWebPort(event.target.value) }} />
@@ -1298,7 +1448,11 @@ function SshDeploySection(props: {
             )
           : undefined}
         <button type="button" className={styles.actionPrimary} data-action="ssh-deploy" disabled={busy !== undefined} onClick={() => { runDeploy() }}>
-          {busy === 'deploy' ? props.t('panel.ssh.deploying') : props.t('panel.ssh.deploy')}
+          {busy === 'deploy'
+            ? props.t('panel.ssh.deploying')
+            : props.fromAddHost === true
+              ? props.t('panel.ssh.startDeploy')
+              : props.t('panel.ssh.deploy')}
         </button>
       </div>
       {keys.length > 0
@@ -1468,6 +1622,111 @@ function HostUseSection(props: {
   )
 }
 
+/** First step when adding a host: pick URL registration, SSH deploy, or Tailscale. */
+function AddHostChooser(props: {
+  readonly tailscale?: TailscalePort | undefined
+  readonly onChooseManual: () => void
+  readonly onChooseSsh: () => void
+  readonly onPickedPeer: (peer: TailscalePeer) => void
+  readonly onCancel: () => void
+  readonly postureNote?: ReactNode
+  readonly t: PanelT
+}): ReactNode {
+  const [picker, setPicker] = useState<{ open: boolean; result?: TailscalePeersResult | undefined }>({ open: false })
+  const openPicker = async (): Promise<void> => {
+    if (props.tailscale === undefined) return
+    setPicker({ open: true, result: undefined })
+    const result = await props.tailscale.loadPeers()
+    setPicker({ open: true, result })
+  }
+  const refreshPicker = async (): Promise<void> => {
+    if (props.tailscale === undefined) return
+    setPicker({ open: true, result: undefined })
+    const result = await props.tailscale.refresh()
+    setPicker({ open: true, result })
+  }
+  const pickPeer = (peer: TailscalePeer): void => {
+    props.onPickedPeer(peer)
+    setPicker({ open: false })
+  }
+  return (
+    <div data-panel-page="add-chooser" className={styles.formPage}>
+      <div className={styles.formNav}>
+        <button type="button" className={styles.action} onClick={props.onCancel}>{props.t('panel.button.back')}</button>
+      </div>
+      <section className={styles.card}>
+        <div className={styles.cardHead}>
+          <h2 className={styles.title}>{props.t('panel.title.addHost')}</h2>
+          <span className={styles.managementTag}>{props.t('panel.add.methodPrompt')}</span>
+        </div>
+        {props.postureNote}
+        <div className={styles.addMethodList}>
+          <button type="button" data-action="add-method-manual" className={styles.addMethodCard} onClick={props.onChooseManual}>
+            <span className={styles.addMethodTitle}>{props.t('panel.add.methodUrl')}</span>
+            <span className={styles.note}>{props.t('panel.add.methodUrlHint')}</span>
+          </button>
+          <button type="button" data-action="add-method-ssh" className={styles.addMethodCard} onClick={props.onChooseSsh}>
+            <span className={styles.addMethodTitle}>{props.t('panel.add.methodSsh')}</span>
+            <span className={styles.note}>{props.t('panel.add.methodSshHint')}</span>
+          </button>
+          {props.tailscale === undefined
+            ? (
+                <p className={styles.note}>{props.t('panel.add.methodTailscaleUnavailable')}</p>
+              )
+            : !picker.open
+              ? (
+                  <button type="button" data-action="add-method-tailscale" className={styles.addMethodCard} onClick={() => { void openPicker() }}>
+                    <span className={styles.addMethodTitle}>{props.t('panel.add.methodTailscale')}</span>
+                    <span className={styles.note}>{props.t('panel.add.methodTailscaleHint')}</span>
+                  </button>
+                )
+              : (
+                  <div data-tailscale-picker="" className={styles.tailscalePicker}>
+                    <div className={styles.tailscalePickerBar}>
+                      <span className={styles.tailscalePickerTitle}>{props.t('panel.tailscale.pickTitle')}</span>
+                      <span className={styles.spacer} />
+                      <button type="button" data-action="tailscale-refresh" className={styles.action} onClick={() => { void refreshPicker() }}>{props.t('panel.button.refresh')}</button>
+                      <button type="button" data-action="tailscale-close" className={styles.action} onClick={() => { setPicker({ open: false }) }}>{props.t('panel.tailscale.collapse')}</button>
+                    </div>
+                    {picker.result === undefined
+                      ? <p data-tailscale-state="loading" className={styles.stateLine}>{props.t('panel.tailscale.loading')}</p>
+                      : picker.result.ok === false
+                        ? <p data-tailscale-state="failed" className={styles.stateBad}>{picker.result.message}</p>
+                        : (
+                            <>
+                              {picker.result.note !== undefined
+                                ? <p data-tailscale-note="" className={styles.note}>{picker.result.note}</p>
+                                : undefined}
+                              {picker.result.peers.length === 0
+                                ? <p data-tailscale-state="empty" className={styles.stateLine}>{props.t('panel.tailscale.empty')}</p>
+                                : (
+                                    <ul className={styles.tailscalePeerList}>
+                                      {picker.result.peers.map(peer => (
+                                        <li key={peer.name}>
+                                          <button
+                                            type="button"
+                                            data-tailscale-peer={peer.name}
+                                            data-tailscale-online={peer.online ? 'true' : 'false'}
+                                            className={peer.online ? styles.tailscalePeer : styles.tailscalePeerOffline}
+                                            onClick={() => { pickPeer(peer) }}
+                                          >
+                                            <span className={styles.tailscalePeerName}>{peer.name}</span>
+                                            <span className={styles.tailscalePeerMeta}>{props.t('panel.tailscale.peerMeta', { ip: peer.ip, status: peer.online ? props.t('panel.status.online') : props.t('panel.status.offline') })}</span>
+                                          </button>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  )}
+                            </>
+                          )}
+                  </div>
+                )}
+        </div>
+      </section>
+    </div>
+  )
+}
+
 /**
  * The form page both adding and viewing share — one component, two modes, so
  * a field changes in one place. Mode `new` collects the two operator-filled
@@ -1499,6 +1758,8 @@ export function HostFormPage(props: {
   readonly onCancel: () => void
   /** 从 Tailscale 选的口（表单前面的入口）；缺省就不显示那个按钮。 */
   readonly tailscale?: TailscalePort | undefined
+  /** 添加页若已用连接方式选择器，则不再在表单前重复 Tailscale 入口。 */
+  readonly showTailscalePicker?: boolean | undefined
   /** 面板持有的 SSH 目标草稿：添加页的目标输入框显示它，选择器往里写。 */
   readonly sshTargetDraft?: string | undefined
   readonly onSshTargetChange?: (value: string) => void
@@ -1530,7 +1791,7 @@ export function HostFormPage(props: {
   // 从 Tailscale 选（表单前面的入口）：点开→读清单→列出；选一台→名称填上、
   // IP 交给 SSH 目标＋收起（地址栏不动）；刷新让主机侧重跑一次；收起只关不填。
   const [picker, setPicker] = useState<{ open: boolean; result?: TailscalePeersResult | undefined }>({ open: false })
-  const canPickAddress = props.tailscale !== undefined && fields.address
+  const canPickAddress = props.showTailscalePicker !== false && props.tailscale !== undefined && fields.address
   const openPicker = async (): Promise<void> => {
     if (props.tailscale === undefined) return
     setPicker({ open: true, result: undefined })
@@ -1714,20 +1975,6 @@ export function HostFormPage(props: {
             主机的登记字段只有名称和地址两个（表单字段的钉子测试守着这条），
             SSH 目标是部署区的草稿，不是登记字段。详情页不渲染——那里的部署
             区有自己的初值来源（登记凭据）。 */}
-        {props.mode === 'new'
-          ? (
-              <label className={styles.field}>
-                {props.t('panel.ssh.targetLabel')}
-                <input
-                  value={props.sshTargetDraft ?? ''}
-                  data-ssh-target=""
-                  className={styles.input}
-                  onChange={event => { props.onSshTargetChange?.(event.target.value) }}
-                  placeholder={props.t('panel.ssh.targetPlaceholder')}
-                />
-              </label>
-            )
-          : undefined}
         {props.message === undefined
           ? undefined
           : <p data-form-message={props.message.tone} className={props.message.tone === 'ok' ? styles.stateLine : styles.stateBad}>{props.message.text}</p>}
@@ -1774,7 +2021,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   const [, setIdentityRevision] = useState(0)
   const [registryRevision, setRegistryRevision] = useState(0)
   const [formMessage, setFormMessage] = useState<{ readonly tone: 'ok' | 'bad'; readonly text: string } | undefined>(undefined)
-  const [addMode, setAddMode] = useState<'manual' | 'ssh'>('manual')
+  const [addMode, setAddMode] = useState<'chooser' | 'manual' | 'ssh'>('chooser')
   const [addIdDraft, setAddIdDraft] = useState('')
   const [addTitleDraft, setAddTitleDraft] = useState('')
   const [addAddressDraft, setAddAddressDraft] = useState('')
@@ -1858,7 +2105,13 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
     setFormMessage(undefined)
     setConfirmingRemove(false)
     setApproveAndReadId(undefined)
+    setAddMode('chooser')
     setView({ page: 'list' })
+  }
+  const openAdd = (): void => {
+    setFormMessage(undefined)
+    setAddMode(sshDeployAvailable ? 'chooser' : 'manual')
+    setView({ page: 'add' })
   }
   const confirmAdd = (values: HostFormValues): boolean => {
     // 显示名已撤销（2026-10-13）：hostTitle 落库留空，存储层回落到 hostId，
@@ -2102,15 +2355,33 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   )
 
   if (view.page === 'add') {
+    if (sshDeployAvailable && addMode === 'chooser') {
+      return (
+        <div data-threadharbor-panel="" className={styles.root}>
+          <AddHostChooser
+            tailscale={props.tailscale}
+            postureNote={<StoragePostureLine posture={props.hostStore?.posture()} t={props.t} />}
+            onCancel={openList}
+            onChooseManual={() => { setAddMode('manual'); setFormMessage(undefined) }}
+            onChooseSsh={() => { setAddMode('ssh'); setFormMessage(undefined) }}
+            onPickedPeer={peer => {
+              setAddIdDraft(peer.name)
+              setSshTargetDraft(peer.ip)
+              setAddMode('ssh')
+            }}
+            t={props.t}
+          />
+        </div>
+      )
+    }
     if (sshDeployAvailable && addMode === 'ssh') {
       return (
         <div data-threadharbor-panel="" className={styles.root}>
           <section data-panel-page="add-ssh" className={styles.card}>
             <div className={styles.cardHead}>
-              <button type="button" className={styles.action} onClick={openList}>{props.t('panel.button.back')}</button>
-              <h2 className={styles.title}>{props.t('panel.ssh.title')}</h2>
+              <button type="button" className={styles.action} onClick={() => { setAddMode('chooser'); setFormMessage(undefined) }}>{props.t('panel.button.back')}</button>
+              <h2 className={styles.title}>{props.t('panel.add.methodSsh')}</h2>
               <span className={styles.spacer} />
-              <button type="button" className={styles.action} onClick={() => { setAddMode('manual'); setFormMessage(undefined) }}>{props.t('panel.ssh.manualEntry')}</button>
             </div>
             <StoragePostureLine posture={props.hostStore?.posture()} t={props.t} />
             {formMessage !== undefined
@@ -2150,6 +2421,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                 setRegistryRevision(revision => revision + 1)
                 setFormMessage({ tone: 'ok', text: props.t('panel.check.saved', { url: new URL(launchUrl).origin }) })
               }}
+              fromAddHost={true}
               t={props.t}
             />
           </section>
@@ -2165,30 +2437,14 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
           values={{ hostId: addIdDraft, address: addAddressDraft }}
           message={formMessage}
           postureNote={<StoragePostureLine posture={props.hostStore?.posture()} t={props.t} />}
-          footer={sshDeployAvailable
-            ? (
-                <p className={styles.note}>
-                  {props.t('panel.ssh.addFooterPrefix')}
-                  <button type="button" data-action="add-host-ssh" className={styles.action} onClick={() => { setAddMode('ssh'); setFormMessage(undefined) }}>{props.t('panel.ssh.title')}</button>
-                </p>
-              )
-            : undefined}
+          showTailscalePicker={false}
           onConfirm={values => {
             setAddIdDraft(values.hostId)
             setAddAddressDraft(values.address)
             return confirmAdd(values)
           }}
-          onCancel={openList}
+          onCancel={() => { sshDeployAvailable ? setAddMode('chooser') : openList() }}
           tailscale={props.tailscale}
-          sshTargetDraft={sshTargetDraft}
-          onSshTargetChange={setSshTargetDraft}
-          onPickedPeer={peer => {
-            // 添加页选中：名称进部署区的主机名、IP 进目标栏，顺带切到部署区
-            // （不可用时留在本页，草稿仍在）；地址没人碰。
-            setAddIdDraft(peer.name)
-            setSshTargetDraft(peer.ip)
-            setAddMode('ssh')
-          }}
           t={props.t}
         />
       </div>
@@ -2513,7 +2769,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
             type="button"
             data-action="add-host"
             className={styles.actionPrimary}
-            onClick={() => { setFormMessage(undefined); setView({ page: 'add' }) }}
+            onClick={openAdd}
           >{props.t('panel.title.addHost')}</button>
         </div>
         <StoragePostureLine posture={props.hostStore?.posture()} t={props.t} />
