@@ -118,7 +118,9 @@ claude-opus-5-5[context=300k,effort=medium,fast=false]
 session/set_config_option { sessionId, configId: "model", value: "<modelId 原样>" }
 ```
 
-`configId` 取 `session/new` 的 `configOptions` 里 `category: "model"`（或 `id: "model"`）那一项，不要写死。实测（2026-10-21）：调用成功，后续回合按新模型跑；`value` 必须是 `models.availableModels` 里的完整 id（含方括号后缀）。本项目由 `modelVia: 'config_option'` + `modelConfigId` 走这条路，同一会话只在选择真正变化时发一次。
+`configId` 取 `session/new` 的 `configOptions` 里 `category: "model"`（或 `id: "model"`）那一项，不要写死。实测（2026-10-21）：调用成功，后续回合按新模型跑；`value` 必须是 `configOptions[id=model].options[].value` 里的完整 id（含方括号后缀）。本项目由 `modelVia: 'config_option'` + `modelConfigId` 走这条路，同一会话只在选择真正变化时发一次。
+
+**旧会话可能存着不带后缀的 id**（2026-10-22 实测）：某个会话落的是 `grok-4.7`，而 cursor 当前可用值是 `grok-4.7[context=256k,reasoning_effort=high,fast=true]`；直接写入会回 `-32602 Invalid model value: grok-4.7`，整个回合失败。本项目在写入前先精确匹配 `value`，再按选项的 `name` 和 `[` 前的基础 id 解析旧值；只有三者都不匹配时才原样送出，由 agent 决定是否拒绝。
 
 ### 会话恢复：`session/resume` 不支持
 

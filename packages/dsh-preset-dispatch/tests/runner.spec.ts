@@ -308,6 +308,38 @@ describe('AcpTurnRunner', () => {
       .toBeUndefined()
   })
 
+  it('resolves a stale cursor model id to the value its config option advertises', async () => {
+    // Sessions stamped before cursor appended its configuration suffix carry
+    // the plain name (`grok-4.7`). Sending that verbatim makes cursor reject
+    // the turn with -32602 "Invalid model value: grok-4.7" — the pick used to
+    // ride a prompt param cursor ignored, so the stale id only surfaced once
+    // the write became strict. The option's name/base is the bridge.
+    const live = 'grok-4.7[context=256k,reasoning_effort=high,fast=true]'
+    const client = fakeClient()
+    client.request = async (method, params) => {
+      client.calls.push({ method, params })
+      if (method === 'session/new') {
+        return {
+          sessionId: 's1',
+          models: { availableModels: [{ modelId: live, name: 'grok-4.7' }] },
+          configOptions: [{ id: 'model', category: 'model', currentValue: 'default[]',
+            options: [{ value: 'default[]', name: 'Auto' }, { value: live, name: 'grok-4.7' }] }],
+        }
+      }
+      if (method === 'session/prompt') return { stopReason: 'end_turn' }
+      return {}
+    }
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: cursorDialect })
+    const turn = (modelId: string) => ({ sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1, modelId })
+
+    await runner.run(DECISION, turn('grok-4.7'))
+    await runner.run(DECISION, turn('grok-4.7[context=128k]'))
+    const values = client.calls
+      .filter(call => call.method === 'session/set_config_option')
+      .map(call => (call.params as { value: string }).value)
+    expect(values).toEqual([live, live])
+  })
+
   it('applies a config-option pick once per change, not once per turn', async () => {
     // The agent keeps its selection across turns; re-sending an unchanged
     // pick before every prompt would charge the wire for nothing.

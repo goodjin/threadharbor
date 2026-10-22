@@ -171,6 +171,50 @@ function recordOf(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {}
 }
 
+/**
+ * The config option's accepted values, with aliases for a stale pick.
+ *
+ * A session can carry a model id from an older catalog: cursor stored plain
+ * `grok-4.7` before its live option value became
+ * `grok-4.7[context=256k,reasoning_effort=high,fast=true]`. Exact values win;
+ * option names and the base before `[` cover those older ids. Unknown ids pass
+ * through untouched — the agent, not this table, owns the final rejection.
+ */
+function configValueAliases(reply: unknown, configId: string | undefined): Map<string, string> | undefined {
+  if (configId === undefined) return undefined
+  const options = recordOf(reply)['configOptions']
+  if (!Array.isArray(options)) return undefined
+  const selector = options.map(recordOf).find(option => option['id'] === configId)
+  const entries = recordOf(selector)['options']
+  if (!Array.isArray(entries)) return undefined
+  const aliases = new Map<string, string>()
+  for (const entry of entries) {
+    const value = recordOf(entry)['value']
+    if (typeof value === 'string') aliases.set(value, value)
+  }
+  for (const entry of entries) {
+    const option = recordOf(entry)
+    const value = option['value']
+    if (typeof value !== 'string') continue
+    const name = option['name']
+    if (typeof name === 'string' && !aliases.has(name)) aliases.set(name, value)
+    const bracket = value.indexOf('[')
+    if (bracket > 0) {
+      const base = value.slice(0, bracket)
+      if (!aliases.has(base)) aliases.set(base, value)
+    }
+  }
+  return aliases.size === 0 ? undefined : aliases
+}
+
+function resolveConfigValue(aliases: Map<string, string> | undefined, modelId: string): string {
+  if (aliases === undefined) return modelId
+  const direct = aliases.get(modelId)
+  if (direct !== undefined) return direct
+  const bracket = modelId.indexOf('[')
+  return (bracket > 0 ? aliases.get(modelId.slice(0, bracket)) : undefined) ?? modelId
+}
+
 function textOf(content: unknown): string {
   const entry = recordOf(content)
   if (typeof entry['text'] === 'string') return entry['text']
@@ -524,6 +568,12 @@ export class AcpTurnRunner {
    * Undefined for prompt_param dialects and for a reply that named no selector.
    */
   private modelConfigId: string | undefined
+  /**
+   * The selector's accepted values and aliases, read off the same reply that
+   * named the config-option id. Translates a stale session pick (cursor's
+   * plain `grok-4.7`) into the value the live agent advertises.
+   */
+  private modelConfigValues: Map<string, string> | undefined
   /**
    * The modelId last applied to the current external session via
    * `session/set_config_option`. Keyed to the session, not the turn: the
@@ -1702,6 +1752,7 @@ export class AcpTurnRunner {
         this.resumedLastOpen = true
         this.appliedModelId = undefined
         this.modelConfigId = this.options.dialect?.modelConfigId?.(resumed)
+        this.modelConfigValues = configValueAliases(resumed, this.modelConfigId)
         if (this.options.dialect !== undefined && this.options.onModels !== undefined) {
           this.options.onModels(this.options.dialect.readModels(resumed))
         }
@@ -1736,6 +1787,7 @@ export class AcpTurnRunner {
     // A fresh session knows no model selection, whatever the last one had.
     this.appliedModelId = undefined
     this.modelConfigId = this.options.dialect?.modelConfigId?.(reply)
+    this.modelConfigValues = configValueAliases(reply, this.modelConfigId)
     // The picker serves what the agent reported; the dialect knows where the
     // list lives. Reported even when empty — an agent that serves nothing must
     // be able to replace whatever was believed before.
@@ -1766,7 +1818,11 @@ export class AcpTurnRunner {
     if (via === 'set_model') {
       await this.client.request('session/set_model', { sessionId, modelId })
     } else if (via === 'config_option' && this.modelConfigId !== undefined) {
-      await this.client.request('session/set_config_option', { sessionId, configId: this.modelConfigId, value: modelId })
+      await this.client.request('session/set_config_option', {
+        sessionId,
+        configId: this.modelConfigId,
+        value: resolveConfigValue(this.modelConfigValues, modelId),
+      })
     } else {
       return
     }
