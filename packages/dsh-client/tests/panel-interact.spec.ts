@@ -912,6 +912,7 @@ describe('主机详情：使用这台主机 + 远程部署（状态机如实呈�
       const errorBox = q(container, '[data-use-error]')
       expect(errorBox.textContent).toContain('ssh: connect to host mini.tailb6790d.ts.net port 22: Connection refused')
       expect(container.querySelector('[data-action="connect-retry"]')).not.toBeNull()
+      expect(container.querySelector('[data-action="connect-copy-for-ai"]')).not.toBeNull()
       expect(open).not.toHaveBeenCalled()
     } finally {
       open.mockRestore()
@@ -954,6 +955,7 @@ describe('主机详情：使用这台主机 + 远程部署（状态机如实呈�
       const errorBox = q(container, '[data-ssh-error]')
       expect(errorBox.textContent).toContain('远端安装失败：tar: Unexpected EOF in archive')
       expect(container.querySelector('[data-action="ssh-deploy-retry"]')).not.toBeNull()
+      expect(container.querySelector('[data-action="ssh-copy-for-ai"]')).not.toBeNull()
     } finally {
       await unmount(root)
       delete (globalThis as { fetch?: unknown }).fetch

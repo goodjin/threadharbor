@@ -56,6 +56,8 @@ import type { ServeFailure } from './ssh-deploy.ts'
 import { loadSshLocalAssets, pickSshIdentityFile } from './ssh-local.ts'
 import type { PeerCheckAction, PeerCheckReport, SshDeployOperationView, SshDeployProgress } from '@threadharbor/dsh-host-federation'
 import { PeerCheckList } from './host-check.tsx'
+import { buildOpsAiPrompt, hostContextFromSshInfo, type OpsAiHostContext } from './copy-for-ai.ts'
+import { CopyForAiButton } from './copy-for-ai-button.tsx'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { NAMESPACE } from './locales.ts'
 import styles from './panel.module.css'
@@ -979,6 +981,8 @@ function SshDeploySection(props: {
   readonly onServeReady?: ((launchUrl: string, facts: SshSeedFacts, hostId: string) => void) | undefined
   /** Add-host flow: primary action copy matches the wireframe. */
   readonly fromAddHost?: boolean | undefined
+  /** Brief confirmation after「复制给 AI」; failure uses onError. */
+  readonly onAiCopyOk?: (() => void) | undefined
   /** The locale seat, threaded from the panel. */
   readonly t: PanelT
 }): ReactNode {
@@ -1008,6 +1012,7 @@ function SshDeploySection(props: {
   // 部署过程逐行留痕：不是只显示最后一行，每一阶段的原话都留在面上。
   const [progressLog, setProgressLog] = useState<readonly SshDeployProgress[]>([])
   const [opError, setOpError] = useState<string | undefined>(undefined)
+  const [deployOperationId, setDeployOperationId] = useState<string | undefined>(undefined)
   const [peer, setPeer] = useState<PeerStatus | undefined>(undefined)
   const [deployed, setDeployed] = useState<SshDeployResult | undefined>(undefined)
   const [remoteAgents, setRemoteAgents] = useState<RemoteAgentDeploySelection>(() => (
@@ -1202,6 +1207,7 @@ function SshDeploySection(props: {
     if (fromCheck) setCheckBusy('deploy')
     setProgressLog([])
     setOpError(undefined)
+    setDeployOperationId(undefined)
     const finishCheck = (): void => {
       if (!fromCheck) return
       setCheckBusy(undefined)
@@ -1225,6 +1231,7 @@ function SshDeploySection(props: {
         props.onError(started.error)
         return
       }
+      setDeployOperationId(started.value.operationId)
       void waitSshDeployOperation(started.value.operationId, view => {
         // 逐行留痕：同一阶段的重复心跳只留一条，阶段一换就另起一行。
         setProgressLog(log => {
@@ -1269,6 +1276,46 @@ function SshDeploySection(props: {
   const copyLaunchUrl = (): void => {
     if (deployed === undefined) return
     void navigator.clipboard.writeText(deployed.launchUrl)
+  }
+
+  const lastDeployProgress = progressLog[progressLog.length - 1]
+  const deployCopyPrompt = opError === undefined
+    ? undefined
+    : buildOpsAiPrompt({
+      scenario: 'ssh-deploy',
+      rawError: opError,
+      ...(lastDeployProgress === undefined
+        ? {}
+        : { failedStep: lastDeployProgress.phase, failedStepDetail: lastDeployProgress.detail }),
+      suggestedAction: props.t('panel.copyForAi.hint.deployRetry'),
+      ...(deployOperationId === undefined ? {} : { operationId: deployOperationId }),
+      host: {
+        hostId: effectiveHostId(),
+        target: target.trim(),
+        ...(user.trim() === '' ? {} : { user: user.trim() }),
+        ...(port.trim() === '' ? {} : { port: Number(port) }),
+        ...(proxyJump.trim() === '' ? {} : { proxyJump: proxyJump.trim() }),
+        authMode,
+        ...(authMode === 'identityFile' && identityFile.trim() !== '' ? { identityFile: identityFile.trim() } : {}),
+        ...(approvedFingerprint !== '' ? { hostKeyFingerprint: approvedFingerprint } : {}),
+        ...(remoteWebPort.trim() === '' ? {} : { remoteWebPort: Number(remoteWebPort) }),
+      },
+    })
+
+  const aiHostContextForCheck = (): OpsAiHostContext => ({
+    hostId: effectiveHostId(),
+    target: target.trim(),
+    ...(user.trim() === '' ? {} : { user: user.trim() }),
+    ...(port.trim() === '' ? {} : { port: Number(port) }),
+    ...(proxyJump.trim() === '' ? {} : { proxyJump: proxyJump.trim() }),
+    authMode,
+    ...(authMode === 'identityFile' && identityFile.trim() !== '' ? { identityFile: identityFile.trim() } : {}),
+    ...(approvedFingerprint !== '' ? { hostKeyFingerprint: approvedFingerprint } : {}),
+    ...(remoteWebPort.trim() === '' ? {} : { remoteWebPort: Number(remoteWebPort) }),
+  })
+
+  const reportCopyFailure = (): void => {
+    props.onError(props.t('panel.copyForAi.failed'))
   }
 
   return (
@@ -1483,6 +1530,9 @@ function SshDeploySection(props: {
               onCheck={() => { runCheck() }}
               onAction={runCheckAction}
               onSave={launchUrl => { props.onServeReady?.(launchUrl, seedFacts(), effectiveHostId()) }}
+              aiHostContext={aiHostContextForCheck()}
+              onCopied={props.onAiCopyOk}
+              onCopyFailed={reportCopyFailure}
               t={props.t}
             />
           )
@@ -1514,6 +1564,17 @@ function SshDeploySection(props: {
               <p className={styles.stateBad}>{props.t('panel.ssh.failedTitle')}</p>
               <code className={styles.launchUrlText}>{opError}</code>
               <div className={styles.formActions}>
+                {deployCopyPrompt !== undefined
+                  ? (
+                      <CopyForAiButton
+                        prompt={deployCopyPrompt}
+                        t={props.t}
+                        dataAction="ssh-copy-for-ai"
+                        onCopied={props.onAiCopyOk}
+                        onCopyFailed={reportCopyFailure}
+                      />
+                    )
+                  : undefined}
                 <button type="button" className={styles.action} data-action="ssh-deploy-retry" disabled={busy !== undefined} onClick={() => { runDeploy() }}>{props.t('panel.ssh.retry')}</button>
               </div>
             </div>
@@ -1563,9 +1624,19 @@ function HostUseSection(props: {
   readonly error: string | undefined
   readonly onConnect: () => void
   readonly onOpenDeploy: () => void
+  readonly onAiCopyOk?: (() => void) | undefined
+  readonly onCopyFailed?: (() => void) | undefined
   readonly t: PanelT
 }): ReactNode {
   const { sshInfo, launchUrl } = props
+  const connectCopyPrompt = props.error === undefined
+    ? undefined
+    : buildOpsAiPrompt({
+      scenario: 'ssh-connect',
+      rawError: props.error,
+      suggestedAction: props.t('panel.copyForAi.hint.connectRetry'),
+      host: hostContextFromSshInfo(props.hostId, sshInfo),
+    })
   // 连接一族要已批准的指纹：未批准时不给连接按钮（裁定 5，与按钮表同一道
   // 闸），说明行也不拿「没存凭据」搪塞——真实原因是密钥还没认。
   const keyUnapproved = sshInfo?.hostKeyFingerprint === 'unapproved'
@@ -1608,13 +1679,24 @@ function HostUseSection(props: {
             <div data-use-error="" className={styles.launchUrlBox}>
               <p className={styles.stateBad}>{props.t('panel.use.failedTitle')}</p>
               <code className={styles.launchUrlText}>{props.error}</code>
-              {canAutoConnect
-                ? (
-                    <div className={styles.formActions}>
+              <div className={styles.formActions}>
+                {connectCopyPrompt !== undefined
+                  ? (
+                      <CopyForAiButton
+                        prompt={connectCopyPrompt}
+                        t={props.t}
+                        dataAction="connect-copy-for-ai"
+                        onCopied={props.onAiCopyOk}
+                        onCopyFailed={props.onCopyFailed}
+                      />
+                    )
+                  : undefined}
+                {canAutoConnect
+                  ? (
                       <button type="button" className={styles.action} data-action="connect-retry" disabled={props.connecting} onClick={props.onConnect}>{props.t('panel.use.retry')}</button>
-                    </div>
-                  )
-                : undefined}
+                    )
+                  : undefined}
+              </div>
             </div>
           )
         : undefined}
@@ -2021,6 +2103,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   const [, setIdentityRevision] = useState(0)
   const [registryRevision, setRegistryRevision] = useState(0)
   const [formMessage, setFormMessage] = useState<{ readonly tone: 'ok' | 'bad'; readonly text: string } | undefined>(undefined)
+  const notifyAiCopyOk = (): void => { setFormMessage({ tone: 'ok', text: props.t('panel.copyForAi.copied') }) }
   const [addMode, setAddMode] = useState<'chooser' | 'manual' | 'ssh'>('chooser')
   const [addIdDraft, setAddIdDraft] = useState('')
   const [addTitleDraft, setAddTitleDraft] = useState('')
@@ -2422,6 +2505,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                 setFormMessage({ tone: 'ok', text: props.t('panel.check.saved', { url: new URL(launchUrl).origin }) })
               }}
               fromAddHost={true}
+              onAiCopyOk={notifyAiCopyOk}
               t={props.t}
             />
           </section>
@@ -2626,6 +2710,8 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                             error={connectError?.hostId === row.hostId ? connectError.text : undefined}
                             onConnect={() => { runConnect(registration) }}
                             onOpenDeploy={() => { setDeployOpenId(deployOpenId === row.hostId ? undefined : row.hostId) }}
+                            onAiCopyOk={notifyAiCopyOk}
+                            onCopyFailed={() => { setFormMessage({ tone: 'bad', text: props.t('panel.copyForAi.failed') }) }}
                             t={props.t}
                           />
                         )
@@ -2691,6 +2777,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                                       setFormMessage({ tone: 'ok', text: props.t('panel.check.saved', { url: new URL(launchUrl).origin }) })
                                     }}
                                     onError={message => { setFormMessage({ tone: 'bad', text: message }) }}
+                                    onAiCopyOk={notifyAiCopyOk}
                                     t={props.t}
                                   />
                                 )
