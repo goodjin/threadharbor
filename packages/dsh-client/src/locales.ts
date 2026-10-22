@@ -422,6 +422,11 @@ export const zh = {
   'panel.check.action.retry': '重新检测',
   'panel.check.manualHint': '普通用户和 sudo -n 都无权配置 tailscale serve。请在对方主机上依次手动执行下面的命令，然后点「重新检测」：',
   'panel.check.copy': '复制',
+  'panel.copyForAi.label': '复制给 AI',
+  'panel.copyForAi.copied': '已复制，可粘贴给助手',
+  'panel.copyForAi.failed': '复制失败，请手动选中错误文本',
+  'panel.copyForAi.hint.deployRetry': '可先点「重试」再次发起部署；仍失败则按 ops 文档「常见失败」逐项核对。',
+  'panel.copyForAi.hint.connectRetry': '可先点「重试」再次连接；仍失败则核对 SSH 用户、密钥路径与主机密钥是否已批准。',
 
   // —— 提供方与模型的屏蔽（设置栏目，存本机；含 ACP agent 与内置 provider） ——
 
@@ -834,6 +839,11 @@ export const en = {
   'panel.check.action.retry': 'Check again',
   'panel.check.manualHint': 'Neither the SSH user nor sudo -n may configure tailscale serve. Run these commands on the peer in order, then press “Check again”:',
   'panel.check.copy': 'Copy',
+  'panel.copyForAi.label': 'Copy for AI',
+  'panel.copyForAi.copied': 'Copied — paste into your assistant',
+  'panel.copyForAi.failed': 'Copy failed — select the error text manually',
+  'panel.copyForAi.hint.deployRetry': 'Try “Retry” in the panel first; if it still fails, follow the “Common failures” section in the ops doc.',
+  'panel.copyForAi.hint.connectRetry': 'Try “Retry” to connect again; verify SSH user, key path, and approved host key fingerprint.',
 
   'acpVisibility.label': 'Providers & models',
   'acpVisibility.title': 'Hide providers and models',
