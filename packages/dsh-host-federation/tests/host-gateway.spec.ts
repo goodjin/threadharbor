@@ -66,6 +66,12 @@ describe('网关路径', () => {
     expect(html.indexOf('<base href="/threadharbor/gateway/mini/">')).toBeLessThan(html.indexOf('src="/threadharbor/gateway/mini/assets/app.js"'))
     expect(html).toContain('REMOTE')
     expect(html).not.toContain('src="/assets/app.js"')
+    const withManifest = rewriteHtml(
+      '<html><head><link rel="manifest" href="./manifest.webmanifest" /></head><body>REMOTE</body></html>',
+      'mini',
+      '迷你',
+    )
+    expect(withManifest).not.toContain('manifest.webmanifest')
     expect(() => { new Function(gatewayClientScript('mini', '迷你')) }).not.toThrow()
     expect(gatewayClientScript('mini', '迷你')).toContain('/threadharbor/gateway-ws')
     expect(gatewayClientScript('mini', '迷你')).toContain('thSession=')

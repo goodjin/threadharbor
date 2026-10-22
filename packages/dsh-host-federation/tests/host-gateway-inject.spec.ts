@@ -68,6 +68,28 @@ describe('网关注入脚本', () => {
     expect(style?.textContent).toContain('padding-top:var(--th-host-bar-h)')
   })
 
+  it('绝对 ws:// 地址也换到网关的升级路径', () => {
+    // 应用传的是 ws:// 绝对地址，页面是 http://：两者 origin 永不相等。
+    // 只比主机，否则每条实时流都直连网关前缀并 401/断手。
+    const seen: string[] = []
+    class FakeSocket {
+      constructor(url: string) { seen.push(String(url)) }
+    }
+    const real = window.WebSocket
+    Object.defineProperty(window, 'WebSocket', { configurable: true, writable: true, value: FakeSocket })
+    try {
+      run('mini', '小机器')
+      new WebSocket(`ws://${location.host}/api/remote.mux`)
+      new WebSocket(`ws://${location.host}/threadharbor/gateway/mini/api/other.mux`)
+      expect(seen).toEqual([
+        `ws://${location.host}/threadharbor/gateway-ws?host=mini&path=%2Fapi%2Fremote.mux`,
+        `ws://${location.host}/threadharbor/gateway-ws?host=mini&path=%2Fapi%2Fother.mux`,
+      ])
+    } finally {
+      Object.defineProperty(window, 'WebSocket', { configurable: true, writable: true, value: real })
+    }
+  })
+
   it('对方页面已有切换器时不插条', () => {
     const switcher = document.createElement('div')
     switcher.setAttribute('data-host-switcher', '')

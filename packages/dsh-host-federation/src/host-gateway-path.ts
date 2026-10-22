@@ -228,10 +228,15 @@ export function rewriteBody(
  */
 export function rewriteHtml(html: string, hostId: string, hostTitle: string, peers: readonly GatewayPeer[] = []): string {
   const root = gatewayPagePath(hostId)
-  const rewritten = html.replace(
-    /(\s(?:src|href|action|poster)\s*=\s*)(['"])\/(?!\/)/gi,
-    (_match, lead: string, quote: string) => `${lead}${quote}${root}`,
-  )
+  const rewritten = html
+    .replace(
+      /(\s(?:src|href|action|poster)\s*=\s*)(['"])\/(?!\/)/gi,
+      (_match, lead: string, quote: string) => `${lead}${quote}${root}`,
+    )
+    // The manifest is fetched without the page's credentials, so the gateway
+    // would answer 401 on every load. Service workers are disabled inside the
+    // frame anyway, which leaves the manifest with nothing useful to do.
+    .replace(/<link\b[^>]*\brel\s*=\s*["']?manifest["']?[^>]*>/gi, '')
   const inject = `<base href="${root}"><script>${gatewayClientScript(hostId, hostTitle, peers)}</script>`
   if (/<head\b[^>]*>/i.test(rewritten)) {
     return rewritten.replace(/<head\b[^>]*>/i, match => `${match}${inject}`)
@@ -348,7 +353,9 @@ return origOpen.apply(this,args);
 var OrigWS=window.WebSocket;
 function wsUrl(input){
 var url=toUrl(input);
-if(!url||url.origin!==location.origin)return String(input);
+// Compare hosts, not origins: the app passes ws:// while the page is http://,
+// and the two origins never match even though it is the same machine.
+if(!url||url.host!==location.host)return String(input);
 if(url.pathname===wsPath)return String(input);
 var path=url.pathname;
 if(underPrefix(url))path=path===prefix?"/":path.slice(prefix.length);
