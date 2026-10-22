@@ -7,7 +7,8 @@
  *   原因：2026-10-20 桌面版上旧做法靠一次性读模型目录服务决定要不要注册，
  *   读不到就静默不注册，官方座位顶上，界面上只剩裸模型名（web 上恰好读到了，
  *   所以看得到前缀——同一个构建，两种表现）。
- * - **前缀规则**：只给 `acp:` 开头的外部 agent 路由加；原生 provider 保持裸模型名。
+ * - **前缀规则**：provider 名一律加——DSH 上配置的 provider 与外部 agent 一视同仁，
+ *   原样拼成「provider · 模型名」，且**不去重**。
  * - **不弄丢东西**：官方那个 1017 角标（只对官方 Flash 的某个固定版本）由我们
  *   复刻——我们接管了这个座位，就不把它弄丢。
  *
@@ -28,10 +29,10 @@ vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
 const {
   MODEL_LABEL_SLOT,
   MODEL_LABEL_STORAGE_KEY,
-  agentPrefix,
+  providerPrefix,
   modelLabelShadowedOff,
   registerModelLabel,
-  ModelLabelWithAgent,
+  ModelLabelWithProvider,
 } = await import('../src/model-label.tsx')
 
 /**
@@ -117,22 +118,36 @@ describe('输入框模型名：占标签子座位', () => {
   })
 })
 
-describe('模型名上的 agent 前缀', () => {
+describe('模型名上的 provider 前缀', () => {
   it('外部 agent 的路由加前缀：谁在回答一眼看得见', () => {
-    expect(agentPrefix(provider('acp:acp-zcode', 'ZCode'), model('GLM-5.3', 'GLM-5.3')))
+    expect(providerPrefix(provider('acp:acp-zcode', 'ZCode'), model('GLM-5.3', 'GLM-5.3')))
       .toBe('ZCode · ')
   })
 
-  it('原生 provider 保持裸模型名：这个歧义是外部 agent 带来的', () => {
-    expect(agentPrefix(provider('zai-coding-cn', 'GLM'), model('GLM-5.3', 'GLM-5.3'))).toBe('')
+  it('配置的 provider 同样加前缀：provider+model 原样拼出来', () => {
+    // 界面上永远能一眼看出这是哪个 provider 的模型。外部 agent 与 DSH 上
+    // 配置的 provider 一视同仁，命名规范才统一。
+    expect(providerPrefix(provider('zai-coding-cn', 'GLM'), model('GLM-5.3', 'GLM-5.3')))
+      .toBe('GLM · ')
   })
 
-  it('模型显示名已经带了 agent 名字就不再加一遍', () => {
-    expect(agentPrefix(provider('acp:acp-zcode', 'ZCode'), model('GLM-5.3', 'ZCode GLM-5.3'))).toBe('')
+  it('配置的 provider+model 也不去重：模型名里带 provider 名照样加', () => {
+    // IQuest 的模型就叫 iquest-q1。模型名里带 provider 名不是「已经带了前缀」的
+    // 信号——去重会让前缀随命名漂移（这个掉了、别的带着），规范不统一。
+    expect(providerPrefix(provider('iquest', 'IQuest'), model('iquest-q1', 'iquest-q1')))
+      .toBe('IQuest · ')
+  })
+
+  it('模型名里碰巧出现 provider 名字也照加前缀：规则不看字符串脸色', () => {
+    // Grok 4.7 这个模型名只是恰好以 Grok 开头，不是「已经带了前缀」的信号。
+    // 去重会让前缀随命名漂移（Grok 掉了、别的带着），规范不统一——宁可显示成
+    // Grok · Grok 4.7，也不让规则去猜。
+    expect(providerPrefix(provider('acp:acp-grok', 'Grok'), model('grok-4.7', 'Grok 4.7')))
+      .toBe('Grok · ')
   })
 
   it('渲染出来的那行字就是「前缀 + 模型名」', () => {
-    const markup = renderToStaticMarkup(createElement(ModelLabelWithAgent, {
+    const markup = renderToStaticMarkup(createElement(ModelLabelWithProvider, {
       provider: provider('acp:acp-codex', 'Codex'),
       model: model('gpt-6-astra', 'GPT-6-Astra'),
       t: (key: string) => (key === 'model-label.badge.1017' ? '1017' : key),
@@ -140,8 +155,17 @@ describe('模型名上的 agent 前缀', () => {
     expect(markup).toContain('Codex · GPT-6-Astra')
   })
 
+  it('配置的 provider+model 在标签上也是原样拼出来', () => {
+    const markup = renderToStaticMarkup(createElement(ModelLabelWithProvider, {
+      provider: provider('iquest', 'IQuest'),
+      model: model('iquest-q1', 'iquest-q1'),
+      t: (key: string) => key,
+    }))
+    expect(markup).toContain('IQuest · iquest-q1')
+  })
+
   it('官方那个 1017 角标一并复刻：接管了座位就不弄丢它', () => {
-    const markup = renderToStaticMarkup(createElement(ModelLabelWithAgent, {
+    const markup = renderToStaticMarkup(createElement(ModelLabelWithProvider, {
       provider: provider('deepseek-official', 'DeepSeek'),
       model: model('deepseek-flash', 'DeepSeek-V4.1-Flash'),
       t: (key: string) => (key === 'model-label.badge.1017' ? '1017' : key),
@@ -151,7 +175,7 @@ describe('模型名上的 agent 前缀', () => {
   })
 
   it('其余模型不挂角标', () => {
-    const markup = renderToStaticMarkup(createElement(ModelLabelWithAgent, {
+    const markup = renderToStaticMarkup(createElement(ModelLabelWithProvider, {
       provider: provider('deepseek-official', 'DeepSeek'),
       model: model('deepseek-v4-pro', 'DeepSeek-V4-Pro'),
       t: (key: string) => (key === 'model-label.badge.1017' ? '1017' : key),

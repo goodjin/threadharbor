@@ -1,5 +1,5 @@
 /**
- * 输入框上的模型名：给外部 agent 的模型加一个 agent 前缀。
+ * 输入框上的模型名：provider 名 + 模型名，原样拼出来。
  *
  * 2026-10-20 的来历与改法：
  *
@@ -17,8 +17,8 @@
  *
  * 现在改成只占那个标签子座位：
  * - 子座位由官方声明，`slots.inject` 等它出现，**顺序无关**；
- * - 标签的 props 里就带着 provider（{id,name}）与 model，agent 名字直接从
- *   provider 拿，不再需要模型目录服务——那一处「读不到就静默」的风险随之消失；
+ * - 标签的 props 里就带着 provider（{id,name}）与 model，provider 名字直接从
+ *   座位给的 props 里拿，不再需要模型目录服务——那一处「读不到就静默」的风险随之消失；
  * - 座位本身仍是官方那份渲染（两段式菜单、搜索、强度选择、提示都还是官方的），
  *   我们不再替换它，也就不用再跟着 harness 升级重抄一整份组件。
  *
@@ -49,9 +49,6 @@ const UPSTREAM_PRIORITY = 0
 
 /** 座位按优先级从小到大渲染，所以 -10 才是「我们赢」。 */
 const SHADOW_PRIORITY = -10
-
-/** 外部 agent 的路由前缀：我们的模型都注册在这种路由下。 */
-const EXTERNAL_ROUTE_PREFIX = 'acp:'
 
 /**
  * 官方 1017 角标的三个条件（复刻自 dsh-client-ui-deepseek-model-label-1017）。
@@ -87,32 +84,36 @@ export type ModelLabelProps = {
 }
 
 /**
- * 给外部 agent 的模型名加的前缀，或空串。
+ * 给模型名加的 provider 前缀，或空串。
  *
- * 只给 `acp:` 开头的路由加：原生 provider（zai-coding-cn、minimax-cn 这些）
- * 保持裸模型名——这个歧义是「把会话交给第三方 agent」带来的，给所有 provider
- * 都加前缀等于给每个人凭空加噪音。
+ * **一律加**：DSH 上配置的 provider 与外部 agent 一视同仁。界面上永远能一眼
+ * 看出这是哪个 provider 的模型，命名规范才统一。
+ *
+ * **不去重**：模型名里碰巧出现 provider 名（IQuest 的模型叫 iquest-q1、Grok 的
+ * 模型叫 Grok 4.7）不是「已经带了前缀」的信号。去重会让前缀规则随命名漂移——
+ * 这个掉了、别的带着，规范又不统一。宁可显示成 `IQuest · iquest-q1`、
+ * `Grok · Grok 4.7`，也不让规则去猜。
+ *
+ * provider 名为空时没有前缀可言（那会拼出「· 模型名」）。
  *
  * @param provider - 标签座位给的那个 provider 组。
- * @param model - 标签座位给的那个模型。
+ * @param model - 标签座位给的那个模型；**故意不拿它做判断**（见上）。
  * @returns 带分隔符的前缀，或空串。
  */
-export function agentPrefix(provider: LabelProvider, model: LabelModel): string {
-  if (!provider.id.startsWith(EXTERNAL_ROUTE_PREFIX)) return ''
-  // 模型显示名是配置来的，可能已经带了 agent 名字。
-  if (provider.name !== '' && model.name.startsWith(provider.name)) return ''
+export function providerPrefix(provider: LabelProvider, _model: LabelModel): string {
+  if (provider.name === '') return ''
   return `${provider.name} · `
 }
 
 /**
- * 我们占用的模型标签：agent 前缀 + 模型名，官方那个 1017 角标一并复刻。
+ * 我们占用的模型标签：provider 前缀 + 模型名，官方那个 1017 角标一并复刻。
  *
  * @param props - 标签座位的 props（provider、model、字典读法）。
  * @returns 标签节点。
  */
-export function ModelLabelWithAgent(props: ModelLabelProps): ReactElement {
+export function ModelLabelWithProvider(props: ModelLabelProps): ReactElement {
   const { provider, model, t } = props
-  const prefix = agentPrefix(provider, model)
+  const prefix = providerPrefix(provider, model)
   if (provider.id.startsWith('deepseek-') === false && provider.id !== 'deepseek-account' && provider.id !== 'deepseek-official') {
     // 非官方 provider：只有前缀。
     return <>{`${prefix}${model.name}`}</>
@@ -177,7 +178,7 @@ export function registerModelLabel(slots: ModelLabelSlotHost): () => void {
       // 角标文案的）；我们的命名空间是插件自己的，键在 locales.ts 里。
       locale: NAMESPACE,
     },
-    ModelLabelWithAgent,
+    ModelLabelWithProvider,
   ))
 }
 

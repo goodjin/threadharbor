@@ -49,6 +49,7 @@ import {
   inspectSshHost,
   probeSshDeployApi,
   readRemotePeer,
+  listSshIdentityFiles,
   startSshDeploy,
   waitSshDeployOperation,
 } from './ssh-deploy.ts'
@@ -935,6 +936,7 @@ function SshComboField(props: {
   readonly listId: string
   readonly dataSshTarget?: boolean | undefined
   readonly dataSshIdentityFile?: boolean | undefined
+  readonly dataSshIdentityOptions?: boolean | undefined
   readonly trailingAction?: ReactNode
 }): ReactNode {
   return (
@@ -951,7 +953,7 @@ function SshComboField(props: {
           onChange={event => { props.onChange(event.target.value) }}
           placeholder={props.placeholder}
         />
-        <datalist id={props.listId}>
+        <datalist id={props.listId} {...(props.dataSshIdentityOptions === true ? { 'data-ssh-identity-options': '' } : {})}>
           {props.options.map(option => (
             <option key={option} value={option} />
           ))}
@@ -1072,8 +1074,18 @@ function SshDeploySection(props: {
     })
   }, [props.t])
 
+  useEffect(() => {
+    let cancelled = false
+    void listSshIdentityFiles(props.t).then(paths => {
+      if (!cancelled) setIdentityOptions(paths)
+    })
+    return () => { cancelled = true }
+  }, [props.t])
+
   const configHostAliases = localAssets?.configHosts?.map(entry => entry.alias) ?? []
-  const identityOptions = localAssets?.identityFiles ?? []
+  // 私钥路径的建议列表：读一次本机 ~/.ssh（host-ssh.keys）。读不到就是空清单——
+  // 输入框照样能接受手填的绝对路径，不在部署框里添一条无关的报错。
+  const [identityOptions, setIdentityOptions] = useState<readonly string[]>([])
 
   const pickConfigHost = (value: string): void => {
     setTarget(value)
@@ -1402,6 +1414,7 @@ function SshDeploySection(props: {
                 placeholder={props.t('panel.ssh.identityFileComboPlaceholder')}
                 options={identityOptions}
                 dataSshIdentityFile={true}
+                dataSshIdentityOptions={true}
                 trailingAction={(
                   <button type="button" className={styles.action} data-action="ssh-browse-identity" onClick={browseIdentityFile}>
                     {props.t('panel.ssh.browseIdentityFile')}
@@ -1873,6 +1886,8 @@ export function HostFormPage(props: {
   readonly agents?: ReactNode
   readonly footer?: ReactNode
   readonly notes?: ReactNode
+  /** 卡片右上角的操作区：渲染在标题与管理标签之后、表单之前（如删除登记）。 */
+  readonly headActions?: ReactNode
   /** The storage posture line; the page renders it under the form. */
   readonly postureNote?: ReactNode
   readonly onConfirm: (values: HostFormValues) => boolean
@@ -1900,6 +1915,16 @@ export function HostFormPage(props: {
   const [localError, setLocalError] = useState<string | undefined>(undefined)
   const { reported } = props
   const fields = props.mode === 'new' ? ALL_FIELDS : props.fields ?? ALL_FIELDS
+  // 详情页默认只读（2026-10-21 用户要求）：靠「编辑」按钮进可改界面，保存/取消再退回只读。
+  // 添加页一进来就可改。editable 决定字段是输入框还是只读文本。
+  const [editing, setEditing] = useState(props.mode === 'new')
+  const editable = props.mode === 'new' || editing
+  const canEdit = fields.id || fields.address
+  const resetDrafts = (): void => {
+    setIdDraft(props.values.hostId)
+    setIpDraft(hostPartOfAddress(props.values.address))
+    setLocalError(undefined)
+  }
   const confirm = (): void => {
     // 名称留空就由 IP 推出一个主机标识（2026-10-21 用户要求：填好 IP 就能保存）。
     const parsed = registrationAddress(ipDraft)
@@ -1972,6 +1997,17 @@ export function HostFormPage(props: {
               下面的主机信息（自报标识、状态、登记字段）是其中一个栏目。 */}
           <span data-host-management-heading="" className={styles.managementTag}>{props.t('panel.title.management')}</span>
           <span className={styles.spacer} />
+          {props.mode === 'view' && canEdit && !editing
+            ? (
+                <button
+                  type="button"
+                  data-action="edit-host"
+                  className={styles.action}
+                  onClick={() => { resetDrafts(); setEditing(true) }}
+                >{props.t('panel.button.edit')}</button>
+              )
+            : undefined}
+          {props.headActions}
         </div>
         {reported === undefined
           ? undefined
@@ -2077,7 +2113,7 @@ export function HostFormPage(props: {
         >
           <label className={styles.field}>
             {props.t('panel.form.fieldName')}
-            {fields.id
+            {editable && fields.id
               ? (
                   <input
                     value={idDraft}
@@ -2094,10 +2130,10 @@ export function HostFormPage(props: {
             : (
                 <label className={styles.field}>
                   {props.t('panel.form.fieldIp')}
-                  {fields.address
+                  {editable && fields.address
                     ? <span data-address-empty-note="" className={styles.note}>{props.t('panel.form.addressEmptyNote')}</span>
                     : undefined}
-                  {fields.address
+                  {editable && fields.address
                     ? (
                         <input
                           value={ipDraft}
@@ -2107,7 +2143,9 @@ export function HostFormPage(props: {
                           placeholder={props.t('panel.form.ipPlaceholder')}
                         />
                       )
-                    : <span data-form-field-address="" className={styles.readonlyValue}>{hostPartOfAddress(props.values.address)}</span>}
+                    : fields.address
+                      ? <span data-form-field-address="" className={styles.readonlyValue}>{hostPartOfAddress(props.values.address)}</span>
+                      : undefined}
                 </label>
               )}
         </form>
@@ -2121,10 +2159,10 @@ export function HostFormPage(props: {
           : <p data-form-message={message.tone} className={message.tone === 'ok' ? styles.stateLine : styles.stateBad}>{message.text}</p>}
         {props.postureNote}
         <div className={styles.formActions}>
-          {props.mode === 'new' || fields.id || fields.address
+          {editable && (props.mode === 'new' || fields.id || fields.address)
             ? (
                 <button type="button" data-form-confirm="" className={styles.actionPrimary} onClick={confirm}>
-                  {props.mode === 'new' ? props.t('panel.button.confirm') : props.t('panel.button.save')}
+                  {props.mode === 'new' ? props.t('panel.button.add') : props.t('panel.button.save')}
                 </button>
               )
             : undefined}
@@ -2334,13 +2372,31 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   const [tunnelChecks, setTunnelChecks] = useState<ReadonlyMap<string, 'checking' | 'online' | 'offline'>>(new Map())
   const [connectBusyId, setConnectBusyId] = useState<string | undefined>(undefined)
   const [connectError, setConnectError] = useState<{ readonly hostId: string; readonly text: string } | undefined>(undefined)
-  const [deployOpenId, setDeployOpenId] = useState<string | undefined>(undefined)
+  // 部署信息默认展开（2026-10-21 用户要求：部署就在设置界面里）；折叠是
+  // 操作者的选择，approve-and-read 这类显式流程会把它重新打开。
+  const [deployCollapsed, setDeployCollapsed] = useState<ReadonlySet<string>>(new Set())
   // 详情页选点的一次性覆盖：详情页换目标部署是受支持的动作（目标栏可编辑、
   // 部署成功就改写登记），显式选点必须赢过已存目标。只记「哪台主机、第几次
   // 选点、选了什么」：序号进部署区的 key 推动重挂，目标作为该次挂载的初值
   // 压过已存凭据。它与 sshTargetDraft（面板级草稿）刻意分开——草稿不翻转
-  // 优先级，添加页留下的旧草稿盖不掉已存的好凭据；部署区一关覆盖即作废。
+  // 优先级，添加页留下的旧草稿盖不掉已存的好凭据；部署区收起或离开详情页即作废。
   const [deployPick, setDeployPick] = useState<{ readonly hostId: string; readonly serial: number; readonly target: string } | undefined>(undefined)
+  const openDeploy = (hostId: string): void => {
+    setDeployCollapsed(previous => {
+      if (!previous.has(hostId)) return previous
+      const next = new Set(previous)
+      next.delete(hostId)
+      return next
+    })
+  }
+  const toggleDeploy = (hostId: string): void => {
+    setDeployCollapsed(previous => {
+      const next = new Set(previous)
+      if (next.has(hostId)) next.delete(hostId)
+      else next.add(hostId)
+      return next
+    })
+  }
 
   const storedSshInput = (info: HostSshInfo): (SshConnectionInput & { readonly hostKeyFingerprint: string }) | undefined => {
     // 可读性与事实装配同一把尺子（storedSshUsable）：密码/粘贴私钥不落盘。
@@ -2422,7 +2478,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
    */
   const approveAndRead = (registration: HostRegistration): void => {
     setApproveAndReadId(registration.hostId)
-    setDeployOpenId(registration.hostId)
+    openDeploy(registration.hostId)
   }
 
   /** 详情页按钮表的统一出口：动作标识符到既有流程的映射，不新增流程。 */
@@ -2431,7 +2487,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
       case 'deploy':
       case 'redeploy':
       case 'fill-ssh':
-        setDeployOpenId(registration.hostId)
+        openDeploy(registration.hostId)
         break
       case 'read-peer':
       case 'retry-read':
@@ -2462,11 +2518,11 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
     if (registration !== undefined) readPeer(registration)
   }, [view])
 
-  // 选点覆盖只用这一程：部署区收起或离开详情页就作废，下次展开仍是已存优先。
+  // 选点覆盖只用这一程：离开详情页就作废，下次进页面仍是已存优先。
   useEffect(() => {
     if (deployPick === undefined) return
-    if (view.page !== 'detail' || deployOpenId !== deployPick.hostId) setDeployPick(undefined)
-  }, [view, deployOpenId, deployPick])
+    if (view.page !== 'detail') setDeployPick(undefined)
+  }, [view, deployPick])
 
   const runConnect = (
     registration: HostRegistration,
@@ -2482,7 +2538,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
     if (ssh === undefined) {
       // 没有可直接复用的凭据（未存方式，或密码/私钥）：如实说明并指去部署区块。
       setConnectError({ hostId: registration.hostId, text: props.t('panel.use.noCredential') })
-      setDeployOpenId(registration.hostId)
+      openDeploy(registration.hostId)
       return
     }
     setConnectBusyId(registration.hostId)
@@ -2530,8 +2586,10 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
             onChooseManual={() => { setAddMode('manual'); setFormMessage(undefined) }}
             onChooseSsh={() => { setAddMode('ssh'); setFormMessage(undefined) }}
             onPickedPeer={peer => {
+              // 添加页选中：带名字（主机 id）并展开部署区。在线主机走 MagicDNS，
+              // 目标栏留空等操作者定；离线主机 ts.net 不可达，直接把 IP 填进目标。
               setAddIdDraft(peer.name)
-              setSshTargetDraft(peer.ip)
+              if (!peer.online) setSshTargetDraft(peer.ip)
               setAddMode('ssh')
             }}
             t={props.t}
@@ -2675,6 +2733,19 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
             fields={fields}
             reported={reported}
             message={formMessage}
+            headActions={registration !== undefined
+              ? (!confirmingRemove
+                  ? (
+                      <button type="button" data-registry-remove-ask="" className={styles.action} onClick={() => { setConfirmingRemove(true) }}>{props.t('panel.button.deleteRegistration')}</button>
+                    )
+                  : (
+                      <span data-registry-confirm="" className={styles.confirmBox}>
+                        {props.t('panel.registry.removeNote')}
+                        <button type="button" data-registry-remove-confirm="" className={styles.action} onClick={() => { removeRegistration(row.hostId); openList() }}>{props.t('panel.button.confirmRemove')}</button>
+                        <button type="button" data-registry-remove-cancel="" className={styles.action} onClick={() => { setConfirmingRemove(false) }}>{props.t('panel.button.cancel')}</button>
+                      </span>
+                    ))
+              : undefined}
             postureNote={<StoragePostureLine posture={props.hostStore?.posture()} t={props.t} />}
             onConfirm={values => row.self ? confirmSelf(values) : confirmEdit(view.hostId, values)}
             onCancel={openList}
@@ -2684,7 +2755,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
               // 模式。选点是显式意图：展开部署区并重挂一次（序号进 key），让
               // 选中的地址成为这次挂载的目标初值，已存凭据的旧目标不压它。
               setSshTargetDraft(peer.ip)
-              setDeployOpenId(row.hostId)
+              openDeploy(row.hostId)
               setDeployPick(previous => ({
                 hostId: row.hostId,
                 serial: (previous?.serial ?? 0) + 1,
@@ -2716,17 +2787,6 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                             </p>
                           )
                         : undefined}
-                      {!confirmingRemove
-                        ? (
-                            <button type="button" data-registry-remove-ask="" className={styles.action} onClick={() => { setConfirmingRemove(true) }}>{props.t('panel.button.deleteRegistration')}</button>
-                          )
-                        : (
-                            <span data-registry-confirm="" className={styles.confirmBox}>
-                              {props.t('panel.registry.removeNote')}
-                              <button type="button" data-registry-remove-confirm="" className={styles.action} onClick={() => { removeRegistration(row.hostId); openList() }}>{props.t('panel.button.confirmRemove')}</button>
-                              <button type="button" data-registry-remove-cancel="" className={styles.action} onClick={() => { setConfirmingRemove(false) }}>{props.t('panel.button.cancel')}</button>
-                            </span>
-                          )}
                     </div>
                     {!row.self
                       ? (
@@ -2792,7 +2852,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                             connecting={connectBusyId === row.hostId}
                             error={connectError?.hostId === row.hostId ? connectError.text : undefined}
                             onConnect={() => { runConnect(registration) }}
-                            onOpenDeploy={() => { setDeployOpenId(deployOpenId === row.hostId ? undefined : row.hostId) }}
+                            onOpenDeploy={() => { openDeploy(row.hostId) }}
                             onAiCopyOk={notifyAiCopyOk}
                             onCopyFailed={() => { setFormMessage({ tone: 'bad', text: props.t('panel.copyForAi.failed') }) }}
                             t={props.t}
@@ -2802,15 +2862,17 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                     {sshDeployAvailable && !row.self
                       ? (
                           <section data-deploy-section="" className={styles.sshSection}>
-                            <div className={styles.formActions}>
+                            <div className={styles.sectionHead}>
+                              <h3 className={styles.sectionTitle}>{props.t('panel.title.deployInfo')}</h3>
+                              <span className={styles.spacer} />
                               <button
                                 type="button"
-                                className={deployOpenId === row.hostId ? styles.action : styles.actionPrimary}
-                                data-action={deployOpenId === row.hostId ? 'close-deploy' : 'open-deploy'}
-                                onClick={() => { setDeployOpenId(deployOpenId === row.hostId ? undefined : row.hostId) }}
-                              >{deployOpenId === row.hostId ? props.t('panel.deploy.collapse') : props.t('panel.deploy.expand')}</button>
+                                className={deployCollapsed.has(row.hostId) ? styles.actionPrimary : styles.action}
+                                data-action={deployCollapsed.has(row.hostId) ? 'open-deploy' : 'close-deploy'}
+                                onClick={() => { toggleDeploy(row.hostId) }}
+                              >{deployCollapsed.has(row.hostId) ? props.t('panel.deploy.expand') : props.t('panel.deploy.collapse')}</button>
                             </div>
-                            {deployOpenId === row.hostId
+                            {!deployCollapsed.has(row.hostId)
                               ? (
                                   <SshDeploySection
                                     // key 带上 approve-and-read 标记：从「批准并读取」
@@ -2859,7 +2921,7 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
                                       setTunnelChecks(previous => new Map(previous).set(row.hostId, 'online'))
                                       setFormMessage({ tone: 'ok', text: props.t('panel.check.saved', { url: new URL(launchUrl).origin }) })
                                     }}
-                                    onError={message => { setFormMessage({ tone: 'bad', text: message }) }}
+                                    onError={() => undefined}
                                     onAiCopyOk={notifyAiCopyOk}
                                     t={props.t}
                                   />
