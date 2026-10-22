@@ -340,6 +340,42 @@ describe('AcpTurnRunner', () => {
     expect(values).toEqual([live, live])
   })
 
+  it('ends a turn whose model is no longer in the agent’s list with a re-select message', async () => {
+    // The session's pick can also name a model the agent has since dropped, and
+    // no alias bridges that. Sending it spends a request only to buy cursor's
+    // opaque -32602; the honest end is local and tells the user the list moved
+    // on. The fresh list already reached the catalog through this turn's
+    // session/new report, so re-selecting is all that is left to do.
+    const live = 'grok-4.7[context=256k,reasoning_effort=high,fast=true]'
+    const client = fakeClient()
+    client.request = async (method, params) => {
+      client.calls.push({ method, params })
+      if (method === 'session/new') {
+        return {
+          sessionId: 's1',
+          models: { availableModels: [{ modelId: live, name: 'grok-4.7' }] },
+          configOptions: [{ id: 'model', category: 'model', currentValue: 'default[]',
+            options: [{ value: 'default[]', name: 'Auto' }, { value: live, name: 'grok-4.7' }] }],
+        }
+      }
+      if (method === 'session/prompt') return { stopReason: 'end_turn' }
+      return {}
+    }
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: cursorDialect })
+    const result = await runner.run(DECISION, {
+      sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1, modelId: 'grok-9-preview',
+    })
+
+    expect(result.end.kind).toBe('error')
+    const error = (result.end as { error: { code: string; message: string } }).error
+    expect(error.code).toBe('ACP_INTERNAL')
+    expect(error.message).toContain('grok-9-preview')
+    expect(error.message).toContain('重新选择')
+    // The refused id never travels: neither the selector nor the prompt sees it.
+    expect(client.calls.some(call => call.method === 'session/set_config_option')).toBe(false)
+    expect(client.calls.some(call => call.method === 'session/prompt')).toBe(false)
+  })
+
   it('applies a config-option pick once per change, not once per turn', async () => {
     // The agent keeps its selection across turns; re-sending an unchanged
     // pick before every prompt would charge the wire for nothing.

@@ -177,8 +177,8 @@ function recordOf(value: unknown): Record<string, unknown> {
  * A session can carry a model id from an older catalog: cursor stored plain
  * `grok-4.7` before its live option value became
  * `grok-4.7[context=256k,reasoning_effort=high,fast=true]`. Exact values win;
- * option names and the base before `[` cover those older ids. Unknown ids pass
- * through untouched — the agent, not this table, owns the final rejection.
+ * option names and the base before `[` cover those older ids. A pick that
+ * matches none of them is no longer in the list the agent just advertised.
  */
 function configValueAliases(reply: unknown, configId: string | undefined): Map<string, string> | undefined {
   if (configId === undefined) return undefined
@@ -207,12 +207,12 @@ function configValueAliases(reply: unknown, configId: string | undefined): Map<s
   return aliases.size === 0 ? undefined : aliases
 }
 
-function resolveConfigValue(aliases: Map<string, string> | undefined, modelId: string): string {
+function resolveConfigValue(aliases: Map<string, string> | undefined, modelId: string): string | undefined {
   if (aliases === undefined) return modelId
   const direct = aliases.get(modelId)
   if (direct !== undefined) return direct
   const bracket = modelId.indexOf('[')
-  return (bracket > 0 ? aliases.get(modelId.slice(0, bracket)) : undefined) ?? modelId
+  return bracket > 0 ? aliases.get(modelId.slice(0, bracket)) : undefined
 }
 
 function textOf(content: unknown): string {
@@ -1818,10 +1818,21 @@ export class AcpTurnRunner {
     if (via === 'set_model') {
       await this.client.request('session/set_model', { sessionId, modelId })
     } else if (via === 'config_option' && this.modelConfigId !== undefined) {
+      const value = resolveConfigValue(this.modelConfigValues, modelId)
+      // An id that matches no value, name or base is not in the list the agent
+      // just reported: the catalog moved on and the session's pick is gone.
+      // Sending it only buys the agent's opaque `Invalid model value` and kills
+      // the turn at its first request; end locally with the fix instead — the
+      // fresh report already reached the catalog, so the user re-picks from it.
+      if (value === undefined) {
+        throw new Error(
+          `模型 ${modelId} 已不在 agent 当前提供的模型列表中，请重新选择模型`,
+        )
+      }
       await this.client.request('session/set_config_option', {
         sessionId,
         configId: this.modelConfigId,
-        value: resolveConfigValue(this.modelConfigValues, modelId),
+        value,
       })
     } else {
       return
