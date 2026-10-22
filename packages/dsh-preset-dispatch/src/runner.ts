@@ -1096,14 +1096,14 @@ export class AcpTurnRunner {
     // applied ahead of the prompt — inside the same try, so a refused pick is
     // classified exactly like a refused prompt instead of dying unhandled.
     const modelId = turn.modelId ?? this.options.modelId
-    if (modelId !== undefined && this.options.dialect?.modelVia !== 'config_option') {
+    if (modelId !== undefined && !this.modelAppliedOutOfBand()) {
       params['modelId'] = modelId
     }
 
     let reply: unknown
     let failure: unknown
     try {
-      if (modelId !== undefined && this.options.dialect?.modelVia === 'config_option') {
+      if (modelId !== undefined && this.modelAppliedOutOfBand()) {
         await this.applyModel(sessionId, modelId)
       }
       reply = await this.client.request('session/prompt', params)
@@ -1243,14 +1243,14 @@ export class AcpTurnRunner {
         prompt: [{ type: 'text', text }, ...images],
       }
       const modelId = turn.modelId ?? this.options.modelId
-      if (modelId !== undefined && this.options.dialect?.modelVia !== 'config_option') {
+      if (modelId !== undefined && !this.modelAppliedOutOfBand()) {
         params['modelId'] = modelId
       }
       // prompt 不在本次调用里等完：应答落定只是末段的闭合条件之一，段边界才是
       // 本次调用的返回时机。落定后续接只做三件事——记录结果、解除监听、唤醒泵。
-      // config_option 方言把选型应用串在 prompt 前面：同一个 promise，落定/失败
+      // 协议写路径的方言把选型应用串在 prompt 前面：同一个 promise，落定/失败
       // 与 prompt 共用同一条通路，选型被拒不会卡死泵。
-      const asking = modelId !== undefined && this.options.dialect?.modelVia === 'config_option'
+      const asking = modelId !== undefined && this.modelAppliedOutOfBand()
         ? this.applyModel(sessionId, modelId).then(() => this.client.request('session/prompt', params))
         : this.client.request('session/prompt', params)
       void asking.then(
@@ -1752,16 +1752,31 @@ export class AcpTurnRunner {
   /**
    * Apply a picked modelId the protocol's own way, once per actual change.
    *
-   * `session/set_config_option` writes the model selector the agent advertised
-   * in `session/new` — the path for dialects with `modelVia: 'config_option'`,
-   * whose prompt-side modelId param would be an undocumented extension. A
-   * failure propagates: a turn that ran on a model the user did not pick is
-   * worse than a turn that ends saying why the pick did not land.
+   * `config_option` writes the model selector the agent advertised in
+   * `session/new`; `set_model` calls the agent's legacy model method with the
+   * picker's combined id, for an agent whose config-option selector rejects
+   * those ids. Both are out-of-band writes ahead of the prompt, whose own
+   * modelId param neither path's agents read. A failure propagates: a turn
+   * that ran on a model the user did not pick is worse than a turn that ends
+   * saying why the pick did not land.
    */
   private async applyModel(sessionId: string, modelId: string): Promise<void> {
-    if (this.modelConfigId === undefined || modelId === this.appliedModelId) return
-    await this.client.request('session/set_config_option', { sessionId, configId: this.modelConfigId, value: modelId })
+    if (modelId === this.appliedModelId) return
+    const via = this.options.dialect?.modelVia
+    if (via === 'set_model') {
+      await this.client.request('session/set_model', { sessionId, modelId })
+    } else if (via === 'config_option' && this.modelConfigId !== undefined) {
+      await this.client.request('session/set_config_option', { sessionId, configId: this.modelConfigId, value: modelId })
+    } else {
+      return
+    }
     this.appliedModelId = modelId
+  }
+
+  /** True when the pick travels before the prompt instead of inside it. */
+  private modelAppliedOutOfBand(): boolean {
+    const via = this.options.dialect?.modelVia
+    return via === 'config_option' || via === 'set_model'
   }
 }
 

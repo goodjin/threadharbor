@@ -1,6 +1,6 @@
 # grok 的 ACP 对接
 
-> 核对时间：2026-10-09 首测；2026-09-14 补充 `initialize` 能力声明实测
+> 核对时间：2026-10-09 首测；2026-09-14 补充 `initialize` 能力声明实测；2026-10-22 复测模型写入与图片声明
 > 状态：**本项目已实现并通过实测**。实现见 `packages/dsh-acp-agent/src/dialects/grok.ts`，回归夹具见 `packages/dsh-acp-agent/tests/fixtures/captured-frames.json`。
 
 ## 一句话结论
@@ -87,11 +87,20 @@ grok 即使命令失败也报 `status: 'completed'`。本项目的处理是**忠
 
 ## 会话能力与私有扩展
 
-`initialize` 声明 `sessionCapabilities` 的 `list` / `resume` / `close` 三项（**没有** `fork`、`delete`）、`loadSession: true`、`mcpCapabilities.http` / `sse`。注意 `promptCapabilities.image` 是 **false**。
+`initialize` 声明 `sessionCapabilities` 的 `list` / `resume` / `close` 三项（**没有** `fork`、`delete`）、`loadSession: true`、`mcpCapabilities.http` / `sse`。注意 `promptCapabilities.image` 是 **false**——但 2026-10-13 的真机图片用例能识别四宫格，2026-10-22 的 1.0.62 仍报 false；本项目按实测保留 `acceptsImageContent: true`，不因这项声明改回 false。
 
 私有扩展在 `_meta` 上：`x.ai/fs_notify`、`x.ai/hooks`（含 `pre_tool_use`/`stop`/`subagent_stop` 阻塞事件）、`x.ai/capabilities.toolOverrides`。
 
 **本轮新增实测**：`initialize` 的完整能力声明、`authMethods`、`promptCapabilities.image` 为 false。
+
+## 选模型：走 `session/set_config_option`，prompt 不携带模型
+
+2026-10-22 对 grok 1.0.62（`agent stdio`）的握手实测：
+
+- `session/new` 现在带标准 `configOptions`：`[{id:'model', category:'model'}, {id:'reasoning_effort', category:'thought_level'}]`，`models.availableModels` 与 `configOptions[id=model].options` 的 id 一致（如 `grok-4.6` / `grok-4.5`）。
+- `session/set_config_option { configId: 'model', value: 'grok-4.5' }` 成功，响应里的 `currentValue` 变为 `grok-4.5`。
+- `session/set_model { modelId: 'grok-4.6' }` 也返回 `_meta.model.Ok`，但标准入口是 `set_config_option`；本项目的 grok dialect 用后者（`modelVia: 'config_option'`）。
+- prompt 侧没有文档化的 `modelId` 参数；选型在 prompt 之前写入，不再依赖 prompt 参数。
 
 ## 1.0.60 复测（2026-10-20）
 

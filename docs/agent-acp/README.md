@@ -27,6 +27,7 @@
 | **工具名** | `title`（**仅第一帧**） | `kind`（如 `execute`） | `_meta.claudeCode.toolName` | `kind`（如 `execute`） | `_meta.qoder.toolName` |
 | **工具输出** | `content`（**双层嵌套**） | `rawOutput.formatted_output` | `content` / `rawOutput` / `_meta…toolResponse.stdout` | `rawOutput.stdout` | `rawOutput`（字符串）/ `_meta.terminal_output.data` |
 | **模型列表** | `models.availableModels` | `models.availableModels` | `configOptions[id=model].options` | `models.availableModels` | `models.availableModels` |
+| **换模型** | `session/set_config_option` | `session/set_model`（组合 id） | `session/set_config_option` | `session/set_config_option` | `session/set_config_option` |
 | **token 数** | 更新帧 `params._meta.totalTokens` | `session/prompt` 响应 | `session/prompt` 响应 | **不提供** | **全为 0，不采用** |
 | **权限请求 id** | 非 0 | 非 0 | 非 0 | **0（假值）** | **0（假值）** |
 | **终端子协议** | **要**（五个方法全实现） | 未观察到 | 未观察到 | 未观察到 | 未观察到（用 `_meta.terminal_output`） |
@@ -61,7 +62,8 @@ client → agent:  authenticate        { methodId }     ← 仅 Cursor 每回合
 client → agent:  session/new         { cwd, mcpServers }
 agent  → client:  { sessionId, models, modes, configOptions }
 client → agent:  session/set_mode    { sessionId, modeId }
-client → agent:  session/set_config_option  { sessionId, configId, value }   ← 换模型（cursor）
+client → agent:  session/set_config_option  { sessionId, configId, value }   ← 换模型（cursor / qoder / claude / grok）
+client → agent:  session/set_model          { sessionId, modelId }          ← 换模型（codex，组合 id）
 client → agent:  session/prompt      { sessionId, prompt: [{type:'text',text}], modelId? }
 agent  → client:  session/update …                        ← 流式内容与工具帧
 agent  → client:  session/request_permission  { id }       ← 必须回响应，见通则 1
@@ -167,10 +169,10 @@ agent 可能发标准之外的方法，本项目的客户端对不认识的会�
 5. **实测抓帧**，存进 `tests/fixtures/captured-frames.<name>.json`，补一份本文档式的说明
 6. 若目标只是一家模型、工具仍用 DSH：参照 zcode / minimaxi，做成模型插件，不要再包一层 ACP
 
-第 5 步不能省。五家的差异全都不是从代码或文档里能看出来的——codex 把输出放在 `rawOutput` 里且 `set_model` 是坏的、grok 的工具名只在第一帧、claude 自己跟自己不一致、Cursor 的权限请求 id 是 0、Qoder 只把工具名放在 `_meta` 且登录后主动认证反而会挂——全是跑起来才看见的。
+第 5 步不能省。五家的差异全都不是从代码或文档里能看出来的——codex 把输出放在 `rawOutput` 里、模型要用 `set_model` 送组合 id，grok 的工具名只在第一帧，claude 自己跟自己不一致，Cursor 的权限请求 id 是 0，Qoder 只把工具名放在 `_meta` 且登录后主动认证反而会挂——全是跑起来才看见的。
 
 **接新 agent 时额外要确认的三件事（几轮下来的教训）：**
 
 1. **`initialize` 后能不能直接 `session/new`。** Cursor 不能，必须先 `authenticate`；Qoder 能，而且主动认证会偶发挂住。两种策略分别对应 `authenticateMethodId`（急切）与 `authenticateOnDemand` + `sessionNeedsAuthenticate`（按需）。
-2. **模型选择到底走哪条路。** codex 的 `session/set_model` 报 `-32603`，而实机测试用 `.catch(() => {})` 把它吞了——**错误被藏了很久**。Cursor 走 `session/set_config_option`，`configId` 必须从 `session/new` 的 `configOptions` 读（2026-10-21 实测有效）；它不读 `session/prompt` 的 `modelId`。新 agent 的模型选择要么放进 `session/prompt`，要么确认协议路径有效，不要靠 catch 兜着。
+2. **模型选择到底走哪条路。** codex 的 `session/set_model` 在旧版报 `-32603`，实机测试曾用 `.catch(() => {})` 把错误藏了很久；**codex-acp 1.10.0（2026-10-22 复测）已接受组合 id**。Cursor、Qoder、claude、grok 走 `session/set_config_option`，`configId` 必须从 `session/new` 的 `configOptions` 读；五家都不读 `session/prompt` 的 `modelId`（prompt_param 只留给愿意读的 agent）。新 agent 的模型选择必须先验证写入口真的生效，不要靠 catch 兜着。
 3. **裸启动是不是你要的东西。** Cursor 与 Qoder 的二进制不带子命令时都是交互式 CLI：进程活着、一个 JSON-RPC 字不回，握手只能等到超时。启动参数放进 `spawn-args.ts`，生产与 live 测试共用一张表。

@@ -611,10 +611,11 @@ describe('加载路径的模型报告真的进目录（applyAcpPlugin 端到端�
     // sent is not enough.
     const answered = new Set<string>()
     let prompted = false
+    let modelSet = false
     for (let pass = 0; pass < 8 && !prompted; pass++) {
       await settle()
       for (const frame of scripted.sent) {
-        const request = JSON.parse(frame) as { id?: number; method?: string }
+        const request = JSON.parse(frame) as { id?: number; method?: string; params?: { modelId?: string } }
         if (request.id === undefined || answered.has(frame)) continue
         answered.add(frame)
         if (request.method === 'initialize') {
@@ -622,6 +623,10 @@ describe('加载路径的模型报告真的进目录（applyAcpPlugin 端到端�
         }
         if (request.method === 'session/new') {
           scripted.receive(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { sessionId: 'x1' } }))
+        }
+        if (request.method === 'session/set_model') {
+          modelSet = request.params?.modelId === 'gpt-6-astra'
+          scripted.receive(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: {} }))
         }
         if (request.method === 'session/prompt') {
           prompted = true
@@ -633,6 +638,7 @@ describe('加载路径的模型报告真的进目录（applyAcpPlugin 端到端�
         }
       }
     }
+    expect(modelSet).toBe(true)
     expect(prompted).toBe(true)
     await settle()
     await settle()

@@ -1,6 +1,6 @@
 # codex 的 ACP 对接
 
-> 核对时间：2026-10-09 首测；2026-09-14 补充 `initialize`、set_model/set_mode、终端子协议三项实测
+> 核对时间：2026-10-09 首测；2026-09-14 补充 `initialize`、set_model/set_mode、终端子协议三项实测；2026-10-22 复测模型写入路径
 > 状态：**本项目已实现并通过实测**。实现见 `packages/dsh-acp-agent/src/dialects/codex.ts`，回归夹具见 `packages/dsh-acp-agent/tests/fixtures/captured-frames.json`。
 
 ## 一句话结论
@@ -26,9 +26,7 @@ stdio 子进程，命令 `codex-acp`（Node 包 `@agentclientprotocol/codex-acp`
   modes: { currentModeId, availableModes } }
 ```
 
-模型列表实测有 23 个。
-
-> **一处注释与夹具不符**：`codex.ts` 的注释写「returns `models.availableModels` like grok, but **without** `currentModelId`」，但夹具里 codex 是带 `currentModelId` 的（实测值 `gpt-6-astra[high]`）。因为代码只读 `availableModels`，功能上无影响，但注释该修。
+模型列表实测有 23 个，id 形如 `gpt-6-astra[high]`（基础模型 × 推理档位）。
 
 ## 最容易踩的坑
 
@@ -69,19 +67,18 @@ rawOutput.exit_code           // 退出码
 
 它带的是 `{used, size}`，那是**上下文窗口占用**，不是 token 计数。别把它当用量读。
 
-## 选模型：`session/set_model` 实测报错
+## 选模型：prompt 里的 `modelId` 不生效，走 `session/set_model`
 
-**实测：`session/set_model` 返回 `-32603 Internal error`。**
+2026-10-22 对 codex-acp 1.10.0 的握手实测（不跑回合）：
 
-现有实机测试里这行是 `session/set_model(...).catch(() => {})`——**错误被静默吞掉，所以这条路从来没走通过**。
+- `session/prompt` **不读** `params.modelId`；codex 的 prompt 处理只取会话状态里的 `currentModelId`。
+- `session/set_config_option { configId: 'model', value: 'gpt-5.6-sol' }` 接受**基础 id**，返回更新后的 `configOptions`。
+- 同一个方法送组合 id `gpt-6-astra[low]` 会报 `-32602 Invalid params`。
+- `session/set_model { sessionId, modelId: 'gpt-6-astra[low]' }` 返回 `{}`，**组合 id 由它接收**。
 
-真正生效的路子是**把 `modelId` 放进 `session/prompt`**：
+`session/new` 的 `models.availableModels` 有 23 个 id，形如 `gpt-6-astra[low]`（基础模型 × 推理档位）；DSH 的模型选择器就是按这份列表展示的。所以本项目的写入口是 `session/set_model`（`modelVia: 'set_model'`），而不是 prompt 参数，也不是 `set_config_option`——后者的选项里只有 `gpt-6-astra` 这类基础 id，送组合 id 会被拒。
 
-```
-session/prompt { sessionId, prompt: [...], modelId: '<选中的模型>' }
-```
-
-接 codex 时别写「先 set_model 再 prompt」，那样会静默失败、然后用错模型跑完整个回合。
+> 历史记录：旧版 codex-acp 的 `session/set_model` 曾返回 `-32603 Internal error`，实机测试用 `.catch(() => {})` 把错误吞掉，导致“选型从未生效”被藏了很久。1.10.0 已恢复；接新版本时必须重新验证，别让错误再被 catch 掉。
 
 （`session/set_mode` 正常：不存在的 mode 会回 `Invalid params`。）
 
@@ -109,12 +106,12 @@ codex 会主动发 `_auth/status_update` 通知。本项目客户端遇到不认
 - `usage_update`
 - `session_info_update`
 
-codex 的 `session/new` 里那五个 `configOptions`（含 `reasoning_effort`、`fast-mode`）也值得留意——它们是可选能力，本项目目前只取了模型列表。
+codex 的 `session/new` 里那五个 `configOptions`（含 `reasoning_effort`、`fast-mode`）也值得留意——本项目目前取了模型列表，并用 `session/set_model` 写入选型；`reasoning_effort` / `fast-mode` 未接。
 
 ## 证据与未验证项
 
 **已验证**（`tests/live.spec.ts`）：建会话拿到非空模型列表、拿到回答、产生了工具调用、工具输出含探针串（即 `rawOutput.formatted_output` 这条路走通了）。
 
-**本轮新增实测**：`initialize` 的完整能力声明（见上）、`session/set_model` 报错、`session/set_mode` 的校验、**未观察到 `terminal/*` 调用**。
+**本轮新增实测**：`initialize` 的完整能力声明（见上）、`session/set_mode` 的校验、**未观察到 `terminal/*` 调用**；2026-10-22 复测模型写入：prompt 的 `modelId` 被忽略，`set_config_option` 只收基础 id，`set_model` 收组合 id。
 
 **仍未验证**：`configOptions` 里的 `reasoning_effort` / `fast-mode` 能否设置；工具失败时的 `status` 取值。collab 模式的委派行为已随 `subagents` 接入验证了单层委派；多层委派（子代理再开子代理）未测。

@@ -39,6 +39,10 @@ const qoderCaptured = JSON.parse(
   cancelReply: unknown
 }
 
+const subagentCaptured = JSON.parse(
+  readFileSync(fileURLToPath(new URL('./fixtures/captured-subagent-frames.json', import.meta.url)), 'utf8'),
+) as Record<string, { frames: AcpFrame[] }>
+
 const qoderUpdate = (frame: AcpFrame) => (frame.params as { update: Record<string, unknown> }).update
 
 const qoderToolName = (frame: AcpFrame) => {
@@ -65,6 +69,57 @@ describe('reading the model list offered at session/new', () => {
   it('gives an empty list rather than throwing when an agent offers no models', () => {
     expect(codexDialect.readModels({ sessionId: 'x' })).toEqual([])
     expect(claudeDialect.readModels({ sessionId: 'x' })).toEqual([])
+  })
+})
+
+describe('the write path for a picked model', () => {
+  it("uses the model config option for claude and grok", () => {
+    // Both ignore session/prompt.modelId; their session/new publishes the
+    // standard selector and session/set_config_option applies the pick.
+    expect(claudeDialect.modelVia).toBe('config_option')
+    expect(claudeDialect.modelConfigId!(claudeNew)).toBe('model')
+    expect(grokDialect.modelVia).toBe('config_option')
+    expect(grokDialect.modelConfigId!({
+      configOptions: [
+        { id: 'reasoning_effort', category: 'thought_level' },
+        { id: 'model', category: 'model' },
+      ],
+    })).toBe('model')
+  })
+
+  it("uses the legacy set_model method for codex's combined model[effort] ids", () => {
+    // codex's config-option selector only accepts the bare model and rejects
+    // `gpt-6-astra[low]` with -32602; set_model takes the picker value as-is.
+    expect(codexDialect.modelVia).toBe('set_model')
+    expect(codexDialect.modelConfigId).toBeUndefined()
+  })
+})
+
+describe("claude's toolResponse fallback", () => {
+  const claudeTools = captured['claude']!['tool'] as AcpFrame[]
+  const updateOf = (frame: AcpFrame) => (frame.params as { update: Record<string, unknown> }).update
+
+  it('reads stdout when content and rawOutput are both absent', () => {
+    // Real final frame (2026-10-09 capture): no content, no rawOutput, only
+    // _meta.claudeCode.toolResponse.stdout. Reading content alone loses it.
+    const update = updateOf(claudeTools[2]!)
+    expect(update['content']).toBeUndefined()
+    expect(update['rawOutput']).toBeUndefined()
+    expect(claudeDialect.toolOutput(update)).toContain('total 544')
+    expect(claudeDialect.foldTool(undefined, update).output).toContain('total 544')
+  })
+
+  it('reads the Agent tool result from toolResponse.content', () => {
+    // Real Task-delegation capture (2026-10-20): the Agent tool's terminal
+    // update carries its answer in a flat content list under toolResponse.
+    const frame = subagentCaptured['claude']!.frames.find(entry => {
+      if (entry.method !== 'session/update') return false
+      const meta = updateOf(entry)['_meta'] as { claudeCode?: { toolResponse?: { content?: unknown } } } | undefined
+      return meta?.claudeCode?.toolResponse?.content !== undefined
+    })!
+    const update = updateOf(frame)
+    expect(update['content']).toBeUndefined()
+    expect(claudeDialect.toolOutput(update)).toBe('42')
   })
 })
 

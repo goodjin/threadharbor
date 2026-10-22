@@ -15,11 +15,16 @@
  *     alongside `exit_code`. Reading `content` the way grok's projection does
  *     silently yields empty output for every codex tool call.
  *
- * `session/new` returns `models.availableModels` like grok, but **without**
- * `currentModelId`. Token counts arrive on the `session/prompt` response under
- * `usage`, with the cache buckets spelled `cachedReadTokens`/`cachedWriteTokens`
- * and the output's reasoning subset as `thoughtTokens` — DSH's names differ, so
- * `readReplyUsage` translates instead of passing the object through.
+ * `session/new` returns `models.availableModels` like grok, with a
+ * `currentModelId` and ids that bundle the effort level (`gpt-6-astra[high]`).
+ * Its `configOptions` model selector only accepts the bare id, and
+ * `session/prompt` ignores a modelId param (codex-acp 1.10.0, measured
+ * 2026-10-22); the combined picker value travels through the legacy
+ * `session/set_model` method instead. Token counts arrive on the
+ * `session/prompt` response under `usage`, with the cache buckets spelled
+ * `cachedReadTokens`/`cachedWriteTokens` and the output's reasoning subset as
+ * `thoughtTokens` — DSH's names differ, so `readReplyUsage` translates instead
+ * of passing the object through.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -91,6 +96,12 @@ export const codexDialect: AcpDialect = {
       return [{ id, name, ...(description === undefined ? {} : { description }) }]
     })
   },
+
+  // The picker values are combined `model[effort]` ids from availableModels.
+  // The standard config option only accepts the bare model, and the prompt
+  // param is ignored; `session/set_model` takes the combined id (this is the
+  // method codex-acp still registers as its legacy extension).
+  modelVia: 'set_model',
 
   readReplyUsage(result) {
     return replyUsageOf(result)

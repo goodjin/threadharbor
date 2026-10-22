@@ -169,16 +169,20 @@ export interface AcpDialect {
   /**
    * How a user-picked modelId reaches the agent.
    *
-   * `'prompt_param'` (the default; every dialect so far) tucks `modelId` onto
-   * the `session/prompt` params — an extension outside the ACP schema that
-   * those agents honor. `'config_option'` uses the protocol's own write path:
+   * `'prompt_param'` (the default) tucks `modelId` onto the `session/prompt`
+   * params — an extension outside the ACP schema that some agents honor.
+   * `'config_option'` uses the protocol's own write path:
    * `session/set_config_option` with the config option that carries the model
-   * selector. Qoder publishes that selector in `session/new` (configOptions,
-   * category `"model"`) and documents no modelId param on `session/prompt`, so
-   * the prompt param would land on a server free to ignore it — the picker
-   * would offer a choice the agent never applies.
+   * selector. Qoder, cursor, claude and grok publish that selector in
+   * `session/new` and ignore the prompt-side param, so the prompt param would
+   * land on a server free to ignore it — the picker would offer a choice the
+   * agent never applies. `'set_model'` is for an agent whose picker values are
+   * combined `model[effort]` ids that its config-option selector cannot accept:
+   * codex 1.10.0 ignores the prompt param, rejects `gpt-6-astra[low]` on
+   * `session/set_config_option` (`-32602`) and takes it on the legacy
+   * `session/set_model` method (measured 2026-10-22).
    */
-  readonly modelVia?: 'prompt_param' | 'config_option' | undefined
+  readonly modelVia?: 'prompt_param' | 'config_option' | 'set_model' | undefined
 
   /**
    * The config-option id carrying the model selector, read off the

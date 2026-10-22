@@ -10,7 +10,9 @@
  *     there the name is in `toolCall.name` while updates use `_meta`, so the
  *     same agent disagrees with itself.
  *   - Output is the same double-nested content grok uses, and the final update
- *     also carries `rawOutput`.
+ *     also carries `rawOutput`. Some terminal frames carry neither: the result
+ *     is only in `_meta.claudeCode.toolResponse` (`stdout` for Bash, a
+ *     `content` list for the Agent tool), measured 2026-10-09 and 2026-10-20.
  *
  * Note the model behind this capture is a relay, not Anthropic's Claude — the
  * adapter's frame shapes are what this dialect encodes, and those are real.
@@ -46,6 +48,29 @@ function nestedText(content: unknown): string {
     if (text.length > 0) parts.push(text)
   }
   return parts.join('')
+}
+
+function toolResponseOf(update: Record<string, unknown>): Record<string, unknown> {
+  return record(record(record(update['_meta'])['claudeCode'])['toolResponse'])
+}
+
+function outputFrom(update: Record<string, unknown>): string {
+  const direct = nestedText(update['content'])
+  if (direct.length > 0) return direct
+  const raw = nestedText(record(update['rawOutput'])['formatted_output'])
+  if (raw.length > 0) return raw
+  const response = toolResponseOf(update)
+  const stdout = typeof response['stdout'] === 'string' ? response['stdout'] : ''
+  if (stdout.length > 0) return stdout
+  return nestedText(response['content'])
+}
+
+function modelSelector(reply: unknown): Record<string, unknown> | undefined {
+  const options = record(reply)['configOptions']
+  if (!Array.isArray(options)) return undefined
+  return options
+    .map(record)
+    .find(option => option['id'] === 'model' || option['category'] === 'model')
 }
 
 const CHATTER = new Set([
@@ -97,7 +122,7 @@ export const claudeDialect: AcpDialect = {
     // Latch the identity: `title` is rewritten as the call progresses, so once
     // a name is known, later frames must not replace it.
     const name = carried?.name || reported || (typeof update['title'] === 'string' ? update['title'] : 'tool')
-    const output = nestedText(update['content'])
+    const output = outputFrom(update)
     return {
       callId: toolCallId,
       name,
@@ -109,17 +134,11 @@ export const claudeDialect: AcpDialect = {
   },
 
   toolOutput(update) {
-    const direct = nestedText(update['content'])
-    if (direct.length > 0) return direct
-    return nestedText(record(update['rawOutput'])['formatted_output'])
+    return outputFrom(update)
   },
 
   readModels(reply) {
-    const options = record(reply)['configOptions']
-    if (!Array.isArray(options)) return []
-    const entry = options
-      .map(record)
-      .find(option => option['id'] === 'model' || option['category'] === 'model')
+    const entry = modelSelector(reply)
     const choices = record(entry)['options']
     if (!Array.isArray(choices)) return []
     return choices.map(record).flatMap(choice => {
@@ -129,6 +148,16 @@ export const claudeDialect: AcpDialect = {
       const description = typeof choice['description'] === 'string' ? choice['description'] : undefined
       return [{ id, name, ...(description === undefined ? {} : { description }) }]
     })
+  },
+
+  // claude's prompt() never reads params.modelId (claude-agent-acp 0.76.0);
+  // the model lives in the config option its session/new publishes and is
+  // written through session/set_config_option (probe 2026-10-22).
+  modelVia: 'config_option',
+
+  modelConfigId(reply) {
+    const id = modelSelector(reply)?.['id']
+    return typeof id === 'string' ? id : undefined
   },
 
   readReplyUsage(result) {

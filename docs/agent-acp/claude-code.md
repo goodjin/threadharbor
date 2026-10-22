@@ -1,6 +1,6 @@
 # claude code 的 ACP 对接
 
-> 核对时间：2026-10-09 首测；2026-09-14 补充 `initialize` 与终端子协议实测
+> 核对时间：2026-10-09 首测；2026-09-14 补充 `initialize` 与终端子协议实测；2026-10-22 复测模型写入路径
 > 状态：**本项目已实现并通过实测**。实现见 `packages/dsh-acp-agent/src/dialects/claude.ts`，回归夹具见 `packages/dsh-acp-agent/tests/fixtures/captured-frames.json`。
 
 ## 一句话结论
@@ -55,8 +55,9 @@ _meta.claudeCode.toolName = "Bash"                    ← 真正的工具名
 | `content` | 双层嵌套 `[{type:'content', content:{type:'text', text}}]`，与 grok 同 |
 | `rawOutput` | 最后一帧实测同时带 `content` 和 `rawOutput` |
 | `_meta.claudeCode.toolResponse.stdout` | 实测第三帧**只有**这个，`content` 和 `rawOutput` 都没有 |
+| `_meta.claudeCode.toolResponse.content` | Task 委派的 Agent 工具完成帧；`[{type:'text',text}]`，同样没有 `content` / `rawOutput` |
 
-**当前实现的 `toolOutput` 读 `content` 再读 `rawOutput`，不读第三处。** 实测中第三帧后面跟了带 `content` 的第四帧，所以没出问题；**但如果一个回合停在只有 `toolResponse.stdout` 那一帧上，输出会丢。** 后续接入时建议补上这条回退。
+**当前实现的读法**：`content` → `rawOutput.formatted_output` → `toolResponse.stdout` → `toolResponse.content`。第三处曾是一个已知缺口（回合若停在只有 `toolResponse` 的帧上会丢输出），2026-10-22 已补上并加了夹具测试。
 
 ### 4. 默认是 `bypassPermissions`，永远不会问你要批准
 
@@ -83,9 +84,23 @@ _meta.claudeCode.toolName = "Bash"                    ← 真正的工具名
 
 `initialize` 声明了 `sessionCapabilities` 的 `resume` / `list` / `close` / `delete` / `fork` / `subagents` / `additionalDirectories`，另有 `mcpCapabilities.http` / `sse` 与 `auth.logout`。
 
+**图片能力有一处声明与实测不一致**：0.76.0 的 `initialize` 报 `promptCapabilities.image: true`（2026-10-22 复测），但 2026-10-13 的真机图片用例里服务端明确说没有处理图像。本项目按实测保留 `acceptsImageContent: false`，不把图片块送上 wire。
+
 私有扩展：`_meta.claudeCode.promptQueueing: true`（表示支持提示队列）。
 
 **`subagents` 已接**（2026-10-20）：claude-agent-acp 0.76.0 实现了[草案 #1992](https://github.com/agentclientprotocol/agent-client-protocol/pull/1992)外加**异步任务扩展**——Task 委派走 `subagent_spawned` / `subagent_state_update`，后台任务走 `async_task_spawned` / `async_task_progress` / `async_task_state_update`（带进度摘要、token 数、时长、输出文件路径）。投影规则见 [README.md](./README.md) 的帧表；后台任务可能跨回合活着，回合结束仍 running 的结果文本带 `[still running]` 前缀。帧级真机验收已通过（2026-10-20）：Task 委派后 `subagent_spawned`（task 逐字带任务描述）与 `subagent_state_update` 到达并投成 subagent 卡片（3.5 秒完成），原始帧存 `tests/fixtures/captured-subagent-frames.json` 的 `claude` 键、并有单测照它钉死。与 codex 同一教训：草案字段会被 SDK 剥掉，握手须同时发 `_meta.jetbrains.air` 备用通道（见 README），否则 Agent 工具退成普通卡（失败取证在 `claude-failed` 键）。本轮抓包未触发后台任务，`async_task_*` 的真机帧待一次真实后台命令后补录。
+
+**已知装饰性重复**：同一次 Task 委派还会来一条 `Agent` 工具的 `tool_call_update`（`_meta.claudeCode.toolResponse.agentId` 指回子会话）。子代理卡片由原生帧负责；这条工具帧目前会多投一张 Agent 工具卡。它不丢结果（`toolResponse.content` 已读），只是重复，与 grok 的 `spawn_subagent` + subagent 双卡同类；未做去重。
+
+## 选模型：prompt 里的 `modelId` 不生效，走 `set_config_option`
+
+2026-10-22 对 claude-agent-acp 0.76.0 的握手实测：
+
+- `session/prompt` 的处理函数**不读** `params.modelId`，模型取自会话状态。
+- `session/set_config_option { configId: 'model', value: 'opus' }` 成功，响应返回更新后的 `configOptions`（`currentValue` 变为 `opus`）。
+- 模型选择器的 id 从 `session/new` 的 `configOptions[id=model]` 读，`configId` 也是 `model`。
+
+所以本项目的 claude dialect 声明 `modelVia: 'config_option'`，选型在 prompt 之前写入，不再往 prompt 里塞 `modelId`。
 
 ## 权限请求
 
@@ -109,4 +124,4 @@ _meta.claudeCode.toolName = "Bash"                    ← 真正的工具名
 
 **本轮新增实测**：`initialize` 的完整能力声明、`authMethods` 为空、**未观察到 `terminal/*` 调用**。
 
-**仍未验证**：回合停在只有 `toolResponse.stdout` 那一帧时的行为（见坑 3）；`effort` 这个 configOption 能否设置；工具失败时的 `status` 取值。
+**仍未验证**：`effort` 这个 configOption 能否设置；工具失败时的 `status` 取值。

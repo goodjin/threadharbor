@@ -8,7 +8,7 @@
  */
 
 import type { AcpFrame } from '@threadharbor/dsh-acp-agent'
-import { codexDialect, cursorDialect, grokDialect, qoderDialect } from '@threadharbor/dsh-acp-agent'
+import { claudeDialect, codexDialect, cursorDialect, grokDialect, qoderDialect } from '@threadharbor/dsh-acp-agent'
 import { describe, expect, it } from 'vitest'
 import { AcpTurnRunner } from '../src/runner.ts'
 import type { AcpClientPort } from '../src/runner.ts'
@@ -333,6 +333,56 @@ describe('AcpTurnRunner', () => {
       .filter(call => call.method === 'session/set_config_option')
       .map(call => (call.params as { value: string }).value)
     expect(values).toEqual(['gmodel', 'auto'])
+  })
+
+  it('codex sends the combined pick through session/set_model, ahead of the prompt', async () => {
+    // codex's config-option model selector accepts only the bare id; the
+    // picker's value carries the effort (`gpt-6-astra[high]`). The legacy
+    // set_model method takes exactly that value, and the prompt must not get
+    // a param codex ignores.
+    const client = fakeClient()
+    client.request = async (method, params) => {
+      client.calls.push({ method, params })
+      if (method === 'session/new') {
+        return { sessionId: 's1', models: { availableModels: [{ modelId: 'gpt-6-astra[high]', name: 'GPT-6-Astra' }] } }
+      }
+      if (method === 'session/prompt') return { stopReason: 'end_turn' }
+      return {}
+    }
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: codexDialect })
+    await runner.run(DECISION, {
+      sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1, modelId: 'gpt-6-astra[high]',
+    })
+
+    const order = client.calls.map(call => call.method)
+    expect(order).toContain('session/set_model')
+    expect(order.indexOf('session/set_model')).toBeLessThan(order.indexOf('session/prompt'))
+    expect(client.calls.find(call => call.method === 'session/set_model')!.params)
+      .toEqual({ sessionId: 's1', modelId: 'gpt-6-astra[high]' })
+    expect((client.calls.find(call => call.method === 'session/prompt')!.params as { modelId?: string }).modelId)
+      .toBeUndefined()
+  })
+
+  it("claude sends the pick through its published model config option", async () => {
+    const client = fakeClient()
+    client.request = async (method, params) => {
+      client.calls.push({ method, params })
+      if (method === 'session/new') {
+        return { sessionId: 's1', configOptions: [{ id: 'model', category: 'model', currentValue: 'default',
+          options: [{ value: 'default', name: 'Default' }, { value: 'opus', name: 'Opus' }] }] }
+      }
+      if (method === 'session/prompt') return { stopReason: 'end_turn' }
+      return {}
+    }
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: claudeDialect })
+    await runner.run(DECISION, {
+      sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1, modelId: 'opus',
+    })
+
+    expect(client.calls.find(call => call.method === 'session/set_config_option')!.params)
+      .toEqual({ sessionId: 's1', configId: 'model', value: 'opus' })
+    expect((client.calls.find(call => call.method === 'session/prompt')!.params as { modelId?: string }).modelId)
+      .toBeUndefined()
   })
 
   it('returns only that turn’s frames, not everything seen so far', async () => {

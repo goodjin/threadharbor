@@ -42,6 +42,14 @@ function textOf(content: unknown): string {
   return typeof entry['text'] === 'string' ? (entry['text'] as string) : ''
 }
 
+function modelSelector(reply: unknown): Record<string, unknown> | undefined {
+  const options = record(reply)['configOptions']
+  if (!Array.isArray(options)) return undefined
+  return options
+    .map(record)
+    .find(option => option['id'] === 'model' || option['category'] === 'model')
+}
+
 const CHATTER = new Set(['available_commands_update', 'usage_update', 'session_info_update'])
 
 export const grokDialect: AcpDialect = {
@@ -95,6 +103,16 @@ export const grokDialect: AcpDialect = {
       const description = typeof model['description'] === 'string' ? model['description'] : undefined
       return [{ id, name, ...(description === undefined ? {} : { description }) }]
     })
+  },
+
+  // grok publishes the model as a standard config option and names no
+  // prompt-side model param (grok 1.0.62 probe, 2026-10-22). The picker's ids
+  // are the selector's values verbatim, so the write is a direct pass-through.
+  modelVia: 'config_option',
+
+  modelConfigId(reply) {
+    const id = modelSelector(reply)?.['id']
+    return typeof id === 'string' ? id : undefined
   },
 
   readReplyUsage() {
