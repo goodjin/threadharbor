@@ -73,13 +73,30 @@ export async function connectRemoteHost(
   return await postJson(ROUTE_CONNECT, { ssh, ...(remoteWebPort === undefined ? {} : { remoteWebPort }) }, t)
 }
 
+/** Start an async peer readiness check (poll with {@link waitSshDeployOperation}). */
+export async function startRemotePeerCheck(
+  ssh: SshConnectionInput & { readonly hostKeyFingerprint: string },
+  remoteWebPort?: number,
+  t: RuntimeT = fallbackT,
+): Promise<ApiResult<{ readonly operationId: string }>> {
+  return await postJson(ROUTE_CHECK, { ssh, ...(remoteWebPort === undefined ? {} : { remoteWebPort }) }, t)
+}
+
 /** Step-by-step readiness check of a peer reached over `tailscale serve`. */
 export async function checkRemotePeer(
   ssh: SshConnectionInput & { readonly hostKeyFingerprint: string },
   remoteWebPort?: number,
+  onProgress?: (view: SshDeployOperationView) => void,
   t: RuntimeT = fallbackT,
 ): Promise<ApiResult<PeerCheckReport>> {
-  return await postJson(ROUTE_CHECK, { ssh, ...(remoteWebPort === undefined ? {} : { remoteWebPort }) }, t)
+  const started = await startRemotePeerCheck(ssh, remoteWebPort, t)
+  if (!started.ok) return started
+  const done = await waitSshDeployOperation(started.value.operationId, onProgress, undefined, t)
+  if (!done.ok) return done
+  if (done.value.status !== 'succeeded' || done.value.checkReport === undefined) {
+    return { ok: false, error: done.value.error ?? t('panel.check.failedGeneric') }
+  }
+  return { ok: true, value: done.value.checkReport }
 }
 
 /** Why `tailscale serve` could not be configured, with the commands to run by hand. */
