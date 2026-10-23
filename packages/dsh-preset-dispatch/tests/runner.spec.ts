@@ -494,6 +494,103 @@ describe('AcpTurnRunner', () => {
     expect(client.calls.some(call => call.method === 'session/prompt')).toBe(false)
   })
 
+  it('writes the picked effort into the model id an agent serves that way', async () => {
+    // codex publishes one wire id per effort ('gpt-6-astra[xhigh]') and refuses
+    // the bare base ("Expected: modelId[effort]", live probe 2026-10-23). The
+    // picker sends the base plus the effort separately, so the runner has to
+    // put the two back together before the write — otherwise the agent is asked
+    // for a model it cannot accept (desktop session 633df594, 2026-10-23:
+    // the same turn failed twice, once with the effort and once without).
+    const client = fakeClient()
+    client.request = async (method, params) => {
+      client.calls.push({ method, params })
+      if (method === 'session/new') {
+        return { sessionId: 's1', models: { availableModels: [
+          { modelId: 'gpt-6-astra[low]', name: 'GPT-6-Astra' },
+          { modelId: 'gpt-6-astra[xhigh]', name: 'GPT-6-Astra' },
+        ] } }
+      }
+      if (method === 'session/prompt') return { stopReason: 'end_turn' }
+      return {}
+    }
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: codexDialect })
+    const result = await runner.run(DECISION, {
+      sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1,
+      modelId: 'gpt-6-astra', reasoningEffort: 'xhigh',
+    })
+
+    expect(result.end.kind).not.toBe('error')
+    expect(client.calls.find(call => call.method === 'session/set_model')!.params)
+      .toEqual({ sessionId: 's1', modelId: 'gpt-6-astra[xhigh]' })
+  })
+
+  it('falls back to the agent’s own current model when the pick names only the base', async () => {
+    // codex reports the model it is on as models.currentModelId
+    // ('gpt-6-astra[medium]', live probe 2026-10-23) — its own default,
+    // effort included. A pick that names the base and no effort means "the
+    // provider default", and that is exactly this id; sending the bare base
+    // instead only buys codex's "Expected: modelId[effort]".
+    const client = fakeClient()
+    client.request = async (method, params) => {
+      client.calls.push({ method, params })
+      if (method === 'session/new') {
+        return { sessionId: 's1', models: {
+          currentModelId: 'gpt-6-astra[medium]',
+          availableModels: [
+            { modelId: 'gpt-6-astra[low]', name: 'GPT-6-Astra' },
+            { modelId: 'gpt-6-astra[medium]', name: 'GPT-6-Astra' },
+          ],
+        } }
+      }
+      if (method === 'session/prompt') return { stopReason: 'end_turn' }
+      return {}
+    }
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: codexDialect })
+    const result = await runner.run(DECISION, {
+      sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1, modelId: 'gpt-6-astra',
+    })
+
+    expect(result.end.kind).not.toBe('error')
+    expect(client.calls.find(call => call.method === 'session/set_model')!.params)
+      .toEqual({ sessionId: 's1', modelId: 'gpt-6-astra[medium]' })
+  })
+
+  it('writes the picked effort through the agent’s own effort option when the id cannot carry it', async () => {
+    // grok publishes bare model ids plus a separate reasoning_effort option
+    // (live probe 2026-10-23), so the effort travels on its own config option
+    // rather than inside the model id.
+    const client = fakeClient()
+    client.request = async (method, params) => {
+      client.calls.push({ method, params })
+      if (method === 'session/new') {
+        return { sessionId: 's1',
+          models: { currentModelId: 'grok-4.7', availableModels: [{ modelId: 'grok-4.7', name: 'Grok 4.7' }] },
+          configOptions: [
+            { id: 'model', category: 'model', currentValue: 'grok-4.7',
+              options: [{ value: 'grok-4.7', name: 'Grok 4.7' }] },
+            { id: 'reasoning_effort', category: 'thought_level', currentValue: 'high',
+              options: [{ value: 'low', name: 'Low' }, { value: 'high', name: 'High' }] },
+          ] }
+      }
+      if (method === 'session/prompt') return { stopReason: 'end_turn' }
+      return {}
+    }
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: grokDialect })
+    const result = await runner.run(DECISION, {
+      sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1,
+      modelId: 'grok-4.7', reasoningEffort: 'low',
+    })
+
+    expect(result.end.kind).not.toBe('error')
+    const writes = client.calls.filter(call => call.method === 'session/set_config_option')
+    expect(writes.map(call => call.params)).toEqual([
+      { sessionId: 's1', configId: 'model', value: 'grok-4.7' },
+      { sessionId: 's1', configId: 'reasoning_effort', value: 'low' },
+    ])
+    expect(client.calls.map(call => call.method).indexOf('session/set_config_option'))
+      .toBeLessThan(client.calls.map(call => call.method).indexOf('session/prompt'))
+  })
+
   it("claude sends the pick through its published model config option", async () => {
     const client = fakeClient()
     client.request = async (method, params) => {

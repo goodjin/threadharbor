@@ -230,6 +230,49 @@ function reportedModelIds(reply: unknown, dialect: AcpDialect | undefined): Read
   return models.length === 0 ? undefined : new Set(models.map(model => model.id))
 }
 
+/**
+ * The model the agent is on right now, as the reply reported it.
+ *
+ * `session/new` answers with `models.currentModelId` — the model the agent
+ * would run on when nobody tells it otherwise. For an agent that serves one
+ * id per effort (codex) that id carries the agent's own default effort
+ * (`gpt-6-astra[medium]`, live probe 2026-10-23), which is the honest answer
+ * to a pick that named the base alone.
+ */
+function reportedCurrentModelId(reply: unknown): string | undefined {
+  const current = recordOf(recordOf(reply)['models'])['currentModelId']
+  return typeof current === 'string' && current !== '' ? current : undefined
+}
+
+/**
+ * The agent's own reasoning-effort selector, when it published one.
+ *
+ * An agent whose model ids carry no effort (grok) takes the effort through
+ * this option instead: `reasoning_effort`, category `thought_level` (live
+ * probe 2026-10-23).
+ */
+function reportedEffortOption(
+  reply: unknown,
+): { readonly configId: string; readonly values: ReadonlySet<string> } | undefined {
+  const options = recordOf(reply)['configOptions']
+  if (!Array.isArray(options)) return undefined
+  const option = options
+    .map(recordOf)
+    .find(entry => entry['category'] === 'thought_level' || entry['id'] === 'reasoning_effort')
+  if (option === undefined) return undefined
+  const configId = option['id']
+  if (typeof configId !== 'string' || configId === '') return undefined
+  const values = new Set<string>()
+  const entries = option['options']
+  if (Array.isArray(entries)) {
+    for (const entry of entries) {
+      const value = recordOf(entry)['value']
+      if (typeof value === 'string') values.add(value)
+    }
+  }
+  return { configId, values }
+}
+
 function textOf(content: unknown): string {
   const entry = recordOf(content)
   if (typeof entry['text'] === 'string') return entry['text']
@@ -603,6 +646,24 @@ export class AcpTurnRunner {
    * re-travel the wire before every prompt.
    */
   private appliedModelId: string | undefined
+  /**
+   * The reasoning effort applied alongside that model. The effort is part of
+   * the pick — the same model at another effort is another write — so it is
+   * remembered separately.
+   */
+  private appliedEffort: string | undefined
+  /**
+   * The model the agent is on, as the reply reported it
+   * (`models.currentModelId`). For an agent that serves one id per effort
+   * (codex) that is the agent's own default, base and effort together, and
+   * the honest answer to a pick that named the base alone.
+   */
+  private currentModelId: string | undefined
+  /**
+   * The agent's own reasoning-effort selector, when it published one. An
+   * agent whose model ids carry no effort (grok) takes the effort here.
+   */
+  private effortOption: { readonly configId: string; readonly values: ReadonlySet<string> } | undefined
 
   constructor(client: AcpClientPort, options: RunnerOptions) {
     this.client = client
@@ -1168,6 +1229,9 @@ export class AcpTurnRunner {
     // applied ahead of the prompt — inside the same try, so a refused pick is
     // classified exactly like a refused prompt instead of dying unhandled.
     const modelId = turn.modelId ?? this.options.modelId
+    // The effort the picker chose belongs to the pick: the agent that serves
+    // one id per effort wants it inside that id.
+    const effort = turn.reasoningEffort
     if (modelId !== undefined && !this.modelAppliedOutOfBand()) {
       params['modelId'] = modelId
     }
@@ -1176,7 +1240,7 @@ export class AcpTurnRunner {
     let failure: unknown
     try {
       if (modelId !== undefined && this.modelAppliedOutOfBand()) {
-        await this.applyModel(sessionId, modelId)
+        await this.applyModel(sessionId, modelId, effort)
       }
       reply = await this.client.request('session/prompt', params)
     } catch (error: unknown) {
@@ -1315,6 +1379,7 @@ export class AcpTurnRunner {
         prompt: [{ type: 'text', text }, ...images],
       }
       const modelId = turn.modelId ?? this.options.modelId
+      const effort = turn.reasoningEffort
       if (modelId !== undefined && !this.modelAppliedOutOfBand()) {
         params['modelId'] = modelId
       }
@@ -1323,7 +1388,7 @@ export class AcpTurnRunner {
       // 协议写路径的方言把选型应用串在 prompt 前面：同一个 promise，落定/失败
       // 与 prompt 共用同一条通路，选型被拒不会卡死泵。
       const asking = modelId !== undefined && this.modelAppliedOutOfBand()
-        ? this.applyModel(sessionId, modelId).then(() => this.client.request('session/prompt', params))
+        ? this.applyModel(sessionId, modelId, effort).then(() => this.client.request('session/prompt', params))
         : this.client.request('session/prompt', params)
       void asking.then(
         reply => {
@@ -1773,9 +1838,12 @@ export class AcpTurnRunner {
         })
         this.resumedLastOpen = true
         this.appliedModelId = undefined
+        this.appliedEffort = undefined
         this.modelConfigId = this.options.dialect?.modelConfigId?.(resumed)
         this.modelConfigValues = configValueAliases(resumed, this.modelConfigId)
         this.modelWireIds = reportedModelIds(resumed, this.options.dialect)
+        this.currentModelId = reportedCurrentModelId(resumed)
+        this.effortOption = reportedEffortOption(resumed)
         if (this.options.dialect !== undefined && this.options.onModels !== undefined) {
           this.options.onModels(this.options.dialect.readModels(resumed))
         }
@@ -1809,9 +1877,12 @@ export class AcpTurnRunner {
     }
     // A fresh session knows no model selection, whatever the last one had.
     this.appliedModelId = undefined
+    this.appliedEffort = undefined
     this.modelConfigId = this.options.dialect?.modelConfigId?.(reply)
     this.modelConfigValues = configValueAliases(reply, this.modelConfigId)
     this.modelWireIds = reportedModelIds(reply, this.options.dialect)
+    this.currentModelId = reportedCurrentModelId(reply)
+    this.effortOption = reportedEffortOption(reply)
     // The picker serves what the agent reported; the dialect knows where the
     // list lives. Reported even when empty — an agent that serves nothing must
     // be able to replace whatever was believed before.
@@ -1835,29 +1906,20 @@ export class AcpTurnRunner {
    * modelId param neither path's agents read. A failure propagates: a turn
    * that ran on a model the user did not pick is worse than a turn that ends
    * saying why the pick did not land.
+   *
+   * The reasoning effort the picker chose rides along: it is part of the pick,
+   * and an agent that serves one id per effort wants it joined onto the model
+   * id, while an agent that keeps the effort in its own option takes it there.
    */
-  private async applyModel(sessionId: string, modelId: string): Promise<void> {
-    if (modelId === this.appliedModelId) return
+  private async applyModel(sessionId: string, modelId: string, effort: string | undefined): Promise<void> {
+    if (modelId === this.appliedModelId && effort === this.appliedEffort) return
     const via = this.options.dialect?.modelVia
     if (via === 'set_model') {
-      const ids = this.modelWireIds
-      if (ids !== undefined && !ids.has(modelId)) {
-        const base = baseIdOf(modelId)
-        // codex advertises one entry per effort (`gpt-6-astra[low]`) and its
-        // set_model rejects the bare base (live probe 2026-10-22: -32603
-        // "Unsupported format ... Expected: modelId[effort]"). A bare pick
-        // whose base is still served is not stale — it is missing the effort,
-        // and only the user can choose one.
-        if (base === modelId && [...ids].some(id => baseIdOf(id) === base)) {
-          throw new Error(
-            `模型 ${modelId} 需要先选择推理档位（agent 只接受带档位的模型 id）`,
-          )
-        }
-        throw new Error(
-          `模型 ${modelId} 已不在 agent 当前提供的模型列表中，请重新选择模型`,
-        )
+      const wireId = this.setModelWireId(modelId, effort)
+      if (wireId === undefined) {
+        throw new Error(this.setModelRefusal(modelId, effort))
       }
-      await this.client.request('session/set_model', { sessionId, modelId })
+      await this.client.request('session/set_model', { sessionId, modelId: wireId })
     } else if (via === 'config_option' && this.modelConfigId !== undefined) {
       const value = resolveConfigValue(this.modelConfigValues, modelId)
       // An id that matches no value, name or base is not in the list the agent
@@ -1875,10 +1937,85 @@ export class AcpTurnRunner {
         configId: this.modelConfigId,
         value,
       })
+      await this.applyEffortOption(sessionId, effort)
     } else {
       return
     }
     this.appliedModelId = modelId
+    this.appliedEffort = effort
+  }
+
+  /**
+   * The wire id to write for a `set_model` agent, or undefined when the pick
+   * cannot be served.
+   *
+   * The picker sends a base plus an effort, because that is how the catalog
+   * presents a model that advertises efforts. An agent that serves one id per
+   * effort (codex) wants them joined again: `gpt-6-astra` + `xhigh` is
+   * `gpt-6-astra[xhigh]`. A pick with no effort asks for the provider default,
+   * which for such an agent is the model it reported as current — codex
+   * publishes that as `gpt-6-astra[medium]` (live probe 2026-10-23) — and
+   * only when that model is the one that was picked.
+   */
+  private setModelWireId(modelId: string, effort: string | undefined): string | undefined {
+    const ids = this.modelWireIds
+    // The agent named no models: there is nothing to judge the pick against.
+    if (ids === undefined) return modelId
+    // Exactly what the agent serves.
+    if (ids.has(modelId)) return modelId
+    const base = baseIdOf(modelId)
+    // A suffixed id the agent does not serve: stale, nothing to compose.
+    if (base !== modelId) return undefined
+    if (effort !== undefined) {
+      const suffixed = `${base}[${effort}]`
+      return ids.has(suffixed) ? suffixed : undefined
+    }
+    const current = this.currentModelId
+    if (current !== undefined && baseIdOf(current) === base && ids.has(current)) return current
+    return undefined
+  }
+
+  /**
+   * Why a pick could not be written, in the words the user can act on.
+   *
+   * codex advertises one entry per effort (`gpt-6-astra[low]`) and its
+   * set_model rejects the bare base (live probe 2026-10-22: -32603
+   * "Unsupported format ... Expected: modelId[effort]"). A bare pick whose base
+   * is still served is not stale — it is missing the effort, and only the user
+   * can choose one.
+   */
+  private setModelRefusal(modelId: string, effort: string | undefined): string {
+    const ids = this.modelWireIds
+    const base = baseIdOf(modelId)
+    if (effort !== undefined) {
+      return `模型 ${base}[${effort}] 已不在 agent 当前提供的模型列表中，请重新选择模型`
+    }
+    if (ids !== undefined && base === modelId && [...ids].some(id => baseIdOf(id) === base)) {
+      return `模型 ${modelId} 需要先选择推理档位（agent 只接受带档位的模型 id）`
+    }
+    return `模型 ${modelId} 已不在 agent 当前提供的模型列表中，请重新选择模型`
+  }
+
+  /**
+   * Write the picked effort through the agent's own effort selector, when it
+   * published one. grok serves bare model ids and a separate `reasoning_effort`
+   * option (live probe 2026-10-23), so the effort the user picked has to
+   * reach that option — it cannot ride inside the model id.
+   */
+  private async applyEffortOption(sessionId: string, effort: string | undefined): Promise<void> {
+    if (effort === undefined) return
+    const option = this.effortOption
+    // The agent carries the effort inside the model id, or published no
+    // effort selector at all: there is nothing to write it to.
+    if (option === undefined) return
+    if (!option.values.has(effort)) {
+      throw new Error(`推理档位 ${effort} 不在 agent 当前提供的档位列表中，请重新选择`)
+    }
+    await this.client.request('session/set_config_option', {
+      sessionId,
+      configId: option.configId,
+      value: effort,
+    })
   }
 
   /** True when the pick travels before the prompt instead of inside it. */
