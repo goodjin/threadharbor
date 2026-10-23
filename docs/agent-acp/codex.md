@@ -1,6 +1,6 @@
 # codex 的 ACP 对接
 
-> 核对时间：2026-10-09 首测；2026-09-14 补充 `initialize`、set_model/set_mode、终端子协议三项实测；2026-10-22 复测模型写入路径
+> 核对时间：2026-10-09 首测；2026-09-14 补充 `initialize`、set_model/set_mode、终端子协议三项实测；2026-10-22 复测模型写入路径；2026-10-23 复测推理档位与 agent 自己的默认模型
 > 状态：**本项目已实现并通过实测**。实现见 `packages/dsh-acp-agent/src/dialects/codex.ts`，回归夹具见 `packages/dsh-acp-agent/tests/fixtures/captured-frames.json`。
 
 ## 一句话结论
@@ -88,6 +88,18 @@ rawOutput.exit_code           // 退出码
 > 历史记录：旧版 codex-acp 的 `session/set_model` 曾返回 `-32603 Internal error`，实机测试用 `.catch(() => {})` 把错误吞掉，导致“选型从未生效”被藏了很久。1.10.0 已恢复；接新版本时必须重新验证，别让错误再被 catch 掉。
 
 （`session/set_mode` 正常：不存在的 mode 会回 `Invalid params`。）
+
+## 推理档位：agent 只认带档位的 id，选中什么档位就得送什么档位（2026-10-23 复测）
+
+模型选择器把 codex 的 23 个组合 id 收成「一个基础模型 + 一串档位」，选完之后发过来的是**基础 id + 档位**两样（如 `gpt-6-astra` 与 `xhigh`）。codex 那边只收组合 id，所以这两样必须在写入前重新合成 `gpt-6-astra[xhigh]`——**合成发生在 runner 里**：档位丢了或没带上，codex 只会回一句 `Unsupported format of modelId: … Expected: modelId[effort].`（桌面版会话 633df594，2026-10-23：同一轮先不带档位、再带 `xhigh`，两次都死在这句上）。
+
+2026-10-23 对 codex-acp 1.10.0 的握手实测：
+
+- `session/new` 的 `models.currentModelId` = **`gpt-6-astra[medium]`**——这是 agent 自己就在用的模型，**档位也在里面**。用户只点了基础模型（选择器里的「提供方默认」）时，它就是那个默认的答案：基础 id 对得上、档位取 agent 自己的。
+- `configOptions` 里有 `model`（只列基础 id：`gpt-6-astra` / `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna`）与 `reasoning_effort`（category `thought_level`，值 `low` / `medium` / `high` / `xhigh` / `max` / `ultra`，当前 `medium`）。**这是另一条可用的写入路径**（先写基础 id、再写档位），本项目仍走 `set_model`——组合 id 由它收，写一次就够。
+- 送列表外的组合 id（`gpt-6-astra[ultra]` 这类没被公布的）→ 仍然是 `-32603`；本地先按报告里的 id 集合判账，不送注定失败的请求。
+
+于是 runner 的写入规则是三条：**选中的 id agent 原样公布了 → 原样送**；**基础 id + 档位 → 合成 `基础[档位]` 再送**；**只有基础 id → 用 agent 自己当前的模型（`models.currentModelId`，基础对得上时）**，这样「提供方默认」这一档就是 agent 自己的默认，而不是一句注定失败的裸基础 id。三条都不成立时，仍然本地以「模型 … 已不在 agent 当前提供的模型列表中，请重新选择模型」结束。
 
 ## 会话能力：五家里声明得最全
 

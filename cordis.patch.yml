@@ -207,11 +207,24 @@
               # 会先拉起 `grok agent serve`（随机端口 + 密钥、等它就绪、关闭时
               # 回收），再连上它返回的 ws url。command 指向 grok 二进制本身。
               command: /Users/good/.local/bin/grok
-              # 清单 = 2026-10-09 真机探针（captured-frames.json 的 session/new）
+              # 清单 = 2026-10-23 真机探针（grok 1.0.67 的 session/new）
               # 读到的 availableModels，一字不差。
+              #
+              # 2026-10-23 桌面版现场：清单里只写了 grok-4.7，而当时跑着的
+              # grok 进程报的是 grok-4.6 / grok-4.5（它的模型清单缓存在
+              # ~/.grok/models_cache.json，缓存旧了就不含 4.7）。用户在选择器里
+              # 点了 grok-4.7，agent 那边根本没有这个模型，这一轮直接作废。
+              # 清单写成真机的样子，选择器在 agent 自己报清单之前就不会给出
+              # agent 做不到的选项。
               models:
                 - id: grok-4.7
                   name: Grok 4.7
+                - id: grok-4.7-build-fast
+                  name: Grok 4.7 Fast
+                - id: grok-4.6
+                  name: Grok 4.6
+                - id: grok-4.5
+                  name: Grok 4.5
     - id: acp-cursor
       name: '@deepseek-ai/dsh-agent-preset'
       config:

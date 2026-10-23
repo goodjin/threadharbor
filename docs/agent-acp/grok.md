@@ -1,6 +1,6 @@
 # grok 的 ACP 对接
 
-> 核对时间：2026-10-09 首测；2026-09-14 补充 `initialize` 能力声明实测；2026-10-22 复测模型写入与图片声明
+> 核对时间：2026-10-09 首测；2026-09-14 补充 `initialize` 能力声明实测；2026-10-22 复测模型写入与图片声明；2026-10-23 复测模型清单与推理档位选项
 > 状态：**本项目已实现并通过实测**。实现见 `packages/dsh-acp-agent/src/dialects/grok.ts`，回归夹具见 `packages/dsh-acp-agent/tests/fixtures/captured-frames.json`。
 
 ## 一句话结论
@@ -101,6 +101,17 @@ grok 即使命令失败也报 `status: 'completed'`。本项目的处理是**忠
 - `session/set_config_option { configId: 'model', value: 'grok-4.5' }` 成功，响应里的 `currentValue` 变为 `grok-4.5`。
 - `session/set_model { modelId: 'grok-4.6' }` 也返回 `_meta.model.Ok`，但标准入口是 `set_config_option`；本项目的 grok dialect 用后者（`modelVia: 'config_option'`）。
 - prompt 侧没有文档化的 `modelId` 参数；选型在 prompt 之前写入，不再依赖 prompt 参数。
+
+## 模型清单来自 agent 的本地缓存，会比服务端旧（2026-10-23 实测）
+
+grok 1.0.67 的 `session/new` 报的是 `grok-4.7` / `grok-4.7-build-fast` / `grok-4.6` / `grok-4.5`，`models.currentModelId` = `grok-4.7`。**这份清单不是每次现拉的**：grok CLI 把它缓存在 `~/.grok/models_cache.json`（`origin: https://cli-chat-proxy.grok.com/v1/models`，带 etag 与 `fetched_at`），缓存旧了就报旧清单。
+
+2026-10-23 桌面版现场（会话 633df594）：用户 22:34 点的是 `grok-4.7`，而当时那个 grok 进程的清单是 `grok-4.6` / `grok-4.5`——**agent 那边没有这个模型**，这一轮只能作废。选择器当时给的是配置里的静态清单（写的是 2026-10-09 的探针结果），它比 agent 手里的缓存还新，两边对不上。教训有两条：
+
+- 选择器的清单在 agent 自己报清单之前只能用静态清单，**静态清单必须写成真机的样子**（配置里那份已按 2026-10-23 的探针更新）；
+- agent 报来的清单一旦与用户选的对不上，runner **本地就结束这一轮**并报「已不在 agent 当前提供的模型列表中」，同时把 agent 刚报的清单回灌给选择器，用户下一次就能看到新清单——不送注定失败的请求。
+
+**推理档位**：grok 的模型 id 不带档位，档位在自己的选项里（`reasoning_effort`，category `thought_level`，值 `xhigh` / `high` / `medium` / `low`，默认 `high`）。用户在选择器里选了档位，就写这个选项——**不能指望它跟模型 id 一起走**（2026-10-23 补上：此前选中的档位在写模型时被丢掉了，agent 一直用自己的默认档位）。
 
 ## 1.0.60 复测（2026-10-20）
 
