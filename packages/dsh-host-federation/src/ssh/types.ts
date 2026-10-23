@@ -55,8 +55,13 @@ export type SshDeployPhase =
   | 'starting'
   | 'opening-tunnel'
   | 'verifying'
+  | 'check-remote'
+  | 'check-https'
   | 'succeeded'
   | 'failed'
+
+/** Long-running SSH UI work: deploy to a peer or the Tailscale serve readiness check. */
+export type SshOperationKind = 'deploy' | 'check'
 
 export type SshDeployProgress = {
   readonly phase: SshDeployPhase
@@ -122,9 +127,12 @@ export type SshConnectResult = {
 
 export type SshDeployOperationView = {
   readonly operationId: string
+  readonly kind?: SshOperationKind
   readonly status: 'queued' | 'running' | 'succeeded' | 'failed'
   readonly progress: SshDeployProgress
   readonly result?: SshDeployResult
+  /** Incremental or final peer-check report while `kind` is `check`. */
+  readonly checkReport?: import('./peer-check.ts').PeerCheckReport
   readonly error?: string
   readonly startedAt: number
   readonly finishedAt?: number

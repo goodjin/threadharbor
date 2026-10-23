@@ -59,6 +59,7 @@ import type { PeerCheckAction, PeerCheckReport, SshDeployOperationView, SshDeplo
 import { PeerCheckList } from './host-check.tsx'
 import { buildOpsAiPrompt, hostContextFromSshInfo, type OpsAiHostContext } from './copy-for-ai.ts'
 import { CopyForAiButton } from './copy-for-ai-button.tsx'
+import { DeployProgressBoard } from './ssh-bind-progress-ui.tsx'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { NAMESPACE } from './locales.ts'
 import styles from './panel.module.css'
@@ -1052,6 +1053,7 @@ function SshDeploySection(props: {
   const [busy, setBusy] = useState<'inspect' | 'peer' | 'deploy' | undefined>(undefined)
   // 部署过程逐行留痕：不是只显示最后一行，每一阶段的原话都留在面上。
   const [progressLog, setProgressLog] = useState<readonly SshDeployProgress[]>([])
+  const [deployOperation, setDeployOperation] = useState<SshDeployOperationView | undefined>(undefined)
   const [opError, setOpError] = useState<string | undefined>(undefined)
   const [deployOperationId, setDeployOperationId] = useState<string | undefined>(undefined)
   const [peer, setPeer] = useState<PeerStatus | undefined>(undefined)
@@ -1061,6 +1063,8 @@ function SshDeploySection(props: {
   ))
 
   const [checkReport, setCheckReport] = useState<PeerCheckReport | undefined>(undefined)
+  const [checkOperation, setCheckOperation] = useState<SshDeployOperationView | undefined>(undefined)
+  const [checkError, setCheckError] = useState<string | undefined>(undefined)
   const [checkBusy, setCheckBusy] = useState<'check' | PeerCheckAction | undefined>(undefined)
   const [serveFailure, setServeFailure] = useState<ServeFailure | undefined>(undefined)
 
@@ -1197,13 +1201,25 @@ function SshDeploySection(props: {
       return
     }
     setCheckBusy('check')
-    void checkRemotePeer({ ...sshPayload(), hostKeyFingerprint: fingerprint }, remotePortValue(), props.t).then(result => {
+    setCheckError(undefined)
+    setCheckOperation(undefined)
+    void checkRemotePeer(
+      { ...sshPayload(), hostKeyFingerprint: fingerprint },
+      remotePortValue(),
+      view => {
+        setCheckOperation(view)
+        if (view.checkReport !== undefined) setCheckReport(view.checkReport)
+      },
+      props.t,
+    ).then(result => {
       setCheckBusy(undefined)
+      setCheckOperation(undefined)
       if (!result.ok) {
-        props.onError(result.error)
+        setCheckError(result.error)
         return
       }
       setCheckReport(result.value)
+      setCheckError(undefined)
     })
   }
 
@@ -1257,6 +1273,7 @@ function SshDeploySection(props: {
     setBusy('deploy')
     if (fromCheck) setCheckBusy('deploy')
     setProgressLog([])
+    setDeployOperation(undefined)
     setOpError(undefined)
     setDeployOperationId(undefined)
     const finishCheck = (): void => {
@@ -1284,6 +1301,7 @@ function SshDeploySection(props: {
       }
       setDeployOperationId(started.value.operationId)
       void waitSshDeployOperation(started.value.operationId, view => {
+        setDeployOperation(view)
         // 逐行留痕：同一阶段的重复心跳只留一条，阶段一换就另起一行。
         setProgressLog(log => {
           const last = log[log.length - 1]
@@ -1293,6 +1311,7 @@ function SshDeploySection(props: {
         })
       }, undefined, props.t).then(done => {
         setBusy(undefined)
+        setDeployOperation(done.ok ? done.value : undefined)
         finishCheck()
         if (!done.ok) {
           setOpError(done.error)
@@ -1554,6 +1573,23 @@ function SshDeploySection(props: {
               : props.t('panel.ssh.deploy')}
         </button>
       </div>
+      {(busy === 'deploy' || progressLog.length > 0 || opError !== undefined) && props.onServeReady === undefined
+        ? (
+            <DeployProgressBoard
+              running={busy === 'deploy'}
+              failed={opError !== undefined}
+              progress={deployOperation?.progress}
+              log={progressLog}
+              error={opError}
+              onRetry={() => { runDeploy() }}
+              retryDisabled={busy !== undefined}
+              copyForAiPrompt={deployCopyPrompt}
+              onAiCopied={props.onAiCopyOk}
+              onAiCopyFailed={reportCopyFailure}
+              t={props.t}
+            />
+          )
+        : undefined}
       {keys.length > 0
         ? (
             <div data-ssh-keys="" className={styles.sshKeys}>
@@ -1574,19 +1610,40 @@ function SshDeploySection(props: {
         : undefined}
       {props.onServeReady !== undefined && approvedFingerprint !== ''
         ? (
-            <PeerCheckList
-              report={checkReport}
-              busy={checkBusy}
-              serveFailure={serveFailure}
-              disabled={busy !== undefined && checkBusy === undefined}
-              onCheck={() => { runCheck() }}
-              onAction={runCheckAction}
-              onSave={launchUrl => { props.onServeReady?.(launchUrl, seedFacts(), effectiveHostId()) }}
-              aiHostContext={aiHostContextForCheck()}
-              onCopied={props.onAiCopyOk}
-              onCopyFailed={reportCopyFailure}
-              t={props.t}
-            />
+            <>
+              {(busy === 'deploy' || checkBusy === 'deploy' || progressLog.length > 0 || opError !== undefined)
+                ? (
+                    <DeployProgressBoard
+                      running={busy === 'deploy' || checkBusy === 'deploy'}
+                      failed={opError !== undefined}
+                      progress={deployOperation?.progress}
+                      log={progressLog}
+                      error={opError}
+                      onRetry={() => { runDeploy({ upgrade: true, fromCheck: true }) }}
+                      retryDisabled={busy !== undefined || checkBusy !== undefined}
+                      copyForAiPrompt={deployCopyPrompt}
+                      onAiCopied={props.onAiCopyOk}
+                      onAiCopyFailed={reportCopyFailure}
+                      t={props.t}
+                    />
+                  )
+                : undefined}
+              <PeerCheckList
+                report={checkReport}
+                busy={checkBusy}
+                checkOperation={checkOperation}
+                checkError={checkError}
+                serveFailure={serveFailure}
+                disabled={busy !== undefined && checkBusy === undefined}
+                onCheck={() => { runCheck() }}
+                onAction={runCheckAction}
+                onSave={launchUrl => { props.onServeReady?.(launchUrl, seedFacts(), effectiveHostId()) }}
+                aiHostContext={aiHostContextForCheck()}
+                onCopied={props.onAiCopyOk}
+                onCopyFailed={reportCopyFailure}
+                t={props.t}
+              />
+            </>
           )
         : undefined}
       {peer !== undefined
@@ -1598,38 +1655,6 @@ function SshDeploySection(props: {
                   : props.t('panel.ssh.peerNotLoopback')
                 : props.t('panel.ssh.peerMissing')}
             </p>
-          )
-        : undefined}
-      {progressLog.length > 0
-        ? (
-            <div data-ssh-progress-log="" className={styles.sshKeys}>
-              <p className={styles.summary}>{props.t('panel.ssh.progressLogTitle')}</p>
-              {progressLog.map((line, index) => (
-                <p key={index} className={styles.stateLine} data-ssh-progress-line={line.phase}>{line.detail}</p>
-              ))}
-            </div>
-          )
-        : undefined}
-      {opError !== undefined
-        ? (
-            <div data-ssh-error="" className={styles.launchUrlBox}>
-              <p className={styles.stateBad}>{props.t('panel.ssh.failedTitle')}</p>
-              <code className={styles.launchUrlText}>{opError}</code>
-              <div className={styles.formActions}>
-                {deployCopyPrompt !== undefined
-                  ? (
-                      <CopyForAiButton
-                        prompt={deployCopyPrompt}
-                        t={props.t}
-                        dataAction="ssh-copy-for-ai"
-                        onCopied={props.onAiCopyOk}
-                        onCopyFailed={reportCopyFailure}
-                      />
-                    )
-                  : undefined}
-                <button type="button" className={styles.action} data-action="ssh-deploy-retry" disabled={busy !== undefined} onClick={() => { runDeploy() }}>{props.t('panel.ssh.retry')}</button>
-              </div>
-            </div>
           )
         : undefined}
       {deployed !== undefined

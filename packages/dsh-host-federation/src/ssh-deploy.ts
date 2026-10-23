@@ -201,9 +201,10 @@ export function apply(ctx: unknown, config: Config = {}): void {
   register(ROUTE_CHECK, async body => {
     const record = body as Record<string, unknown>
     const ssh = manager.parseApprovedConfig(record['ssh'])
-    const report = await manager.checkPeer(ssh, portOf(record['remoteWebPort']))
-    log.info('ssh peer check', { target: ssh.target, ready: report.ready, steps: report.steps.map(step => `${step.id}:${step.state}`).join(',') })
-    return report
+    const remoteWebPort = portOf(record['remoteWebPort'])
+    const operation = operations.create('check')
+    void runCheck(manager, operations, operation.operationId, ssh, remoteWebPort, log)
+    return { operationId: operation.operationId }
   })
 
   register(ROUTE_SERVE, async body => {
@@ -344,6 +345,29 @@ async function runDeploy(
     const message = error instanceof Error ? error.message : String(error)
     operations.fail(operationId, message)
     log.warn('ssh deploy failed', { hostId: request.hostId, error: message })
+  }
+}
+
+async function runCheck(
+  manager: DshSshManager,
+  operations: OperationStore,
+  operationId: string,
+  ssh: ReturnType<DshSshManager['parseApprovedConfig']>,
+  remoteWebPort: number | undefined,
+  log: ReturnType<typeof loggerOf>,
+): Promise<void> {
+  operations.progress(operationId, { phase: 'connecting', detail: '开始检测……' })
+  try {
+    const report = await manager.checkPeer(ssh, remoteWebPort, (progress, partial) => {
+      operations.progress(operationId, progress, partial)
+    })
+    operations.succeedCheck(operationId, report)
+    log.info('ssh peer check', { target: ssh.target, ready: report.ready, steps: report.steps.map(step => `${step.id}:${step.state}`).join(',') })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const partial = operations.get(operationId)?.checkReport
+    operations.fail(operationId, message, { phase: 'failed', detail: message }, partial)
+    log.warn('ssh peer check failed', { target: ssh.target, error: message })
   }
 }
 

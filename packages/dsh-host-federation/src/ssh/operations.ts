@@ -1,15 +1,17 @@
 import { randomUUID } from 'node:crypto'
-import type { SshDeployOperationView, SshDeployProgress, SshDeployResult } from './types.ts'
+import type { PeerCheckReport } from './peer-check.ts'
+import type { SshDeployOperationView, SshDeployProgress, SshDeployResult, SshOperationKind } from './types.ts'
 
 export class OperationStore {
   private readonly operations = new Map<string, SshDeployOperationView>()
 
-  create(): SshDeployOperationView {
+  create(kind: SshOperationKind = 'deploy'): SshDeployOperationView {
     const operationId = randomUUID()
     const view: SshDeployOperationView = {
       operationId,
+      kind,
       status: 'queued',
-      progress: { phase: 'queued', detail: '等待开始……' },
+      progress: { phase: 'queued', detail: kind === 'check' ? '等待开始检测……' : '等待开始……' },
       startedAt: Date.now(),
     }
     this.operations.set(operationId, view)
@@ -32,13 +34,14 @@ export class OperationStore {
     return next
   }
 
-  progress(operationId: string, progress: SshDeployProgress): void {
+  progress(operationId: string, progress: SshDeployProgress, checkReport?: PeerCheckReport): void {
     const current = this.operations.get(operationId)
     if (current === undefined) return
     this.operations.set(operationId, {
       ...current,
       status: progress.phase === 'failed' ? 'failed' : progress.phase === 'succeeded' ? 'succeeded' : 'running',
       progress,
+      ...(checkReport === undefined ? {} : { checkReport }),
     })
   }
 
@@ -51,11 +54,21 @@ export class OperationStore {
     })
   }
 
-  fail(operationId: string, message: string, progress?: SshDeployProgress): void {
+  succeedCheck(operationId: string, report: PeerCheckReport): void {
+    this.update(operationId, {
+      status: 'succeeded',
+      progress: { phase: 'succeeded', detail: '检测完成。' },
+      checkReport: report,
+      finishedAt: Date.now(),
+    })
+  }
+
+  fail(operationId: string, message: string, progress?: SshDeployProgress, checkReport?: PeerCheckReport): void {
     this.update(operationId, {
       status: 'failed',
       progress: progress ?? { phase: 'failed', detail: message },
       error: message,
+      ...(checkReport === undefined ? {} : { checkReport }),
       finishedAt: Date.now(),
     })
   }
