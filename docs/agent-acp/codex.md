@@ -30,6 +30,20 @@ stdio 子进程，命令 `codex-acp`（Node 包 `@agentclientprotocol/codex-acp`
 
 ## 最容易踩的坑
 
+### 0. 「一直不出字」多半不是 agent 坏了，是它连不上 OpenAI（2026-10-26 现场）
+
+codex 的模型请求走 chatgpt.com（登录也走它）。**网络走不通时，agent 不会报错退出，只会一遍遍重连**，界面上表现为「转圈、没有任何输出」，几分钟后才可能自己放弃。
+
+判断办法（三条，从快到慢）：
+
+1. 会话日志里只有一条 system/message「等待外部 agent——已静默 30s；agent 最近输出：（无输出）」，之后没有任何帧 → agent 起来了但没在说活；
+2. 进程还在（`pgrep -f codex-acp`），CPU 几乎不动 → 它在等网络，不是在算；
+3. **codex 自己的日志在 `~/.codex/logs_2.sqlite`（不是 stdout、不是 stderr）** —— 用 sqlite 读 `logs` 表，能看到它连的是哪个地址、报什么错。2026-10-26 那次：`stream_responses_websocket … tls handshake eof`、`error sending request for url (https://chatgpt.com/…)`，重试到 5 次。
+
+本机那次的原因是**代理被切成了直连**：Clash Verge 的运行模式是 `direct` 时（`~/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/config.yaml` 里的 `mode: direct`），所有流量直连，chatgpt.com 在这条网络上本来就走不通（本地 DNS 给的是被污染的地址），TLS 握手直接失败。**改成 `rule`（规则）模式就好了**——规则集最后一条 `Match -> ClashGit.com` 会把非国内域名交给代理节点，节点到 chatgpt.com 是通的（实测各节点延迟 111–251ms）。
+
+顺带一条：这一轮**不是我们的写模型路径坏了**——codex 的日志里能看到 `model=gpt-6-astra codex.turn.reasoning_effort=medium`，说明选型与档位都送到了；DSH 这边只是看不到任何帧。
+
 ### 1. 它从不报告工具名
 
 `title` 里放的是**agent 想执行的命令原文**（实测：`ls -la\nfind . -maxdepth 1 -type f | wc -l`）。另一个像身份的字段是 `kind`，实测值 `execute`，那是工具**类别**不是名字。
