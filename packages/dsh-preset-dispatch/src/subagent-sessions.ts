@@ -13,9 +13,9 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { AcpDialect, AcpFrame, RawOutputBlock } from '@threadharbor/dsh-acp-agent'
+import type { AcpDialect, AcpFrame, RawOutputBlock, ToolCall } from '@threadharbor/dsh-acp-agent'
 import {
-  RawOutputAggregator, assistantMessageEvent, toolCallAnnouncementEvent, toolCallEvent, toolResultMessageEvent, userMessageEvent,
+  RawOutputAggregator, assistantMessageEvent, mapToolName, projectToolCallAnnouncementCall, toolCallAnnouncementEvent, toolCallEvent, toolResultMessageEvent, userMessageEvent,
 } from '@threadharbor/dsh-acp-agent'
 import { AcpAssistantStream } from './stream.ts'
 
@@ -62,6 +62,10 @@ type ChildState = {
   readonly thought: string[]
   readonly text: string[]
   readonly aggregator: RawOutputAggregator
+  /** 子代理已见过的工具调用，按 callId 留存：增量帧靠它累积参数与状态。 */
+  readonly tools: Map<string, ToolCall>
+  /** 已落过公告的工具 callId，避免同一张卡随更新帧重复。 */
+  readonly writtenCards: Set<string>
   settled: boolean
 }
 
@@ -107,6 +111,66 @@ export class SubagentSessions {
     else state.text.push(text)
     if (kind === 'thought') state.stream.reasoningDelta(text)
     else state.stream.textDelta(text)
+  }
+
+  /**
+   * 子代理的一帧工具调用 → 子会话里一张真工具卡。
+   *
+   * 子代理运行在它自己的进程里，我们线上收到的就是它的 tool_call / tool_call_update
+   * 帧。把它们按当地方言折叠、映射工具名，落成与父会话同形的「公告 + call + result」，
+   * 宿主 ui-tool 才能渲染富视图（搜索/读文件/编辑/命令），而不是一张「外部输出」卡。
+   * 同一 callId 只落一张卡；终态帧落 result。
+   */
+  toolFrame(parentSessionId: string, childSessionId: string, frame: AcpFrame): void {
+    if (!this.host.available) return
+    const pending = this.pending
+    const state = this.ensure(parentSessionId, childSessionId, pending?.label ?? childSessionId, pending?.task ?? '')
+    if (state === undefined || state.settled) return
+    this.pending = undefined
+    const params = (frame.params as Record<string, unknown> | undefined) ?? {}
+    const update = (params['update'] as Record<string, unknown> | undefined) ?? {}
+    const sessionUpdate = update['sessionUpdate']
+    const isTool = frame.method === 'session/update'
+      && (sessionUpdate === 'tool_call' || sessionUpdate === 'tool_call_update'
+        || (sessionUpdate === 'tool_call_delta_chunk' && this.dialect.foldToolDelta !== undefined))
+    if (!isTool) return
+    const rawId = update['toolCallId'] ?? update['tool_call_id']
+    const resolvedId = typeof rawId === 'string' ? rawId : undefined
+    if (resolvedId === undefined) return
+    const carried = state.tools.get(resolvedId)
+    const deltaFold = this.dialect.foldToolDelta
+    const folded = sessionUpdate === 'tool_call_delta_chunk' && deltaFold !== undefined
+      ? (deltaFold(carried, update) ?? this.dialect.foldTool(carried, update))
+      : this.dialect.foldTool(carried, update)
+    state.tools.set(resolvedId, folded)
+    // 占位帧（参数还没到）先不落卡：卡片不可变，落下去就冻住空参数。
+    if (folded.status !== 'completed' && folded.status !== 'failed'
+      && Object.keys((folded.arguments as Record<string, unknown>) ?? {}).length === 0) return
+    // 公告 + call：只落一次。
+    if (!state.writtenCards.has(resolvedId)) {
+      try {
+        const announcement = projectToolCallAnnouncementCall(folded, { turn: TURN, step: STEP, dialect: this.dialect })
+        if (announcement !== undefined) state.child.append(announcement.type, announcement.payload, { surfaceOp: 'append' })
+        const call = toolCallEvent({ turn: TURN, step: STEP, callId: resolvedId, name: mapToolName(this.dialect, folded.name), arguments: JSON.stringify(folded.arguments) })
+        state.child.append(call.type, call.payload)
+      } catch {
+        return
+      }
+      state.writtenCards.add(resolvedId)
+    }
+    // 终态帧落 result。
+    if (folded.status !== 'completed' && folded.status !== 'failed') return
+    if (folded.output === '' && folded.status === 'completed') return
+    const isError = folded.status === 'failed'
+    const result = toolResultMessageEvent({
+      turn: TURN, step: STEP, callId: resolvedId, text: folded.output, isError,
+      ...(isError ? { error: { name: 'tool', code: folded.status ?? 'failed', ...(folded.title === undefined ? {} : { reason: folded.title }) } } : {}),
+    })
+    try {
+      state.child.append(result.type, result.payload, { surfaceOp: 'append' })
+    } catch {
+      // 写失败不打断帧流。
+    }
   }
 
   /** 真实终态：落最后一段消息 + 结束子回合。 */
@@ -240,6 +304,8 @@ export class SubagentSessions {
       thought: [],
       text: [],
       aggregator: new RawOutputAggregator(),
+      tools: new Map<string, ToolCall>(),
+      writtenCards: new Set<string>(),
       settled: false,
     }
     this.states.set(prefixed, state)

@@ -69,16 +69,16 @@ describe('未知输出块接线（run）', () => {
     const running = runner.run(DECISION, turn as never)
     await new Promise(resolve => { setTimeout(resolve, 0) })
 
-    client.deliver(parentUpdate({ sessionUpdate: 'plan', a: 1 }))
-    client.deliver(parentUpdate({ sessionUpdate: 'plan', a: 2 }))
+    client.deliver(parentUpdate({ sessionUpdate: 'mystery_update', a: 1 }))
+    client.deliver(parentUpdate({ sessionUpdate: 'mystery_update', a: 2 }))
     client.deliver(parentUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '正文' } }))
-    client.deliver(parentUpdate({ sessionUpdate: 'plan', a: 3 }))
+    client.deliver(parentUpdate({ sessionUpdate: 'mystery_update', a: 3 }))
     client.releaseReply()
     await running
 
     const blocks = rawBlocks(writes)
     expect(blocks.map(block => block.count)).toEqual([2, 1])
-    expect(blocks[0]!.kind).toBe('plan')
+    expect(blocks[0]!.kind).toBe('mystery_update')
   })
 
   it('应答与审批帧夹在中间不闭段', async () => {
@@ -114,7 +114,7 @@ describe('未知输出块接线（run）', () => {
     const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: codexDialect })
     const running = runner.run(DECISION, turn as never)
     await new Promise(resolve => { setTimeout(resolve, 0) })
-    client.deliver(parentUpdate({ sessionUpdate: 'plan', a: 1 }))
+    client.deliver(parentUpdate({ sessionUpdate: 'mystery_update', a: 1 }))
     client.releaseReply()
     await expect(running).resolves.toMatchObject({ end: { kind: 'completed' } })
   })
@@ -175,8 +175,8 @@ describe('未知输出块接线（子会话）', () => {
     await new Promise(resolve => { setTimeout(resolve, 0) })
 
     client.deliver(parentUpdate({ sessionUpdate: 'subagent_spawned', subagentSessionId: 'c1', name: 'Calc', task: 't' }))
-    client.deliver(childUpdate({ sessionUpdate: 'plan', x: 1 }))
-    client.deliver(childUpdate({ sessionUpdate: 'plan', x: 2 }))
+    client.deliver(childUpdate({ sessionUpdate: 'mystery_update', x: 1 }))
+    client.deliver(childUpdate({ sessionUpdate: 'mystery_update', x: 2 }))
     client.deliver(childUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hi' } }))
     client.releaseReply()
     await running
@@ -186,7 +186,7 @@ describe('未知输出块接线（子会话）', () => {
     expect(types).toContain('tool/call')
     expect(types).toContain('tool/result')
     const card = childAppends.find(entry => entry.type === 'tool/call')!.payload as { name: string }
-    expect(card.name).toContain('plan')
+    expect(card.name).toContain('mystery_update')
     const result = childAppends.find(entry => entry.type === 'tool/result')!.payload as { message: { content: { text: string }[] } }
     expect(result.message.content[0]!.text).toContain('（2 帧）')
     expect(emitted.some(entry => entry.type === 'chunk')).toBe(true)

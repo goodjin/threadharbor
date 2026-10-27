@@ -30,6 +30,20 @@ export type ToolCall = {
   status?: string | undefined
   /** Output text harvested from whichever field this agent uses. */
   output: string
+  /**
+   * True when `output` was assembled from streamed terminal chunks and the next
+   * such chunk should append rather than replace. Set by a dialect that folds
+   * incremental terminal output (qoder's Bash); a whole `rawOutput` result
+   * clears it.
+   */
+  readonly outputStreaming?: boolean | undefined
+  /**
+   * The raw JSON-string buffer of streamed argument fragments, when this agent
+   * delivers arguments incrementally (`tool_call_delta_chunk`). Only a dialect
+   * that folds such frames sets it; the projection keeps it across frames so the
+   * next fragment appends rather than replaces.
+   */
+  readonly argumentsBuffer?: string | undefined
 }
 
 /**
@@ -159,6 +173,20 @@ export interface AcpDialect {
    * the name comes from differs per agent, so the latching rule does too.
    */
   foldTool(carried: ToolCall | undefined, update: Record<string, unknown>): ToolCall
+
+  /**
+   * Fold one incremental tool-argument frame into the call it belongs to.
+   *
+   * grok streams a tool's arguments as `tool_call_delta_chunk` frames — the
+   * first names the tool (`name` + `tool_call_id`), the rest carry an
+   * `arguments_delta` JSON-string fragment — all BEFORE the canonical
+   * `tool_call` frame. `foldTool` reads whole `rawInput` objects and cannot
+   * assemble a partial one, so this hook accumulates the fragments onto the
+   * carried call's arguments. Returning undefined means the frame is not a tool
+   * frame this dialect folds (the projection then drops it as before). Absent
+   * means the agent emits no incremental tool frames.
+   */
+  foldToolDelta?(carried: ToolCall | undefined, update: Record<string, unknown>): ToolCall | undefined
 
   /** Output text for one update frame. Empty means "nothing new yet". */
   toolOutput(update: Record<string, unknown>): string

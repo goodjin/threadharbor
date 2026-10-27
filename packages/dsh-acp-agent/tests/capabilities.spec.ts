@@ -68,10 +68,21 @@ describe('capabilities', () => {
     })
   })
 
-  it('codex/cursor 名字只有 kind execute，映射成 bash；grok 的标题同理', () => {
+  it('codex 只有 kind execute，映射成 bash；grok 的标题同理', () => {
     expect(codexDialect.capabilities.toolNameMap).toEqual({ execute: 'bash' })
-    expect(cursorDialect.capabilities.toolNameMap).toEqual({ execute: 'bash' })
     expect(grokDialect.capabilities.toolNameMap).toEqual({ run_terminal_command: 'bash' })
+  })
+
+  it('cursor 的 kind execute/read/edit/search 映射成 DSH 卡片视图', () => {
+    // 2026-10 capture (captured-frames.cursor-edit.json): execute→bash，
+    // read/edit 带 path，search 带 pattern。search→grep 是最近的宿主搜索卡键
+    // （宿主无裸 search 工具名，grep 归到 search 变体并读 pattern）。
+    expect(cursorDialect.capabilities.toolNameMap).toEqual({
+      execute: 'bash',
+      read: 'read',
+      edit: 'edit',
+      search: 'grep',
+    })
   })
 
   it('qoder maps only the tool names its live capture showed', () => {

@@ -66,7 +66,9 @@ describe('classifyRawOutput', () => {
       .toEqual({ kind: 'grok/private_update', format: 'json', line: JSON.stringify({ method: 'grok/private_update', params: { a: 1 } }) })
   })
 
-  it('认得的会话更新给可读行：计划、用量、标题、模式', () => {
+  it('认得的会话更新给可读行：用量、标题、模式', () => {
+    // plan 与 plan_update(items) 已由投影接管成 todo_write 卡片，raw output 让位
+    // （返回 mapped）；这里钉仍在 raw output 里的可读行。
     const plan = classifyRawOutput(update('plan', {
       entries: [
         { content: '读代码', status: 'completed' },
@@ -74,8 +76,7 @@ describe('classifyRawOutput', () => {
         { content: '跑测试', status: 'pending' },
       ],
     }), { childSession: false })
-    expect(plan).toMatchObject({ kind: 'plan', format: 'text' })
-    expect((plan as { line: string }).line).toBe('计划（3 项）：✓ 读代码  ▶ 改代码  ○ 跑测试')
+    expect(plan).toBe('mapped')
 
     const usage = classifyRawOutput(update('usage_update', { used: 86_780, size: 258_400 }), { childSession: false })
     expect((usage as { line: string }).line).toBe('用量：86,780 / 258,400 tokens（33.6%）')
@@ -112,39 +113,46 @@ describe('classifyRawOutput', () => {
 })
 
 describe('RawOutputAggregator', () => {
+  // config_option_update is a known, non-mapped, non-telemetry session update
+  // (plan is now owned by the projection's todo card, so it can no longer stand
+  // in for a generic known kind here).
+  const configLine = (id: string) => update('config_option_update', {
+    configOptions: [{ id, name: id, type: 'boolean', currentValue: true }],
+  })
+
   it('连续同类三帧只在 flush 时出一块', () => {
     const agg = new RawOutputAggregator()
-    expect(agg.observe(update('plan', { entries: [{ content: 'a', status: 'pending' }] }), AT, { childSession: false })).toBeUndefined()
-    expect(agg.observe(update('plan', { entries: [{ content: 'b', status: 'pending' }] }), AT, { childSession: false })).toBeUndefined()
-    expect(agg.observe(update('plan', { entries: [{ content: 'c', status: 'pending' }] }), AT, { childSession: false })).toBeUndefined()
+    expect(agg.observe(configLine('a'), AT, { childSession: false })).toBeUndefined()
+    expect(agg.observe(configLine('b'), AT, { childSession: false })).toBeUndefined()
+    expect(agg.observe(configLine('c'), AT, { childSession: false })).toBeUndefined()
     const block = agg.flush(AT)
     expect(block).toBeDefined()
     expect(block!.count).toBe(3)
-    expect(block!.kind).toBe('plan')
+    expect(block!.kind).toBe('config_option_update')
     expect(block!.format).toBe('text')
     const lines = linesOf(block!)
     expect(lines[0]).toBe('（3 帧）')
     expect(lines).toHaveLength(4)
-    expect(lines[1]).toBe('计划（1 项）：○ a')
-    expect(lines[3]).toBe('计划（1 项）：○ c')
+    expect(lines[1]).toBe('配置更新（1 项）：a=开')
+    expect(lines[3]).toBe('配置更新（1 项）：c=开')
   })
 
   it('种类切换时先交出前一块，新段从切换帧起', () => {
     const agg = new RawOutputAggregator()
-    expect(agg.observe(update('plan'), AT, { childSession: false })).toBeUndefined()
-    const closed = agg.observe(update('config_option_update'), AT, { childSession: false })
+    expect(agg.observe(configLine('a'), AT, { childSession: false })).toBeUndefined()
+    const closed = agg.observe(update('compaction_update', { status: 'in_progress' }), AT, { childSession: false })
     expect(closed).toBeDefined()
-    expect(closed!.kind).toBe('plan')
+    expect(closed!.kind).toBe('config_option_update')
     expect(closed!.count).toBe(1)
     const second = agg.flush(AT)
     expect(second).toBeDefined()
-    expect(second!.kind).toBe('config_option_update')
+    expect(second!.kind).toBe('compaction_update')
     expect(second!.count).toBe(1)
   })
 
   it('已映射帧闭合当前段，自身不入块', () => {
     const agg = new RawOutputAggregator()
-    agg.observe(update('plan'), AT, { childSession: false })
+    agg.observe(update('config_option_update'), AT, { childSession: false })
     const closed = agg.observe(content('正文'), AT, { childSession: false })
     expect(closed).toBeDefined()
     expect(closed!.count).toBe(1)
@@ -154,7 +162,7 @@ describe('RawOutputAggregator', () => {
 
   it('应答与审批请求不闭段也不入块', () => {
     const agg = new RawOutputAggregator()
-    agg.observe(update('plan'), AT, { childSession: false })
+    agg.observe(update('config_option_update'), AT, { childSession: false })
     expect(agg.observe(REPLY, AT, { childSession: false })).toBeUndefined()
     expect(agg.observe(PERMISSION, AT, { childSession: false })).toBeUndefined()
     const block = agg.flush(AT)
@@ -187,11 +195,11 @@ describe('RawOutputAggregator', () => {
 
   it('块携带段起点的位置（跨步骤不换起点）', () => {
     const agg = new RawOutputAggregator()
-    agg.observe(update('plan'), { turn: 1, step: 1 }, { childSession: false })
-    const closed = agg.observe(update('config_option_update'), { turn: 1, step: 2 }, { childSession: false })
-    expect(closed).toMatchObject({ turn: 1, step: 1, kind: 'plan' })
+    agg.observe(update('config_option_update'), { turn: 1, step: 1 }, { childSession: false })
+    const closed = agg.observe(update('compaction_update', { status: 'in_progress' }), { turn: 1, step: 2 }, { childSession: false })
+    expect(closed).toMatchObject({ turn: 1, step: 1, kind: 'config_option_update' })
     const second = agg.flush({ turn: 1, step: 2 })
-    expect(second).toMatchObject({ turn: 1, step: 2, kind: 'config_option_update' })
+    expect(second).toMatchObject({ turn: 1, step: 2, kind: 'compaction_update' })
   })
 
   it('遥测帧不实时出块、不打断连续段，回合末按种类汇总', () => {
@@ -199,12 +207,12 @@ describe('RawOutputAggregator', () => {
     expect(agg.observe(update('usage_update', { a: 1 }), AT, { childSession: false })).toBeUndefined()
     expect(agg.observe(update('session_info_update', { t: 'x' }), AT, { childSession: false })).toBeUndefined()
     // 遥测帧夹在同类未知帧之间，不得把那段拆开。
-    expect(agg.observe(update('plan', { p: 1 }), AT, { childSession: false })).toBeUndefined()
+    expect(agg.observe(update('config_option_update', { p: 1 }), AT, { childSession: false })).toBeUndefined()
     expect(agg.observe(update('usage_update', { a: 2 }), AT, { childSession: false })).toBeUndefined()
-    expect(agg.observe(update('plan', { p: 2 }), AT, { childSession: false })).toBeUndefined()
+    expect(agg.observe(update('config_option_update', { p: 2 }), AT, { childSession: false })).toBeUndefined()
     // 步骤末封的是非遥测段，遥测不在这里出现。
     const closed = agg.flush(AT)
-    expect(closed).toMatchObject({ kind: 'plan', count: 2 })
+    expect(closed).toMatchObject({ kind: 'config_option_update', count: 2 })
     // 回合末汇总：每种遥测一块，全部帧都算进去。
     const summary = agg.summary(AT)
     expect(summary.map(block => [block.kind, block.count])).toEqual([
