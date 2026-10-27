@@ -113,6 +113,23 @@ describe('makeContentWriter', () => {
     expect(target.calls.map(c => c.type)).toEqual(['assistant/message', 'tool/call'])
   })
 
+  it('writes a system note as a surface append', () => {
+    // 状态提示走的就是这条路：形状由 systemNoteEvent 保证，写入器只补 surface 意图。
+    const target = session()
+    const note = {
+      turn: 1,
+      step: 1,
+      message: {
+        id: 'n1',
+        role: 'system',
+        content: [{ type: 'text', text: 'codex 正在压缩上下文' }],
+        source: { kind: 'system-prompt' },
+      },
+    }
+    makeContentWriter(target.append)([{ type: 'system/message', payload: note }])
+    expect(target.calls[0]).toMatchObject({ type: 'system/message', intent: { surfaceOp: 'append' } })
+  })
+
   it('stops pairing after a new turn starts', () => {
     // Turn numbers restart per turn, so a call id reused later must not pick up
     // an earlier turn's sequence number.
@@ -169,5 +186,12 @@ describe('makeToolOnlyWriter', () => {
       { type: 'tool/result', payload: result },
     ])
     expect(target.calls.map(c => c.type)).toEqual(['assistant/message', 'tool/call', 'tool/result'])
+  })
+
+  it('passes a system note through: gateway 路径的状态提示靠它落地', () => {
+    const target = session()
+    const note = { turn: 1, step: 1, message: { role: 'system', content: [] } }
+    makeToolOnlyWriter(target.append)([{ type: 'system/message', payload: note }])
+    expect(target.calls).toEqual([{ type: 'system/message', payload: note, intent: { surfaceOp: 'append' } }])
   })
 })

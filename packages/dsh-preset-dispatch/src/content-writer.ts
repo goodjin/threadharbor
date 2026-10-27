@@ -67,6 +67,15 @@ const CALL = 'tool/call'
 const RESULT = 'tool/result'
 const MESSAGE = 'assistant/message'
 const USER = 'user/message'
+/**
+ * A system note: the same session event the loop uses for its own notices.
+ *
+ * It is a surface event like a message, so it takes the surface intent; its
+ * shape is fixed by `systemNoteEvent` (source.kind must be `system-prompt`, or
+ * the whole log becomes unloadable). Used for live agent-status notes — the
+ * one place a status can appear while a step is still open.
+ */
+const SYSTEM = 'system/message'
 
 /**
  * The runner's marker for attachments that did not reach the external agent.
@@ -208,6 +217,12 @@ export function makeContentWriter(append: SessionAppend, onOrphan?: (callId: str
         // surface intent. No seq to track — nothing later points at a user
         // message.
         append(USER, event.payload, { surfaceOp: 'append' })
+        continue
+      }
+      if (event.type === SYSTEM) {
+        // A status note. Shape comes from `systemNoteEvent`; this branch only
+        // supplies the surface intent the host requires of message events.
+        append(SYSTEM, event.payload, { surfaceOp: 'append' })
         continue
       }
       if (event.type === MESSAGE) {

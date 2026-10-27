@@ -90,6 +90,21 @@ export const Config: Schema<Config> = Schema.object({
   cwd: Schema.string(),
   models: Schema.array(Model),
   /**
+   * Watchdog limits for an in-place answer, in milliseconds. Meaning per field
+   * in `AcpPresetConfig`; absent fields keep the gateway's defaults.
+   *
+   * Named here because this schema is what the loader normalises with: a
+   * limit it does not list is dropped before the preset is built, and the
+   * watchdog then silently runs on its defaults (2026-10-27: a configured
+   * 300000 arrived as 120000 this way).
+   */
+  stallMs: Schema.number(),
+  /** Deprecated alias for `stallMs`; kept so old rows keep their meaning. */
+  answerTimeoutMs: Schema.number(),
+  totalMs: Schema.number(),
+  warnMs: Schema.number(),
+  graceMs: Schema.number(),
+  /**
    * Which hosts offer this preset. Empty or omitted means every host.
    *
    * Not configurable to mean "off here": an omitted field and an explicitly
@@ -133,6 +148,13 @@ export type Config = {
    */
   cwd?: string
   models?: { id: string; name: string; description?: string; contextWindow?: number }[]
+  /** Watchdog limits for an in-place answer, ms. `0` disables that one behavior. */
+  stallMs?: number
+  /** Deprecated alias for `stallMs`. */
+  answerTimeoutMs?: number
+  totalMs?: number
+  warnMs?: number
+  graceMs?: number
   hosts?: string[]
   hostId?: string
   /** When true, the roster filter omits this preset id from the picker. */
@@ -196,6 +218,11 @@ export function apply(ctx: unknown, config: Config): void {
     ...(config.cwd === undefined ? {} : { cwd: config.cwd }),
     ...(config.models === undefined ? {} : { models: config.models }),
     ...(config.hosts === undefined ? {} : { hosts: config.hosts }),
+    ...(config.stallMs === undefined ? {} : { stallMs: config.stallMs }),
+    ...(config.answerTimeoutMs === undefined ? {} : { answerTimeoutMs: config.answerTimeoutMs }),
+    ...(config.totalMs === undefined ? {} : { totalMs: config.totalMs }),
+    ...(config.warnMs === undefined ? {} : { warnMs: config.warnMs }),
+    ...(config.graceMs === undefined ? {} : { graceMs: config.graceMs }),
   }
 
   // The hosts filter decides whether this row is offered here at all. It runs
@@ -227,9 +254,14 @@ export function apply(ctx: unknown, config: Config): void {
   const transport = isModelBackedAgent(config.agent)
     ? 'model'
     : config.url === undefined ? 'process' : 'websocket'
+  // The effective watchdog limits, said at mount: a limit that never reached
+  // the gateway is indistinguishable from a configured one until a turn is
+  // wrongly declared stalled, and by then the config file has been trusted.
+  const limit = (value: number | undefined): string => value === undefined ? 'default' : `${value}ms`
   const summary = `acp row mounted: preset=${config.presetId} agent=${config.agent} `
     + `transport=${transport} `
     + `host=${hostId} `
+    + `watchdog=stall:${limit(config.stallMs ?? config.answerTimeoutMs)} total:${limit(config.totalMs)} `
     + `preset-reading=${readProjection(host) === undefined ? 'header-only' : 'projection'} `
     + `approvals=${host.get?.('approval') === undefined ? 'refuse-all' : 'host'} `
     + `questions=${questions === undefined ? 'auto-answer' : 'host'}`

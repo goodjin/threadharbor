@@ -60,10 +60,48 @@ describe('classifyRawOutput', () => {
   })
 
   it('未知会话更新与厂商私有方法走 JSON 行', () => {
-    expect(classifyRawOutput(update('session_info_update', { title: 'x' }), { childSession: false }))
-      .toEqual({ kind: 'session_info_update', format: 'json', line: JSON.stringify({ sessionUpdate: 'session_info_update', title: 'x' }) })
+    expect(classifyRawOutput(update('mystery_update', { a: 1 }), { childSession: false }))
+      .toEqual({ kind: 'mystery_update', format: 'json', line: JSON.stringify({ sessionUpdate: 'mystery_update', a: 1 }) })
     expect(classifyRawOutput({ method: 'grok/private_update', params: { a: 1 } }, { childSession: false }))
       .toEqual({ kind: 'grok/private_update', format: 'json', line: JSON.stringify({ method: 'grok/private_update', params: { a: 1 } }) })
+  })
+
+  it('认得的会话更新给可读行：计划、用量、标题、模式', () => {
+    const plan = classifyRawOutput(update('plan', {
+      entries: [
+        { content: '读代码', status: 'completed' },
+        { content: '改代码', status: 'in_progress' },
+        { content: '跑测试', status: 'pending' },
+      ],
+    }), { childSession: false })
+    expect(plan).toMatchObject({ kind: 'plan', format: 'text' })
+    expect((plan as { line: string }).line).toBe('计划（3 项）：✓ 读代码  ▶ 改代码  ○ 跑测试')
+
+    const usage = classifyRawOutput(update('usage_update', { used: 86_780, size: 258_400 }), { childSession: false })
+    expect((usage as { line: string }).line).toBe('用量：86,780 / 258,400 tokens（33.6%）')
+
+    const title = classifyRawOutput(update('session_info_update', { title: '修超时' }), { childSession: false })
+    expect((title as { line: string }).line).toBe('会话标题：修超时')
+
+    const status = classifyRawOutput(update('session_info_update', {
+      _meta: { codex: { threadStatus: { type: 'active', activeFlags: ['waitingOnApproval'] } } },
+    }), { childSession: false })
+    expect((status as { line: string }).line).toBe('codex 状态：active（waitingOnApproval）')
+
+    const mode = classifyRawOutput(update('current_mode_update', { currentModeId: 'agent' }), { childSession: false })
+    expect((mode as { line: string }).line).toBe('模式切换：agent')
+  })
+
+  it('压缩上下文与计划清除也有可读行', () => {
+    const compacting = classifyRawOutput(update('compaction_update', { status: 'in_progress' }), { childSession: false })
+    expect(compacting).toMatchObject({ kind: 'compaction_update', format: 'text' })
+    expect((compacting as { line: string }).line).toBe('上下文压缩进行中')
+
+    const failed = classifyRawOutput(update('compaction_update', { status: 'failed', error: 'boom' }), { childSession: false })
+    expect((failed as { line: string }).line).toBe('上下文压缩失败：boom')
+
+    const removed = classifyRawOutput(update('plan_removed', { planId: 'p1' }), { childSession: false })
+    expect((removed as { line: string }).line).toBe('计划已清除（p1）')
   })
 
   it('私有方法包装的已映射种类仍归 mapped', () => {
@@ -76,18 +114,19 @@ describe('classifyRawOutput', () => {
 describe('RawOutputAggregator', () => {
   it('连续同类三帧只在 flush 时出一块', () => {
     const agg = new RawOutputAggregator()
-    expect(agg.observe(update('plan', { a: 1 }), AT, { childSession: false })).toBeUndefined()
-    expect(agg.observe(update('plan', { a: 2 }), AT, { childSession: false })).toBeUndefined()
-    expect(agg.observe(update('plan', { a: 3 }), AT, { childSession: false })).toBeUndefined()
+    expect(agg.observe(update('plan', { entries: [{ content: 'a', status: 'pending' }] }), AT, { childSession: false })).toBeUndefined()
+    expect(agg.observe(update('plan', { entries: [{ content: 'b', status: 'pending' }] }), AT, { childSession: false })).toBeUndefined()
+    expect(agg.observe(update('plan', { entries: [{ content: 'c', status: 'pending' }] }), AT, { childSession: false })).toBeUndefined()
     const block = agg.flush(AT)
     expect(block).toBeDefined()
     expect(block!.count).toBe(3)
     expect(block!.kind).toBe('plan')
+    expect(block!.format).toBe('text')
     const lines = linesOf(block!)
     expect(lines[0]).toBe('（3 帧）')
     expect(lines).toHaveLength(4)
-    expect(lines[1]).toContain('"a":1')
-    expect(lines[3]).toContain('"a":3')
+    expect(lines[1]).toBe('计划（1 项）：○ a')
+    expect(lines[3]).toBe('计划（1 项）：○ c')
   })
 
   it('种类切换时先交出前一块，新段从切换帧起', () => {
@@ -133,8 +172,8 @@ describe('RawOutputAggregator', () => {
 
   it('超过上限时在同一连续段内切块，且不丢行', () => {
     const agg = new RawOutputAggregator({ maxBytes: 40 })
-    const first = update('plan', { pad: 'A'.repeat(24) })
-    const second = update('plan', { pad: 'B'.repeat(24) })
+    const first = update('mystery_update', { pad: 'A'.repeat(24) })
+    const second = update('mystery_update', { pad: 'B'.repeat(24) })
     expect(agg.observe(first, AT, { childSession: false })).toBeUndefined()
     const closed = agg.observe(second, AT, { childSession: false })
     expect(closed).toBeDefined()
@@ -181,6 +220,16 @@ describe('RawOutputAggregator', () => {
     expect(agg.flush(AT)).toBeUndefined()
     const summary = agg.summary(AT)
     expect(summary.map(block => block.kind)).toEqual(['current_mode_update'])
+  })
+
+  it('压缩上下文的帧实时成块，不拖到回合末', () => {
+    // 压缩是「为什么这几分钟没帧」的现场解释，回合末才说就晚了。
+    const agg = new RawOutputAggregator()
+    expect(agg.observe(update('compaction_update', { status: 'in_progress' }), AT, { childSession: false })).toBeUndefined()
+    const block = agg.flush(AT)
+    expect(block).toMatchObject({ kind: 'compaction_update', count: 1, format: 'text' })
+    expect(block!.content).toContain('上下文压缩进行中')
+    expect(agg.summary(AT)).toEqual([])
   })
 
   it('cursor/update_todos 格式化为可读的待办行', () => {

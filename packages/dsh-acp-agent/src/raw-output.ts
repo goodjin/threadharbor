@@ -112,6 +112,148 @@ function recordOf(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {}
 }
 
+function stringOf(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/** 折叠成一行并截断：聚合块按「一帧一行」排版，多行文本会把行数说错。 */
+function oneLine(text: string, max = 200): string {
+  const collapsed = text.replace(/\s+/g, ' ').trim()
+  return collapsed.length > max ? `${collapsed.slice(0, max)}…` : collapsed
+}
+
+/** 千分位，不依赖 locale：日志与用例读到的都是同一个形状。 */
+function grouped(value: number): string {
+  const [whole, fraction] = String(Math.round(value)).split('.')
+  const groupedWhole = (whole ?? '').replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+  return fraction === undefined ? groupedWhole : `${groupedWhole}.${fraction}`
+}
+
+const PLAN_MARKS: Readonly<Record<string, string>> = {
+  completed: '✓',
+  in_progress: '▶',
+  pending: '○',
+  cancelled: '✗',
+}
+
+function planLine(prefix: string, entries: readonly Record<string, unknown>[]): string {
+  const items = entries.map(entry => {
+    const status = typeof entry['status'] === 'string' ? entry['status'] : ''
+    const mark = PLAN_MARKS[status] ?? '○'
+    const content = typeof entry['content'] === 'string' ? entry['content'] : ''
+    return `${mark} ${content}`
+  })
+  return `${prefix}（${String(entries.length)} 项）${items.length === 0 ? '' : `：${items.join('  ')}`}`
+}
+
+function entriesOf(value: unknown): readonly Record<string, unknown>[] {
+  return Array.isArray(value) ? value.map(recordOf) : []
+}
+
+function textOfContent(value: unknown): string {
+  const block = recordOf(value)
+  return stringOf(block['text']) ?? ''
+}
+
+/**
+ * 会话更新种类的可读行。
+ *
+ * 这些帧原先一律以 JSON 进未知块：用户看到的是一屏原始字段，看不懂它说了什么。
+ * 形状来自 ACP schema（codex-acp 1.10.0 的校验器，2026-10-27 核对）。认不出的
+ * 种类仍走 JSON——原样展示好过假装看懂了。
+ */
+const SESSION_UPDATE_FORMATTERS: Readonly<Record<string, (update: Record<string, unknown>) => string>> = {
+  plan: update => planLine('计划', entriesOf(update['entries'])),
+  plan_update: update => {
+    const plan = recordOf(update['plan'])
+    const type = stringOf(plan['type'])
+    if (type === 'items') return planLine('计划更新', entriesOf(plan['entries']))
+    if (type === 'file') {
+      const uri = stringOf(plan['uri'])
+      return uri === undefined ? '计划文件：更新' : `计划文件：${uri}`
+    }
+    if (type === 'markdown') {
+      const content = stringOf(plan['content'])
+      return content === undefined ? '计划更新' : `计划（markdown）：${oneLine(content)}`
+    }
+    return `计划更新：${JSON.stringify(update)}`
+  },
+  plan_removed: update => {
+    const planId = stringOf(update['planId'])
+    return planId === undefined ? '计划已清除' : `计划已清除（${planId}）`
+  },
+  config_option_update: update => {
+    const options = entriesOf(update['configOptions'])
+    if (options.length === 0) return `配置更新：${JSON.stringify(update)}`
+    const parts = options.map(option => {
+      const name = stringOf(option['name']) ?? stringOf(option['id']) ?? '选项'
+      const value = option['type'] === 'boolean'
+        ? (option['currentValue'] === true ? '开' : '关')
+        : String(option['currentValue'] ?? '')
+      return `${name}=${value}`
+    })
+    return `配置更新（${String(options.length)} 项）：${parts.join('；')}`
+  },
+  session_info_update: update => {
+    const title = stringOf(update['title'])
+    if (title !== undefined) return `会话标题：${title}`
+    const codex = recordOf(recordOf(update['_meta'])['codex'])
+    const status = recordOf(codex['threadStatus'])
+    const type = stringOf(status['type'])
+    if (type !== undefined) {
+      const flags = Array.isArray(status['activeFlags'])
+        ? status['activeFlags'].filter((flag): flag is string => typeof flag === 'string')
+        : []
+      return `codex 状态：${type}${flags.length === 0 ? '' : `（${flags.join('、')}）`}`
+    }
+    const goal = recordOf(recordOf(update['_meta'])['goal'])
+    if (Object.keys(goal).length > 0) return `会话目标：${oneLine(JSON.stringify(goal))}`
+    return `会话信息：${JSON.stringify(update)}`
+  },
+  usage_update: update => {
+    const used = typeof update['used'] === 'number' ? update['used'] : undefined
+    const size = typeof update['size'] === 'number' ? update['size'] : undefined
+    if (used === undefined || size === undefined) return `用量：${JSON.stringify(update)}`
+    const percent = size > 0 ? `（${((used / size) * 100).toFixed(1)}%）` : ''
+    const cost = recordOf(update['cost'])
+    const amount = typeof cost['amount'] === 'number'
+      ? `；费用 ${String(cost['amount'])} ${String(cost['currency'] ?? '')}`.trimEnd()
+      : ''
+    return `用量：${grouped(used)} / ${grouped(size)} tokens${percent}${amount}`
+  },
+  available_commands_update: update => {
+    const commands = entriesOf(update['availableCommands'])
+      .map(command => stringOf(command['name']))
+      .filter((name): name is string => name !== undefined)
+    const shown = commands.slice(0, 10).join('、')
+    const rest = commands.length > 10 ? ' 等' : ''
+    return commands.length === 0
+      ? '可用命令：无'
+      : `可用命令（${String(commands.length)}）：${shown}${rest}`
+  },
+  current_mode_update: update => {
+    const modeId = stringOf(update['currentModeId'])
+    return modeId === undefined ? `模式切换：${JSON.stringify(update)}` : `模式切换：${modeId}`
+  },
+  compaction_update: update => {
+    const status = stringOf(update['status']) ?? 'unknown'
+    const summary = Array.isArray(update['summary'])
+      ? oneLine(update['summary'].map(textOfContent).filter(text => text.length > 0).join(' '))
+      : ''
+    const error = stringOf(update['error'])
+    const tail = error !== undefined ? `：${oneLine(error)}` : summary.length > 0 ? `：${summary}` : ''
+    const label = status === 'in_progress' ? '进行中'
+      : status === 'completed' ? '完成'
+        : status === 'failed' ? '失败'
+          : status === 'cancelled' ? '已取消' : status
+    return `上下文压缩${label}${tail}`
+  },
+  compaction_summary_chunk: update => {
+    const text = textOfContent(update['content'])
+    return text.length === 0 ? `压缩摘要：${JSON.stringify(update)}` : oneLine(text, 400)
+  },
+}
+
 /**
  * 给一帧归类。
  *
@@ -138,6 +280,11 @@ export function classifyRawOutput(
     }
   }
   if (frame.method === 'session/update') {
+    // 认得的种类给可读行；认不得的原样 JSON——看漏一帧比看错一帧更糟。
+    const formatter = SESSION_UPDATE_FORMATTERS[kind]
+    if (formatter !== undefined) {
+      return { kind, format: 'text', line: formatter(update) }
+    }
     return { kind: kind === '' ? frame.method : kind, format: 'json', line: JSON.stringify(update) }
   }
   // cursor 的三种通知方法有可读格式（文档结构已知），其余厂商方法原样展示。

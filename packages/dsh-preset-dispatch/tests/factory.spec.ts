@@ -242,6 +242,33 @@ function recordingCwd(): { command: string; cwd: () => string } {
   return { command: script, cwd: () => readFileSync(cwdFile, 'utf8') }
 }
 
+describe('看门狗时限经过宿主配置校验', () => {
+  it('stallMs / totalMs / warnMs / graceMs 不再被配置校验丢掉', () => {
+    // 2026-10-27：行上写了 stallMs: 300000，schema 没列这个字段，校验后
+    // 静默消失，网关退回默认的 120000——「超时时间不准」的根源。列了字段
+    // 还不够，值必须一路留到建预设的地方。
+    const preset = EntryConfig({
+      presetId: 'acp-codex',
+      agent: 'codex',
+      stallMs: 300_000,
+      totalMs: 3_600_000,
+      warnMs: 60_000,
+      graceMs: 5_000,
+    })
+    expect(preset).toMatchObject({
+      stallMs: 300_000,
+      totalMs: 3_600_000,
+      warnMs: 60_000,
+      graceMs: 5_000,
+    })
+  })
+
+  it('旧行里的 answerTimeoutMs 别名同样保留', () => {
+    const preset = EntryConfig({ presetId: 'acp-codex', agent: 'codex', answerTimeoutMs: 600_000 })
+    expect(preset.answerTimeoutMs).toBe(600_000)
+  })
+})
+
 describe('拉起外部 agent 时补齐 ACP 所需的参数', () => {
   it('经过宿主配置校验后，省略参数仍使用 Cursor 的 ACP 默认参数', async () => {
     const preset = EntryConfig({ presetId: 'acp-cursor', agent: 'cursor' })
