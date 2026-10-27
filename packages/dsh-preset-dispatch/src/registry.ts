@@ -6,7 +6,8 @@
  * those sessions completely alone, with nothing left to forget.
  */
 
-import type { AcpDialect } from '@threadharbor/dsh-acp-agent'
+import type { AcpDialect, SessionStatusSnapshot } from '@threadharbor/dsh-acp-agent'
+import type { ProgressReading } from './agent-progress.ts'
 import type { AcpPresetBinding } from './dispatch.ts'
 import type { RunnerOptions } from './runner.ts'
 
@@ -152,6 +153,21 @@ export type AcpSessionDiagnostics = {
    * 不会失去别的（0 与「没有子代理」同义）。
    */
   readonly liveDelegatedRuns?: number
+  /**
+   * 外部 agent 最后上报的状态（active/idle、压缩上下文、模式切换……）。
+   *
+   * 看门狗只用它把话说清楚：停的时候它在干什么。缺席按 undefined 读——没有
+   * 状态信号只失去一句解释，不失去看门狗本身。
+   */
+  readonly lastStatus?: SessionStatusSnapshot
+  /**
+   * 日志层的增量进度：帧静默时（codex 压缩上下文）仍能看见它在推进。
+   *
+   * 每次调用推进内部游标；没有新进展返回 undefined。有读数时调用方应重计
+   * 静默期限——这就是「没帧也算活着」的那条信号。缺席表示该 agent 没有这层
+   * 信号（目前只有 codex 有）。
+   */
+  readonly progress?: () => ProgressReading | undefined
 }
 
 /** How an agent is reached; separate so tests can stand in for spawning. */

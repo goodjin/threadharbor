@@ -13,10 +13,10 @@ import { baseIdOf } from './selection.ts'
 import { RawOutputAggregator } from '@threadharbor/dsh-acp-agent'
 import type { RawOutputBlock } from '@threadharbor/dsh-acp-agent'
 import type { UndeliveredAttachment } from './content-writer.ts'
-import { AcpSegmenter, projectToolCall, projectToolCallAnnouncement, projectToolCallFrame, projectToolResultFrame, projectSpawnedResult, readSpawnedFrame, stillRunningText } from '@threadharbor/dsh-acp-agent'
+import { AcpSegmenter, projectToolCall, projectToolCallAnnouncement, projectToolCallFrame, projectToolResultFrame, projectSpawnedResult, readSessionStatus, readSpawnedFrame, stillRunningText, systemNoteEvent } from '@threadharbor/dsh-acp-agent'
 import { SubagentSessions } from './subagent-sessions.ts'
 import type { SubagentSessionHost } from './subagent-sessions.ts'
-import type { AcpDialect, AcpFrame, ProjectionEvent, ToolCall } from '@threadharbor/dsh-acp-agent'
+import type { AcpDialect, AcpFrame, ProjectionEvent, SessionStatusSnapshot, ToolCall } from '@threadharbor/dsh-acp-agent'
 import { randomUUID } from 'node:crypto'
 
 /** The JSON-RPC surface this runner needs, kept narrow so it can be stood in for. */
@@ -617,6 +617,15 @@ export class AcpTurnRunner {
   private parentSessionId: string | undefined
   /** 未映射帧的连续段聚合器（每个 prompt 重建）。 */
   private rawOutput: RawOutputAggregator | undefined
+  /**
+   * 外部 agent 最后上报的状态（active/idle/压缩/模式……）。
+   *
+   * 状态帧不产出内容，但超时消息要说清「停的时候它在干什么」；压缩上下文时
+   * codex 一个帧都不发，这个快照是当时唯一的现场。每个 prompt 重开。
+   */
+  private lastStatus: SessionStatusSnapshot | undefined
+  /** 已实时提示过的状态键：同一状态重复上报只提醒一次。 */
+  private statusNoted: string | undefined
 
   private readonly client: AcpClientPort
   private readonly options: RunnerOptions
@@ -727,6 +736,9 @@ export class AcpTurnRunner {
     if (this.segmenter?.observe(frame) === true && this.frames.length > 0) return true
     this.queue.shift()
     this.frames.push(frame)
+    // 状态帧先读：它要的提示必须落在本帧可能带来的卡片之前，且即便这帧没有
+    // 任何内容可展示，状态也要更新（超时消息靠它说清最后在干什么）。
+    this.observeStatus(frame)
     // 未映射帧先归聚合器：它返回的块必须在本帧自己的写入之前落盘，顺序才对。
     this.observeRawOutput(frame)
     // 出生帧建影子子会话、终态帧收尾；与 spawned 卡片记账互不干扰。
@@ -758,6 +770,28 @@ export class AcpTurnRunner {
     if (aggregator === undefined || live === undefined) return
     const block = aggregator.observe(frame, { turn: live.turn, step: live.step }, { childSession: false })
     if (block !== undefined) this.writeRawOutput(block)
+  }
+
+  /**
+   * 状态帧 → 快照 +（必要时）一条实时提示。
+   *
+   * 只对值得说的状态写提示：普通 active/idle 每个回合都有，铺进转录就是噪音；
+   * 等待审批、模式切换、内部错误这些变化才是用户需要立刻知道的。写失败不抛：
+   * 一条提示写不进去，不能连快照一起丢——超时消息读的是快照。
+   */
+  private observeStatus(frame: AcpFrame): void {
+    const reading = readSessionStatus(frame)
+    if (reading === undefined) return
+    this.lastStatus = { ...reading, at: Date.now() }
+    if (!reading.notable || reading.key === this.statusNoted) return
+    const live = this.liveCards
+    if (live === undefined) return
+    try {
+      live.write([systemNoteEvent(live.turn, live.step, reading.label)])
+      this.statusNoted = reading.key
+    } catch {
+      // 下次同状态再试；帧流与回合不受影响。
+    }
   }
 
   /** 写一块未知输出：经内容写入器展开成公告+卡片+结果（写失败不打死帧处理器）。 */
@@ -909,6 +943,16 @@ export class AcpTurnRunner {
     return this.delegatedRuns.size
   }
 
+  /** 外部对话的 id（ACP session id，codex 里就是 thread id）；未开会话时 undefined。 */
+  externalSessionId(): string | undefined {
+    return this.sessionId
+  }
+
+  /** 当前 prompt 最后收到的 agent 状态；还没收到状态帧时 undefined。 */
+  lastStatusSnapshot(): SessionStatusSnapshot | undefined {
+    return this.lastStatus
+  }
+
   /**
    * 逐帧记账：委托运行出生时记一笔，收尾时销掉。
    *
@@ -1008,6 +1052,10 @@ export class AcpTurnRunner {
     this.noticeWritten = false
     // 未映射帧的连续段从空开始：每次 prompt 一段新记录，块不跨回合。
     this.rawOutput = new RawOutputAggregator()
+    // 状态快照也随 prompt 重开：上一回合结束时的 idle 不是这一回合的现场，
+    // 超时消息若读到它，会把「还没开始说话」说成「说完话了」。
+    this.lastStatus = undefined
+    this.statusNoted = undefined
   }
 
   /**

@@ -30,6 +30,7 @@ import type {
 } from '@threadharbor/dsh-acp-agent'
 import { cwdForOpen } from './registry.ts'
 import type { AcpPresetConfig, AcpSession, AcpSessionFactory, PresetConfig } from './registry.ts'
+import { codexProgressProbe } from './agent-progress.ts'
 import { AcpTurnRunner } from './runner.ts'
 import type { AcpClientPort } from './runner.ts'
 import type { SubagentSessionHost } from './subagent-sessions.ts'
@@ -244,6 +245,10 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
         ...(deps.resumeOf === undefined ? {} : { resumeOf: dshSessionId => deps.resumeOf!(presetId, dshSessionId) }),
         ...(deps.subagents === undefined ? {} : { subagents: deps.subagents }),
       })
+      // codex 在回合中途压缩上下文时一个帧都不发，它自己的日志却还在跳
+      // （2026-10-27：四分钟零帧，每 30s 一行 compaction）。只给 codex 接这层
+      // 信号：别的 agent 没有这个库，接上也只会是空操作。
+      const progressProbe = preset.agent === 'codex' ? codexProgressProbe() : undefined
       return {
         run: async (decision, turn) => await runner.run(decision, turn),
         // The segmented path, passed through with its `first` marker untouched:
@@ -253,15 +258,29 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
         // Drops the connection itself, not just the runner's bookkeeping: a
         // runner that forgets its session id would otherwise hand back the
         // same conversation.
-        close: () => { client.close() },
+        close: () => {
+          progressProbe?.close()
+          client.close()
+        },
         onDead: handler => { transport.onDeath(handler) },
-        diagnostics: () => ({
-          lastFrameAt: transport.lastFrameAt(),
-          lastDiagnosticAt: transport.lastDiagnosticAt(),
-          stderrTail: transport.stderrTail(),
-          // 外部 agent 自己的子代理/后台任务还开着几个：网关的总上限据此让路。
-          liveDelegatedRuns: runner.liveDelegatedRuns(),
-        }),
+        diagnostics: () => {
+          const lastStatus = runner.lastStatusSnapshot()
+          return {
+            lastFrameAt: transport.lastFrameAt(),
+            lastDiagnosticAt: transport.lastDiagnosticAt(),
+            stderrTail: transport.stderrTail(),
+            // 外部 agent 自己的子代理/后台任务还开着几个：网关的总上限据此让路。
+            liveDelegatedRuns: runner.liveDelegatedRuns(),
+            // 最后上报的状态与日志层进度：超时消息的解释与「没帧也算活着」的依据。
+            ...(lastStatus === undefined ? {} : { lastStatus }),
+            ...(progressProbe === undefined ? {} : {
+              progress: () => {
+                const external = runner.externalSessionId()
+                return external === undefined ? undefined : progressProbe.read(external)
+              },
+            }),
+          }
+        },
       }
     },
   }

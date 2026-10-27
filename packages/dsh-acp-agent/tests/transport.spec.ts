@@ -278,6 +278,24 @@ describe('WebSocketAcpTransport 信标', () => {
       vi.useRealTimers()
     }
   })
+
+  it('认不出的帧也计帧：没处理的事件同样重计静默期限', () => {
+    // 用户规则：有事件就要重新计时，不能因为插件没处理就不计时。信标在
+    // 分发之前计数，所以哪怕这行既不是 JSON、也不是任何已知 method，只要
+    // agent 发过来，就说明连接是活的。
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(2_100_000)
+      const socket = fakeSocket()
+      const transport = new WebSocketAcpTransport({ url: 'ws://x/ws?server-key=y', createSocket: () => socket })
+      transport.onLine(() => {})
+      vi.setSystemTime(2_100_700)
+      socket.deliver('this is not json at all')
+      expect(transport.lastFrameAt()).toBe(2_100_700)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
 
 describe('StdioAcpTransport 信标', () => {

@@ -143,6 +143,10 @@ function fakeSession() {
     stderrTail: [] as string[],
     // 外部 agent 自己的委托运行还开着几个：0 = 没有子代理在跑。
     liveDelegatedRuns: 0,
+    // 最后上报的 agent 状态；缺省表示这个桩没收到过状态帧。
+    lastStatus: undefined as { key: string; label: string; working: boolean; notable: boolean; at: number } | undefined,
+    // 日志层进度读数；缺省表示这层信号不可用（帧静默就是真静默）。
+    progress: undefined as (() => { at: number; key: string; label: string } | undefined) | undefined,
   }
   const endResult = (end: GatewayStepEnd) => ({ frames: [], end })
   const session: AcpSession = {
@@ -171,6 +175,8 @@ function fakeSession() {
       lastDiagnosticAt: diagnosticsState.lastDiagnosticAt,
       stderrTail: [...diagnosticsState.stderrTail],
       liveDelegatedRuns: diagnosticsState.liveDelegatedRuns,
+      ...(diagnosticsState.lastStatus === undefined ? {} : { lastStatus: diagnosticsState.lastStatus }),
+      ...(diagnosticsState.progress === undefined ? {} : { progress: () => diagnosticsState.progress!() }),
     }),
   } as unknown as AcpSession
   return {
@@ -1023,6 +1029,108 @@ describe('GatewayConversations — 帧静默超时、提示与诊断包', () => 
         vi.advanceTimersByTimeAsync(2_000).then(() => 'still-hanging'),
       ])
       expect(after).toBe('resolved')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('日志层报进度时重计静默期限：压缩上下文不再被当成卡死', async () => {
+    // 2026-10-27 的现场：codex 回合中途 auto-compact，四分钟零帧，日志每 30s
+    // 一行 compaction；只有帧的看门狗把一条活得正好的回合杀了。日志有读数
+    // 就必须重计时，且只提示一次「仍在推进」。
+    vi.useFakeTimers()
+    try {
+      const fake = fakeSession()
+      fake.answerWith(() => new Promise<GatewayStepEnd>(() => {}))
+      fake.diagnosticsState.lastFrameAt = Date.now()
+      fake.diagnosticsState.progress = () => ({ at: Date.now(), key: 'compaction', label: 'codex 正在压缩上下文' })
+      const append = recordingAppend()
+      const gate = new GatewayConversations(
+        async () => fake.session,
+        undefined,
+        sessionId => (sessionId === 's1' ? append : undefined),
+        undefined,
+        () => ({ stallMs: 8_000, warnMs: 0 }),
+      )
+      const chunks: GatewayChunk[] = []
+      const answering = gate.answer('s1', 'acp-codex', { messages: [user('压缩中')], position }, { chunk: c => { chunks.push(c) } })
+      const outcome = await Promise.race([
+        answering.then(() => 'resolved'),
+        vi.advanceTimersByTimeAsync(10_000).then(() => 'survived-10s'),
+      ])
+      expect(outcome).toBe('survived-10s')
+      const notes = append.written.filter(w => w.type === 'system/message')
+      expect(notes).toHaveLength(1)
+      expectV4SystemNote(notes[0], position)
+      const text = JSON.stringify(notes[0]?.payload)
+      expect(text).toContain('仍在推进')
+      expect(text).toContain('codex 正在压缩上下文')
+      // 日志不再跳之后，静默期限照常收场；消息里带着最后一条日志进展。
+      // 上一次读数把期限重挂到了 t=10s+8s，所以要从第 10 秒再走到 18 秒后。
+      fake.diagnosticsState.progress = undefined
+      const after = await Promise.race([
+        answering.then(() => 'resolved'),
+        vi.advanceTimersByTimeAsync(9_000).then(() => 'still-hanging'),
+      ])
+      expect(after).toBe('resolved')
+      const finish = chunks.at(-1) as { reason: { kind: string; failure?: { code?: string; message?: string } } }
+      expect(finish.reason.kind).toBe('error')
+      expect(finish.reason.failure?.code).toBe('ACP_STALLED')
+      expect(finish.reason.failure?.message).toContain('日志：codex 正在压缩上下文')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('静默收场的消息带上最后上报的 agent 状态', async () => {
+    vi.useFakeTimers()
+    try {
+      const { fake, gate, reports } = wedgedSetup(3_000, 0)
+      fake.diagnosticsState.lastStatus = {
+        key: 'codex:active:waitingOnApproval',
+        label: 'codex 正在处理（等待审批）',
+        working: true,
+        notable: true,
+        at: Date.now(),
+      }
+      const chunks: GatewayChunk[] = []
+      const answering = gate.answer('s1', 'acp-codex', { messages: [user('卡住')], position }, { chunk: c => { chunks.push(c) } })
+      const outcome = await Promise.race([
+        answering.then(() => 'resolved'),
+        vi.advanceTimersByTimeAsync(10_000).then(() => 'still-hanging'),
+      ])
+      expect(outcome).toBe('resolved')
+      const finish = chunks.at(-1) as { reason: { failure?: { code?: string; message?: string } } }
+      expect(finish.reason.failure?.code).toBe('ACP_STALLED')
+      expect(finish.reason.failure?.message).toContain('codex 正在处理（等待审批）')
+      expect(finish.reason.failure?.message).toContain('前上报')
+      expect(reports.some(line => line.includes('last state: codex 正在处理（等待审批）'))).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('静默提示带上最后状态', async () => {
+    vi.useFakeTimers()
+    try {
+      const { fake, append, gate } = wedgedSetup(5_000, 1_000)
+      fake.diagnosticsState.lastStatus = {
+        key: 'codex:active',
+        label: 'codex 正在处理',
+        working: true,
+        notable: false,
+        at: Date.now(),
+      }
+      const answering = gate.answer('s1', 'acp-codex', { messages: [user('等等')], position }, { chunk: () => {} })
+      await Promise.race([answering.then(() => 'done'), vi.advanceTimersByTimeAsync(1_500).then(() => 't1500')])
+      const notes = append.written.filter(w => w.type === 'system/message')
+      expect(notes).toHaveLength(1)
+      const text = JSON.stringify(notes[0]?.payload)
+      expect(text).toContain('已静默')
+      expect(text).toContain('最后状态')
+      expect(text).toContain('codex 正在处理')
+      await vi.advanceTimersByTimeAsync(10_000)
+      await answering
     } finally {
       vi.useRealTimers()
     }

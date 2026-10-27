@@ -22,6 +22,7 @@ import { feedCountsOf, planFeed } from './gateway-feed.ts'
 import type { FeedCursor } from './gateway-feed.ts'
 import { makeToolOnlyWriter } from './content-writer.ts'
 import type { SessionAppend } from './content-writer.ts'
+import type { ProgressReading } from './agent-progress.ts'
 import type { AcpSession } from './registry.ts'
 import type { TurnContext, StepDecisionLike, StepPosition, TurnStreamHandle, AcpStepResult, ContentEvent } from './dispatch.ts'
 import { systemNoteEvent } from '@threadharbor/dsh-acp-agent'
@@ -101,6 +102,18 @@ const DEFAULT_GRACE_MS = 3_000
  * is not strictly below the stall deadline.
  */
 const DEFAULT_WARN_MS = 30_000
+
+/**
+ * How long frames must have been silent before the codex-log probe is consulted.
+ *
+ * Below it the frames themselves are the progress signal and the log adds
+ * nothing; above it, the log is the ONLY signal left (a mid-turn compaction
+ * sends no frames at all for minutes — 2026-10-27).
+ */
+const PROGRESS_PROBE_AFTER_MS = 5_000
+
+/** Minimum gap between two log probes when frames are silent. */
+const PROGRESS_PROBE_EVERY_MS = 5_000
 
 /** Watchdog limits one preset may override; absent fields use the defaults. */
 export type GatewayLimits = {
@@ -472,6 +485,10 @@ export class GatewayConversations {
     let warned = false
     let lastActivityWall = Date.now()
     let lastSeenFrameAt = entry.session?.diagnostics().lastFrameAt ?? Date.now()
+    // 日志层的最后读数与已提示过的种类：压缩上下文时心跳每 30 秒一条，提示只写一次。
+    let lastProbeAt = 0
+    let lastProgress: ProgressReading | undefined
+    const progressNoted = new Set<string>()
     let settle!: (value: { end: GatewayStepEnd }) => void
     const stderrTailNow = (): readonly string[] => entry.session?.diagnostics().stderrTail ?? []
     /** The tail block every forced ending carries, so「为什么停」self-explains. */
@@ -492,15 +509,32 @@ export class GatewayConversations {
       const live = delegatedLive()
       return live <= 0 ? '' : `（还有 ${String(live)} 个委托运行未收尾）`
     }
+    /**
+     * 停的时候它在干什么：最后上报的 agent 状态 + 日志层最后一条进展。
+     *
+     * 这句话不参与判定，只回答「为什么该等 / 为什么该停」。没有它，超时消息
+     * 只会说「静默了多久」，而 2026-10-27 那次它其实正在压缩上下文——这正是
+     * 用户当时看不出区别的那一句。
+     */
+    const stateText = (): string => {
+      const status = entry.session?.diagnostics().lastStatus
+      const parts: string[] = []
+      if (status !== undefined) {
+        parts.push(`${status.label}（${String(Math.round((Date.now() - status.at) / 1000))}s 前上报）`)
+      }
+      if (lastProgress !== undefined) parts.push(`日志：${lastProgress.label}`)
+      return parts.join('；')
+    }
     const fireStall = (): void => {
       const silentForMs = Date.now() - lastActivityWall
-      this.report(`acp gateway: session ${sessionId} answer stalled — no agent activity for ${String(silentForMs)}ms (limit ${String(timeoutMs)}ms)${delegatedNote()} — ending the turn as error`)
+      const state = stateText()
+      this.report(`acp gateway: session ${sessionId} answer stalled — no agent activity for ${String(silentForMs)}ms (limit ${String(timeoutMs)}ms)${state === '' ? '' : `; last state: ${state}`}${delegatedNote()} — ending the turn as error`)
       controller.abort()
       done({
         end: {
           kind: 'error',
           error: {
-            message: `外部 agent 静默 ${String(Math.round(silentForMs / 1000))}s 无进展，已自动停止并重开新会话。${delegatedNote()}进程处置：已终止；agent 输出尾部：\n${tailLines()}`,
+            message: `外部 agent 静默 ${String(Math.round(silentForMs / 1000))}s 无进展，已自动停止并重开新会话。${state === '' ? '' : `${state}。`}${delegatedNote()}进程处置：已终止；agent 输出尾部：\n${tailLines()}`,
             code: 'ACP_STALLED',
           },
         },
@@ -508,13 +542,14 @@ export class GatewayConversations {
     }
     const fireTotal = (): void => {
       const silentForMs = Date.now() - lastActivityWall
-      this.report(`acp gateway: session ${sessionId} answer exceeded the total cap of ${String(totalMs)}ms${delegatedNote()} — ending the turn as error`)
+      const state = stateText()
+      this.report(`acp gateway: session ${sessionId} answer exceeded the total cap of ${String(totalMs)}ms${state === '' ? '' : ` (last state: ${state})`}${delegatedNote()} — ending the turn as error`)
       controller.abort()
       done({
         end: {
           kind: 'error',
           error: {
-            message: `外部 agent 回合超过总上限 ${String(totalMs)}ms，已自动停止并重开新会话。静默 ${String(Math.round(silentForMs / 1000))}s；${delegatedNote()}进程处置：已终止；agent 输出尾部：\n${tailLines()}`,
+            message: `外部 agent 回合超过总上限 ${String(totalMs)}ms，已自动停止并重开新会话。静默 ${String(Math.round(silentForMs / 1000))}s；${state === '' ? '' : `${state}。`}${delegatedNote()}进程处置：已终止；agent 输出尾部：\n${tailLines()}`,
             code: 'ACP_TIMEOUT',
           },
         },
@@ -669,6 +704,27 @@ export class GatewayConversations {
           lastSeenFrameAt = diagnostics.lastFrameAt
           noteActivity()
         }
+        // 帧静默不等于 agent 静默：codex 压缩上下文时一个帧都不发，日志却每
+        // 30 秒还在报进度（2026-10-27）。只在已经安静下来时读日志——有帧时
+        // 帧本身就是进展；读到了就重计两个期限，并说一句它在干什么。
+        if (Date.now() - lastActivityWall >= PROGRESS_PROBE_AFTER_MS
+          && Date.now() - lastProbeAt >= PROGRESS_PROBE_EVERY_MS) {
+          lastProbeAt = Date.now()
+          const progress = diagnostics?.progress?.()
+          if (progress !== undefined) {
+            lastProgress = progress
+            noteActivity()
+            if (!progressNoted.has(progress.key) && position !== undefined) {
+              progressNoted.add(progress.key)
+              try {
+                const note = systemNoteEvent(position.turn, position.step, `外部 agent 仍在推进：${progress.label}`)
+                append?.(note.type, note.payload, { surfaceOp: 'append' })
+              } catch {
+                // 提示写不进去不影响重计时；这条信号已经在看门狗账上了。
+              }
+            }
+          }
+        }
         if (warned || warnMs <= 0 || warnMs >= timeoutMs) return
         const silentForMs = Date.now() - lastActivityWall
         if (silentForMs < warnMs) return
@@ -683,10 +739,11 @@ export class GatewayConversations {
         const tail = stderrTailNow()
         const rawLast = tail.length === 0 ? '（无输出）' : tail.at(-1) ?? '（无输出）'
         const last = rawLast.length > 160 ? `${rawLast.slice(0, 160)}…` : rawLast
+        const state = stateText()
         try {
           // 形状由构造器保证：system/message 的 source 必须是 system-prompt，
           // 写错一次整份日志就永久加载不了（session-3575e031 的 seq 203）。
-          const note = systemNoteEvent(position.turn, position.step, `等待外部 agent——已静默 ${String(Math.round(silentForMs / 1000))}s；agent 最近输出：${last}`)
+          const note = systemNoteEvent(position.turn, position.step, `等待外部 agent——已静默 ${String(Math.round(silentForMs / 1000))}s；${state === '' ? '' : `最后状态：${state}；`}agent 最近输出：${last}`)
           append?.(note.type, note.payload, { surfaceOp: 'append' })
         } catch {
           // A failed note must not kill the answer it was trying to explain.
