@@ -515,7 +515,7 @@ describe('加载路径的模型报告真的进目录（applyAcpPlugin 端到端�
       provider: 'acp:acp-codex',
       model: 'gpt-6-astra',
       sessionId: 's1',
-      messages: [{ role: 'user', content: [{ type: 'text', text: '看看项目里有什么' }] }],
+      messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '看看项目里有什么' }] }],
     })
     void (async () => { for await (const chunk of chunks ?? []) { void chunk } })()
     const answered = new Set<string>()
@@ -561,7 +561,7 @@ describe('加载路径的模型报告真的进目录（applyAcpPlugin 端到端�
       provider: 'acp:acp-codex',
       model: 'gpt-6-astra',
       sessionId: 's1',
-      messages: [{ role: 'user', content: [{ type: 'text', text: '看看项目里有什么' }] }],
+      messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '看看项目里有什么' }] }],
     })
     await expect((async () => {
       for await (const chunk of chunks ?? []) { void chunk }
@@ -604,7 +604,7 @@ describe('加载路径的模型报告真的进目录（applyAcpPlugin 端到端�
       provider: 'acp:acp-codex',
       model: 'gpt-6-astra',
       sessionId: 's1',
-      messages: [{ role: 'user', content: [{ type: 'text', text: '看看项目里有什么' }] }],
+      messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '看看项目里有什么' }] }],
     })
     void (async () => { for await (const chunk of chunks ?? []) { void chunk } })()
     // Answer each request as it goes out: the prompt only leaves after the

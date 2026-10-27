@@ -416,6 +416,31 @@ describe('runSteps — 段落推进', () => {
     expect(h.streams[0]!.log.deltas).toEqual(['hi'])
     expect(h.streams[0]!.log.ended?.kind).toBe('settled')
   })
+
+  it('promptDelivered 只在 prompt 真正发出前触发一次，后续段不再触发', async () => {
+    const h = segmentHarness()
+    const atDelivery: number[] = []
+    const turnWith = (step: number): TurnContext => ({
+      ...h.turnOf(step),
+      promptDelivered: () => {
+        // 回调时刻，session/prompt 必须还没进入调用记录。
+        atDelivery.push(h.calls.filter(call => call.method === 'session/prompt').length)
+      },
+    })
+    const first = h.runner.runSteps(DECISION, turnWith(1), { first: true })
+    await h.started()
+    h.deliver(textFrame('a'))
+    h.deliver(toolOpen('t1'))
+    h.deliver(toolDone('t1', 'ok'))
+    h.deliver(textFrame('b'))
+    expect(await first).toBeNull()
+
+    h.deliver(replyFrame())
+    h.resolvePrompt()
+    // 第二段用另一个 turn（自己的 promptDelivered）：它没有发 prompt，不该响。
+    expect(await h.runner.runSteps(DECISION, turnWith(2), { first: false })).toEqual({ kind: 'completed' })
+    expect(atDelivery).toEqual([0])
+  })
 })
 
 describe('runSteps — 泵内两条裁定', () => {

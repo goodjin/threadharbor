@@ -1104,3 +1104,43 @@ describe('AcpTurnRunner — 外部 agent 自己的委托运行', () => {
     expect(runner.liveDelegatedRuns()).toBe(0)
   })
 })
+
+describe('promptDelivered — delivery means the request left', () => {
+  it('fires once, immediately before session/prompt', async () => {
+    const client = fakeClient()
+    const events: string[] = []
+    const original = client.request
+    client.request = async (method, params) => {
+      if (method === 'session/prompt') events.push('prompt')
+      return original(method, params)
+    }
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp' })
+    await runner.run(DECISION, { ...TURN({}), promptDelivered: () => { events.push('delivered') } })
+    expect(events).toEqual(['delivered', 'prompt'])
+  })
+
+  it('does not fire when the model pick is refused before the prompt', async () => {
+    // codex refuses a stale set_model id locally, before session/prompt. The
+    // question never reached the agent, so a caller anchoring its cursor here
+    // must keep it where it was — otherwise the retry silently loses it.
+    const client = fakeClient()
+    client.request = async (method, params) => {
+      client.calls.push({ method, params })
+      if (method === 'session/new') {
+        return { sessionId: 's1', models: { availableModels: [{ modelId: 'gpt-6-astra[low]', name: 'GPT' }] } }
+      }
+      if (method === 'session/prompt') return { stopReason: 'end_turn' }
+      return {}
+    }
+    const delivered: string[] = []
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: codexDialect })
+    const ended = await runner.run(DECISION, {
+      ...TURN({}),
+      modelId: 'gpt-6-astra[ultra]',
+      promptDelivered: () => { delivered.push('x') },
+    })
+    expect(ended.end.kind).toBe('error')
+    expect(delivered).toEqual([])
+    expect(client.calls.some(call => call.method === 'session/prompt')).toBe(false)
+  })
+})

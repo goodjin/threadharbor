@@ -18,7 +18,7 @@
 
 import { randomUUID } from 'node:crypto'
 
-import { planFeed } from './gateway-feed.ts'
+import { feedCountsOf, planFeed } from './gateway-feed.ts'
 import type { FeedCursor } from './gateway-feed.ts'
 import { makeToolOnlyWriter } from './content-writer.ts'
 import type { SessionAppend } from './content-writer.ts'
@@ -288,6 +288,12 @@ type Entry = {
   primerText: string | undefined
   tail: Promise<unknown>
   /**
+   * Bumped whenever this entry's conversation is dropped for a fresh one. An
+   * abandoned run can still reach its prompt-delivery seam afterwards; its
+   * callback must not advance the cursor of the conversation that replaced it.
+   */
+  epoch: number
+  /**
    * Set while a user stop's grace window is open and the stopped run has not
    * settled: the conversation that run still floats on. A request arriving
    * inside the window must NOT reuse it — two runs in one runner reset each
@@ -306,6 +312,13 @@ type Entry = {
  */
 export class GatewayConversations {
   private readonly entries = new Map<string, Entry>()
+  /**
+   * Sessions whose external conversation was dropped after it had been fed —
+   * a forced ending or a session stop. The next request still plans a primer
+   * (the new agent has no conversation), but the diagnostic names it a
+   * recovery so「为什么又看到历史」self-explains.
+   */
+  private readonly recovering = new Set<string>()
   private readonly open: GatewayOpen
   private readonly report: (message: string) => void
   private readonly sessionAppend: GatewaySessionAppend | undefined
@@ -340,7 +353,7 @@ export class GatewayConversations {
   answer(sessionId: string, presetId: string, request: GatewayAnswerRequest, sink: GatewaySink): Promise<void> {
     let entry = this.entries.get(sessionId)
     if (entry === undefined) {
-      entry = { session: undefined, cursor: undefined, primerText: undefined, tail: Promise.resolve(), stopping: undefined }
+      entry = { session: undefined, cursor: undefined, primerText: undefined, tail: Promise.resolve(), epoch: 0, stopping: undefined }
       this.entries.set(sessionId, entry)
     }
     const run = entry.tail.catch(() => {}).then(async () => {
@@ -357,27 +370,59 @@ export class GatewayConversations {
     request: GatewayAnswerRequest,
     sink: GatewaySink,
   ): Promise<void> {
-    const plan = planFeed(request.messages, entry.cursor)
-    if (plan.kind === 'nothing') {
-      throw new Error(`acp gateway: ${plan.reason} (session ${sessionId})`)
-    }
-    // The primer is set before anything runs: the runner's seam takes it when
-    // the first prompt goes out and restores it if that prompt fails, so the
-    // conversation is never silently continued without the history it was
-    // promised.
-    if (plan.kind === 'first' && plan.primer !== '') entry.primerText = plan.primer
     // A stop's grace window is still open: the conversation below still has a
     // run floating on it. Reusing it would run two turns in one runner — the
     // floating run's late frames would write into this new turn. Drop the old
     // conversation now (its runner's abort state already discards late frames)
     // and open fresh below.
+    //
+    // This happens BEFORE planning on purpose: the replacement is a brand-new
+    // external conversation that owns none of the history, so its first
+    // request must be planned as first contact (full primer) rather than as an
+    // increment against a cursor the dropped agent never received.
+    let reopened = false
     if (entry.stopping !== undefined) {
       const stale = entry.stopping
       entry.stopping = undefined
       entry.session = undefined
+      entry.cursor = undefined
+      entry.primerText = undefined
+      entry.epoch += 1
       stale.close()
+      reopened = true
       this.report(`acp gateway: session ${sessionId} reopened inside a stop's grace — the floating conversation was dropped`)
     }
+    const epoch = entry.epoch
+    const previousCursor = entry.cursor
+    const plan = planFeed(request.messages, previousCursor)
+    if (plan.kind === 'nothing') {
+      throw new Error(`acp gateway: ${plan.reason} (session ${sessionId})`)
+    }
+    // A conversation that had been fed, was dropped, and is being opened anew
+    // is a recovery: the agent lost its state, and the primer re-establishes
+    // it. Only a first-ever contact is `first`.
+    const recovering = plan.kind === 'first' && this.recovering.has(sessionId)
+    const mode = plan.kind === 'first' ? (reopened || recovering ? 'recovery' : 'first') : 'next'
+    // The primer is set before anything runs: the runner's seam takes it when
+    // the first prompt goes out and restores it if that prompt fails BEFORE
+    // delivery, so the conversation is never silently continued without the
+    // history it was promised. Replace (not just set) so a primer restored by
+    // a run that failed before sending cannot outlive a recomputed plan.
+    if (plan.kind === 'first') entry.primerText = plan.primer === '' ? undefined : plan.primer
+    // Delivery diagnostics: mode, categories, lengths, cursor movement — never
+    // a body. The line is emitted when the question actually goes out, and a
+    // run that settles without ever delivering one says so instead of leaving
+    // the cursor's stillness unexplained.
+    const counts = feedCountsOf(request.messages, previousCursor)
+    const countsText = `human=${String(counts.human)} assistant=${String(counts.assistant)} `
+      + `tool=${String(counts.tool)} injected=${String(counts.injected)} `
+      + `system=${String(counts.system)} other=${String(counts.other)} total=${String(counts.total)}`
+    const primerLength = plan.kind === 'first' ? plan.primer.length : 0
+    const feedLine = (delivery: string): string =>
+      `acp gateway: session ${sessionId} feed=${mode} ${countsText} `
+      + `prompt=${String(plan.prompt.length)}ch primer=${String(primerLength)}ch `
+      + `cursor=${previousCursor === undefined ? 'none' : String(previousCursor.fed)}->${String(plan.cursor.fed)} ${delivery}`
+    let delivered = false
     if (entry.session === undefined) {
       entry.session = await this.open(presetId, {
         dshSessionId: sessionId,
@@ -388,9 +433,13 @@ export class GatewayConversations {
             entry.primerText = undefined
             return text
           },
-          restore: (id, text) => { if (id === sessionId) entry.primerText = text },
+          // A prompt that was delivered already put the history into the
+          // agent's conversation; restoring the primer then would prepend it
+          // to the next increment and read the history twice.
+          restore: (id, text) => { if (id === sessionId && !delivered) entry.primerText = text },
         },
       })
+      this.recovering.delete(sessionId)
     }
     // The gateway owns this answer's cancellation: the deadline below ends
     // the turn through this controller, and an external abort (the loop
@@ -552,7 +601,10 @@ export class GatewayConversations {
     }
     const decision: StepDecisionLike = {
       kind: 'enter',
-      messages: [{ role: 'user', content: [{ type: 'text', text: plan.prompt }] }],
+      // The raw human messages, not a text-only reconstruction: attachments
+      // ride the same routing (and the same undelivered announcement) as the
+      // preset path, and a pure-attachment question stays askable.
+      messages: plan.messages,
     }
     const turn = {
       sessionId,
@@ -571,18 +623,31 @@ export class GatewayConversations {
       write: writingTools,
       openStream: () => stream.port(),
       abort: () => controller.signal,
+      // Delivery anchors the cursor: once the runner hands the prompt to the
+      // external conversation, those user messages live in its history for
+      // good — a turn that later errors must not re-feed them (2026-10-16
+      // session 03067bcc: a re-sent approval arrived at the agent twice). A
+      // failure BEFORE this point — the open handshake, a refused model
+      // application — leaves the cursor where it was, so a question never sent
+      // is asked in full next time. The epoch guard makes an abandoned run's
+      // late delivery unable to move a replacement conversation's cursor.
+      promptDelivered: () => {
+        if (delivered || entry.epoch !== epoch) return
+        delivered = true
+        entry.cursor = plan.cursor
+        this.report(feedLine('delivered'))
+      },
       ...(request.modelId === undefined ? {} : { modelId: request.modelId }),
       ...(request.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }),
     } as unknown as TurnContext
-    // Delivery anchors the cursor: once run() hands the prompt to the
-    // external conversation, those user texts live in its history for good —
-    // a turn that later errors must not re-feed them (2026-10-16 session
-    // 03067bcc: a re-sent approval arrived at the agent twice). A failure
-    // BEFORE this point — the open handshake above — still leaves the cursor
-    // where it was, so a question never sent is asked in full next time.
-    entry.cursor = plan.cursor
     const run = entry.session.run(decision, turn) as Promise<unknown>
     run.catch(() => {}) // a late rejection from an already-ended turn must not crash the host
+    let undeliveredReported = false
+    const reportUndelivered = (): void => {
+      if (delivered || undeliveredReported || entry.epoch !== epoch) return
+      undeliveredReported = true
+      this.report(feedLine('not-delivered — the prompt never reached the external agent; cursor unchanged'))
+    }
     // Both deadlines are armed at delivery and re-armed by every piece of
     // activity (see noteActivity). The total one is not a wall-clock cap: a
     // turn that keeps reporting is never ended for taking long.
@@ -670,12 +735,14 @@ export class GatewayConversations {
           runSettled = true
           entry.stopping = undefined
           if (graceTimer !== undefined) clearTimeout(graceTimer)
+          reportUndelivered()
           done(value as { end: GatewayStepEnd })
         },
         error => {
           runSettled = true
           entry.stopping = undefined
           if (graceTimer !== undefined) clearTimeout(graceTimer)
+          reportUndelivered()
           reject(error)
         },
       )
@@ -707,6 +774,10 @@ export class GatewayConversations {
     const entry = this.entries.get(sessionId)
     if (entry === undefined) return
     this.entries.delete(sessionId)
+    // A dropped conversation that had been fed is a lost agent state: the next
+    // request must re-prime, and the diagnostic says recovery rather than
+    // first contact. An entry that never reached a real conversation is not.
+    if (entry.cursor !== undefined || entry.session !== undefined) this.recovering.add(sessionId)
     if (entry.session !== undefined) entry.session.close()
   }
 
