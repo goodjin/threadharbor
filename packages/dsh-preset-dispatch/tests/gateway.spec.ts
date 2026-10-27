@@ -21,8 +21,31 @@ import type { AcpSession } from '../src/registry.ts'
 import type { RunnerOptions } from '../src/runner.ts'
 import type { GatewayChunk, GatewayStepEnd } from '../src/gateway.ts'
 
-const user = (text: string) => ({ role: 'user', content: [{ type: 'text', text }], id: `u-${text}` })
-const assistant = (text: string) => ({ role: 'assistant', content: [{ type: 'text', text }], id: `a-${text}` })
+const user = (text: string) => ({
+  role: 'user',
+  source: { kind: 'user' },
+  content: [{ type: 'text', text }],
+  id: `u-${text}`,
+})
+const assistant = (text: string) => ({
+  role: 'assistant',
+  source: { kind: 'model', provider: 'deepseek', model: 'chat' },
+  content: [{ type: 'text', text }],
+  id: `a-${text}`,
+})
+const injected = (text: string, kind = 'agent-instructions') => ({
+  role: 'user',
+  source: { kind },
+  content: [{ type: 'text', text }],
+  id: `i-${kind}-${text}`,
+})
+const tool = (text: string) => ({
+  role: 'tool',
+  source: { kind: 'tool', callId: 'c1' },
+  content: [{ type: 'text', text }],
+  id: 't-1',
+})
+const picture = { role: 'user', source: { kind: 'user' }, content: [{ type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' }], id: 'u-picture' }
 const position = { turn: 1, step: 1 }
 
 /** A session-log append, recording what the gateway asked the session to record. */
@@ -89,6 +112,7 @@ function expectV4SystemNote(
 function fakeSession() {
   const seen: {
     prompt: string
+    primer: string | undefined
     modelId: string | undefined
     reasoningEffort: string | undefined
     signal: AbortSignal | undefined
@@ -102,8 +126,15 @@ function fakeSession() {
     abort?: () => AbortSignal | undefined
     write?: (events: readonly { type: string; payload: unknown }[]) => number | undefined
     position?: { turn: number; step: number }
+    promptDelivered?: () => void
   }
   let reply: (turn: Turnish) => Promise<GatewayStepEnd> = async () => ({ kind: 'completed' })
+  // 生产里的 runner 每次 run 都从 options.primer 取一次移交文本；桩也一样，
+  // 否则「开场失败后重开是否重新 prime」根本无从断言。
+  let primerSeam: { take(sessionId: string): string | undefined } | undefined
+  // 提示是否真的交到传输层。真机里 applyModel 失败时 request 不会发出，
+  // promptDelivered 也就不该响——用这个开关模拟「送之前就失败」。
+  let deliver = true
   const closes = { count: 0 }
   // 默认「帧一直新鲜」：旧的活轮次用例靠流口/工具写重置期限，不被帧轮询干扰。
   const diagnosticsState = {
@@ -117,8 +148,11 @@ function fakeSession() {
   const session: AcpSession = {
     run: async (decision: { messages?: unknown }, turn: unknown) => {
       const t = turn as unknown as Turnish
+      const primer = primerSeam?.take('s1')
+      if (deliver) t.promptDelivered?.()
       seen.push({
         prompt: JSON.stringify(decision.messages),
+        primer,
         positionTurn: (turn as unknown as { position?: { turn?: number } }).position?.turn,
         modelId: t.modelId,
         reasoningEffort: t.reasoningEffort,
@@ -145,6 +179,8 @@ function fakeSession() {
     closes,
     diagnosticsState,
     answerWith(next: (turn: Turnish) => Promise<GatewayStepEnd>) { reply = next },
+    usePrimer(seam: { take(sessionId: string): string | undefined } | undefined) { primerSeam = seam },
+    setDeliver(value: boolean) { deliver = value },
   }
 }
 
@@ -405,6 +441,75 @@ describe('GatewayConversations — one external conversation per session', () =>
     expect(fake.seen[1]?.prompt).not.toContain('第一问')
   })
 
+  it('续聊只送新增的人类输入：巨型工具结果与注入上下文永不重发', async () => {
+    // 2026-10-27 session 8b518c00 的实际形状：第一轮一次 bash 产出 104 万
+    // 字符的结果，第二问只有 122 字符，网关却把工具结果、注入上下文和助手
+    // 回复一起拼进入，1,221,980 字符超过 codex 的 1,048,576 上限。
+    const fake = fakeSession()
+    const gate = new GatewayConversations(async () => fake.session)
+    const sink = { chunk: () => {} }
+    const first = user('看看这个仓库')
+    await gate.answer('s1', 'acp-codex', { messages: [first], position }, sink)
+    const second = user('继续修')
+    await gate.answer('s1', 'acp-codex', {
+      messages: [
+        first,
+        injected('宿主指令'.repeat(200), 'agent-instructions'),
+        injected('运行上下文'.repeat(200), 'runtime-context'),
+        tool('工具输出'.repeat(100_000)),
+        assistant('看完了'),
+        second,
+      ],
+      position,
+    }, sink)
+    const sent = fake.seen[1]?.prompt ?? ''
+    expect(sent).toContain('继续修')
+    expect(sent).not.toContain('宿主指令')
+    expect(sent).not.toContain('运行上下文')
+    expect(sent).not.toContain('工具输出')
+    expect(sent).not.toContain('看完了')
+    expect(sent.length).toBeLessThan(1_000)
+  })
+
+  it('续聊带上附件块，不把图片当成纯文本丢掉', async () => {
+    const fake = fakeSession()
+    const gate = new GatewayConversations(async () => fake.session)
+    const sink = { chunk: () => {} }
+    const first = user('先看一眼')
+    await gate.answer('s1', 'acp-codex', { messages: [first], position }, sink)
+    await gate.answer('s1', 'acp-codex', {
+      messages: [first, assistant('好'), picture],
+      position,
+    }, sink)
+    const sent = fake.seen[1]?.prompt ?? ''
+    expect(sent).toContain('"type":"image"')
+    expect(sent).toContain('aGVsbG8=')
+  })
+
+  it('续聊诊断只记模式、条数与长度，不记正文', async () => {
+    const reports: string[] = []
+    const fake = fakeSession()
+    const gate = new GatewayConversations(async () => fake.session, message => { reports.push(message) })
+    const sink = { chunk: () => {} }
+    const first = user('第一问')
+    await gate.answer('s1', 'acp-codex', { messages: [first], position }, sink)
+    const secret = '只该出现在提示里的新问题'
+    await gate.answer('s1', 'acp-codex', {
+      messages: [first, assistant('第一答'), tool('工具正文'.repeat(50)), user(secret)],
+      position,
+    }, sink)
+    const line = reports.find(message => message.includes('feed=next')) ?? ''
+    expect(line).toContain('human=1')
+    expect(line).toContain('assistant=1')
+    expect(line).toContain('tool=1')
+    expect(line).toContain(`prompt=${String(secret.length)}ch`)
+    expect(line).toContain('cursor=0->3')
+    expect(line).toContain('delivered')
+    expect(line).not.toContain(secret)
+    expect(line).not.toContain('工具正文')
+    expect(reports.some(message => message.includes('feed=first'))).toBe(true)
+  })
+
   it('passes the model and effort through for the agent to attach', async () => {
     const fake = fakeSession()
     const gate = new GatewayConversations(async () => fake.session)
@@ -436,22 +541,34 @@ describe('GatewayConversations — one external conversation per session', () =>
     expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
   })
 
-  it('does not advance on failure, so a retry asks the same question', async () => {
+  it('提示没送出就失败：游标不前进，重试仍从第一问开始', async () => {
+    // 送达的定义是提示真的交给了传输层。开场成功但选型/发送前就失败时，
+    // 外部会话里一个字都没有——游标必须留在原地，下一问重新 prime 全量，
+    // 否则第一问会永久丢失。
     const fake = fakeSession()
-    fake.answerWith(async () => ({ kind: 'error', error: { message: 'agent died' } }))
-    const gate = new GatewayConversations(async () => fake.session)
+    let opened = 0
+    const gate = new GatewayConversations(async (_presetId, options) => {
+      opened += 1
+      fake.usePrimer(options.primer)
+      return fake.session
+    })
+    fake.setDeliver(false)
+    fake.answerWith(async () => ({ kind: 'error', error: { message: 'model application refused' } }))
     const sink = { chunk: () => {} }
     const chunks: GatewayChunk[] = []
     await gate.answer('s1', 'acp-codex', { messages: [user('第一问')], position }, { chunk: c => { chunks.push(c) } })
     expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'error' } })
+
+    fake.setDeliver(true)
     fake.answerWith(async () => ({ kind: 'completed' }))
     await gate.answer('s1', 'acp-codex', {
       messages: [user('第一问'), user('再试一次')],
       position,
     }, sink)
-    // The cursor stayed where it was, so the retry still carries the question
-    // (the prior turn rides the primer seam, not the prompt).
+    expect(opened).toBe(1)
+    expect(fake.seen[1]?.primer).toContain('第一问')
     expect(fake.seen[1]?.prompt).toContain('再试一次')
+    expect(fake.seen[1]?.prompt).not.toContain('第一问')
   })
 
   it('serializes concurrent answers on one session', async () => {
@@ -586,7 +703,8 @@ describe('GatewayConversations — one external conversation per session', () =>
     }, { chunk: () => {} })
     const prompt = fake.seen.at(-1)?.prompt ?? ''
     // 一句归一句：第三次请求只携带新一轮的用户文本，出错那轮已送达的不重发。
-    expect(prompt.match(/可以，按这个方案实施/g)).toHaveLength(1)
+    // 只数 text 字段——消息 id 里也带同样的字，整串计数会数出两次。
+    expect(prompt.match(/"text":"可以，按这个方案实施"/g)).toHaveLength(1)
   })
 
   it('开场失败不前进：提示从未发出，重试仍从第一问开始', async () => {
@@ -1103,8 +1221,10 @@ describe('GatewayConversations — 停止宽限窗口内的新请求', () => {
       // 每次 open 一个新桩：旧 run 永不结算（停止后漂浮），新 run 正常完成。
       const generations: ReturnType<typeof fakeSession>[] = []
       const opens: string[] = []
-      const gate = new GatewayConversations(async presetId => {
+      const primers: (string | undefined)[] = []
+      const gate = new GatewayConversations(async (presetId, options) => {
         opens.push(presetId)
+        primers.push(options.primer.take('s1'))
         const fake = fakeSession()
         generations.push(fake)
         fake.answerWith(generations.length === 1
@@ -1129,6 +1249,11 @@ describe('GatewayConversations — 停止宽限窗口内的新请求', () => {
       await vi.advanceTimersByTimeAsync(1)
       expect(opens).toHaveLength(2)
       expect(generations[0]?.closes.count).toBe(1)
+      // 新外部会话里没有旧对话：重开必须重新 prime（第一问在 primer 里），
+      // 不能只把「改问这个」当成一次无上下文的续聊。
+      expect(primers[1]).toContain('第一问')
+      expect(generations[1]?.seen[0]?.prompt).toContain('改问这个')
+      expect(generations[1]?.seen[0]?.prompt).not.toContain('第一问')
       // 宽限到点（停止后 3 秒）：杀的只能是旧对话，新回合照常完成。
       await vi.advanceTimersByTimeAsync(3_000)
       expect(generations[1]?.closes.count).toBe(0)

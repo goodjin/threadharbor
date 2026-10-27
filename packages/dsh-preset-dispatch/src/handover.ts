@@ -21,8 +21,36 @@
  * carrying it would present one agent's tool calls as another's history.
  */
 export type HandoverMessage = {
-  readonly role: 'user' | 'assistant' | 'other'
+  readonly role: 'user' | 'assistant'
   readonly text: string
+}
+
+/** One raw message's role, or an empty string when it has none. */
+function roleOf(message: unknown): string {
+  return typeof message === 'object' && message !== null
+    ? String((message as { readonly role?: unknown }).role ?? '')
+    : ''
+}
+
+/**
+ * The `source.kind` a durable message declares, when it has a usable one.
+ *
+ * Every message the host admits to a session carries a source (session-format
+ * validation refuses one without), so this is the boundary between what the
+ * human said and what the host injected into the same user role.
+ */
+export function sourceKindOf(message: unknown): string | undefined {
+  const source = typeof message === 'object' && message !== null
+    ? (message as { readonly source?: unknown }).source
+    : undefined
+  if (typeof source !== 'object' || source === null) return undefined
+  const kind = (source as { readonly kind?: unknown }).kind
+  return typeof kind === 'string' && kind !== '' ? kind : undefined
+}
+
+/** Whether this message is something the human typed, not host-injected context. */
+export function isHumanInput(message: unknown): boolean {
+  return roleOf(message) === 'user' && sourceKindOf(message) === 'user'
 }
 
 /** Read one content block's text, or nothing when it carries none. */
@@ -46,22 +74,22 @@ function textOfMessage(message: unknown): string {
  * Flatten the conversation a request or a session log carries into handover
  * messages.
  *
- * Roles other than user and assistant (system, tool) read as `other`; the
- * assembler drops them. Anything unshaped reads as empty and is dropped the
- * same way — a handover carries what is actually there, never a guess.
+ * Only two voices belong to a handover: the human's own words (role user with
+ * source kind `user`) and the assistant's replies. System instructions, tool
+ * traffic, and injected context ride the user role too — but they are host
+ * plumbing, and presenting them to the receiving agent as something the user
+ * said would put words in the human's mouth. Anything unshaped reads as empty
+ * and is dropped the same way — a handover carries what is actually there,
+ * never a guess.
  */
 export function messagesOf(raw: readonly unknown[] | undefined): readonly HandoverMessage[] {
   if (raw === undefined) return []
   const messages: HandoverMessage[] = []
   for (const message of raw) {
-    const role = (typeof message === 'object' && message !== null ? message : {}) as { role?: unknown }
-    const kind = role['role']
     const text = textOfMessage(message)
     if (text === '') continue
-    messages.push({
-      role: kind === 'user' || kind === 'assistant' ? kind : 'other',
-      text,
-    })
+    if (isHumanInput(message)) messages.push({ role: 'user', text })
+    else if (roleOf(message) === 'assistant') messages.push({ role: 'assistant', text })
   }
   return messages
 }
@@ -78,7 +106,6 @@ export function assembleHandover(messages: readonly HandoverMessage[]): string {
   const labelOf: Readonly<Record<HandoverMessage['role'], string>> = {
     user: '用户',
     assistant: '助手',
-    other: '其他',
   }
   const lines = messages.map(message => `【${labelOf[message.role]}】${message.text}`)
   return [

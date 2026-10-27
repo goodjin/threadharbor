@@ -101,19 +101,30 @@ describe('decideHandover', () => {
   })
 })
 describe('messagesOf', () => {
-  it('reads user and assistant text from request-shaped messages', () => {
+  it('reads the human’s and the assistant’s words, and nothing else', () => {
+    // Only conversation words travel. System instructions belong to the
+    // target, tool traffic is the old agent's scratch work, and injected
+    // context is host plumbing — none of it is something the user said.
     const messages = messagesOf([
-      { role: 'user', content: [{ type: 'text', text: '一' }] },
+      { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '一' }] },
       { role: 'assistant', content: '二' },
       { role: 'system', content: [{ type: 'text', text: '指令' }] },
-      { role: 'user', content: [{ type: 'image', data: 'x' }] },
+      { role: 'user', source: { kind: 'agent-instructions' }, content: [{ type: 'text', text: '注入' }] },
+      { role: 'tool', source: { kind: 'tool', callId: 'c1' }, content: [{ type: 'text', text: '结果' }] },
+      { role: 'user', content: [{ type: 'text', text: '无来源' }] },
+      { role: 'user', source: { kind: 'user' }, content: [{ type: 'image', data: 'x' }] },
       '不是对象',
     ])
     expect(messages).toEqual([
       { role: 'user', text: '一' },
       { role: 'assistant', text: '二' },
-      { role: 'other', text: '指令' },
     ])
+  })
+
+  it('carries the text of a message that also has an attachment', () => {
+    expect(messagesOf([
+      { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '看图' }, { type: 'image', data: 'x' }] },
+    ])).toEqual([{ role: 'user', text: '看图' }])
   })
 
   it('reads nothing from an absent conversation', () => {

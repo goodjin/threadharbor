@@ -205,6 +205,19 @@ export type TurnContext = {
   readonly reasoningEffort?: string
   readonly openStream?: () => TurnStreamHandle | undefined
   /**
+   * Called exactly once per turn, immediately before the prompt is handed to
+   * `session/prompt` — after any model/effort application succeeded.
+   *
+   * A caller that anchors state to what the agent actually received (the
+   * in-place gateway advances its feed cursor here) must not do it at `run()`
+   * entry: a turn refused before the request leaves — a stale model pick, a
+   * failed handshake — never delivered the question, and counting it as sent
+   * would silently drop it from the next request. A request that was sent and
+   * then failed does count: it may have reached the agent, and re-sending it
+   * risks duplicate execution.
+   */
+  readonly promptDelivered?: () => void
+  /**
    * The current turn's stop signal, when the host can stop the turn.
    *
    * A live getter on purpose: the runner consults it once per turn, before the

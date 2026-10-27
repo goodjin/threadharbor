@@ -44,9 +44,9 @@ const deps: CatalogDeps = {
 
 /** The conversation a native request would carry, with this turn's question last. */
 const CONVERSATION = [
-  { role: 'user', content: [{ type: 'text', text: '第一问' }] },
-  { role: 'assistant', content: [{ type: 'text', text: '第一答' }] },
-  { role: 'user', content: [{ type: 'text', text: '现在的问题' }] },
+  { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '第一问' }] },
+  { role: 'assistant', source: { kind: 'model', provider: 'deepseek', model: 'chat' }, content: [{ type: 'text', text: '第一答' }] },
+  { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '现在的问题' }] },
 ]
 
 type CreatedRequest = { agentPreset?: string; cwd?: string }
@@ -56,8 +56,8 @@ const SOURCE_LOG = [
   { type: 'request/header', data: { header: { config: { provider: 'deepseek', model: 'chat' } }, reason: 'initial' } },
   { type: 'turn/start', data: { turn: 1 } },
   { type: 'step/start', data: { turn: 1, step: 1 } },
-  { type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: '第一问' }] } },
-  { type: 'assistant/message', data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: '第一答' }] }, stream: [] } },
+  { type: 'user/message', data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '第一问' }] } },
+  { type: 'assistant/message', data: { turn: 1, step: 1, message: { role: 'assistant', source: { kind: 'model', provider: 'deepseek', model: 'chat' }, content: [{ type: 'text', text: '第一答' }] }, stream: [] } },
   { type: 'step/end', data: { turn: 1, step: 1 } },
   { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
   { type: 'turn/start', data: { turn: 2 } },
@@ -207,8 +207,8 @@ describe('switchDrivenSession — the pick a driven session makes at its turn', 
   }) as never as AgentLike
 
   const agent = agentWith([
-    { role: 'user', content: [{ type: 'text', text: '第一问' }] },
-    { role: 'assistant', content: [{ type: 'text', text: '第一答' }] },
+    { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '第一问' }] },
+    { role: 'assistant', source: { kind: 'model', provider: 'deepseek', model: 'chat' }, content: [{ type: 'text', text: '第一答' }] },
   ])
 
   const mounted = (shared: ReturnType<typeof makeSwitchShared>): void => {

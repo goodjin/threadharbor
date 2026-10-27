@@ -23,8 +23,18 @@ const CONFIG: PresetConfig = {
   },
 }
 
-const user = (text: string) => ({ role: 'user', content: [{ type: 'text', text }], id: `u-${text}` })
-const assistant = (text: string) => ({ role: 'assistant', content: [{ type: 'text', text }], id: `a-${text}` })
+const user = (text: string) => ({
+  role: 'user',
+  source: { kind: 'user' },
+  content: [{ type: 'text', text }],
+  id: `u-${text}`,
+})
+const assistant = (text: string) => ({
+  role: 'assistant',
+  source: { kind: 'model', provider: 'deepseek', model: 'chat' },
+  content: [{ type: 'text', text }],
+  id: `a-${text}`,
+})
 
 async function answer(gate: GatewayConversations, messages: readonly unknown[]): Promise<{ text: string; finish: string }> {
   const chunks: GatewayChunk[] = []

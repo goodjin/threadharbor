@@ -1242,6 +1242,11 @@ export class AcpTurnRunner {
       if (modelId !== undefined && this.modelAppliedOutOfBand()) {
         await this.applyModel(sessionId, modelId, effort)
       }
+      // The question is on its way now, and only now: a refusal above (a stale
+      // model pick, a failed handshake) never delivered it. A caller anchoring
+      // its state to delivery advances here, so the failed-before-send turn is
+      // asked again in full while a sent-then-failed one is not duplicated.
+      turn.promptDelivered?.()
       reply = await this.client.request('session/prompt', params)
     } catch (error: unknown) {
       // Remember it and settle the listeners; the classification below turns
@@ -1386,10 +1391,15 @@ export class AcpTurnRunner {
       // prompt 不在本次调用里等完：应答落定只是末段的闭合条件之一，段边界才是
       // 本次调用的返回时机。落定后续接只做三件事——记录结果、解除监听、唤醒泵。
       // 协议写路径的方言把选型应用串在 prompt 前面：同一个 promise，落定/失败
-      // 与 prompt 共用同一条通路，选型被拒不会卡死泵。
+      // 与 prompt 共用同一条通路，选型被拒不会卡死泵。promptDelivered 挂在
+      // request 之前、选型成功之后：没送出的问题不算送达。
+      const sendPrompt = (): Promise<unknown> => {
+        turn.promptDelivered?.()
+        return this.client.request('session/prompt', params)
+      }
       const asking = modelId !== undefined && this.modelAppliedOutOfBand()
-        ? this.applyModel(sessionId, modelId, effort).then(() => this.client.request('session/prompt', params))
-        : this.client.request('session/prompt', params)
+        ? this.applyModel(sessionId, modelId, effort).then(sendPrompt)
+        : sendPrompt()
       void asking.then(
         reply => {
           this.promptSettled = true
