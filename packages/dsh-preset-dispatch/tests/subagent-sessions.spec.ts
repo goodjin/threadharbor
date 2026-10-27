@@ -91,6 +91,50 @@ describe('SubagentSessions', () => {
     expect(written.find(entry => entry.target === 'parent')!.payload).toMatchObject({ label: 'Compute 6 times 7' })
   })
 
+  it('子代理的工具调用帧落成子会话里的真工具卡（公告+call+result），宿主能渲染富视图', () => {
+    const { host, children } = fakeHost()
+    const sessions = new SubagentSessions(host, codexDialect)
+    sessions.spawn('parent', 'child-1', 'Calc', 'task')
+    // codex 的工具帧：name 在 _meta.codex 里，execute 映射成 bash。
+    sessions.toolFrame('parent', 'child-1', {
+      jsonrpc: '2.0', method: 'session/update',
+      params: { update: { sessionUpdate: 'tool_call', toolCallId: 'c1', title: 'Run', kind: 'execute', status: 'in_progress', rawInput: { command: 'ls' } } },
+    })
+    sessions.toolFrame('parent', 'child-1', {
+      jsonrpc: '2.0', method: 'session/update',
+      params: { update: { sessionUpdate: 'tool_call_update', toolCallId: 'c1', status: 'completed', rawOutput: { formatted_output: 'ok' } } },
+    })
+    sessions.terminal('parent', 'child-1', 'completed', undefined)
+
+    const appends = children.get('acp-sub-child-1')!.appends
+    const types = appends.map(e => e.type)
+    // 公告 + call + result，与父会话同一形状。
+    expect(types).toContain('tool/call')
+    expect(types).toContain('tool/result')
+    const call = appends.find(e => e.type === 'tool/call')!
+    expect((call.payload as { name: string }).name).toBe('bash')
+    const result = appends.find(e => e.type === 'tool/result')!
+    expect((result.payload as { message: { content: { text: string }[] } }).message.content[0]!.text).toContain('ok')
+    // 工具卡排在收尾消息之前。
+    const messageAt = types.lastIndexOf('assistant/message')
+    expect(types.indexOf('tool/call')).toBeLessThan(messageAt)
+  })
+
+  it('子代理工具帧的同一 callId 只落一张卡，不随更新帧重复', () => {
+    const { host, children } = fakeHost()
+    const sessions = new SubagentSessions(host, codexDialect)
+    sessions.spawn('parent', 'child-1', 'Calc', 'task')
+    const frame = (status: string) => ({
+      jsonrpc: '2.0', method: 'session/update',
+      params: { update: { sessionUpdate: status === 'in_progress' ? 'tool_call' : 'tool_call_update', toolCallId: 'c1', status, rawInput: { command: 'ls' } } },
+    })
+    sessions.toolFrame('parent', 'child-1', frame('in_progress'))
+    sessions.toolFrame('parent', 'child-1', frame('in_progress'))
+    sessions.toolFrame('parent', 'child-1', frame('completed'))
+    const calls = children.get('acp-sub-child-1')!.appends.filter(e => e.type === 'tool/call')
+    expect(calls).toHaveLength(1)
+  })
+
   it('既无 id 也无增量：零写入', () => {
     const { host, written } = fakeHost()
     const sessions = new SubagentSessions(host, codexDialect)
@@ -173,7 +217,7 @@ describe('SubagentSessions', () => {
     const { host, children } = fakeHost()
     const sessions = new SubagentSessions(host, codexDialect)
     sessions.spawn('parent', 'child-1', 'Calc', 'task')
-    sessions.rawOutputFrame('parent', 'child-1', { method: 'session/update', params: { sessionId: 'child-1', update: { sessionUpdate: 'plan', a: 1 } } })
+    sessions.rawOutputFrame('parent', 'child-1', { method: 'session/update', params: { sessionId: 'child-1', update: { sessionUpdate: 'mystery_update', a: 1 } } })
     sessions.terminal('parent', 'child-1', 'completed', undefined)
     const types = children.get('acp-sub-child-1')!.appends.map(entry => entry.type)
     const messageAt = types.lastIndexOf('assistant/message')

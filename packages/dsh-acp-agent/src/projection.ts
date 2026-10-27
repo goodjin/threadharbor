@@ -44,6 +44,20 @@ type Accumulator = {
   text: readonly string[]
   readonly tools: Map<string, ToolCall>
   /**
+   * The latest plan the agent published as an ACP `plan`/`plan_update`, folded
+   * into one synthetic `todo_write` call so the host's todo card renders it with
+   * progress. Keyed by a stable id so repeated updates fold onto one card; the
+   * host's todo-diff shows the move between the previous and current list.
+   */
+  plan?: ToolCall
+  /**
+   * The last tool-call id seen per grok `tool_index`, for delta frames that
+   * carry no `tool_call_id`. grok streams a tool's arguments across
+   * `tool_call_delta_chunk` frames addressed by index after the first names the
+   * id; without this the later fragments would fold onto fresh ids.
+   */
+  readonly deltaToolByIndex: Map<number, string>
+  /**
    * Tool calls whose card is owned by a spawned run: cursor publishes a
    * delegation as both a `task` tool call and native subagent frames, and the
    * frames carry the run's real lifecycle. The tool call still supplies the
@@ -283,17 +297,19 @@ export function projectTurnIncremental(
   const tools = new Map<string, ToolCall>()
   const opened = new Set<string>()
   const settled = new Set<string>()
+  const deltaToolByIndex = new Map<number, string>()
   const events: ProjectionEvent[] = []
 
   for (const frame of frames) {
     if (frame.method !== 'session/update') continue
     const update = recordOf(recordOf(frame.params)['update'])
     const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
-    if (kind !== 'tool_call' && kind !== 'tool_call_update') continue
-    const id = typeof update['toolCallId'] === 'string' ? update['toolCallId'] : undefined
+    if (!isToolFrameKind(kind)) continue
+    const id = toolFrameId(update, deltaToolByIndex)
     const carried = id === undefined ? undefined : tools.get(id)
-    const call = dialect.foldTool(carried, update)
-    tools.set(typeof update['toolCallId'] === 'string' ? update['toolCallId'] : call.callId, call)
+    const call = foldToolFrame(dialect, kind, carried, update)
+    tools.set(id ?? call.callId, call)
+    if (id !== undefined && typeof update['tool_index'] === 'number') deltaToolByIndex.set(update['tool_index'], id)
     if (!opened.has(call.callId)) {
       opened.add(call.callId)
       events.push(toolCallEvent(dialect, call, turn, step))
@@ -321,6 +337,104 @@ export function projectTurnIncremental(
  */
 export function mapToolName(dialect: AcpDialect, rawName: string): string {
   return dialect.capabilities.toolNameMap[rawName] ?? rawName
+}
+
+/** The session-update kinds that describe a tool call, whole or incremental. */
+const TOOL_FRAME_KINDS = new Set(['tool_call', 'tool_call_update', 'tool_call_delta_chunk'])
+
+function isToolFrameKind(kind: string): boolean {
+  return TOOL_FRAME_KINDS.has(kind)
+}
+
+/**
+ * The wire id a tool frame addresses, across the spellings agents use.
+ *
+ * Standard frames carry `toolCallId`; grok's private delta frames carry
+ * `tool_call_id`. Folding onto one key is what lets the later canonical
+ * `tool_call` frame find the call the delta frames already opened.
+ */
+function toolFrameId(update: Record<string, unknown>, deltaToolByIndex?: ReadonlyMap<number, string>): string | undefined {
+  if (typeof update['toolCallId'] === 'string') return update['toolCallId']
+  if (typeof update['tool_call_id'] === 'string') return update['tool_call_id']
+  // grok's later delta fragments carry only a `tool_index`; they belong to the
+  // last call seen at that index, remembered as the frames stream in.
+  if (typeof update['tool_index'] === 'number' && deltaToolByIndex !== undefined) {
+    return deltaToolByIndex.get(update['tool_index'])
+  }
+  return undefined
+}
+
+/**
+ * Fold one tool frame onto its call, dispatching whole vs incremental frames.
+ *
+ * A `tool_call_delta_chunk` (grok's private incremental vocabulary) has no
+ * whole `rawInput` to read, so it goes through the dialect's `foldToolDelta`
+ * when present; every other tool frame is a whole-frame `foldTool`. The delta
+ * kind is a first-class tool frame here so the card opens with streamed
+ * arguments instead of staying empty until the canonical frame lands.
+ */
+function foldToolFrame(
+  dialect: AcpDialect,
+  kind: string,
+  carried: ToolCall | undefined,
+  update: Record<string, unknown>,
+): ToolCall {
+  if (kind === 'tool_call_delta_chunk' && dialect.foldToolDelta !== undefined) {
+    return dialect.foldToolDelta(carried, update) ?? dialect.foldTool(carried, update)
+  }
+  return dialect.foldTool(carried, update)
+}
+
+/** The session-update kinds that carry a plan/todo list. */
+const PLAN_KINDS = new Set(['plan', 'plan_update'])
+
+function isPlanKind(kind: string): boolean {
+  return PLAN_KINDS.has(kind)
+}
+
+/**
+ * Fold an ACP plan update into the synthetic `todo_write` call the host's todo
+ * card renders.
+ *
+ * `plan` carries `entries` directly; `plan_update` carries them under `plan`
+ * (with a `type` of `items`, or a `file`/`markdown` form that is not a todo
+ * list and yields nothing). The host's todo card reads `{todos:[{content,
+ * status}]}`, which is exactly the ACP entry shape, so the entries pass through
+ * untouched under a stable call id — repeated updates fold onto one card and
+ * the host's todo-diff shows the move between them.
+ */
+function foldPlanOf(update: Record<string, unknown>): ToolCall | undefined {
+  const entries = planEntriesOf(update)
+  if (entries === undefined) return undefined
+  return {
+    callId: PLAN_CALL_ID,
+    name: 'todo_write',
+    arguments: { todos: entries },
+    output: '',
+  }
+}
+
+/** The plan call id, stable so every update of one plan folds onto one card. */
+const PLAN_CALL_ID = 'acp-plan'
+
+/** The todo entries of a plan/plan_update, or undefined when it is not a list. */
+function planEntriesOf(update: Record<string, unknown>): readonly Record<string, unknown>[] | undefined {
+  if (update['sessionUpdate'] === 'plan') return entriesOf(update['entries'])
+  const plan = recordOf(update['plan'])
+  if (stringOf(plan['type']) === 'items') return entriesOf(plan['entries'])
+  // A `plan` update with no entries key is the whole list; a `plan_update` of
+  // type file/markdown is a plan document, not a todo list — leave it to the
+  // raw-output formatter rather than inventing entries.
+  if (update['sessionUpdate'] === 'plan' && Array.isArray(update['entries'])) return entriesOf(update['entries'])
+  return undefined
+}
+
+function stringOf(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined
+}
+
+function entriesOf(value: unknown): readonly Record<string, unknown>[] {
+  return Array.isArray(value) ? value.map(recordOf) : []
 }
 
 /** The log-only call card, the one shape `contentEvents` has always written. */
@@ -416,6 +530,21 @@ export function projectToolCallAnnouncement(
   return announcementEvent(options.dialect, call, options.turn, options.step)
 }
 
+/**
+ * The announcement message for a call the caller already holds.
+ *
+ * The incremental (delta) path folds the call itself — the frame carries only a
+ * fragment, so re-folding from it would lose the accumulated arguments and the
+ * index-resolved id. This writes the announcement from the held call, carrying
+ * exactly what the matching `tool/call` (via `projectToolCall`) carries.
+ */
+export function projectToolCallAnnouncementCall(
+  call: ToolCall,
+  options: { readonly turn: number; readonly step: number; readonly dialect: AcpDialect },
+): ProjectionEvent {
+  return announcementEvent(options.dialect, call, options.turn, options.step)
+}
+
 /** Project a completed/failed tool frame immediately, retaining earlier arguments and output. */
 export function projectToolResultFrame(
   frame: AcpFrame,
@@ -450,6 +579,8 @@ function accumulate(frames: readonly AcpFrame[], dialect: AcpDialect): Accumulat
   const linkedTools = new Set<string>()
   const spawned = new Map<string, SpawnedRun>()
   const childSessions = new Set<string>()
+  const deltaToolByIndex = new Map<number, string>()
+  let plan: ToolCall | undefined
   let usage: TurnUsage | undefined
 
   for (const frame of frames) {
@@ -483,10 +614,19 @@ function accumulate(frames: readonly AcpFrame[], dialect: AcpDialect): Accumulat
     }
     if (kind === 'agent_thought_chunk') thought.push(textOf(update['content']))
     else if (kind === 'agent_message_chunk') text.push(textOf(update['content']))
-    else if (kind === 'tool_call' || kind === 'tool_call_update') {
-      const carried = typeof update['toolCallId'] === 'string' ? tools.get(update['toolCallId']) : undefined
-      const call = dialect.foldTool(carried, update)
-      tools.set(typeof update['toolCallId'] === 'string' ? update['toolCallId'] : call.callId, call)
+    else if (isToolFrameKind(kind)) {
+      const id = toolFrameId(update, deltaToolByIndex)
+      const carried = id === undefined ? undefined : tools.get(id)
+      const call = foldToolFrame(dialect, kind, carried, update)
+      tools.set(id ?? call.callId, call)
+      // A delta frame that names its id teaches the index→id mapping for the
+      // fragments that follow carrying only the index.
+      if (id !== undefined && typeof update['tool_index'] === 'number') {
+        deltaToolByIndex.set(update['tool_index'], id)
+      }
+    } else if (isPlanKind(kind)) {
+      const folded = foldPlanOf(update)
+      if (folded !== undefined) plan = folded
     } else if (subagentUpdateOf(dialect, update) !== undefined) {
       // A spawned-run lifecycle update: one of the draft's own kinds, or a
       // vendor vocabulary the dialect normalized onto them (grok's).
@@ -496,7 +636,17 @@ function accumulate(frames: readonly AcpFrame[], dialect: AcpDialect): Accumulat
     }
   }
 
-  return { thought, text, tools, linkedTools, spawned, childSessions, usage }
+  return {
+    thought,
+    text,
+    tools,
+    linkedTools,
+    spawned,
+    childSessions,
+    deltaToolByIndex,
+    ...(plan === undefined ? {} : { plan }),
+    usage,
+  }
 }
 
 /**
@@ -717,19 +867,23 @@ function contentEvents(
 ): ProjectionEvent[] {
   const { dialect, turn, step } = options
   if (options.stream !== undefined) acc.stream = options.stream
-  const { thought, text, tools, spawned } = acc
+  const { thought, text, tools, spawned, plan } = acc
   const events: ProjectionEvent[] = []
   // A linked tool call's card is rendered by its spawned run: same callId,
   // but the run's state is the live one. Counting the tool too would announce
   // the same id twice, which the log rejects.
   const toolCards = [...tools.values()].filter(tool => !acc.linkedTools.has(tool.callId))
+  // The plan rides as one settled `todo_write` card the host's todo row renders
+  // with progress; it goes last, after the turn's own tool calls, so it reads
+  // as the running checklist rather than interleaving with the work.
+  const planCards = plan === undefined ? [] : [plan]
   // One message per step, in the canonical native shape: the ordered blocks
   // carry the reasoning first, then the answer, then the tool-call blocks the
   // `tool/call` events below must have been announced by. Two separate messages
   // would survive in the log, but the conversation view folds each step's
   // message into one node by keeping the LAST assistant/message — a second
   // message would erase the first on screen.
-  const runs = [...toolCards, ...[...spawned.values()].map(run => run.call)]
+  const runs = [...toolCards, ...planCards, ...[...spawned.values()].map(run => run.call)]
   // Each block mirrors its `tool/call` exactly (same name mapping, same
   // serialization) — the validator compares the two, and a divergence is the
   // "does not match one advertised tool call" rejection.
@@ -747,6 +901,12 @@ function contentEvents(
   for (const tool of toolCards) {
     events.push(toolCallEvent(dialect, tool, turn, step))
     events.push(toolResultEvent(tool, turn, step))
+  }
+  // The plan card is settled the moment it is written: it is a checklist, not
+  // a running call, and the host's todo row reads its state from the arguments.
+  for (const planCall of planCards) {
+    events.push(toolCallEvent(dialect, planCall, turn, step))
+    events.push(toolResultEvent(planCall, turn, step))
   }
   // A spawned run settles the same way a tool call does, with one addition:
   // the agent may still be running it when the turn ends, and the step cannot

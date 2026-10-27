@@ -75,11 +75,19 @@ export const cursorDialect: AcpDialect = {
     commandVia: 'tool_frame',
     // foldTool names a call after `kind`, as codex does (`toolCall` carries no
     // `name`; the docs' 工具名 row and the 2026-09-14 capture both say `kind`).
-    // The only kind observed is `execute` — a shell command — and DSH's bash
-    // card is the matching view (value verified against the reference client's
-    // `classifyTool`, 2026-10-13). Other kinds stay unmapped until measured.
+    // cursor's `kind` is its only tool identity. Measured (2026-10 capture,
+    // captured-frames.cursor-edit.json): execute (terminal → bash), read and
+    // edit (rawInput carries `path`, which the host's FILE_PATH_KEYS accepts),
+    // and search (rawInput carries `pattern`, the host search-variant summary
+    // key). search maps to `grep` — the host's keyed search card — because the
+    // host has no bare `search` tool name; grep classifies to the search
+    // variant and reads `pattern`, matching cursor's shape. Other kinds stay
+    // unmapped until measured (the generic card is the honest fallback).
     toolNameMap: {
       execute: 'bash',
+      read: 'read',
+      edit: 'edit',
+      search: 'grep',
     },
     // Cursor reads the ACP subagent draft capability from
     // `clientCapabilities._meta.subagents` — the top-level draft field is

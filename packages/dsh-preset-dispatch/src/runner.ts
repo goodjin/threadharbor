@@ -13,7 +13,7 @@ import { baseIdOf } from './selection.ts'
 import { RawOutputAggregator } from '@threadharbor/dsh-acp-agent'
 import type { RawOutputBlock } from '@threadharbor/dsh-acp-agent'
 import type { UndeliveredAttachment } from './content-writer.ts'
-import { AcpSegmenter, projectToolCall, projectToolCallAnnouncement, projectToolCallFrame, projectToolResultFrame, projectSpawnedResult, readSessionStatus, readSpawnedFrame, stillRunningText, systemNoteEvent } from '@threadharbor/dsh-acp-agent'
+import { AcpSegmenter, projectToolCall, projectToolCallAnnouncement, projectToolCallAnnouncementCall, projectToolCallFrame, projectToolResultFrame, projectSpawnedResult, readSessionStatus, readSpawnedFrame, stillRunningText, systemNoteEvent } from '@threadharbor/dsh-acp-agent'
 import { SubagentSessions } from './subagent-sessions.ts'
 import type { SubagentSessionHost } from './subagent-sessions.ts'
 import type { AcpDialect, AcpFrame, ProjectionEvent, SessionStatusSnapshot, ToolCall } from '@threadharbor/dsh-acp-agent'
@@ -481,6 +481,12 @@ type LiveCards = {
   readonly settled: Set<string>
   /** Raw wire id → the folded call, so multi-frame tools keep their partial input. */
   readonly tools: Map<string, ToolCall>
+  /**
+   * grok `tool_index` → the last call id seen at that index, for delta frames
+   * that carry only an index. Lets the streamed argument fragments fold onto the
+   * call the first delta frame opened.
+   */
+  readonly deltaToolByIndex: Map<number, string>
 }
 
 /**
@@ -860,16 +866,21 @@ export class AcpTurnRunner {
     }
   }
 
-  /** 子会话帧：未映射的进子会话未知块，正文/思考增量进实时流。 */
+  /** 子会话帧：工具调用帧落成子会话真工具卡；未映射的进子会话未知块，正文/思考增量进实时流。 */
   private routeChildSubagent(frame: AcpFrame, childSessionId: string): void {
     const sessions = this.subagents
     const parentId = this.parentSessionId
     if (sessions === undefined || parentId === undefined) return
+    // 工具调用帧先落子会话的工具卡（宿主 ui-tool 渲染富视图），不当未知输出。
+    const update = this.frameUpdateOf(frame)
+    const kind = typeof update?.['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
+    if (kind === 'tool_call' || kind === 'tool_call_update' || kind === 'tool_call_delta_chunk') {
+      sessions.toolFrame(parentId, childSessionId, frame)
+      return
+    }
     // 未映射内容先归子会话自己的聚合器（写进子会话日志，不串到父会话）。
     sessions.rawOutputFrame(parentId, childSessionId, frame)
-    const update = this.frameUpdateOf(frame)
     if (update === undefined) return
-    const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
     if (kind !== 'agent_message_chunk' && kind !== 'agent_thought_chunk') return
     const text = textOf(update['content'])
     if (text.length === 0) return
@@ -1068,14 +1079,32 @@ export class AcpTurnRunner {
     const dialect = this.options.dialect
     if (live === undefined || dialect === undefined) return
     const update = recordOf(recordOf(frame.params)['update'])
-    const rawId = update['toolCallId']
-    const isTool = frame.method === 'session/update'
-      && (update['sessionUpdate'] === 'tool_call' || update['sessionUpdate'] === 'tool_call_update')
-    const carried = isTool && typeof rawId === 'string' ? live.tools.get(rawId) : undefined
+    const sessionUpdate = update['sessionUpdate']
+    const isWholeTool = frame.method === 'session/update'
+      && (sessionUpdate === 'tool_call' || sessionUpdate === 'tool_call_update')
+    const isDeltaTool = dialect.foldToolDelta !== undefined
+      && sessionUpdate === 'tool_call_delta_chunk'
+      && (frame.method === 'session/update' || (typeof dialect.frameUpdate === 'function' && dialect.frameUpdate(frame) !== undefined))
+    const rawId = update['toolCallId'] ?? update['tool_call_id']
+    // A delta fragment names its call by id on the first frame and by index
+    // after; resolve the same way the projection does so the fragments fold
+    // onto one call.
+    const deltaIndex = typeof update['tool_index'] === 'number' ? update['tool_index'] : undefined
+    const resolvedId = typeof rawId === 'string'
+      ? rawId
+      : isDeltaTool && deltaIndex !== undefined ? live.deltaToolByIndex.get(deltaIndex) : undefined
+    const isTool = isWholeTool || isDeltaTool
+    const carried = isTool && resolvedId !== undefined ? live.tools.get(resolvedId) : undefined
     let nativeSubagent = false
-    if (isTool && typeof rawId === 'string') {
-      const folded = dialect.foldTool(carried, update)
-      live.tools.set(rawId, folded)
+    let foldedCall: ToolCall | undefined
+    if (isTool && resolvedId !== undefined) {
+      const deltaFold = dialect.foldToolDelta
+      const folded = isDeltaTool && deltaFold !== undefined
+        ? (deltaFold(carried, update) ?? dialect.foldTool(carried, update))
+        : dialect.foldTool(carried, update)
+      foldedCall = folded
+      live.tools.set(resolvedId, folded)
+      if (deltaIndex !== undefined) live.deltaToolByIndex.set(deltaIndex, resolvedId)
       // 子代理经**工具调用**派发时（cursor 的 `task` 工具，2026-10-21 真机抓帧：
       // kind "other" + rawInput._toolName "task"），也要开一个影子子会话——否则
       // 界面上只有一张卡片，子会话列表里没有它（ACP 草案的 subagent_spawned 帧
@@ -1104,12 +1133,19 @@ export class AcpTurnRunner {
       if (linkedId !== undefined && this.subagentTools.has(linkedId)) return
     }
     const options = { turn: live.turn, step: live.step, dialect, ...(carried === undefined ? {} : { carried }) }
-    const event = projectToolCallFrame(frame, options)
+    // A delta frame carries only a fragment, so re-folding from it would lose the
+    // accumulated arguments and the index-resolved id; write from the folded call
+    // the loop already holds instead.
+    const event = isDeltaTool && foldedCall !== undefined
+      ? projectToolCall(foldedCall, options)
+      : projectToolCallFrame(frame, options)
     if (event === undefined) return
     const callId = recordOf(event.payload)['callId']
     if (typeof callId !== 'string') return
     if (!live.written.has(callId)) {
-      const announcement = projectToolCallAnnouncement(frame, options)
+      const announcement = isDeltaTool && foldedCall !== undefined
+        ? projectToolCallAnnouncementCall(foldedCall, options)
+        : projectToolCallAnnouncement(frame, options)
       try {
         live.write(announcement === undefined ? [event] : [announcement, event])
       } catch {
@@ -1235,6 +1271,7 @@ export class AcpTurnRunner {
       written: new Set<string>(),
       settled: new Set<string>(),
       tools: new Map<string, ToolCall>(),
+      deltaToolByIndex: new Map<number, string>(),
     }
     this.liveCards = liveCards
     // Registered before the prompt goes out: the stop lands while the agent is
@@ -1485,6 +1522,7 @@ export class AcpTurnRunner {
       written: new Set<string>(),
       settled: new Set<string>(),
       tools: new Map<string, ToolCall>(),
+      deltaToolByIndex: new Map<number, string>(),
     }
     this.liveCards = liveCards
     const stream = turn.openStream?.()

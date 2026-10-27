@@ -45,6 +45,33 @@ describe('projectTurn with the codex dialect', () => {
   })
 })
 
+describe('projecting an ACP plan into the host todo card', () => {
+  const planFrames: AcpFrame[] = [
+    { jsonrpc: '2.0', method: 'session/update', params: { sessionId: 's', update: { sessionUpdate: 'plan', entries: [
+      { content: 'Survey the code', status: 'completed' },
+      { content: 'Write the patch', status: 'in_progress' },
+      { content: 'Run the tests', status: 'pending' },
+    ] } } },
+  ]
+
+  it('writes a todo_write tool call carrying the plan entries as its todos', () => {
+    // The host renders a todo card from a `todo_write` call whose arguments are
+    // `{todos:[{content,status}]}`. The ACP `plan` update is that same list, so
+    // the projection synthesizes the call instead of flattening the plan to a
+    // one-line text card.
+    const events = projectTurn(planFrames, { turn: 1, dialect: claudeDialect })
+    const call = events.find(event => event.type === 'tool/call')!
+    expect(call).toBeDefined()
+    expect((call.payload as { name: string }).name).toBe('todo_write')
+    const args = JSON.parse((call.payload as { arguments: string }).arguments) as { todos: { content: string; status: string }[] }
+    expect(args.todos).toEqual([
+      { content: 'Survey the code', status: 'completed' },
+      { content: 'Write the patch', status: 'in_progress' },
+      { content: 'Run the tests', status: 'pending' },
+    ])
+  })
+})
+
 describe('projectStepContent', () => {
   // Synthetic frames are fine here: this pins the event shape the replaced step
   // writes, not a dialect's reading of an agent's frames.

@@ -121,6 +121,23 @@ describe("claude's toolResponse fallback", () => {
     expect(update['content']).toBeUndefined()
     expect(claudeDialect.toolOutput(update)).toBe('42')
   })
+
+  it('pass Edit/Write arguments through untouched so the host derives its diff', () => {
+    // The host's diff card is derived from the tool call ARGUMENTS (write→
+    // file_path+content, edit→file_path+old_string+new_string); the projection
+    // must not rewrite them. claude reports the native Anthropic field names.
+    const editUpdate = {
+      sessionUpdate: 'tool_call', toolCallId: 'e1', name: 'Edit',
+      rawInput: { file_path: '/tmp/a.txt', old_string: 'foo', new_string: 'bar', replace_all: false },
+    }
+    const edit = claudeDialect.foldTool(undefined, editUpdate)
+    expect(edit.arguments).toEqual({ file_path: '/tmp/a.txt', old_string: 'foo', new_string: 'bar', replace_all: false })
+    const writeUpdate = {
+      sessionUpdate: 'tool_call', toolCallId: 'w1', name: 'Write',
+      rawInput: { file_path: '/tmp/b.txt', content: 'hello\n' },
+    }
+    expect(claudeDialect.foldTool(undefined, writeUpdate).arguments).toEqual({ file_path: '/tmp/b.txt', content: 'hello\n' })
+  })
 })
 
 describe('separating conversation content from chatter', () => {
@@ -347,6 +364,25 @@ describe('qoder dialect', () => {
     expect(folded.output).toBe('ACP_LIVE_OK')
     expect(qoderDialect.foldTool(folded, qoderUpdate(done!)).status).toBe('completed')
     expect(qoderDialect.foldTool(folded, qoderUpdate(done!)).output).toBe('ACP_LIVE_OK')
+  })
+
+  it('accumulates terminal bytes across streaming frames, and a final rawOutput replaces them', () => {
+    // A Bash call streams its output as several `_meta.terminal_output.data`
+    // frames before the completed frame carries the whole result in `rawOutput`.
+    // Each interim frame is the next chunk, not the whole: keeping only the
+    // last would drop everything streamed before it.
+    const opening = { sessionUpdate: 'tool_call', toolCallId: 'c1', status: 'pending', _meta: { qoder: { toolName: 'Bash' } } }
+    const chunk1 = { sessionUpdate: 'tool_call_update', toolCallId: 'c1', _meta: { terminal_output: { data: 'line one\n' } } }
+    const chunk2 = { sessionUpdate: 'tool_call_update', toolCallId: 'c1', _meta: { terminal_output: { data: 'line two\n' } } }
+    let folded = qoderDialect.foldTool(undefined, opening)
+    folded = qoderDialect.foldTool(folded, chunk1)
+    expect(folded.output).toBe('line one\n')
+    folded = qoderDialect.foldTool(folded, chunk2)
+    expect(folded.output).toBe('line one\nline two\n')
+    // The completed frame carries the full result in rawOutput; it replaces the
+    // streamed chunks rather than appending to them.
+    const done = qoderDialect.foldTool(folded, { sessionUpdate: 'tool_call_update', toolCallId: 'c1', status: 'completed', rawOutput: 'line one\nline two\n' })
+    expect(done.output).toBe('line one\nline two\n')
   })
 
   it('reads the permission request tool name from _meta, where draft agents use name', () => {

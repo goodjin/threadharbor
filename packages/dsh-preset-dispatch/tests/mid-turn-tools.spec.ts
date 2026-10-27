@@ -20,7 +20,7 @@
  */
 
 import type { AcpDialect, AcpFrame } from '@threadharbor/dsh-acp-agent'
-import { claudeDialect, cursorDialect, projectStepContent } from '@threadharbor/dsh-acp-agent'
+import { claudeDialect, cursorDialect, grokDialect, projectStepContent } from '@threadharbor/dsh-acp-agent'
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import type { StepDecisionLike, TurnContext } from '../src/dispatch.ts'
@@ -208,6 +208,36 @@ describe('mid-turn tool-card writing', () => {
     // Each result pairs to its own card by sequence number: the first card is
     // seq 2 (its announcement took seq 1), the second seq 4.
     expect(results.map(append => append.intent?.sourceEventSeqs)).toEqual([[2], [4]])
+  })
+
+  it('projects an ACP plan into a todo_write card the host renders with progress', async () => {
+    const turn1 = harness({ dialect: claudeDialect })
+    await turn1.started()
+    turn1.push([{
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: update({ sessionUpdate: 'plan', entries: [
+        { content: 'Survey the code', status: 'completed' },
+        { content: 'Write the patch', status: 'in_progress' },
+        { content: 'Run the tests', status: 'pending' },
+      ] }),
+    }, answerFrame])
+    turn1.release()
+    await turn1.run()
+
+    const calls = turn1.appends.filter(a => a.type === 'tool/call')
+    const planCall = calls.find(a => a.payload['name'] === 'todo_write')
+    expect(planCall).toBeDefined()
+    const args = JSON.parse(String(planCall!.payload['arguments'])) as { todos: { content: string; status: string }[] }
+    expect(args.todos).toEqual([
+      { content: 'Survey the code', status: 'completed' },
+      { content: 'Write the patch', status: 'in_progress' },
+      { content: 'Run the tests', status: 'pending' },
+    ])
+    // The plan is a settled checklist, not a running call: it has a result.
+    expect(turn1.appends.some(a => a.type === 'tool/result')).toBe(true)
+    // And it never also lands as a raw-output one-liner.
+    expect(turn1.appends.some(a => a.type === 'acp/raw-output')).toBe(false)
   })
 
   it('keeps pre-abort cards and writes nothing for frames that arrive after the stop', async () => {
@@ -654,5 +684,51 @@ describe('Cursor 的子代理派发只写一张卡', () => {
     expect(results).toHaveLength(1)
     expect(results[0]!.payload).toMatchObject({ message: { toolCallId: foldedId } })
     expect(JSON.stringify(results[0]!.payload)).toContain('方案好了')
+  })
+})
+
+describe('grok 的工具参数增量帧（tool_call_delta_chunk）', () => {
+  const deltaOpen: AcpFrame = {
+    jsonrpc: '2.0',
+    method: '_x.ai/session_notification',
+    params: update({ sessionUpdate: 'tool_call_delta_chunk', tool_call_id: 'g1', tool_index: 0, name: 'spawn_subagent' }),
+  }
+  const deltaArgs: AcpFrame = {
+    jsonrpc: '2.0',
+    method: '_x.ai/session_notification',
+    params: update({ sessionUpdate: 'tool_call_delta_chunk', tool_index: 0, arguments_delta: '{"description":"Trivial arithmetic check","prompt":"Reply with only the number that is 2 + 2.","background":false}' }),
+  }
+  const canonical: AcpFrame = {
+    jsonrpc: '2.0',
+    method: 'session/update',
+    params: update({ sessionUpdate: 'tool_call', toolCallId: 'g1', title: 'spawn_subagent', rawInput: { description: 'Trivial arithmetic check', prompt: 'Reply with only the number that is 2 + 2.', background: false } }),
+  }
+  const canonicalDone: AcpFrame = {
+    jsonrpc: '2.0',
+    method: 'session/update',
+    params: update({ sessionUpdate: 'tool_call_update', toolCallId: 'g1', status: 'completed', content: [{ type: 'text', text: '4' }] }),
+  }
+
+  it('增量帧在正文到达前就开卡，参数来自流式拼接；权威帧不重复开卡', async () => {
+    const h = harness({ dialect: grokDialect })
+    await h.started()
+    h.push([deltaOpen, deltaArgs])
+
+    // The streamed fragments open the card with the assembled arguments before
+    // the canonical tool_call frame arrives.
+    const call = h.appends.find(a => a.type === 'tool/call')!
+    expect(call).toBeDefined()
+    const args = JSON.parse(call.payload['arguments'] as string) as Record<string, unknown>
+    expect(args['prompt']).toBe('Reply with only the number that is 2 + 2.')
+    expect(args['description']).toBe('Trivial arithmetic check')
+
+    h.push([canonical, canonicalDone, { ...answerFrame, params: update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'done' } }) }])
+    h.release()
+    await h.run()
+
+    // Exactly one card for the call id, opened live and closed by the terminal.
+    const calls = h.appends.filter(a => a.type === 'tool/call')
+    expect(calls.map(a => a.payload['callId'])).toEqual(['g1'])
+    expect(h.appends.filter(a => a.type === 'tool/result')).toHaveLength(1)
   })
 })

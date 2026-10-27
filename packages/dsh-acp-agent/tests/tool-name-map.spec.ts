@@ -112,6 +112,15 @@ describe('mapToolName', () => {
     expect(mapToolName(qoderDialect, 'Glob')).toBe('glob')
   })
 
+  it('cursor 的 kind read/edit/search 映射成 DSH 卡片视图', () => {
+    // cursor 的真机抓帧里 kind 取 search/read/edit/execute；read 与 edit 的
+    // rawInput 带 path（宿主 FILE_PATH_KEYS 接受），search 带 pattern（宿主
+    // search 变体的 summary 键）。execute 已由上一条测成 bash。
+    expect(mapToolName(cursorDialect, 'read')).toBe('read')
+    expect(mapToolName(cursorDialect, 'edit')).toBe('edit')
+    expect(mapToolName(cursorDialect, 'search')).toBe('grep')
+  })
+
   it('每张映射表的值都是 DSH 认识的键（classifyTool 或 keyed toolview）', () => {
     for (const dialect of [claudeDialect, codexDialect, grokDialect, cursorDialect, qoderDialect]) {
       for (const [raw, mapped] of Object.entries(dialect.capabilities.toolNameMap)) {

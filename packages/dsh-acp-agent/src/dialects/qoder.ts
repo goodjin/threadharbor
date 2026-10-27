@@ -117,19 +117,20 @@ export const qoderDialect: AcpDialect = {
     // Latch the identity: the opening frame names the tool, later frames may
     // omit `_meta` and only carry status/output.
     const name = carried?.name || toolNameOf(update) || (typeof update['title'] === 'string' ? update['title'] : 'tool')
-    const output = outputFrom(update)
+    const { output, outputStreaming } = outputFrom(update, carried)
     return {
       callId: toolCallId,
       name,
       arguments: update['rawInput'] ?? carried?.arguments ?? {},
       title: typeof update['title'] === 'string' ? update['title'] : carried?.title,
       status: typeof update['status'] === 'string' ? update['status'] : carried?.status,
-      output: output.length > 0 ? output : (carried?.output ?? ''),
+      output,
+      outputStreaming,
     } satisfies ToolCall
   },
 
   toolOutput(update) {
-    return outputFrom(update)
+    return outputFrom(update).output
   },
 
   // The user's pick rides `session/set_config_option` — the protocol's write
@@ -198,10 +199,20 @@ export const qoderDialect: AcpDialect = {
  * intermediate Bash frame puts terminal bytes in `_meta.terminal_output.data`.
  * `content` is deliberately ignored: it holds the tool's input on the opening
  * frame, not its result.
+ *
+ * Streaming terminal bytes accumulate onto the carried output (each interim
+ * frame is the next chunk, not the whole); a whole `rawOutput` result replaces
+ * them and ends the accumulation. Returns the resolved output and whether it is
+ * still streaming (so the next terminal chunk appends).
  */
-function outputFrom(update: Record<string, unknown>): string {
+function outputFrom(update: Record<string, unknown>, carried?: ToolCall): { output: string; outputStreaming: boolean } {
   const raw = update['rawOutput']
-  if (typeof raw === 'string') return raw
+  if (typeof raw === 'string') return { output: raw, outputStreaming: false }
   const terminal = record(record(update['_meta'])['terminal_output'])
-  return typeof terminal['data'] === 'string' ? terminal['data'] : ''
+  const data = typeof terminal['data'] === 'string' ? terminal['data'] : ''
+  if (data !== '') {
+    const base = carried?.outputStreaming === true ? (carried?.output ?? '') : ''
+    return { output: `${base}${data}`, outputStreaming: true }
+  }
+  return { output: carried?.output ?? '', outputStreaming: carried?.outputStreaming ?? false }
 }

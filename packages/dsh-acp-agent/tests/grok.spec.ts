@@ -78,4 +78,41 @@ describe('projectTurn with the grok dialect', () => {
   it('reads grok’s model list from models.availableModels', () => {
     expect(grokDialect.readModels(grok['sessionNew'])).toEqual([{ id: 'grok-4.7', name: 'Grok 4.7' }])
   })
+
+  it('folds tool_call_delta_chunk into a tool call with the streamed arguments', () => {
+    // Real grok capture (captured-subagent-frames.json frames 51-52): the delta
+    // frames carry the tool name on the first frame and the arguments as an
+    // `arguments_delta` JSON string on the next, arriving BEFORE the canonical
+    // `tool_call` frame. Frames are on grok's private `_x.ai/session_notification`
+    // method. Before folding, the delta kind is dropped and the card opens empty
+    // until the later tool_call arrives.
+    const deltaFrames: AcpFrame[] = [
+      {
+        jsonrpc: '2.0',
+        method: '_x.ai/session_notification',
+        params: {
+          sessionId: 'sess-1',
+          update: { sessionUpdate: 'tool_call_delta_chunk', tool_call_id: 'call-1', tool_index: 0, name: 'spawn_subagent' },
+        },
+      },
+      {
+        jsonrpc: '2.0',
+        method: '_x.ai/session_notification',
+        params: {
+          sessionId: 'sess-1',
+          update: {
+            sessionUpdate: 'tool_call_delta_chunk',
+            tool_index: 0,
+            arguments_delta: '{"description":"Trivial arithmetic check","prompt":"Reply with only the number that is 2 + 2. Do not add any other text.","background":false}',
+          },
+        },
+      },
+    ]
+    const events = projectTurn(deltaFrames, { turn: 1, dialect: grokDialect })
+    const call = events.find(event => event.type === 'tool/call')!
+    expect(call).toBeDefined()
+    const args = JSON.parse((call.payload as { arguments: string }).arguments) as Record<string, unknown>
+    expect(args['prompt']).toBe('Reply with only the number that is 2 + 2. Do not add any other text.')
+    expect(args['description']).toBe('Trivial arithmetic check')
+  })
 })

@@ -34,6 +34,7 @@ const MAPPED_KINDS = new Set([
   'agent_thought_chunk',
   'tool_call',
   'tool_call_update',
+  'tool_call_delta_chunk',
   'subagent_spawned',
   'subagent_state_update',
   'async_task_spawned',
@@ -129,23 +130,6 @@ function grouped(value: number): string {
   return fraction === undefined ? groupedWhole : `${groupedWhole}.${fraction}`
 }
 
-const PLAN_MARKS: Readonly<Record<string, string>> = {
-  completed: '✓',
-  in_progress: '▶',
-  pending: '○',
-  cancelled: '✗',
-}
-
-function planLine(prefix: string, entries: readonly Record<string, unknown>[]): string {
-  const items = entries.map(entry => {
-    const status = typeof entry['status'] === 'string' ? entry['status'] : ''
-    const mark = PLAN_MARKS[status] ?? '○'
-    const content = typeof entry['content'] === 'string' ? entry['content'] : ''
-    return `${mark} ${content}`
-  })
-  return `${prefix}（${String(entries.length)} 项）${items.length === 0 ? '' : `：${items.join('  ')}`}`
-}
-
 function entriesOf(value: unknown): readonly Record<string, unknown>[] {
   return Array.isArray(value) ? value.map(recordOf) : []
 }
@@ -162,12 +146,16 @@ function textOfContent(value: unknown): string {
  * 形状来自 ACP schema（codex-acp 1.10.0 的校验器，2026-10-27 核对）。认不出的
  * 种类仍走 JSON——原样展示好过假装看懂了。
  */
-const SESSION_UPDATE_FORMATTERS: Readonly<Record<string, (update: Record<string, unknown>) => string>> = {
-  plan: update => planLine('计划', entriesOf(update['entries'])),
+const SESSION_UPDATE_FORMATTERS: Readonly<Record<string, (update: Record<string, unknown>) => string | undefined>> = {
+  // The projection folds `plan` and item-list `plan_update` into a `todo_write`
+  // card, so raw output leaves them alone (undefined = mapped, skip). Only the
+  // non-list plan forms — a plan file, a markdown plan, a removal — survive as
+  // a one-liner, since the card cannot represent them.
+  plan: () => undefined,
   plan_update: update => {
     const plan = recordOf(update['plan'])
     const type = stringOf(plan['type'])
-    if (type === 'items') return planLine('计划更新', entriesOf(plan['entries']))
+    if (type === 'items') return undefined
     if (type === 'file') {
       const uri = stringOf(plan['uri'])
       return uri === undefined ? '计划文件：更新' : `计划文件：${uri}`
@@ -280,10 +268,12 @@ export function classifyRawOutput(
     }
   }
   if (frame.method === 'session/update') {
-    // 认得的种类给可读行；认不得的原样 JSON——看漏一帧比看错一帧更糟。
+    // 认得的种类给可读行；认不得的原样 JSON——看漏一帧比看错一帧更糟。一个
+    // 返回 undefined 的格式化器（如 plan，投影已接管）意为「已映射，跳过」。
     const formatter = SESSION_UPDATE_FORMATTERS[kind]
     if (formatter !== undefined) {
-      return { kind, format: 'text', line: formatter(update) }
+      const line = formatter(update)
+      return line === undefined ? 'mapped' : { kind, format: 'text', line }
     }
     return { kind: kind === '' ? frame.method : kind, format: 'json', line: JSON.stringify(update) }
   }

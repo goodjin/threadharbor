@@ -42,6 +42,24 @@ function textOf(content: unknown): string {
   return typeof entry['text'] === 'string' ? (entry['text'] as string) : ''
 }
 
+/**
+ * Parse a buffered argument JSON string into the object the card carries.
+ *
+ * grok streams its tool arguments as `arguments_delta` fragments; the buffer is
+ * only complete JSON once the last fragment lands. A partial buffer is the
+ * normal state mid-stream, so an incomplete parse yields an empty object — the
+ * card shows nothing rather than a fabricated half-argument.
+ */
+function parseArgs(buffer: string): Record<string, unknown> {
+  if (buffer.trim() === '') return {}
+  try {
+    const parsed = JSON.parse(buffer)
+    return typeof parsed === 'object' && parsed !== null ? record(parsed) : {}
+  } catch {
+    return {}
+  }
+}
+
 function modelSelector(reply: unknown): Record<string, unknown> | undefined {
   const options = record(reply)['configOptions']
   if (!Array.isArray(options)) return undefined
@@ -86,6 +104,35 @@ export const grokDialect: AcpDialect = {
       title: typeof update['title'] === 'string' ? update['title'] : carried?.title,
       status: typeof update['status'] === 'string' ? update['status'] : carried?.status,
       output: output.length > 0 ? output : (carried?.output ?? ''),
+    } satisfies ToolCall
+  },
+
+  foldToolDelta(carried, update) {
+    // grok's incremental tool frames: the first carries the tool identity
+    // (`name` + `tool_call_id`); the rest carry an `arguments_delta` JSON-string
+    // fragment. These arrive before the canonical `tool_call` frame, so the card
+    // they build has to stand on its own until that frame (or a terminal) lands.
+    const toolCallId = typeof update['tool_call_id'] === 'string'
+      ? update['tool_call_id']
+      : typeof update['toolCallId'] === 'string'
+        ? update['toolCallId']
+        : carried?.callId ?? randomUUID()
+    const name = carried?.name
+      || (typeof update['name'] === 'string' ? update['name'] : undefined)
+      || 'tool'
+    // Accumulate the streamed fragments onto the carried buffer; the next frame
+    // appends rather than replaces, so a JSON object split across frames
+    // reassembles.
+    const delta = typeof update['arguments_delta'] === 'string' ? update['arguments_delta'] : ''
+    const buffer = `${carried?.argumentsBuffer ?? ''}${delta}`
+    return {
+      callId: toolCallId,
+      name,
+      arguments: parseArgs(buffer),
+      argumentsBuffer: buffer,
+      title: carried?.title,
+      status: carried?.status,
+      output: carried?.output ?? '',
     } satisfies ToolCall
   },
 
