@@ -16,6 +16,7 @@ import type { AcpDialect, AcpFrame } from '@threadharbor/dsh-acp-agent'
 import { claudeDialect, cursorDialect, projectStepContent } from '@threadharbor/dsh-acp-agent'
 import { describe, expect, it } from 'vitest'
 import type { StepDecisionLike, TurnContext, TurnStreamHandle } from '../src/dispatch.ts'
+import type { SurfaceIntent } from '../src/content-writer.ts'
 import { makeContentWriter } from '../src/content-writer.ts'
 import type { ContentWriter } from '../src/content-writer.ts'
 import { AcpTurnRunner } from '../src/runner.ts'
@@ -125,7 +126,7 @@ function fakePromptClient() {
   }
 }
 
-type Append = { type: string; payload: Record<string, unknown>; intent?: { surfaceOp?: string; sourceEventSeqs?: readonly number[] } }
+type Append = { type: string; payload: Record<string, unknown>; intent?: SurfaceIntent }
 
 /**
  * 记录每次 append 的写入器，形状同 mid-turn-tools 的 recordingWrite；`failures`

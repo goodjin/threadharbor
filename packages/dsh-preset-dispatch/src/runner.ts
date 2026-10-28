@@ -491,6 +491,12 @@ type LiveCards = {
   readonly written: Set<string>
   /** Call ids whose result already went to the log this segment. */
   readonly settled: Set<string>
+  /**
+   * Call ids whose result is on the log with streamed output but no terminal
+   * exit yet. The result waits at whichever content last arrived; a second
+   * append would be rejected, so later output refines it in place.
+   */
+  readonly streamed: Set<string>
   /** Raw wire id → the folded call, so multi-frame tools keep their partial input. */
   readonly tools: Map<string, ToolCall>
   /**
@@ -1226,11 +1232,14 @@ export class AcpTurnRunner {
 
   /**
    * Handle streaming output from a terminal: accumulate output into the call
-   * and write a tool/result event so the UI updates live.
+   * and refresh its result so the UI updates live.
    *
    * We construct the result event directly rather than going through
    * projectToolResultFrame, because that function gates on completed/failed
    * status and we want to stream partial output while the call is still running.
+   * The writer turns the first write into the call's one result and every later
+   * one into a content-only replacement: a second result append is what makes a
+   * session refuse to load at all.
    */
   private handleTerminalOutput(terminalId: string, data: string): void {
     if (this.aborted) return
@@ -1240,11 +1249,21 @@ export class AcpTurnRunner {
     if (live === undefined) return
     const call = live.tools.get(toolCallId)
     if (call === undefined) return
-    // Accumulate output into the call.
-    const existingOutput = call.output ?? ''
-    call.output = existingOutput + data
-    // Write a tool/result event with the accumulated output so the UI updates.
-    // This matches the shape that toolResultEvent produces in the projection.
+    call.output = (call.output ?? '') + data
+    this.writeTerminalResult(live, toolCallId, call)
+  }
+
+  /**
+   * Put the call's accumulated output on its result, opening one when needed.
+   *
+   * The result waits for the card: a result the log never saw announced is the
+   * orphan that makes the file unloadable, and the exit path writes the pair in
+   * order when the opening frame is still held back.
+   *
+   * @returns whether the write reached the log.
+   */
+  private writeTerminalResult(live: LiveCards, toolCallId: string, call: ToolCall): boolean {
+    if (!live.written.has(toolCallId)) return false
     const event = projectToolResultFrame(
       {
         jsonrpc: '2.0',
@@ -1255,22 +1274,29 @@ export class AcpTurnRunner {
             sessionUpdate: 'tool_call_update',
             toolCallId,
             status: 'completed',
-            content: [{ type: 'content', content: { type: 'text', text: call.output } }],
+            content: [{ type: 'content', content: { type: 'text', text: call.output ?? '' } }],
           },
         },
       },
       { turn: live.turn, step: live.step, dialect: this.options.dialect!, carried: call },
     )
-    if (event === undefined) return
+    if (event === undefined) return false
     try {
       live.write([event])
     } catch {
       // A rejected append stays eligible for the turn-end projection.
+      return false
     }
+    live.streamed.add(toolCallId)
+    return true
   }
 
   /**
-   * Handle terminal process exit: synthesize a completed tool_call_update frame.
+   * Handle terminal process exit: land the final output, then settle the card.
+   *
+   * The provider's own completed update arrives after this and must not land a
+   * second result, so the call is marked settled here — the provider's frame is
+   * a duplicate the log would reject.
    */
   private handleTerminalExit(terminalId: string, exitCode: number): void {
     if (this.aborted) return
@@ -1281,20 +1307,27 @@ export class AcpTurnRunner {
     const call = live.tools.get(toolCallId)
     if (call === undefined) return
     call.status = 'completed'
-    const frame: AcpFrame = {
-      jsonrpc: '2.0',
-      method: 'session/update',
-      params: {
-        sessionId: this.sessionId ?? '',
-        update: {
-          sessionUpdate: 'tool_call_update',
-          toolCallId,
-          status: 'completed',
-          content: [{ type: 'content', content: { type: 'text', text: call.output ?? '' } }],
+    if (live.written.has(toolCallId)) {
+      if (!this.writeTerminalResult(live, toolCallId, call)) return
+      live.settled.add(toolCallId)
+    } else {
+      // The card never opened: the placeholder waited for input that never
+      // came. The completed frame opens it and lands card + result in order,
+      // and marks the call settled itself.
+      this.writeToolFrame({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: this.sessionId ?? '',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId,
+            status: 'completed',
+            content: [{ type: 'content', content: { type: 'text', text: call.output ?? '' } }],
+          },
         },
-      },
+      })
     }
-    this.writeToolFrame(frame)
     this.terminalToTool.delete(terminalId)
   }
 
@@ -1398,6 +1431,7 @@ export class AcpTurnRunner {
       write: turn.write,
       written: new Set<string>(),
       settled: new Set<string>(),
+      streamed: new Set<string>(),
       tools: new Map<string, ToolCall>(),
       deltaToolByIndex: new Map<number, string>(),
     }
@@ -1649,6 +1683,7 @@ export class AcpTurnRunner {
       write: turn.write,
       written: new Set<string>(),
       settled: new Set<string>(),
+      streamed: new Set<string>(),
       tools: new Map<string, ToolCall>(),
       deltaToolByIndex: new Map<number, string>(),
     }
@@ -1931,6 +1966,12 @@ export class AcpTurnRunner {
     for (const callId of live.written) {
       if (live.settled.has(callId)) continue
       live.settled.add(callId)
+      // A streamed card already shows its output; the abort note refines that
+      // same result instead of replacing the only evidence of what ran.
+      const streamed = live.streamed.has(callId) ? live.tools.get(callId)?.output ?? '' : ''
+      const text = streamed.length === 0
+        ? '外部 agent 回合被中止，这个调用没有等到结果。'
+        : `${streamed}\n\n外部 agent 回合被中止，这个调用没有等到结果。`
       events.push({
         type: 'tool/result',
         payload: {
@@ -1939,7 +1980,7 @@ export class AcpTurnRunner {
           message: {
             id: randomUUID(),
             role: 'tool',
-            content: [{ type: 'text', text: '外部 agent 回合被中止，这个调用没有等到结果。' }],
+            content: [{ type: 'text', text }],
             source: { kind: 'tool', callId },
             toolCallId: callId,
             isError: true,
@@ -2297,7 +2338,12 @@ function withoutLiveWritten(produced: readonly ProjectionEvent[], liveCards: Liv
     if (event.type === 'assistant/message') return withoutAnnouncedToolBlocks(event, liveCards.written)
     if (event.type === 'tool/result') {
       const toolCallId = resultCallIdOf(event)
-      return toolCallId !== undefined && liveCards.settled.has(toolCallId) ? [] : [event]
+      // A streamed result is already on the log: the provider's late outcome
+      // frame refines it in place, and a projected second result would be a
+      // duplicate append the log refuses.
+      return toolCallId !== undefined && (liveCards.settled.has(toolCallId) || liveCards.streamed.has(toolCallId))
+        ? []
+        : [event]
     }
     if (event.type !== 'tool/call') return [event]
     const callId = recordOf(event.payload)['callId']

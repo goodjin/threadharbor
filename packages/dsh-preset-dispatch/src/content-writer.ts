@@ -42,12 +42,19 @@ import { randomUUID } from 'node:crypto'
 import { toolCallAnnouncementEvent, toolCallEvent, toolResultMessageEvent } from '@threadharbor/dsh-acp-agent'
 
 import type { ContentEvent } from './dispatch.ts'
+import { withLifecycleGuard } from './session-lifecycle.ts'
+
+/** How an event enters the log's surface: append it, or replace one current node. */
+export type SurfaceIntent = {
+  surfaceOp?: 'append' | { readonly op: 'replace'; readonly startSeq: number; readonly endSeq: number }
+  sourceEventSeqs?: readonly number[]
+}
 
 /** What `session.append` gives back, and all this needs of it. */
 export type SessionAppend = (
   type: string,
   payload: unknown,
-  intent?: { surfaceOp?: string; sourceEventSeqs?: readonly number[] },
+  intent?: SurfaceIntent,
 ) => { readonly seq: number }
 
 /**
@@ -143,8 +150,18 @@ function undeliveredEvents(payload: unknown): ContentEvent[] {
   const attachments = Array.isArray(record['attachments']) ? record['attachments'] : []
   const callId = randomUUID()
   const notice = noticeText(attachments)
+  const args = JSON.stringify({ attachments })
   return [
-    toolCallEvent({ turn, step, callId, name: UNDELIVERED_TOOL, arguments: JSON.stringify({ attachments }) }),
+    toolCallAnnouncementEvent({
+      turn,
+      step,
+      callId,
+      name: UNDELIVERED_TOOL,
+      arguments: args,
+      provider: 'acp-undelivered',
+      model: 'acp-undelivered',
+    }),
+    toolCallEvent({ turn, step, callId, name: UNDELIVERED_TOOL, arguments: args }),
     toolResultMessageEvent({
       turn,
       step,
@@ -170,14 +187,29 @@ function noticeText(attachments: readonly unknown[]): string {
 /**
  * Build a writer bound to one session.
  *
- * `onOrphan` is told when a result arrives with no call behind it. The result is
- * still written: dropping it would lose the agent's output, and an unpaired
- * result is easier to recover from than a missing one.
+ * The log admits exactly one `tool/result` per advertised call: a second append
+ * closes a lifecycle that is already closed, and the reader refuses the whole
+ * file (`tool/result … has no advertised tool lifecycle`). That is fatal, not
+ * cosmetic — the session stops opening. So the writer enforces the rule here,
+ * where every result passes:
+ *
+ * - the first result for a call is an append, linked to the call's sequence;
+ * - a later result for the same call is the same answer refined (live terminal
+ *   output, a late provider update). It is written as a replacement of the
+ *   current result node, carrying the first result's non-content fields
+ *   verbatim — the live append path only accepts a content-only change;
+ * - a result with no call behind it is dropped. `onOrphan` names it so the
+ *   caller can report the loss: one call's output missing beats a file that
+ *   never loads again.
  */
 export function makeContentWriter(append: SessionAppend, onOrphan?: (callId: string) => void): ContentWriter {
   // Keyed by turn as well as call id: turn numbers restart, so a call id reused
-  // in a later turn must not pick up an earlier turn's sequence number.
+  // in a later turn must not pick up an earlier turn's sequence number. Step is
+  // deliberately not part of the key — a spawned run's card opens in its birth
+  // segment and settles in a later one, and the log pairs the two by call id.
   const answers = new Map<PairKey, number>()
+  const results = new Map<PairKey, WrittenResult>()
+  const guarded = withLifecycleGuard(append)
 
   return (events): number | undefined => {
     let written: number | undefined
@@ -197,36 +229,54 @@ export function makeContentWriter(append: SessionAppend, onOrphan?: (callId: str
         continue
       }
       if (event.type === CALL) {
-        const { seq } = append(CALL, event.payload)
+        const written = guarded(CALL, event.payload)
         const { turn, callId } = parts(event.payload)
-        if (callId !== undefined) answers.set(key(turn, callId), seq)
+        if (written !== undefined && callId !== undefined) answers.set(key(turn, callId), written.seq)
         continue
       }
       if (event.type === RESULT) {
         const { turn, callId } = parts(event.payload)
-        const seq = callId === undefined ? undefined : answers.get(key(turn, callId))
-        if (callId !== undefined && seq === undefined) onOrphan?.(callId)
-        append(RESULT, event.payload, {
-          surfaceOp: 'append',
-          ...(seq === undefined ? {} : { sourceEventSeqs: [seq] }),
+        if (callId === undefined) continue
+        const pair = key(turn, callId)
+        const callSeq = answers.get(pair)
+        if (callSeq === undefined) {
+          onOrphan?.(callId)
+          continue
+        }
+        const previous = results.get(pair)
+        if (previous === undefined) {
+          const payload = recordOf(event.payload)
+          const written = guarded(RESULT, payload, { surfaceOp: 'append', sourceEventSeqs: [callSeq] })
+          if (written !== undefined) results.set(pair, { seq: written.seq, payload: withoutContent(payload) })
+          continue
+        }
+        const payload = refinedResult(previous.payload, recordOf(event.payload))
+        // An event this writer cannot turn into a content-only refinement is
+        // not written: a real replacement the log will refuse corrupts the
+        // file as surely as a duplicate append.
+        if (payload === undefined) continue
+        const written = guarded(RESULT, payload, {
+          surfaceOp: { op: 'replace', startSeq: previous.seq, endSeq: previous.seq },
+          sourceEventSeqs: [previous.seq],
         })
+        if (written !== undefined) results.set(pair, { seq: written.seq, payload })
         continue
       }
       if (event.type === USER) {
         // The loop's own shape: the message object as it was claimed, with the
         // surface intent. No seq to track — nothing later points at a user
         // message.
-        append(USER, event.payload, { surfaceOp: 'append' })
+        guarded(USER, event.payload, { surfaceOp: 'append' })
         continue
       }
       if (event.type === SYSTEM) {
         // A status note. Shape comes from `systemNoteEvent`; this branch only
         // supplies the surface intent the host requires of message events.
-        append(SYSTEM, event.payload, { surfaceOp: 'append' })
+        guarded(SYSTEM, event.payload, { surfaceOp: 'append' })
         continue
       }
       if (event.type === MESSAGE) {
-        written = append(MESSAGE, event.payload, { surfaceOp: 'append' }).seq
+        written = guarded(MESSAGE, event.payload, { surfaceOp: 'append' })?.seq
       }
       // Anything else is not ours to write: a guessed shape corrupts the
       // transcript in a way nothing downstream can detect.
@@ -237,6 +287,46 @@ export function makeContentWriter(append: SessionAppend, onOrphan?: (callId: str
 
 function key(turn: number, callId: string): PairKey {
   return `${turn}:${callId}`
+}
+
+/**
+ * A result this writer has already logged for a call: the sequence of its
+ * current surface node, and its envelope (content stripped — the content of a
+ * later version replaces it, and keeping every output in memory for the life of
+ * the session buys nothing). Every later result for the call refines against
+ * this envelope, so the replacement differs from its target in the content
+ * alone.
+ */
+type WrittenResult = {
+  seq: number
+  payload: Record<string, unknown>
+}
+
+function recordOf(value: unknown): Record<string, unknown> {
+  return (typeof value === 'object' && value !== null ? value : {}) as Record<string, unknown>
+}
+
+/** The result payload with its message content cleared: the part a refinement keeps verbatim. */
+function withoutContent(payload: Record<string, unknown>): Record<string, unknown> {
+  const message = payload['message']
+  if (typeof message !== 'object' || message === null) return payload
+  return { ...payload, message: { ...(message as Record<string, unknown>), content: [] } }
+}
+
+/**
+ * The next version of an answer: the previous payload with only the message
+ * content taken from the new one. The log's surface replacement rule allows a
+ * tool result to change its content and nothing else — turn, step, message id,
+ * source and error all stay as first written.
+ */
+function refinedResult(previous: Record<string, unknown>, next: Record<string, unknown>): Record<string, unknown> | undefined {
+  const priorMessage = previous['message']
+  const nextMessage = next['message']
+  if (typeof priorMessage !== 'object' || priorMessage === null) return undefined
+  if (typeof nextMessage !== 'object' || nextMessage === null) return undefined
+  const content = (nextMessage as Record<string, unknown>)['content']
+  if (!Array.isArray(content)) return undefined
+  return { ...previous, message: { ...(priorMessage as Record<string, unknown>), content } }
 }
 
 /**
