@@ -20,7 +20,10 @@ import { makeContentWriter, makeToolOnlyWriter } from '../src/content-writer.ts'
 interface Call {
   type: string
   payload: unknown
-  intent?: { surfaceOp?: string; sourceEventSeqs?: readonly number[] }
+  intent?: {
+    surfaceOp?: 'append' | { readonly op: 'replace'; readonly startSeq: number; readonly endSeq: number }
+    sourceEventSeqs?: readonly number[]
+  }
 }
 
 function session() {
@@ -38,7 +41,7 @@ function session() {
 
 const message = { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'hi' }] } }
 const call = { turn: 1, step: 1, callId: 'c1', name: 'bash', arguments: { command: 'ls' } }
-const result = { turn: 1, step: 1, message: { role: 'tool', toolCallId: 'c1', content: [{ type: 'text', text: 'ok' }] } }
+const result = { turn: 1, step: 1, message: { id: 'result-1', role: 'tool', toolCallId: 'c1', content: [{ type: 'text', text: 'ok' }] } }
 
 describe('makeContentWriter', () => {
   it('marks a message as a surface append', () => {
@@ -79,13 +82,17 @@ describe('makeContentWriter', () => {
     expect(answer.intent?.sourceEventSeqs).toEqual([2])
   })
 
-  it('still writes a result whose call it cannot find', () => {
-    // Dropping it would lose the agent's output; an unpaired result is better
-    // than a missing one, and the reason is reported by the caller.
+  it('drops a result whose call it cannot find', () => {
+    // The log refuses the whole file over one result with no lifecycle
+    // (`tool/result … has no advertised tool lifecycle`). Losing this output is
+    // the smaller loss, and the caller is told which call lost it.
     const target = session()
-    makeContentWriter(target.append)([{ type: 'tool/result', payload: result }])
-    expect(target.calls).toHaveLength(1)
-    expect(target.calls[0]!.intent).toEqual({ surfaceOp: 'append' })
+    const orphans: string[] = []
+    makeContentWriter(target.append, callId => orphans.push(callId))([
+      { type: 'tool/result', payload: result },
+    ])
+    expect(target.calls).toEqual([])
+    expect(orphans).toEqual(['c1'])
   })
 
   it('reports which result had no call behind it', () => {
@@ -95,6 +102,52 @@ describe('makeContentWriter', () => {
       { type: 'tool/result', payload: result },
     ])
     expect(orphans).toEqual(['c1'])
+  })
+
+  it('refines a repeated result instead of appending a second one', () => {
+    // One call answers once; a second append is what made the session
+    // unloadable. Live output updates arrive as content-only replacements of
+    // the result already on the log.
+    const target = session()
+    const write = makeContentWriter(target.append)
+    write([{ type: 'tool/call', payload: call }])
+    write([{ type: 'tool/result', payload: result }])
+    write([{
+      type: 'tool/result',
+      payload: {
+        ...result,
+        message: {
+          ...result.message,
+          id: 'later-message',
+          content: [{ type: 'text', text: 'ok, more' }],
+        },
+      },
+    }])
+    const writes = target.calls.filter(c => c.type === 'tool/result')
+    expect(writes).toHaveLength(2)
+    expect(writes[0]!.intent).toEqual({ surfaceOp: 'append', sourceEventSeqs: [1] })
+    // Replacement targets the current result node and rewrites exactly it.
+    expect(writes[1]!.intent).toEqual({
+      surfaceOp: { op: 'replace', startSeq: 2, endSeq: 2 },
+      sourceEventSeqs: [2],
+    })
+    // Only the content may change: the message id stays the first one's, or
+    // the live append path refuses the replacement.
+    expect(writes[1]!.payload).toMatchObject({
+      message: { id: 'result-1', role: 'tool', toolCallId: 'c1', content: [{ type: 'text', text: 'ok, more' }] },
+    })
+  })
+
+  it('chains replacements onto the newest result node', () => {
+    const target = session()
+    const write = makeContentWriter(target.append)
+    write([{ type: 'tool/call', payload: call }])
+    write([{ type: 'tool/result', payload: result }])
+    write([{ type: 'tool/result', payload: { ...result, message: { ...result.message, content: [{ type: 'text', text: 'a' }] } } }])
+    write([{ type: 'tool/result', payload: { ...result, message: { ...result.message, content: [{ type: 'text', text: 'ab' }] } } }])
+    const writes = target.calls.filter(c => c.type === 'tool/result')
+    expect(writes[2]!.intent?.surfaceOp).toEqual({ op: 'replace', startSeq: 3, endSeq: 3 })
+    expect(writes[2]!.payload).toMatchObject({ message: { content: [{ type: 'text', text: 'ab' }] } })
   })
 
   it('skips an event type it does not know', () => {
@@ -132,12 +185,13 @@ describe('makeContentWriter', () => {
 
   it('stops pairing after a new turn starts', () => {
     // Turn numbers restart per turn, so a call id reused later must not pick up
-    // an earlier turn's sequence number.
+    // an earlier turn's sequence number — and a result with no call of its own
+    // turn is the orphan the log refuses, so it is dropped.
     const target = session()
     const write = makeContentWriter(target.append)
     write([{ type: 'tool/call', payload: { ...call, callId: 'c1', turn: 1 } }])
     write([{ type: 'tool/result', payload: { ...result, message: { ...result.message, toolCallId: 'c1' }, turn: 2 } }])
-    expect(target.calls.find(c => c.type === 'tool/result')!.intent?.sourceEventSeqs).toBeUndefined()
+    expect(target.calls.filter(c => c.type === 'tool/result')).toEqual([])
   })
 })
 

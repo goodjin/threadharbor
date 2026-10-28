@@ -9,6 +9,7 @@
 
 import { claudeDialect, codexDialect } from '@threadharbor/dsh-acp-agent'
 import { describe, expect, it } from 'vitest'
+import type { SurfaceIntent } from '../src/content-writer.ts'
 import { makeContentWriter, UNDELIVERED } from '../src/content-writer.ts'
 import { promptContent, AcpTurnRunner } from '../src/runner.ts'
 import type { AcpClientPort } from '../src/runner.ts'
@@ -35,9 +36,9 @@ function fakeClient() {
 
 /** A turn context whose writer lands on a recording session, like the real wiring. */
 function turnWithWriter() {
-  const appends: { type: string; payload: unknown; intent?: { surfaceOp?: string; sourceEventSeqs?: readonly number[] } }[] = []
+  const appends: { type: string; payload: unknown; intent?: SurfaceIntent }[] = []
   let seq = 0
-  const append = (type: string, payload: unknown, intent?: { surfaceOp?: string; sourceEventSeqs?: readonly number[] }) => {
+  const append = (type: string, payload: unknown, intent?: SurfaceIntent) => {
     appends.push({ type, payload, ...(intent === undefined ? {} : { intent }) })
     seq += 1
     return { seq }
@@ -181,11 +182,25 @@ describe('makeContentWriter — 未送达行', () => {
     const message = { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'answer' }] } }
     const returned = target.turn.write([marker, { type: 'assistant/message', payload: message }])
 
-    expect(target.appends.map(entry => entry.type)).toEqual(['tool/call', 'tool/result', 'assistant/message'])
-    expect(target.appends[0]!.intent).toBeUndefined()
-    const result = target.appends[1]!
-    expect(result.intent).toEqual({ surfaceOp: 'append', sourceEventSeqs: [1] })
+    // The announcement is not decoration: the load-time validator admits a
+    // `tool/call` only after an assistant message advertises the same id, name
+    // and arguments. Without it the whole session refuses to open.
+    expect(target.appends.map(entry => entry.type)).toEqual([
+      'assistant/message', 'tool/call', 'tool/result', 'assistant/message',
+    ])
+    const announcement = target.appends[0]!
+    expect(announcement.intent).toEqual({ surfaceOp: 'append' })
+    const announced = (announcement.payload as { message: { content: { id: string; name: string; arguments: string }[] } }).message.content[0]!
+    const call = target.appends[1]!
+    expect(call.intent).toBeUndefined()
+    expect(call.payload).toMatchObject({
+      callId: announced.id,
+      name: announced.name,
+      arguments: announced.arguments,
+    })
+    const result = target.appends[2]!
+    expect(result.intent).toEqual({ surfaceOp: 'append', sourceEventSeqs: [2] })
     expect((result.payload as { message: { isError?: boolean } }).message.isError).toBe(true)
-    expect(returned).toBe(3)
+    expect(returned).toBe(4)
   })
 })

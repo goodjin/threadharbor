@@ -17,6 +17,8 @@ import type { AcpDialect, AcpFrame, RawOutputBlock, ToolCall } from '@threadharb
 import {
   RawOutputAggregator, assistantMessageEvent, mapToolName, projectToolCallAnnouncementCall, toolCallAnnouncementEvent, toolCallEvent, toolResultMessageEvent, userMessageEvent,
 } from '@threadharbor/dsh-acp-agent'
+import type { GuardedAppend } from './session-lifecycle.ts'
+import { withLifecycleGuard } from './session-lifecycle.ts'
 import { AcpAssistantStream } from './stream.ts'
 
 /** 子会话 id 前缀：与 DSH 自身 minted 的会话 id 区分开，且来源一眼可见。 */
@@ -66,6 +68,10 @@ type ChildState = {
   readonly tools: Map<string, ToolCall>
   /** 已落过公告的工具 callId，避免同一张卡随更新帧重复。 */
   readonly writtenCards: Set<string>
+  /** 已落过结果的工具 callId：终态帧可能重复到达，而一条调用只允许一条结果。 */
+  readonly writtenResults: Set<string>
+  /** 子会话的 append，过保存时的工具生命周期校验。 */
+  readonly append: GuardedAppend
   settled: boolean
 }
 
@@ -150,9 +156,9 @@ export class SubagentSessions {
     if (!state.writtenCards.has(resolvedId)) {
       try {
         const announcement = projectToolCallAnnouncementCall(folded, { turn: TURN, step: STEP, dialect: this.dialect })
-        if (announcement !== undefined) state.child.append(announcement.type, announcement.payload, { surfaceOp: 'append' })
+        if (announcement !== undefined) state.append(announcement.type, announcement.payload, { surfaceOp: 'append' })
         const call = toolCallEvent({ turn: TURN, step: STEP, callId: resolvedId, name: mapToolName(this.dialect, folded.name), arguments: JSON.stringify(folded.arguments) })
-        state.child.append(call.type, call.payload)
+        if (state.append(call.type, call.payload) === undefined) return
       } catch {
         return
       }
@@ -166,8 +172,10 @@ export class SubagentSessions {
       turn: TURN, step: STEP, callId: resolvedId, text: folded.output, isError,
       ...(isError ? { error: { name: 'tool', code: folded.status ?? 'failed', ...(folded.title === undefined ? {} : { reason: folded.title }) } } : {}),
     })
+    if (state.writtenResults.has(resolvedId)) return
     try {
-      state.child.append(result.type, result.payload, { surfaceOp: 'append' })
+      const written = state.append(result.type, result.payload, { surfaceOp: 'append' })
+      if (written !== undefined) state.writtenResults.add(resolvedId)
     } catch {
       // 写失败不打断帧流。
     }
@@ -192,6 +200,19 @@ export class SubagentSessions {
     if (tail !== undefined) this.writeRawBlock(state, tail)
     // 遥测帧按种类在终态前汇总：子会话也是「回合末」才把它们摆出来。
     for (const block of state.aggregator.summary({ turn: TURN, step: STEP })) this.writeRawBlock(state, block)
+    // 已落卡但始终没等到结果帧的调用：宿主校验要求每条 call 在 step/end 前
+    // 结算，否则整份子会话日志拒绝加载。空输出也是合法结果，补一条。
+    for (const callId of state.writtenCards) {
+      if (state.writtenResults.has(callId)) continue
+      try {
+        const closed = toolResultMessageEvent({ turn: TURN, step: STEP, callId, text: '', isError: false })
+        if (state.append(closed.type, closed.payload, { surfaceOp: 'append' }) !== undefined) {
+          state.writtenResults.add(callId)
+        }
+      } catch {
+        // 写失败不打断收尾；这条日志的其它内容照常落盘。
+      }
+    }
     const content = [
       ...(state.thought.length > 0 ? [{ type: 'reasoning' as const, text: state.thought.join('') }] : []),
       ...(state.text.length > 0 ? [{ type: 'text' as const, text: state.text.join('') }] : []),
@@ -204,15 +225,18 @@ export class SubagentSessions {
       model: this.dialect.id,
       stream: state.stream.records(),
     })
-    const messageSeq = state.child.append(message.type, message.payload, { surfaceOp: 'append' }).seq
-    state.child.append('step/end', { turn: TURN, step: STEP })
-    state.child.append('turn/end', {
+    const messageSeq = state.append(message.type, message.payload, { surfaceOp: 'append' })?.seq
+    state.append('step/end', { turn: TURN, step: STEP })
+    state.append('turn/end', {
       turn: TURN,
       reason: status === 'completed'
         ? { kind: 'completed' }
         : { kind: 'error', error: { message: output ?? '子代理未完成', code: 'SUBAGENT_FAILED' } },
     })
-    if (!state.stream.finished) state.stream.settle('assistant/message', () => messageSeq)
+    if (!state.stream.finished) {
+      if (messageSeq === undefined) state.stream.abandon()
+      else state.stream.settle('assistant/message', () => messageSeq)
+    }
   }
 
   /** 父回合结束：只放弃实时流，子会话保持开放（不写 turn/end）。 */
@@ -253,11 +277,12 @@ export class SubagentSessions {
       const announcement = toolCallAnnouncementEvent({
         turn: TURN, step: STEP, callId, name, arguments: args, provider: PROVIDER, model: this.dialect.id,
       })
-      state.child.append(announcement.type, announcement.payload, { surfaceOp: 'append' })
+      state.append(announcement.type, announcement.payload, { surfaceOp: 'append' })
       const call = toolCallEvent({ turn: TURN, step: STEP, callId, name, arguments: args })
-      const callSeq = state.child.append(call.type, call.payload).seq
+      const started = state.append(call.type, call.payload)
+      if (started === undefined) return
       const result = toolResultMessageEvent({ turn: TURN, step: STEP, callId, text: block.content, isError: false })
-      state.child.append(result.type, result.payload, { surfaceOp: 'append', sourceEventSeqs: [callSeq] })
+      state.append(result.type, result.payload, { surfaceOp: 'append', sourceEventSeqs: [started.seq] })
     } catch {
       // 写失败不打断帧流：这条块丢了，其余内容照旧。
     }
@@ -273,12 +298,13 @@ export class SubagentSessions {
     if (existing !== undefined) return existing
     const child = this.host.openChild(parentSessionId, prefixed)
     if (child === undefined) return undefined
-    child.append('turn/start', { turn: TURN })
-    child.append('step/start', { turn: TURN, step: STEP })
+    const append = withLifecycleGuard((type, payload, intent) => child.append(type, payload, intent))
+    append('turn/start', { turn: TURN })
+    append('step/start', { turn: TURN, step: STEP })
     const prompt = task !== '' ? task : label
     if (prompt !== '') {
       const message = userMessageEvent(TURN, prompt)
-      child.append(message.type, message.payload, { surfaceOp: 'append' })
+      append(message.type, message.payload, { surfaceOp: 'append' })
     }
     this.host.appendParent(parentSessionId, 'subagent/catalog', {
       version: CATALOG_VERSION,
@@ -306,6 +332,8 @@ export class SubagentSessions {
       aggregator: new RawOutputAggregator(),
       tools: new Map<string, ToolCall>(),
       writtenCards: new Set<string>(),
+      writtenResults: new Set<string>(),
+      append,
       settled: false,
     }
     this.states.set(prefixed, state)

@@ -120,19 +120,41 @@ describe('SubagentSessions', () => {
     expect(types.indexOf('tool/call')).toBeLessThan(messageAt)
   })
 
-  it('子代理工具帧的同一 callId 只落一张卡，不随更新帧重复', () => {
+  it('子代理工具帧的同一 callId 只落一张卡、一条结果，不随更新帧重复', () => {
     const { host, children } = fakeHost()
     const sessions = new SubagentSessions(host, codexDialect)
     sessions.spawn('parent', 'child-1', 'Calc', 'task')
     const frame = (status: string) => ({
       jsonrpc: '2.0', method: 'session/update',
-      params: { update: { sessionUpdate: status === 'in_progress' ? 'tool_call' : 'tool_call_update', toolCallId: 'c1', status, rawInput: { command: 'ls' } } },
+      params: { update: { sessionUpdate: status === 'in_progress' ? 'tool_call' : 'tool_call_update', toolCallId: 'c1', status, rawInput: { command: 'ls' }, rawOutput: { formatted_output: 'ok' } } },
     })
     sessions.toolFrame('parent', 'child-1', frame('in_progress'))
     sessions.toolFrame('parent', 'child-1', frame('in_progress'))
     sessions.toolFrame('parent', 'child-1', frame('completed'))
-    const calls = children.get('acp-sub-child-1')!.appends.filter(e => e.type === 'tool/call')
-    expect(calls).toHaveLength(1)
+    // 同一终态帧重复到达：第二条 result 会让子会话日志整份拒绝加载。
+    sessions.toolFrame('parent', 'child-1', frame('completed'))
+    const appends = children.get('acp-sub-child-1')!.appends
+    expect(appends.filter(e => e.type === 'tool/call')).toHaveLength(1)
+    expect(appends.filter(e => e.type === 'tool/result')).toHaveLength(1)
+  })
+
+  it('终态时给始终没回结果的工具卡补一条空结果，子会话才能加载', () => {
+    // 宿主校验要求 step/end 前每条 call 都已结算；空输出也是合法结果。
+    // 少这一条，子会话日志会整份拒绝加载。
+    const { host, children } = fakeHost()
+    const sessions = new SubagentSessions(host, codexDialect)
+    sessions.spawn('parent', 'child-1', 'Calc', 'task')
+    sessions.toolFrame('parent', 'child-1', {
+      jsonrpc: '2.0', method: 'session/update',
+      params: { update: { sessionUpdate: 'tool_call', toolCallId: 'c1', title: 'Run', kind: 'execute', status: 'in_progress', rawInput: { command: 'ls' } } },
+    })
+    sessions.terminal('parent', 'child-1', 'completed', undefined)
+    const appends = children.get('acp-sub-child-1')!.appends
+    const types = appends.map(e => e.type)
+    expect(types.filter(type => type === 'tool/result')).toHaveLength(1)
+    const resultAt = types.indexOf('tool/result')
+    expect(resultAt).toBeLessThan(types.lastIndexOf('assistant/message'))
+    expect(resultAt).toBeLessThan(types.indexOf('step/end'))
   })
 
   it('既无 id 也无增量：零写入', () => {

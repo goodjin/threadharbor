@@ -24,6 +24,7 @@ import { claudeDialect, cursorDialect, grokDialect, projectStepContent } from '@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import type { StepDecisionLike, TurnContext } from '../src/dispatch.ts'
+import type { SurfaceIntent } from '../src/content-writer.ts'
 import { makeContentWriter } from '../src/content-writer.ts'
 import type { ContentWriter } from '../src/content-writer.ts'
 import { AcpTurnRunner } from '../src/runner.ts'
@@ -71,7 +72,7 @@ const answerFrame: AcpFrame = {
 }
 
 /** What the session log received, in arrival order. */
-type Append = { type: string; payload: Record<string, unknown>; intent?: { surfaceOp?: string; sourceEventSeqs?: readonly number[] } }
+type Append = { type: string; payload: Record<string, unknown>; intent?: SurfaceIntent }
 
 /**
  * A recording writer whose appends can be made to refuse, once each.

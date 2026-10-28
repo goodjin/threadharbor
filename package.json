@@ -64,6 +64,7 @@
     "release:candidate": "node scripts/release-promote.mjs candidate",
     "release:promote": "node scripts/release-promote.mjs promote",
     "release:status": "node scripts/release-promote.mjs status",
+    "sessions:check": "node scripts/repair-session-log.mjs --scan ~/.dsh/sessions ~/.dsh-web/sessions",
     "check": "npm run typecheck && npm run test && npm run build"
   },
   "devDependencies": {

@@ -1423,7 +1423,7 @@ describe('GatewayConversations — 停止宽限窗口内的新请求', () => {
       sessionId => (sessionId === 's1' ? { turn: 11, step: 1 } : undefined),
       undefined,
       () => (_result: unknown, at: { turn: number; step: number }) => [
-        { type: 'tool/result', payload: { turn: at.turn, step: at.step, callId: 'c1', message: { role: 'tool', callId: 'c1', content: [{ type: 'text', text: 'ok' }] } } },
+        { type: 'tool/result', payload: { turn: at.turn, step: at.step, message: { id: 'r1', role: 'tool', toolCallId: 'c1', content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: 'c1' } } } },
       ],
     )
     await gate.answer('s1', 'acp-grok', { messages: [user('查一下')] }, { chunk: () => {} })

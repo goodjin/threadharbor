@@ -38,12 +38,19 @@ const bashOpenFrame: AcpFrame = {
   }),
 }
 
-type Append = { type: string; payload: Record<string, unknown> }
+type Append = {
+  type: string
+  payload: Record<string, unknown>
+  intent?: {
+    surfaceOp?: 'append' | { readonly op: 'replace'; readonly startSeq: number; readonly endSeq: number }
+    sourceEventSeqs?: readonly number[]
+  }
+}
 
 function recordingWrite(): { write: ContentWriter; appends: Append[] } {
   const appends: Append[] = []
-  const write = makeContentWriter((type, payload) => {
-    appends.push({ type, payload: payload as Record<string, unknown> })
+  const write = makeContentWriter((type, payload, intent) => {
+    appends.push({ type, payload: payload as Record<string, unknown>, ...(intent === undefined ? {} : { intent }) })
     return { seq: appends.length }
   })
   return { write, appends }
@@ -120,8 +127,7 @@ describe('live terminal output streaming', () => {
     // grok announces the bash tool call.
     h.push([bashOpenFrame])
 
-    // The opening card should be written (as tool/call for the opening,
-    // and tool/result for the terminal result).
+    // The opening card should be written (as tool/call for the opening).
     const toolCalls = h.appends.filter(a => a.type === 'tool/call')
     expect(toolCalls.length).toBeGreaterThanOrEqual(1)
     expect(toolCalls[0]!.payload['name']).toBe('bash')
@@ -131,19 +137,27 @@ describe('live terminal output streaming', () => {
     h.emitTerminalOutput('term-1', 'world\n')
 
     // The card should have been updated with accumulated output.
-    const updates = h.appends.filter(a => a.type === 'tool/result')
-    const hasOutput = updates.some(a => {
-      const payload = a.payload as { message?: { content?: { text?: string }[] } }
-      const text = payload.message?.content?.[0]?.text ?? ''
-      return text.includes('hello')
-    })
-    expect(hasOutput).toBe(true)
+    const results = h.appends.filter(a => a.type === 'tool/result')
+    expect(results.some(a => JSON.stringify(a.payload).includes('hello'))).toBe(true)
+    // Exactly one result append: the log pairs a call with one result, and a
+    // second append is the corruption that makes a session refuse to load.
+    expect(results.filter(a => a.intent?.surfaceOp === 'append')).toHaveLength(1)
+    // Every later update rewrites that same result node in place.
+    const refinements = results.filter(a => typeof a.intent?.surfaceOp === 'object')
+    expect(refinements.length).toBeGreaterThanOrEqual(1)
+    for (const refinement of refinements) {
+      expect(refinement.intent?.surfaceOp).toMatchObject({ op: 'replace' })
+      expect(refinement.intent?.sourceEventSeqs).toHaveLength(1)
+    }
+    // The newest version carries the full output.
+    const texts = refinements.map(a => JSON.stringify(a.payload))
+    expect(texts.some(text => text.includes('hello ') && text.includes('world'))).toBe(true)
 
     h.release()
     await h.run()
   })
 
-  it('settles the bash card on terminal exit', async () => {
+  it('settles the bash card on terminal exit without a second append', async () => {
     const h = harness()
     await h.started()
 
@@ -155,8 +169,34 @@ describe('live terminal output streaming', () => {
     const result = await h.run()
 
     expect(result.end.kind).toBe('completed')
-    // The card should be settled (a tool/result should exist).
     const results = h.appends.filter(a => a.type === 'tool/result')
     expect(results.length).toBeGreaterThanOrEqual(1)
+    expect(results.filter(a => a.intent?.surfaceOp === 'append')).toHaveLength(1)
+  })
+
+  it('treats the provider\'s late outcome frame as a refinement, not a new result', async () => {
+    const h = harness()
+    await h.started()
+
+    h.push([bashOpenFrame])
+    h.emitTerminalOutput('term-1', 'done\n')
+    h.emitTerminalExit('term-1', 0)
+    // grok relays its own completion after the terminal exit.
+    h.push([{
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: update({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-bash-1',
+        status: 'completed',
+        rawOutput: 'done\n',
+      }),
+    }])
+
+    h.release()
+    await h.run()
+
+    const results = h.appends.filter(a => a.type === 'tool/result')
+    expect(results.filter(a => a.intent?.surfaceOp === 'append')).toHaveLength(1)
   })
 })
