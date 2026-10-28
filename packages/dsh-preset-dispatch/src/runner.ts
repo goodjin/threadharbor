@@ -33,6 +33,18 @@ export type AcpClientPort = {
   onFrame(handler: (frame: AcpFrame) => void): void
 
   /**
+   * Called when a terminal produces new output (grok's bash delegation).
+   * The runner maps terminalId → toolCallId by command match and synthesizes
+   * a tool_call_update frame so the UI shows live output.
+   */
+  onTerminalOutput?: (handler: (terminalId: string, data: string) => void) => void
+  /**
+   * Called when a terminal process exits. The runner settles the tool card
+   * with the exit code.
+   */
+  onTerminalExit?: (handler: (terminalId: string, exitCode: number) => void) => void
+
+  /**
    * The agent's `authenticate` round-trip, when it has one.
    *
    * Cursor must authenticate (after an interactive `agent login`) between
@@ -617,6 +629,14 @@ export class AcpTurnRunner {
    */
   private liveCards: LiveCards | undefined
 
+  /**
+   * Maps a terminalId (from `terminal/create`) to the toolCallId of the
+   * `run_terminal_command` that spawned it. Populated when the client fires
+   * `onTerminalOutput` — the runner finds the matching tool call by command
+   * string in `liveCards.tools` and records the binding.
+   */
+  private readonly terminalToTool = new Map<string, string>()
+
   /** 子代理影子会话：端口缺席时整个能力不存在（零写入）。 */
   private readonly subagents: SubagentSessions | undefined
   /** 当前外部回合对应的 DSH 会话 id（子会话目录事件写在它名下）。 */
@@ -690,6 +710,15 @@ export class AcpTurnRunner {
     // arriving between turns must not be dropped, and a handler installed
     // mid-turn misses whatever arrived before it.
     this.client.onFrame(frame => this.observe(frame))
+    // Terminal streaming: grok delegates shell execution to the client. When
+    // output arrives, map terminalId → toolCallId by command match and
+    // synthesize a tool_call_update frame so the UI shows live output.
+    if (client.onTerminalOutput !== undefined) {
+      client.onTerminalOutput((terminalId: string, data: string) => this.handleTerminalOutput(terminalId, data))
+    }
+    if (client.onTerminalExit !== undefined) {
+      client.onTerminalExit((terminalId: string, exitCode: number) => this.handleTerminalExit(terminalId, exitCode))
+    }
   }
 
   /** Take one frame: keep it queued; the pump does everything else. */
@@ -1168,6 +1197,105 @@ export class AcpTurnRunner {
       return
     }
     live.settled.add(callId)
+  }
+
+  /**
+   * Map a terminalId to a toolCallId by finding the most recent run_terminal_command
+   * (or bash) call that hasn't settled yet. Called on first output from a new terminalId.
+   */
+  private resolveTerminalTool(terminalId: string): string | undefined {
+    const existing = this.terminalToTool.get(terminalId)
+    if (existing !== undefined) return existing
+    const live = this.liveCards
+    if (live === undefined) return undefined
+    // Search liveCards.tools for a bash or run_terminal_command call.
+    // The grok dialect's foldTool keeps the native name; the projection
+    // maps it to 'bash' via toolNameMap, but liveCards.tools stores the
+    // folded call with the native name.
+    let bestId: string | undefined
+    for (const [id, call] of live.tools) {
+      if ((call.name === 'bash' || call.name === 'run_terminal_command') && !live.settled.has(id)) {
+        bestId = id
+      }
+    }
+    if (bestId !== undefined) {
+      this.terminalToTool.set(terminalId, bestId)
+    }
+    return bestId
+  }
+
+  /**
+   * Handle streaming output from a terminal: accumulate output into the call
+   * and write a tool/result event so the UI updates live.
+   *
+   * We construct the result event directly rather than going through
+   * projectToolResultFrame, because that function gates on completed/failed
+   * status and we want to stream partial output while the call is still running.
+   */
+  private handleTerminalOutput(terminalId: string, data: string): void {
+    if (this.aborted) return
+    const toolCallId = this.resolveTerminalTool(terminalId)
+    if (toolCallId === undefined) return
+    const live = this.liveCards
+    if (live === undefined) return
+    const call = live.tools.get(toolCallId)
+    if (call === undefined) return
+    // Accumulate output into the call.
+    const existingOutput = call.output ?? ''
+    call.output = existingOutput + data
+    // Write a tool/result event with the accumulated output so the UI updates.
+    // This matches the shape that toolResultEvent produces in the projection.
+    const event = projectToolResultFrame(
+      {
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: this.sessionId ?? '',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId,
+            status: 'completed',
+            content: [{ type: 'content', content: { type: 'text', text: call.output } }],
+          },
+        },
+      },
+      { turn: live.turn, step: live.step, dialect: this.options.dialect!, carried: call },
+    )
+    if (event === undefined) return
+    try {
+      live.write([event])
+    } catch {
+      // A rejected append stays eligible for the turn-end projection.
+    }
+  }
+
+  /**
+   * Handle terminal process exit: synthesize a completed tool_call_update frame.
+   */
+  private handleTerminalExit(terminalId: string, exitCode: number): void {
+    if (this.aborted) return
+    const toolCallId = this.resolveTerminalTool(terminalId)
+    if (toolCallId === undefined) return
+    const live = this.liveCards
+    if (live === undefined) return
+    const call = live.tools.get(toolCallId)
+    if (call === undefined) return
+    call.status = 'completed'
+    const frame: AcpFrame = {
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        sessionId: this.sessionId ?? '',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId,
+          status: 'completed',
+          content: [{ type: 'content', content: { type: 'text', text: call.output ?? '' } }],
+        },
+      },
+    }
+    this.writeToolFrame(frame)
+    this.terminalToTool.delete(terminalId)
   }
 
   /**

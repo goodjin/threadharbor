@@ -93,6 +93,19 @@ export class AcpClient {
 
   onNotification: (frame: AcpFrame) => void = () => {}
   onPermissionRequest: (request: PermissionRequest) => Promise<PermissionDecision> = async () => ({ outcome: 'reject' })
+  /**
+   * Called when a terminal produces new output, so the host can stream it to the
+   * UI instead of waiting for the agent to relay it in a tool_call_update.
+   *
+   * The terminalId is the one returned by `terminal/create`; the host maps it
+   * to a tool call by whatever means it likes (command match, ordering, etc.).
+   */
+  onTerminalOutput: ((terminalId: string, data: string) => void) | undefined = undefined
+  /**
+   * Called when a terminal process exits, so the host can settle the tool card
+   * without waiting for the agent's tool_call_update.
+   */
+  onTerminalExit: ((terminalId: string, exitCode: number) => void) | undefined = undefined
 
   /**
    * Serves the agent's ask-the-user request, when this client can put the

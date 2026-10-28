@@ -136,4 +136,62 @@ describe('TerminalService', () => {
     resolveExit?.(7)
     await expect(waiting).resolves.toEqual({ exitCode: 7, signal: null })
   })
+
+  it('calls onOutput as new output arrives', async () => {
+    const outputs: string[] = []
+    let pushData: ((s: string) => void) | undefined
+    const service = new TerminalService({
+      spawn: () => ({
+        output: () => '',
+        exited: new Promise<number>(() => {}),
+        kill: () => {},
+        onData: (cb) => { pushData = cb },
+      }),
+    })
+    service.onOutput = (_terminalId, data) => outputs.push(data)
+    const created = await service.create({ command: 'echo hello' })
+
+    pushData?.('hello ')
+    pushData?.('world\n')
+    expect(outputs).toEqual(['hello ', 'world\n'])
+  })
+
+  it('calls onExit when the process finishes', async () => {
+    let exitInfo: { terminalId: string; exitCode: number } | undefined
+    let resolveExit: ((code: number) => void) | undefined
+    const service = new TerminalService({
+      spawn: () => ({
+        output: () => '',
+        exited: new Promise<number>(resolve => { resolveExit = resolve }),
+        kill: () => {},
+      }),
+    })
+    service.onExit = (info) => { exitInfo = info }
+    const created = await service.create({ command: 'true' })
+
+    resolveExit?.(42)
+    // Give the microtask queue a chance to deliver the callback.
+    await new Promise(r => setTimeout(r, 0))
+    expect(exitInfo).toEqual({ terminalId: created.terminalId, exitCode: 42 })
+  })
+
+  it('does not call onOutput after release', async () => {
+    const outputs: string[] = []
+    let pushData: ((s: string) => void) | undefined
+    const service = new TerminalService({
+      spawn: () => ({
+        output: () => '',
+        exited: Promise.resolve(0),
+        kill: () => {},
+        onData: (cb) => { pushData = cb },
+      }),
+    })
+    service.onOutput = (_id, data) => outputs.push(data)
+    const created = await service.create({ command: 'echo hi' })
+
+    pushData?.('before release')
+    await service.release(created.terminalId)
+    pushData?.('after release')
+    expect(outputs).toEqual(['before release'])
+  })
 })
