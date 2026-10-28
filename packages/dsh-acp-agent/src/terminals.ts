@@ -24,6 +24,8 @@ export type SpawnedCommand = {
   /** Settles with the exit code once the process ends. */
   readonly exited: Promise<number>
   kill(): void
+  /** Register a callback for new output chunks. Optional — commands that don't stream omit it. */
+  onData?(cb: (chunk: string) => void): void
 }
 
 export type TerminalSpec = {
@@ -68,6 +70,10 @@ function spawnInShell(spec: TerminalSpec): SpawnedCommand {
   const collect = (chunk: Buffer | string) => { buffer += String(chunk) }
   child.stdout.on('data', collect)
   child.stderr.on('data', collect)
+  let dataCb: ((chunk: string) => void) | undefined
+  const notify = (chunk: Buffer | string) => { dataCb?.(String(chunk)) }
+  child.stdout.on('data', notify)
+  child.stderr.on('data', notify)
   return {
     output: () => buffer,
     exited: new Promise<number>(resolve => {
@@ -77,6 +83,7 @@ function spawnInShell(spec: TerminalSpec): SpawnedCommand {
       child.on('error', () => resolve(127))
     }),
     kill: () => { child.kill('SIGTERM') },
+    onData: (cb) => { dataCb = cb },
   }
 }
 
@@ -84,6 +91,8 @@ type Entry = {
   readonly command: SpawnedCommand
   /** Once the process has ended, the exit status; undefined while running. */
   exitStatus?: TerminalExitStatus
+  /** Set to false on release to suppress further onOutput callbacks. */
+  active: boolean
 }
 
 export class TerminalService {
@@ -91,6 +100,11 @@ export class TerminalService {
   private nextId = 1
 
   private readonly options: { readonly spawn?: (spec: TerminalSpec) => SpawnedCommand }
+
+  /** Called whenever a terminal produces new output. */
+  onOutput?: (terminalId: string, data: string) => void
+  /** Called when a terminal process exits. */
+  onExit?: (info: { terminalId: string; exitCode: number }) => void
 
   constructor(options: { readonly spawn?: (spec: TerminalSpec) => SpawnedCommand } = {}) {
     this.options = options
@@ -106,7 +120,19 @@ export class TerminalService {
   async create(spec: TerminalSpec): Promise<{ terminalId: string }> {
     const command = this.options.spawn?.(spec) ?? spawnInShell(spec)
     const terminalId = `term-${this.nextId++}`
-    const entry: Entry = { command }
+    const entry: Entry = { command, active: true }
+    // Wire streaming output to the onOutput callback.
+    if (command.onData !== undefined && this.onOutput !== undefined) {
+      const cb = this.onOutput
+      const id = terminalId
+      command.onData((chunk) => { if (entry.active) cb(id, chunk) })
+    }
+    // Wire process exit to the onExit callback.
+    if (this.onExit !== undefined) {
+      const cb = this.onExit
+      const id = terminalId
+      void command.exited.then(exitCode => cb({ terminalId: id, exitCode }))
+    }
     void command.exited.then(exitCode => { entry.exitStatus = { exitCode, signal: null } })
     this.terminals.set(terminalId, entry)
     // Only a terminal id. ACP's CreateTerminalResponse names no output field,
@@ -135,7 +161,8 @@ export class TerminalService {
   }
 
   async release(terminalId: string): Promise<Record<never, never>> {
-    this.require(terminalId)
+    const entry = this.terminals.get(terminalId)
+    if (entry !== undefined) entry.active = false
     this.terminals.delete(terminalId)
     return {}
   }

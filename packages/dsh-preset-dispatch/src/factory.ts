@@ -193,7 +193,14 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
       const client = new AcpClient(transport, dialect)
       // grok delegates shell execution to the client. Without this the agent
       // waits for a terminal that never appears, and the turn hangs silently.
-      client.terminals = new TerminalService()
+      const terminalService = new TerminalService()
+      client.terminals = terminalService
+      terminalService.onOutput = (terminalId, data) => {
+        client.onTerminalOutput?.(terminalId, data)
+      }
+      terminalService.onExit = (info) => {
+        client.onTerminalExit?.(info.terminalId, info.exitCode)
+      }
       client.onPermissionRequest = async request => await deps.answerPermission(request)
       // Cursor sends two blocking custom methods that stall the turn if left
       // unanswered. Answer them with a benign outcome so the agent proceeds;
@@ -298,6 +305,8 @@ export function adaptClient(client: AcpClient, dialect: AcpDialect): AcpClientPo
     request: (method, params) => client.request(method, params),
     notify: (method, params) => { client.notify(method, params) },
     onFrame: handler => { client.onFrame(frame => { handler(frame) }) },
+    onTerminalOutput: (handler) => { client.onTerminalOutput = handler },
+    onTerminalExit: (handler) => { client.onTerminalExit = handler },
     // Cursor must authenticate (after an interactive `agent login`) before
     // session/new; qoder derives its own method id (CN and international builds
     // differ) from the initialize reply and authenticates only when
