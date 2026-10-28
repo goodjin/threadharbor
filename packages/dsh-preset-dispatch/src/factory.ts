@@ -253,7 +253,8 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
         ...(deps.subagents === undefined ? {} : { subagents: deps.subagents }),
       })
       // 外部 agent 在回合中途长时间不吐 ACP 帧时，读它自己的日志判断是否还在
-      // 干活（2026-10-27 codex 压缩上下文；2026-10-28 qoder 大仓等模型回答）。
+      // 干活（2026-10-27 codex 压缩上下文；2026-10-28 qoder 长工具执行——模型
+      // 请求期间思考帧照常流，不发帧的是工具在跑的那段）。
       // 只给接了这种日志信号的 agent 接这层：codex 读 ~/.codex/logs_2.sqlite，
       // qoder 读 <config>/logs/sessions/.../segments/*.jsonl。别的 agent 没有
       // 这个库，接上也只会是空操作。
