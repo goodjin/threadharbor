@@ -226,26 +226,31 @@ params.toolCall = { toolCallId, status, title, kind, rawInput, content,
 
 ## 静默看门狗与日志进度信号
 
-Qoder 在大仓里干活时，工具结果落地后它要等模型的下一次回答，这一等常常超过两分钟，
-而它在等的时候不吐任何 ACP 帧——在外面看与「卡死」一模一样。网关的静默看门狗
-（`stallMs`，默认 120 秒）会把它这一轮杀掉（2026-10-28 桌面版现场：会话
-`a655a45d`，`ACP_STALLED`，静默 120s，进程其实刚发出新的 `model.request`）。
+Qoder 执行长工具（下载/构建/测试）期间**一个 ACP 帧都不发**——模型请求期间思考帧
+照常流，不发帧的是工具在跑的那段，在外面看与「卡死」一模一样。网关的静默看门狗
+（`stallMs`，默认 120 秒）会把这一轮杀掉（2026-10-28 桌面版现场：会话 `a655a45d`，
+一个 python 测速跑了两分钟，被 qoder 自己的 Bash 超时终止后 5 毫秒，我们的看门狗
+跟进——两个 120 秒定时器的赛跑，回合本来马上要继续下一轮）。
 
 两道防线：
 
-1. **`cordis.patch.yml` 给 `acp-qoder` 配 `stallMs: 300000`**（5 分钟），与 `acp-codex`
-   同款放宽，理由一致。
+1. **`cordis.patch.yml` 给 `acp-qoder` 配 `stallMs: 300000`**（5 分钟）：长工具执行
+   不发帧的静默常超过 2 分钟；放宽后 qoder 自己的工具超时先解决战斗，回合不死。
 2. **接了 Qoder 自己的日志进度探针**（`agent-progress.ts` 的 `qoderProgressProbe`）：
    读 `<QODERCN_CONFIG_DIR>/logs/sessions/<project>/<sessionId>/segments/*.jsonl`
    （按 mtime 取最新一段；`<sessionId>` 就是 DSH 会话 id），认 `turn.started` /
    `loop.iteration.*` / `model.request.started` / `model.response.completed` / `tool.*`
    为进展；`attachment.*` / `hook.*` / `session.phase.*` 这类每轮刷上百行的当噪音。
-   帧静默时（Qoder 在等模型回答 / 压缩上下文）仍能看见它在推进，看门狗据此让路——
-   与 codex 读 `~/.codex/logs_2.sqlite` 同一套机制，只是日志格式不同（JSONL 段日志
-   vs SQLite）。
+   帧静默时（工具在跑）仍能看见它在推进，看门狗据此让路——与 codex 读
+   `~/.codex/logs_2.sqlite` 同一套机制，只是日志格式不同（JSONL 段日志 vs SQLite）。
 
-> stderr 尾部若出现 `-32601 Method not found` 这类 JSON-RPC 错误码，说明进程已经崩了，
-> 看门狗的收场文案会点明「进程疑似已崩溃」，不再只说「静默 Ns」。
+> 关于死因标注：只有**整轮没有任何 agent 输出**且 stderr 尾部有 `-32xxx` /
+> 「method not found」时，收场文案才点明「疑似进程在启动阶段已崩溃」。qoder 启动期
+> 会把不认的 `initialized` 通知记成一条无害的 `-32601` 警告，它常驻 stderr 尾部——
+> 出过帧之后的静默不能拿它当死因。
+
+> 思考过程的显示无需额外做：模型请求期间 qoder 流式发思考帧，DSH 已经实时展示；
+> 「从日志提取思考补显」没有增量（思考窗口已显示，工具窗口没有思考可提取）。
 
 ## 噪声帧与私有扩展
 

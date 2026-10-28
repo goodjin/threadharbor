@@ -483,6 +483,8 @@ export class GatewayConversations {
     // closing results are the stop listener's job, written before this.
     let answerEnded = false
     let warned = false
+    // 这轮回答里 agent 是否产出过任何活动（帧/文字/工具/日志进展），一见即锁存。
+    let sawActivity = false
     let lastActivityWall = Date.now()
     let lastSeenFrameAt = entry.session?.diagnostics().lastFrameAt ?? Date.now()
     // 日志层的最后读数与已提示过的种类：压缩上下文时心跳每 30 秒一条，提示只写一次。
@@ -497,18 +499,20 @@ export class GatewayConversations {
       return lines.length === 0 ? '（无）' : lines.join('\n')
     }
     /**
-     * stderr 尾部里有没有「进程已经崩了」的证据。
+     * stderr 尾部里有没有「进程在启动阶段就崩了」的证据。
      *
-     * 静默有两种：进程还活着、只是没进展（该等）；进程已经自己崩了（不该再等它，
-     * 杀掉是确认而非补救）。看门狗只看帧，分不清这两者，于是 2026-10-28 qoder
-     * 那次它明明已在 JSON-RPC 握手上抛 `-32601 Method not found`、根本出不了帧，
-     * 消息却只说「静默 120s」——用户看不出它早死了。这句话不参与判定，只把「真
-     * 崩了」点出来：认 `-32xxx` JSON-RPC 错误码与「method not found」字样。
+     * 只有「整轮没有任何 agent 输出」时才允许断言：JSON-RPC 错误一旦进过
+     * stderr，就会一直留在尾部（保留 20 行、会话存活期不清空），而 qoder 的
+     * `initialized` 通知不认是启动期的无害警告（2026-10-28：它之后照常跑了
+     * 13 轮）——出过帧之后再拿它说「崩溃」就是误导。没有这层门槛，几乎每次
+     * qoder 静默都会被误标。真正的握手即死（零输出 + stderr 有 `-32xxx` /
+     * 「method not found」）才值得点明。
      */
     const crashNote = (): string => {
+      if (sawActivity) return ''
       const tail = stderrTailNow().join('\n')
       if (/-[3]\d{4}/.test(tail) || /method not found/i.test(tail)) {
-        return '进程疑似已崩溃（agent 输出尾部有 JSON-RPC 错误）；'
+        return '整轮没有任何 agent 输出，疑似进程在启动阶段已崩溃（stderr 有 JSON-RPC 错误）；'
       }
       return ''
     }
@@ -580,7 +584,7 @@ export class GatewayConversations {
       settle(value)
     }
     /**
-     * 有活动：两个期限都重新计时。
+     * 重计两个期限——不含「见过活动」的锁存。交付时挂钟与每次活动共用这一段。
      *
      * 「总上限」不是墙上时钟——它是「最多连续安静多久」。agent（或它派出去的
      * 子代理）每报一次东西，这个钟就重新开始，所以一个一直在忙的回合不会因为
@@ -588,14 +592,21 @@ export class GatewayConversations {
      * 后一边轮询一边等了 26 分钟，30 分钟的固定上限到点把主回合按超时杀掉，
      * 5 个子代理的结果全部丢失——那时它明明还在上报。
      */
-    const noteActivity = (): void => {
-      if (settled) return
+    const rearm = (): void => {
       lastActivityWall = Date.now()
       if (timeoutMs > 0) {
         if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
         deadlineTimer = setTimeout(fireStall, timeoutMs)
       }
       armTotal()
+    }
+    const noteActivity = (): void => {
+      if (settled) return
+      // 这轮见过 agent 的任何一次活动（帧/文字/工具写/日志进展）——crashNote
+      // 靠它区分「从没干过活」和「干着干着安静了」。交付时的初始挂钟不算活动：
+      // 那是我方动作，不是 agent 的产出。
+      sawActivity = true
+      rearm()
     }
     /**
      * 挂总上限的钟——先清掉旧的再挂新的。
@@ -802,7 +813,9 @@ export class GatewayConversations {
       }
       if (request.signal?.aborted === true) stopped()
       else request.signal?.addEventListener('abort', stopped, { once: true })
-      noteActivity()
+      // 交付时挂钟：只重计期限，不算「agent 出过活动」——那会废掉 crashNote
+      // 的「整轮零输出」门槛（见 rearm/noteActivity 的分工）。
+      rearm()
       run.then(
         value => {
           runSettled = true

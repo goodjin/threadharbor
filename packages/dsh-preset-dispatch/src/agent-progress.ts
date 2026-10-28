@@ -222,9 +222,10 @@ export function codexProgressProbe(options?: { readonly source?: ProgressSource 
 // qoder: 读它自己的会话段日志，判断它是否还在推进。
 //
 // 为什么需要第二只看门狗（qoder 这一版）：codex 在回合中途压缩上下文时一个 ACP
-// 帧都不发，qoder 在大仓里干活时同样可能长时间不吐帧（工具结果落地后等模型
-// 下一次回答，2026-10-28 桌面版现场：静默到点被杀，而它的段日志里每一轮都在
-// `model.request.started` / `tool.requested` 之间跳）。帧静默不等于 agent 静默。
+// 帧都不发；qoder 执行长工具（下载/构建/测试）期间同样一个帧都不发——模型请求
+// 期间思考帧照常流，不发帧的是工具在跑的那段（2026-10-28 桌面版现场：一个
+// python 测速跑了两分钟被杀，静默期段日志里只有 `tool.shell.started`，没有
+// `model.*`）。帧静默不等于 agent 静默。
 //
 // 与 codex 的差别只在「日志长什么样、怎么读」：codex 读 SQLite，qoder 读
 // `<config>/logs/sessions/<project>/<sessionId>/segments/<ts>.jsonl`——
