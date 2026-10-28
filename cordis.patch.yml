@@ -331,6 +331,14 @@
               # （packages/dsh-acp-agent/src/spawn-args.ts），这里不重复。
               # 国际站把 command 指向 `qoder`/`qodercli`；本机是 CN 版。
               command: /Users/good/.local/bin/qoderclicn
+              # 静默看门狗的期限放宽到 5 分钟（默认 120 秒）。
+              #
+              # 2026-10-28 桌面版现场：qoder 在大仓里干活时，工具结果落地后它要
+              # 等模型的下一次回答；这一等常常超过两分钟，而它在等的时候不吐任何
+              # 帧——在外面看与「卡死」一模一样，120 秒的看门狗就把这一轮杀了
+              # （会话 a655a45d：ACP_STALLED，静默 120s，进程其实刚发出新的
+              # model.request）。与 acp-codex 同款放宽，理由一致。
+              stallMs: 300000
               # 登录走 `qoderclicn login`，凭据留在 CLI 自己的
               # ~/.qoder-cn 配置目录。无头部署可改用 PAT：
               # 宿主进程设 QODERCN_PERSONAL_ACCESS_TOKEN 即自动登录（官方

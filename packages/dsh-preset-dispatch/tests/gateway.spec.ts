@@ -982,6 +982,32 @@ describe('GatewayConversations — 帧静默超时、提示与诊断包', () => 
     }
   })
 
+  it('静默收场带死因：stderr 有 JSON-RPC 错误码时点明进程已崩溃', async () => {
+    vi.useFakeTimers()
+    try {
+      const fake = fakeSession()
+      fake.answerWith(() => new Promise<GatewayStepEnd>(() => {}))
+      fake.diagnosticsState.lastFrameAt = Date.now()
+      // 2026-10-28 qoder 现场：握手抛 -32601，进程出不了帧，看门狗杀掉时要点明「已崩溃」。
+      fake.diagnosticsState.stderrTail = [
+        'Error handling notification { jsonrpc: \'2.0\', method: \'initialized\', params: {} }',
+        '{ code: -32601, message: \'"Method not found": initialized\', data: { method: \'initialized\' } }',
+      ]
+      const gate = new GatewayConversations(async () => fake.session, undefined, undefined, undefined, () => ({ stallMs: 3_000 }))
+      const chunks: GatewayChunk[] = []
+      const outcome = await Promise.race([
+        gate.answer('s1', 'acp-qoder', { messages: [user('崩了')], position }, { chunk: c => { chunks.push(c) } }).then(() => 'resolved'),
+        vi.advanceTimersByTimeAsync(10_000).then(() => 'still-hanging'),
+      ])
+      expect(outcome).toBe('resolved')
+      const finish = chunks.at(-1) as { reason: { kind: string; failure?: { code?: string; message?: string } } }
+      expect(finish.reason.failure?.code).toBe('ACP_STALLED')
+      expect(finish.reason.failure?.message).toContain('进程疑似已崩溃')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('stderr 行不算进展：诊断时间戳持续前移，静默照常触发', async () => {
     vi.useFakeTimers()
     try {
