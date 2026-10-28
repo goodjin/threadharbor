@@ -496,6 +496,22 @@ export class GatewayConversations {
       const lines = stderrTailNow().slice(-5).map(line => (line.length > 200 ? `${line.slice(0, 200)}…` : line))
       return lines.length === 0 ? '（无）' : lines.join('\n')
     }
+    /**
+     * stderr 尾部里有没有「进程已经崩了」的证据。
+     *
+     * 静默有两种：进程还活着、只是没进展（该等）；进程已经自己崩了（不该再等它，
+     * 杀掉是确认而非补救）。看门狗只看帧，分不清这两者，于是 2026-10-28 qoder
+     * 那次它明明已在 JSON-RPC 握手上抛 `-32601 Method not found`、根本出不了帧，
+     * 消息却只说「静默 120s」——用户看不出它早死了。这句话不参与判定，只把「真
+     * 崩了」点出来：认 `-32xxx` JSON-RPC 错误码与「method not found」字样。
+     */
+    const crashNote = (): string => {
+      const tail = stderrTailNow().join('\n')
+      if (/-[3]\d{4}/.test(tail) || /method not found/i.test(tail)) {
+        return '进程疑似已崩溃（agent 输出尾部有 JSON-RPC 错误）；'
+      }
+      return ''
+    }
     /** 外部 agent 自己的委托运行（子代理 / 后台任务）还开着几个。 */
     const delegatedLive = (): number => entry.session?.diagnostics().liveDelegatedRuns ?? 0
     /**
@@ -528,13 +544,13 @@ export class GatewayConversations {
     const fireStall = (): void => {
       const silentForMs = Date.now() - lastActivityWall
       const state = stateText()
-      this.report(`acp gateway: session ${sessionId} answer stalled — no agent activity for ${String(silentForMs)}ms (limit ${String(timeoutMs)}ms)${state === '' ? '' : `; last state: ${state}`}${delegatedNote()} — ending the turn as error`)
+      this.report(`acp gateway: session ${sessionId} answer stalled — no agent activity for ${String(silentForMs)}ms (limit ${String(timeoutMs)}ms)${state === '' ? '' : `; last state: ${state}`}${delegatedNote()}${crashNote()} — ending the turn as error`)
       controller.abort()
       done({
         end: {
           kind: 'error',
           error: {
-            message: `外部 agent 静默 ${String(Math.round(silentForMs / 1000))}s 无进展，已自动停止并重开新会话。${state === '' ? '' : `${state}。`}${delegatedNote()}进程处置：已终止；agent 输出尾部：\n${tailLines()}`,
+            message: `外部 agent 静默 ${String(Math.round(silentForMs / 1000))}s 无进展，已自动停止并重开新会话。${crashNote()}${state === '' ? '' : `${state}。`}${delegatedNote()}进程处置：已终止；agent 输出尾部：\n${tailLines()}`,
             code: 'ACP_STALLED',
           },
         },

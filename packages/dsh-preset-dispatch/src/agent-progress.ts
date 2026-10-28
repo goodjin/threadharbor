@@ -11,7 +11,7 @@
  * 一律当「没有这层信号」处理，绝不影响回合本身。
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -97,7 +97,12 @@ export function classifyProgressRow(row: ProgressRow): { key: string; label: str
 }
 
 /** A probe over an injected source; tests drive it with in-memory rows. */
-export function createProgressProbe(source: ProgressSource): ProgressProbe {
+export type ProgressRowClassifier = (row: ProgressRow) => { key: string; label: string } | undefined
+
+export function createProgressProbe(
+  source: ProgressSource,
+  classify: ProgressRowClassifier = classifyProgressRow,
+): ProgressProbe {
   const readers = new Map<string, ProgressReader>()
   return {
     read(sessionId) {
@@ -118,7 +123,7 @@ export function createProgressProbe(source: ProgressSource): ProgressProbe {
       // 说明 agent 在干活。
       for (let index = rows.length - 1; index >= 0; index -= 1) {
         const row = rows[index]!
-        const reading = classifyProgressRow(row)
+        const reading = classify(row)
         if (reading !== undefined) return { at: row.at, ...reading }
       }
       return undefined
@@ -211,4 +216,199 @@ export function codexProgressProbe(options?: { readonly source?: ProgressSource 
   const source = options?.source ?? sqliteSource()
   if (source === undefined) return undefined
   return createProgressProbe(source)
+}
+
+// ---------------------------------------------------------------------------
+// qoder: 读它自己的会话段日志，判断它是否还在推进。
+//
+// 为什么需要第二只看门狗（qoder 这一版）：codex 在回合中途压缩上下文时一个 ACP
+// 帧都不发，qoder 在大仓里干活时同样可能长时间不吐帧（工具结果落地后等模型
+// 下一次回答，2026-10-28 桌面版现场：静默到点被杀，而它的段日志里每一轮都在
+// `model.request.started` / `tool.requested` 之间跳）。帧静默不等于 agent 静默。
+//
+// 与 codex 的差别只在「日志长什么样、怎么读」：codex 读 SQLite，qoder 读
+// `<config>/logs/sessions/<project>/<sessionId>/segments/<ts>.jsonl`——
+// 一段一个文件，按 mtime 取最新那段；行是 JSON，带 `ts`（ISO）与 `type`。
+// 分类逻辑（哪些 type 算进展）单独抽出，游标与增量读取复用 createProgressProbe。
+// ---------------------------------------------------------------------------
+
+/** qoder 段日志里算「还在干活」的记录类型；其余当噪音或无关。 */
+const QODER_PROGRESS_TYPES = new Set([
+  'turn.started',
+  'loop.iteration.started',
+  'loop.iteration.finished',
+  'model.request.started',
+  'model.response.completed',
+  'tool.requested',
+  'tool.shell.started',
+  'tool.shell.backgrounded',
+])
+
+/** qoder 段日志行；只取分类与游标需要的字段。 */
+type QoderSegmentRow = {
+  seq?: unknown
+  ts?: unknown
+  type?: unknown
+}
+
+/** ISO 串 → epoch 毫秒；解析失败回 0（排到最旧，不影响判定）。 */
+function qoderRowAt(ts: unknown): number {
+  if (typeof ts !== 'string') return 0
+  const at = Date.parse(ts)
+  return Number.isNaN(at) ? 0 : at
+}
+
+/**
+ * 一段 qoder 段日志的分类器。
+ *
+ * 认不出的类型按「噪音」跳过：新增的 phase 类型（如 attachment/hook 碎念）不该
+ * 把死回合说成活——真进展由 QODER_PROGRESS_TYPES 里那几类明确背书。
+ */
+export function classifyQoderRow(row: ProgressRow): { key: string; label: string } | undefined {
+  let parsed: QoderSegmentRow
+  try {
+    parsed = JSON.parse(row.body) as QoderSegmentRow
+  } catch {
+    return undefined
+  }
+  if (typeof parsed.type !== 'string') return undefined
+  if (!QODER_PROGRESS_TYPES.has(parsed.type)) return undefined
+  const label = qoderLabel(parsed.type)
+  return { key: `qoder:${parsed.type}`, label }
+}
+
+function qoderLabel(type: string): string {
+  switch (type) {
+    case 'turn.started': return 'qoder 正在开始新回合'
+    case 'loop.iteration.started': return 'qoder 正在推进一轮'
+    case 'loop.iteration.finished': return 'qoder 正在收尾一轮'
+    case 'model.request.started': return 'qoder 正在等待模型回答'
+    case 'model.response.completed': return 'qoder 正在生成输出'
+    case 'tool.requested': return 'qoder 正在执行工具'
+    case 'tool.shell.started': return 'qoder 正在跑命令'
+    case 'tool.shell.backgrounded': return 'qoder 正在后台跑命令'
+    default: return `qoder 日志活动：${type}`
+  }
+}
+
+/** qoder 配置目录：官方 `QODERCN_CONFIG_DIR`，缺省本机 `~/.qoder-cn`。 */
+function qoderHome(): string {
+  return process.env['QODERCN_CONFIG_DIR'] ?? join(homedir(), '.qoder-cn')
+}
+
+/** 该会话当前最新一段段日志的路径；会话还没落日志时 undefined。 */
+function newestSegmentPath(sessionId: string): string | undefined {
+  const sessionsRoot = join(qoderHome(), 'logs', 'sessions')
+  if (!existsSync(sessionsRoot)) return undefined
+  // 段日志按 <project>/<sessionId>/segments/<ts>.jsonl 存；project 名是工作目录
+  // 编码，DSH 不知道，只能遍历。会话目录只有一个，命中即停。
+  let projectDirs: string[]
+  try {
+    projectDirs = readdirSync(sessionsRoot)
+  } catch {
+    return undefined
+  }
+  for (const project of projectDirs) {
+    const segmentsDir = join(sessionsRoot, project, sessionId, 'segments')
+    if (!existsSync(segmentsDir)) continue
+    let files: string[]
+    try {
+      files = readdirSync(segmentsDir).filter(name => name.endsWith('.jsonl'))
+    } catch {
+      continue
+    }
+    let newest: { name: string; mtime: number } | undefined
+    for (const name of files) {
+      try {
+        const mtime = statSync(join(segmentsDir, name)).mtimeMs
+        if (newest === undefined || mtime > newest.mtime) newest = { name, mtime }
+      } catch {
+        // 一段刚被删/换名，跳过。
+      }
+    }
+    if (newest !== undefined) return join(segmentsDir, newest.name)
+  }
+  return undefined
+}
+
+/**
+ * 按会话 id 拿 qoder 段日志读取器。
+ *
+ * 首次 read 之前游标停在文件当时的末尾：打开会话就把历史行当「刚刚还在动」，
+ * 看门狗就永远不响——与 codex 同一个坑。段文件在回合进行中会被追加，按字节
+ * 偏移游标增量读；文件被换名（新一轮）时回到新文件从头读。
+ */
+function qoderSegmentSource(): ProgressSource {
+  return sessionId => {
+    const path = newestSegmentPath(sessionId)
+    if (path === undefined) return undefined
+    let cursor = 0
+    let primed = false
+    const read = (): readonly ProgressRow[] => {
+      let text: string
+      try {
+        text = readFileSync(path, 'utf8')
+      } catch {
+        return []
+      }
+      // 文件被换/截断：从新文件头重读，并重新 primed。
+      if (text.length < cursor) {
+        cursor = 0
+        primed = false
+      }
+      // 首次接入：游标停在当时末尾，历史行不算「刚刚还在动」——否则打开会话
+      // 就把十分钟前的旧行当进展，看门狗永远不响（与 codex 同一个坑）。停在
+      // 最后一个换行之后：qoder 段日志每行完整，但停在行尾避免把半行当整行。
+      if (!primed) {
+        const lastNewline = text.lastIndexOf('\n')
+        cursor = lastNewline < 0 ? text.length : lastNewline + 1
+        primed = true
+        if (text.length === cursor) return []
+      }
+      if (text.length === cursor) return []
+      const slice = text.slice(cursor)
+      cursor = text.length
+      const fresh: ProgressRow[] = []
+      let seq = 0
+      for (const line of splitLines(slice)) {
+        if (line.trim() === '') continue
+        let parsed: QoderSegmentRow
+        try {
+          parsed = JSON.parse(line) as QoderSegmentRow
+        } catch {
+          continue
+        }
+        const id = typeof parsed.seq === 'number' ? parsed.seq : seq
+        seq = id + 1
+        fresh.push({ id, at: qoderRowAt(parsed.ts), target: typeof parsed.type === 'string' ? parsed.type : 'qoder', body: line })
+      }
+      return fresh
+    }
+    return { read }
+  }
+}
+
+/** 按行切，保留末尾未完成的半行（下一段再拼）。 */
+function splitLines(text: string): string[] {
+  const out: string[] = []
+  let start = 0
+  for (let index = 0; index < text.length; index += 1) {
+    if (text.charCodeAt(index) === 10) {
+      out.push(text.slice(start, index))
+      start = index + 1
+    }
+  }
+  if (start < text.length) out.push(text.slice(start))
+  return out
+}
+
+/**
+ * qoder 进度探针；宿主环境里没有段日志时返回 undefined。
+ *
+ * `source` 仅供测试注入——生产路径永远走只读段日志。
+ */
+export function qoderProgressProbe(options?: { readonly source?: ProgressSource }): ProgressProbe | undefined {
+  const source = options?.source ?? qoderSegmentSource()
+  if (source === undefined) return undefined
+  return createProgressProbe(source, classifyQoderRow)
 }

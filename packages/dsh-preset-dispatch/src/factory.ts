@@ -30,7 +30,7 @@ import type {
 } from '@threadharbor/dsh-acp-agent'
 import { cwdForOpen } from './registry.ts'
 import type { AcpPresetConfig, AcpSession, AcpSessionFactory, PresetConfig } from './registry.ts'
-import { codexProgressProbe } from './agent-progress.ts'
+import { codexProgressProbe, qoderProgressProbe } from './agent-progress.ts'
 import { AcpTurnRunner } from './runner.ts'
 import type { AcpClientPort } from './runner.ts'
 import type { SubagentSessionHost } from './subagent-sessions.ts'
@@ -252,10 +252,16 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
         ...(deps.resumeOf === undefined ? {} : { resumeOf: dshSessionId => deps.resumeOf!(presetId, dshSessionId) }),
         ...(deps.subagents === undefined ? {} : { subagents: deps.subagents }),
       })
-      // codex 在回合中途压缩上下文时一个帧都不发，它自己的日志却还在跳
-      // （2026-10-27：四分钟零帧，每 30s 一行 compaction）。只给 codex 接这层
-      // 信号：别的 agent 没有这个库，接上也只会是空操作。
-      const progressProbe = preset.agent === 'codex' ? codexProgressProbe() : undefined
+      // 外部 agent 在回合中途长时间不吐 ACP 帧时，读它自己的日志判断是否还在
+      // 干活（2026-10-27 codex 压缩上下文；2026-10-28 qoder 大仓等模型回答）。
+      // 只给接了这种日志信号的 agent 接这层：codex 读 ~/.codex/logs_2.sqlite，
+      // qoder 读 <config>/logs/sessions/.../segments/*.jsonl。别的 agent 没有
+      // 这个库，接上也只会是空操作。
+      const progressProbe = preset.agent === 'codex'
+        ? codexProgressProbe()
+        : preset.agent === 'qoder'
+          ? qoderProgressProbe()
+          : undefined
       return {
         run: async (decision, turn) => await runner.run(decision, turn),
         // The segmented path, passed through with its `first` marker untouched:
