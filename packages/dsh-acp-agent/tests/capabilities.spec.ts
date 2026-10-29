@@ -26,10 +26,13 @@ describe('capabilities', () => {
     expect(codexDialect.capabilities.toolFrameShape).toBe('two_frame')
   })
 
-  it('grok: 认图片、工具帧两段、命令经工具帧', () => {
+  it('grok: 认图片、工具帧两段、命令经工具帧、可重连会话', () => {
     expect(grokDialect.capabilities.acceptsImageContent).toBe(true)
     expect(grokDialect.capabilities.toolFrameShape).toBe('two_frame')
     expect(grokDialect.capabilities.commandVia).toBe('tool_frame')
+    // 2026-10-29 真机探针：同一 serve 内 resume 成功，杀掉 serve 换新进程后
+    // 用旧 sessionId 再 resume 也成功（会话存在 updates.jsonl 里）。
+    expect(grokDialect.capabilities.supportsSessionResume).toBe(true)
   })
 
   it('cursor: 认图片、工具帧有执行中', () => {

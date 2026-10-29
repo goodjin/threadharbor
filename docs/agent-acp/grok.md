@@ -1,6 +1,6 @@
 # grok 的 ACP 对接
 
-> 核对时间：2026-10-09 首测；2026-09-14 补充 `initialize` 能力声明实测；2026-10-22 复测模型写入与图片声明；2026-10-23 复测模型清单与推理档位选项
+> 核对时间：2026-10-09 首测；2026-09-14 补充 `initialize` 能力声明实测；2026-10-22 复测模型写入与图片声明；2026-10-23 复测模型清单与推理档位选项；2026-10-29 实测单进程多会话与 `session/resume`
 > 状态：**本项目已实现并通过实测**。实现见 `packages/dsh-acp-agent/src/dialects/grok.ts`，回归夹具见 `packages/dsh-acp-agent/tests/fixtures/captured-frames.json`。
 
 ## 一句话结论
@@ -133,6 +133,15 @@ grok 不实现草案 #1992，但**确实报告子代理生命周期**，用自�
 三个要点：全部帧挂在**父会话**名下（不像草案用子会话编号标内容帧，grok 不流子会话内容）；方法名是私有的 `_x.ai/session_notification`（方言的 `frameUpdate` 钩子认领它，否则帧进不了投影门）；委派同时还有一次普通的 `spawn_subagent` 工具调用帧——工具卡和子代理卡**并存**，各自如实。
 - **排查时注意**：受限网络环境下 serve 拉不起来（启动时回连 grok.com 被挡，横幅后无声悬挂）——这是之前误判「serve 坏了」的原因，不代表生产故障。
 
+## 一个 `agent serve` 承载多个会话，`session/resume` 跨进程可用（2026-10-29 真机探针）
+
+两件事一起测的，都影响进程模型：
+
+- **多会话**：`initialize` 之后在同一条 WebSocket 上并发两次 `session/new`（不同 cwd），返回两个不同的 `sessionId`，日志各自落在 `~/.grok/sessions/<该项目>/<sessionId>/updates.jsonl`。会话之间按 `sessionId` 寻址——模型选项（`session/set_config_option`）、权限请求、工具帧都带这个字段。
+- **重连**：`session/resume {sessionId, cwd}` 在同一 serve 内成功；把 serve 进程杀掉、另起一个新进程（新端口、新密钥）后，用旧 `sessionId` 再 resume **也成功**。会话状态存在磁盘的 `updates.jsonl` 里，进程重启不丢历史。
+
+所以方言声明 `capabilities.supportsSessionResume: true`。补一句边界：探针验的是空会话的重连，带长历史/工具状态的重连建议在改动进程模型时活测一次。
+
 ## 权限请求
 
 和其他家一样是阻塞式：**必须用 JSON-RPC 响应回同一个 id**。
@@ -153,4 +162,4 @@ grok 不实现草案 #1992，但**确实报告子代理生命周期**，用自�
 
 **已验证**（`tests/live.spec.ts`，需 `THREADHARBOR_LIVE_ACP=1`）：建会话、拿到非空模型列表、拿到回答、工具名含 `run_terminal_command`、工具输出含探针串。
 
-**仍未验证**：失败命令的真实状态字段（已知不可靠）、多命令合并的具体边界、终端子协议之外是否还有别的子协议、`session/load` 加载旧会话。
+**仍未验证**：失败命令的真实状态字段（已知不可靠）、多命令合并的具体边界、终端子协议之外是否还有别的子协议、`session/load` 加载旧会话、带长历史/工具状态的 `session/resume`。

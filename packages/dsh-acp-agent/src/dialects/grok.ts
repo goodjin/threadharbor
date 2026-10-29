@@ -76,6 +76,12 @@ export const grokDialect: AcpDialect = {
   capabilities: {
     cancelsTurns: true,
     acceptsImageContent: true,
+    // `session/resume` is real (measured 2026-10-29): a live session reattached
+    // in its own `agent serve`, and the same session id reattached again in a
+    // freshly spawned serve after the first process was killed. grok keeps the
+    // conversation in `~/.grok/sessions/<项目>/<sessionId>/updates.jsonl`, so a
+    // process restart does not cost the history.
+    supportsSessionResume: true,
     // grok emits an opening frame and a completed frame per call — no
     // in-progress status in between.
     toolFrameShape: 'two_frame',
