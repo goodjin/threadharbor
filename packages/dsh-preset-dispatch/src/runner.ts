@@ -33,6 +33,18 @@ export type AcpClientPort = {
   onFrame(handler: (frame: AcpFrame) => void): void
 
   /**
+   * Claim a session id this runner is entitled to see frames for.
+   *
+   * On a connection shared by several conversations, the broker routes
+   * session-scoped frames by id. The runner's own id is learned from
+   * `session/new`/`session/resume`; a subagent's shadow session id arrives in
+   * the parent's spawn frame — and its frames must reach this runner, not the
+   * one whose conversation happens to be open elsewhere on the connection.
+   * Absent when nothing is shared (the per-session transport delivers all).
+   */
+  claimSession?(sessionId: string): void
+
+  /**
    * Called when a terminal produces new output (grok's bash delegation).
    * The runner maps terminalId → toolCallId by command match and synthesizes
    * a tool_call_update frame so the UI shows live output.
@@ -785,6 +797,8 @@ export class AcpTurnRunner {
     this.observeStatus(frame)
     // 未映射帧先归聚合器：它返回的块必须在本帧自己的写入之前落盘，顺序才对。
     this.observeRawOutput(frame)
+    // 出生帧先认领子会话 id：共享连接上，子代帧只有被认领了才会送达本会话。
+    this.claimSpawnedSession(frame)
     // 出生帧建影子子会话、终态帧收尾；与 spawned 卡片记账互不干扰。
     this.routeSubagentFrame(frame)
     this.trackDelegatedFrame(frame)
@@ -859,6 +873,24 @@ export class AcpTurnRunner {
         // 写失败只丢这一块；回合收尾不受影响。
       }
     }
+  }
+
+  /**
+   * 出生帧里的子会话 id → 向共享连接认领。
+   *
+   * 走 `readSpawnedFrame` 而不是直接读字段：grok 的原生出生帧把 id 放在
+   * `child_session_id`，草案帧放在 `subagentSessionId`，两条形状都只在这里
+   * 归一。认领与「有没有宿主子会话能力包」无关——不建影子会话时，子代帧
+   * 仍要进本回合的帧列表。
+   */
+  private claimSpawnedSession(frame: AcpFrame): void {
+    const dialect = this.options.dialect
+    if (dialect === undefined) return
+    const update = this.frameUpdateOf(frame)
+    if (update === undefined) return
+    const reading = readSpawnedFrame(dialect, update)
+    if (reading === undefined || reading.kind !== 'spawn') return
+    if (reading.call.callId !== '') this.client.claimSession?.(reading.call.callId)
   }
 
   /**
@@ -1379,6 +1411,9 @@ export class AcpTurnRunner {
     const args = recordOf(folded.arguments)
     const task = typeof args['prompt'] === 'string' ? args['prompt'] : ''
     const label = typeof args['agent'] === 'string' && args['agent'] !== '' ? args['agent'] : 'subagent'
+    // This dispatch's child session uses the call id on the wire; claim it so
+    // its frames reach this runner on a shared connection.
+    this.client.claimSession?.(folded.callId)
     if (folded.status === 'completed' || folded.status === 'failed') {
       sessions.terminal(parentId, folded.callId, folded.status === 'completed' ? 'completed' : 'failed', folded.output)
       return
