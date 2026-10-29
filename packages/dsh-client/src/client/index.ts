@@ -61,6 +61,8 @@ import { registerModelLabel } from '../model-label.tsx'
 import { registerSessionIdBar } from '../session-id-bar.ts'
 import { createQuotaPoller, registerQuotaDockPills, routeQuotaFetcher } from '../quota-pill.ts'
 import { registerInterruptedTurnRecovery } from '../interrupted-turn-recovery.ts'
+import { createMarkdownTurnReaders } from '../markdown-turn-sources.ts'
+import { registerMarkdownTurn } from '../markdown-turn.tsx'
 import { HOST_ACCESS_ORIGIN_KEY, HOST_REGISTRY_KEY, HOST_STORE_ENTRY_ID, TAILSCALE_ERROR_KEY, TAILSCALE_PEERS_KEY, TAILSCALE_REFRESHED_KEY, TAILSCALE_REFRESH_KEY, hostRegistry } from '@threadharbor/dsh-host-federation'
 import type { TailscalePeer } from '@threadharbor/dsh-host-federation'
 import { startHostStore } from '../host-store.ts'
@@ -112,8 +114,10 @@ import { createElement } from 'react'
  * 声明的 inject 是 ['sessions','remote','remote.session']，那些读因此落在本入口
  * 头上——少声明一个，真实页面会在占用者里炸（cannot get property
  * "remote.session" without inject），而官方那几处用到它的入口全都声明了它。
+ * `remote.workspaceFiles`：会话区读文本正文走 `workspaceFiles.read`。
+ * 不声明的话，这一读会抛 cannot get property。
  */
-export const inject = ['slots', 'remote', 'remote.settings', 'remote.session', 'uiConversation', 'uiWorkspace', 'sessions', 'locale']
+export const inject = ['slots', 'remote', 'remote.settings', 'remote.session', 'remote.workspaceFiles', 'uiConversation', 'uiWorkspace', 'sessions', 'locale']
 
 // The panel's pieces are one published surface: the verify-build step reads
 // every export under src/client and requires it in the built artifact, and a
@@ -532,6 +536,13 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // turnTail 列表座位（折叠范围之外），命中盲区条件时给一个展开过程按钮，
   // 走聊天存储现成的展开动作。座位由轮次结尾渲染器声明，inject 负责等它。
   ctx.effect(() => registerInterruptedTurnRecovery(seatHost), 'threadharbor: interrupted turn recovery')
+
+  // 这一轮的文本文件在会话区展开：产出和交付的路径来自轮次数据，改动清单
+  // 再向主机要一次摘要。官方改动卡片仍在，点它照旧打开右侧。
+  ctx.effect(
+    () => registerMarkdownTurn(seatHost, createMarkdownTurnReaders(() => readService(ctx, 'remote'))),
+    'threadharbor: markdown turn',
+  )
 
   // GLM 套餐配额胶囊：输入框下方 dock 里、token 用量同一排。配额是账号级
   // 数字，轮询器全浏览器一份（5 分钟一拍，回到页面再补一拍）；数据走宿主侧

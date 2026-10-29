@@ -47,6 +47,20 @@ const KEYS_USED_BY_COMPONENTS: readonly ClientLocaleKey[] = [
   'acpVisibility.error.missing',
   'acpVisibility.error.shape',
   'acpVisibility.error.failed',
+  'markdownTurn.loading',
+  'markdownTurn.error',
+  'markdownTurn.retry',
+  'markdownTurn.truncated',
+  'markdownTurn.collapse',
+  'markdownTurn.expand',
+  'markdownTurn.collapseAria',
+  'markdownTurn.expandAria',
+  'markdownTurn.copy',
+  'markdownTurn.copied',
+  'markdownTurn.code',
+  'markdownTurn.wrap',
+  'markdownTurn.unwrap',
+  'markdownTurn.footnotes',
 ]
 
 /** Every `{name}` placeholder a value carries, in order. */
