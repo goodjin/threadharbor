@@ -31,9 +31,14 @@
  *     task). `spawnToolCallId` joins them on `_meta.cursor.toolCallId`.
  *   - **The model picker is written through `session/set_config_option`**
  *     (`configId: "model"`), the only path Cursor implements.
- *   - **No `session/resume`.** `initialize` advertises `loadSession: true`,
- *     but a `session/resume` probe returns -32601; only `session/load` exists,
- *     which the runner's journal does not use yet.
+ *   - **No `session/resume`; `session/load` reattaches.** A `session/resume`
+ *     probe returns -32601 (2026-09-14, reconfirmed 2026-10-29). `initialize`
+ *     advertises `loadSession: true`, and `session/load` against a persisted
+ *     session succeeds — in the same process and in a fresh one (measured
+ *     2026-10-29; sessions live under `~/.cursor/acp-sessions/<id>/`). The
+ *     load replays the transcript as `session/update` notifications before
+ *     replying, and the reply carries `modes`/`models`/`configOptions` but no
+ *     `sessionId`; the runner drops the replay frames.
  *
  * Models come from `session/new` `.models.availableModels` like codex, but the
  * ids carry a config suffix (`grok-4.7[context=256k,reasoning_effort=high,
@@ -100,6 +105,12 @@ export const cursorDialect: AcpDialect = {
     // dispatch time. The native frames describe the run, so they own the card
     // and the child session; the tool call is only their join key.
     nativeSubagentFrames: true,
+    // `session/resume` answers -32601 (2026-09-14, reconfirmed 2026-10-29), but
+    // `session/load` reattaches a persisted session both on the process that
+    // made it and on a fresh one. The reply carries modes/models/configOptions
+    // and no sessionId; the history replay precedes it (710 of 711 frames
+    // measured), and the runner drops it while the load is in flight.
+    supportsSessionLoad: true,
   },
 
   // The user's pick rides `session/set_config_option` — cursor publishes the

@@ -882,11 +882,90 @@ describe('AcpTurnRunner — resumed external sessions', () => {
 
   it('never attempts a resume for a dialect that does not declare the capability', async () => {
     const client = resumableClient()
-    const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: cursorDialect, resumeOf: () => 'old-s1' })
+    // claude declares neither capability: cursor has since gained load.
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: claudeDialect, resumeOf: () => 'old-s1' })
 
     await runner.run(DECISION, TURN_S1)
 
     expect(client.calls.map(call => call.method)).not.toContain('session/resume')
+    expect(client.calls.map(call => call.method)).not.toContain('session/load')
+  })
+
+  it('cursor 走 session/load 接上旧会话，重放的历史不进本回合', async () => {
+    // cursor 没有 session/resume（回 -32601），只有 session/load；它先把整段
+    // 旧对话作为 session/update 重放，再回执（2026-10-29 实测 710/711 帧）。
+    // 这些帧与实时帧只差一个会话 id，不丢就会当成本回合的回答播出。
+    const client = fakeClient()
+    let emit: (frame: unknown) => void = () => {}
+    client.onFrame = handler => { emit = handler as (frame: unknown) => void }
+    client.request = async (method, params) => {
+      client.calls.push({ method, params })
+      if (method === 'session/new') return { sessionId: 'fresh-cursor' }
+      if (method === 'session/load') {
+        emit({
+          method: 'session/update',
+          params: { sessionId: 'old-cursor', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '重放出来的旧回答' } } },
+        })
+        return { configOptions: [{ id: 'model', category: 'model', currentValue: 'auto', options: [] }] }
+      }
+      if (method === 'session/prompt') return { stopReason: 'end_turn' }
+      return {}
+    }
+    const journal = new Map([['dsh-2', 'old-cursor']])
+    const taken: string[] = []
+    const journaled: string[] = []
+    const runner = new AcpTurnRunner(client, {
+      cwd: '/tmp',
+      dialect: cursorDialect,
+      resumeOf: id => journal.get(id),
+      onExternalSession: (dsh, external) => { journaled.push(`${dsh}→${external}`) },
+      replay: { take: id => { taken.push(id); return '旧对话' } },
+    })
+
+    // 第一回合把 runner 带进 run 模式；第二回合换一个 DSH 会话，触发重开——
+    // 此时重放帧若照常入队，会被立即泵出，正是要防的路径。
+    await runner.run(DECISION, { ...TURN_S1, sessionId: 'dsh-1' })
+    const second = await runner.run(DECISION, { ...TURN_S1, sessionId: 'dsh-2' })
+
+    const order = client.calls.map(call => call.method)
+    expect(order).toContain('session/load')
+    expect(order).not.toContain('session/resume')
+    const load = client.calls.find(call => call.method === 'session/load')!
+    expect(load.params).toEqual({ sessionId: 'old-cursor', cwd: '/tmp', mcpServers: [] })
+    const prompts = client.calls.filter(call => call.method === 'session/prompt')
+    expect((prompts.at(-1)!.params as { sessionId: string }).sessionId).toBe('old-cursor')
+    expect((prompts.at(-1)!.params as { prompt: { text: string }[] }).prompt[0]!.text).toBe('hello')
+    expect(taken).not.toContain('dsh-2')
+    expect(JSON.stringify(second.frames)).not.toContain('重放出来的旧回答')
+    // 新开的会话与 load 接上的会话都记进日志，下一次重开才能再接。
+    expect(journaled).toEqual(['dsh-1→fresh-cursor', 'dsh-2→old-cursor'])
+  })
+
+  it('load 失败退回 session/new，并保留文本重放', async () => {
+    const client = resumableClient()
+    client.request = async (method, params) => {
+      client.calls.push({ method, params })
+      if (method === 'session/load') throw new Error('session not found')
+      if (method === 'session/new') return { sessionId: 's1' }
+      if (method === 'session/prompt') return { stopReason: 'end_turn' }
+      return {}
+    }
+    const runner = new AcpTurnRunner(client, {
+      cwd: '/tmp',
+      dialect: cursorDialect,
+      resumeOf: () => 'old-cursor',
+      replay: { take: () => '旧对话' },
+    })
+
+    await runner.run(DECISION, TURN_S1)
+
+    const order = client.calls.map(call => call.method)
+    expect(order).toContain('session/load')
+    expect(order).not.toContain('session/resume')
+    expect(order).toContain('session/new')
+    const prompt = client.calls.find(call => call.method === 'session/prompt')!
+    expect((prompt.params as { sessionId: string }).sessionId).toBe('s1')
+    expect((prompt.params as { prompt: { text: string }[] }).prompt[0]!.text).toContain('【之前对话】')
   })
 })
 

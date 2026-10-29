@@ -454,6 +454,70 @@ describe('会话停下来的善后', () => {
   })
 })
 
+describe('进程内 journal：重启 agent 后接回同一外部会话', () => {
+  /** A transport that answers every request like a scripted agent would. */
+  function answeringTransport(connections: { sent: { id?: number; method?: string; params?: Record<string, unknown> }[]; closed: boolean }[]): AcpTransport {
+    const record = { sent: [] as { id?: number; method?: string; params?: Record<string, unknown> }[], closed: false }
+    connections.push(record)
+    let line: (frame: string) => void = () => {}
+    return {
+      send: frame => {
+        const parsed = JSON.parse(frame) as { id?: number; method?: string; params?: Record<string, unknown> }
+        record.sent.push(parsed)
+        if (typeof parsed.id !== 'number' || parsed.method === undefined) return
+        const result = parsed.method === 'session/new'
+          ? { sessionId: 'ext-journal' }
+          : parsed.method === 'session/resume'
+            ? { sessionId: parsed.params?.['sessionId'] }
+            : parsed.method === 'session/prompt' ? { stopReason: 'end_turn' } : {}
+        line(JSON.stringify({ jsonrpc: '2.0', id: parsed.id, result }))
+      },
+      onLine: handler => { line = handler },
+      onDeath: () => {},
+      lastFrameAt: () => Date.now(),
+      lastDiagnosticAt: () => 0,
+      stderrTail: () => [],
+      close: () => { record.closed = true },
+    }
+  }
+
+  it('手动重启后同一 DSH 会话走 session/resume，而不是重开新会话', async () => {
+    const connections: { sent: { id?: number; method?: string; params?: Record<string, unknown> }[]; closed: boolean }[] = []
+    let captured: ReadonlyMap<string, AcpPresetBinding> | undefined
+    const context = Object.assign(ctx(), {
+      get: (key: string) => (key === 'sessions'
+        ? { get: () => ({ header: { cwd: '/workspace' } }) }
+        : undefined),
+    })
+    applyAcpPlugin(context, 'acp-grok', { agent: 'grok', url: 'ws://127.0.0.1:2419' }, {
+      install: (_agent, _presetId, _dialect, table) => { captured = table },
+      transport: () => answeringTransport(connections),
+    })
+    context.created({ session: { header: { agentPreset: 'acp-grok' } } })
+    const table = captured ?? new Map<string, AcpPresetBinding>()
+    const runTurn = () => table.get('acp-grok')!.run(
+      { kind: 'enter', messages: [] },
+      { sessionId: 'dsh-1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 },
+    )
+
+    await runTurn()
+    expect(connections).toHaveLength(1)
+    expect(connections[0]!.sent.map(frame => frame.method)).toContain('session/new')
+
+    // The operator restarts the agent: the process and every cached session
+    // are dropped, but the journal this row keeps survives — that is the point.
+    await table.get('acp-grok')!.restart!()
+
+    await runTurn()
+    expect(connections).toHaveLength(2)
+    const methods = connections[1]!.sent.map(frame => frame.method)
+    expect(methods).toContain('session/resume')
+    expect(methods).not.toContain('session/new')
+    const resumed = connections[1]!.sent.find(frame => frame.method === 'session/resume')!
+    expect(resumed.params).toEqual({ sessionId: 'ext-journal', cwd: '/workspace', mcpServers: [] })
+  })
+})
+
 describe('加载路径的模型报告真的进目录（applyAcpPlugin 端到端）', () => {
   /**
    * An agent the takeover can claim, with a real `step` for the installer to

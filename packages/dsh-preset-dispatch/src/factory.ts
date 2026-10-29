@@ -71,11 +71,18 @@ export type FactoryDeps = {
    *
    * Keyed by both because a session that switched presets must not resume into
    * the wrong agent's conversation. The runner turns the answer into one
-   * `session/resume` attempt before any `session/new` (dialect-gated); a
-   * caller without a journal — every deployment today — omits this and opens
-   * exactly as before.
+   * `session/resume` (or `session/load`, per the dialect) attempt before any
+   * `session/new` (dialect-gated); a caller without a journal omits this and
+   * opens exactly as before.
    */
   resumeOf?(presetId: string, dshSessionId: string): string | undefined
+  /**
+   * Journal the external session id an open settled on, fresh or reattached.
+   *
+   * The counterpart of `resumeOf`: the caller stores it so the next open of
+   * this DSH session can reattach instead of starting a new conversation.
+   */
+  onExternalSession?(presetId: string, dshSessionId: string, externalSessionId: string): void
   /**
    * 外部子代理的影子子会话端口。
    *
@@ -275,6 +282,7 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
         dialect,
         ...(deps.onRuntimeModels === undefined ? {} : { onModels: models => { deps.onRuntimeModels!(presetId, models) } }),
         ...(deps.resumeOf === undefined ? {} : { resumeOf: dshSessionId => deps.resumeOf!(presetId, dshSessionId) }),
+        ...(deps.onExternalSession === undefined ? {} : { onExternalSession: (dshSessionId, externalSessionId) => { deps.onExternalSession!(presetId, dshSessionId, externalSessionId) } }),
         ...(deps.subagents === undefined ? {} : { subagents: deps.subagents }),
       })
       // 外部 agent 自己的日志进度信号（选型见 progressProbeFor）。
@@ -538,11 +546,12 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
           routes.add(route)
           const port = adaptClient(client, dialect, {
             request: (method, params) => {
-              // session/resume 的目标 id 发请求时就知道；先认领，回执之前到达的
-              // 帧也不会被当成无人认领。
-              if (method === 'session/resume') {
-                const resumed = (params as { sessionId?: unknown } | null | undefined)?.sessionId
-                if (typeof resumed === 'string') claim(route, resumed)
+              // session/resume / session/load 的目标 id 发请求时就知道；先认领，
+              // 回执之前到达的帧也不会被当成无人认领。cursor 的 load 回执甚至
+              // 不带 sessionId，事后再认领就没有 id 可用。
+              if (method === 'session/resume' || method === 'session/load') {
+                const target = (params as { sessionId?: unknown } | null | undefined)?.sessionId
+                if (typeof target === 'string') claim(route, target)
               }
               const { id, reply } = client.requestWithId(method, params)
               replyOwner.set(id, route)
@@ -565,6 +574,7 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
             ...(opts.primer === undefined ? {} : { primer: opts.primer }),
             ...(opts.replay === undefined ? {} : { replay: opts.replay }),
             ...(opts.resumeOf === undefined ? {} : { resumeOf: opts.resumeOf }),
+            ...(deps.onExternalSession === undefined ? {} : { onExternalSession: (dshSessionId: string, externalSessionId: string) => { deps.onExternalSession!(presetId, dshSessionId, externalSessionId) } }),
             ...(deps.subagents === undefined ? {} : { subagents: deps.subagents }),
             ...(deps.onRuntimeModels === undefined ? {} : { onModels: (models: readonly { id: string; name: string; description?: string }[]) => { deps.onRuntimeModels!(presetId, models) } }),
             ...(opts.stopsTurns && opts.abort !== undefined ? { abort: opts.abort } : {}),

@@ -122,9 +122,18 @@ session/set_config_option { sessionId, configId: "model", value: "<modelId 原�
 
 **旧会话可能存着不带后缀的 id**（2026-10-22 实测）：某个会话落的是 `grok-4.7`，而 cursor 当前可用值是 `grok-4.7[context=256k,reasoning_effort=high,fast=true]`；直接写入会回 `-32602 Invalid model value: grok-4.7`，整个回合失败。本项目在写入前先精确匹配 `value`，再按选项的 `name` 和 `[` 前的基础 id 解析旧值；三者都匹配不上，说明模型列表已经更新、会话里的选择已被淘汰——此时**不再把无效值送给 agent**，回合直接在本地以「模型 … 已不在 agent 当前提供的模型列表中，请重新选择模型」结束。本轮 `session/new` 已把 agent 的最新列表上报到模型目录，用户从刷新后的列表重选即可。**每回合的选择门也读这份最新报告**（不是配置里的静态清单）：agent 新增的模型在 picker 选中后能直接放行；旧 id 交由上面的写入前校验兜底。
 
-### 会话恢复：`session/resume` 不支持
+### 会话恢复：只有 `session/load`，没有 `session/resume`
 
-`initialize` 声明 `loadSession: true`，但 **`session/resume` 探针返回 `-32601`（方法不存在）**，只有 `session/load` 存在。本项目的日志恢复路径用 `session/resume`，所以 Cursor 方言**不能声明 `supportsSessionResume`**；恢复时按文本回灌走，而不是指望 agent 端保留会话。`session/load` 的实际加载行为未测。
+`initialize` 声明 `loadSession: true`，但 **`session/resume` 探针返回 `-32601`（方法不存在）**（2026-09-14 首次、2026-10-29 复测）；只有 `session/load` 存在。所以 Cursor 方言声明的是 `supportsSessionLoad: true`，**不声明 `supportsSessionResume`**。
+
+2026-10-29 真机探针（cursor-agent 2026.10.01-e373342）：
+
+- **同一进程、以及杀掉进程换新的 `agent acp` 之后，`session/load` 都能接上会话**——会话落在 `~/.cursor/acp-sessions/<sessionId>/`，与进程无关。
+- **load 先重放整段旧对话，再回执**：一次实测共 711 条 `session/update`（4 条用户消息、82 条思考、18 条正文、303 个 `tool_call` + 303 个 `tool_call_update`、1 条 `available_commands_update`），其中 710 条在回执之前到达，1 条在之后。
+- **回执不带 `sessionId`**，只带 `modes` / `models` / `configOptions`——所以共享连接上的会话认领必须在**发出 load 请求时**完成，不能等回执。
+- 刚 `session/new` 出来、还没跑过回合的会话 load 会回 “Session not found”；已有历史的会话正常。
+
+本项目的行为：runner 在日志里记着该 DSH 会话的外部 id 时先试 `session/resume`（若方言声明），否则试 `session/load`；load 期间按会话 id **丢弃重放帧**（它们是我们已经有的旧对话，不是本回合的应答），成功则首个 prompt 不再回灌文本；失败（会话被清理、升级）退回 `session/new` + 文本回灌。journal 目前是**进程内**的：手动重启 agent 或 agent 崩溃后能接回，宿主进程重启后仍回退文本回灌（宿主侧持久化未接）。
 
 ## 工具帧（实测）
 
@@ -263,6 +272,8 @@ params.toolCall = { toolCallId, title, kind, status, content }
 
 2026-10-21/22 补测：`_meta.subagents` 的能力开关（四种写法对照）、`subagent_spawned` / `subagent_state_update` 与子会话帧、`task` 工具调用的双发与派发即 `completed`、`session/set_config_option` 切模型、`session/resume → -32601`、三个「通知式」扩展方法按请求到达。
 
+2026-10-29 补测：`session/resume → -32601` 复测；`session/load` 的完整行为（同进程/换进程、711 帧重放与回执顺序、回执无 `sessionId`、同一连接可重复 initialize/authenticate、不同 cwd 的并发 `session/new` 得到不同 id）。
+
 **抓到的原始帧已存为夹具**：`packages/dsh-acp-agent/tests/fixtures/captured-frames.cursor.json`（基础帧）。子代理的双发形状按真机抓帧写进 `tests/subagent-frames.spec.ts` 的 `cursor delegation published twice` 组，泵内去重由 `subagent-wiring.spec.ts`、`mid-turn-tools.spec.ts` 与 `runsteps.spec.ts` 分别钉住。
 
-**未实测**：`cursor/ask_question` / `cursor/create_plan` 的真实触发形状；失败工具的 `status` 取值；`session/load` 加载旧会话的行为；多层委派（子代理再开子代理）。
+**未实测**：`cursor/ask_question` / `cursor/create_plan` 的真实触发形状；失败工具的 `status` 取值；多层委派（子代理再开子代理）；宿主进程重启后的 `session/load`（journal 尚未落盘）。

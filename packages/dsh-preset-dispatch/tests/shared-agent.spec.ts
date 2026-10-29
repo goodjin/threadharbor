@@ -11,12 +11,13 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { grokDialect } from '@threadharbor/dsh-acp-agent'
+import { cursorDialect, grokDialect } from '@threadharbor/dsh-acp-agent'
 import type { AcpTransport } from '@threadharbor/dsh-acp-agent'
 import { makeSessionFactory } from '../src/factory.ts'
 import type { AcpSession } from '../src/registry.ts'
 
 const CONFIG = { presets: { 'acp-grok': { agent: 'grok', url: 'ws://127.0.0.1:2419' } } }
+const CURSOR_CONFIG = { presets: { 'acp-cursor': { agent: 'cursor', command: '/no/such/cursor-agent' } } }
 
 type Wire = AcpTransport & { readonly sent: string[]; receive(frame: unknown): void }
 
@@ -307,6 +308,50 @@ describe('一条连接上的两个会话', () => {
       expect(methods).not.toContain('session/new')
       const prompt = sentFrames(h.transport).find(frame => frame.method === 'session/prompt')
       expect((prompt?.params as { sessionId?: string } | undefined)?.sessionId).toBe('journaled-1')
+    } finally {
+      agent.kill('test over')
+    }
+  }, 20_000)
+
+  it('cursor 的 session/load 在发请求时就认领目标会话：重放丢掉，回执后的帧照常归位', async () => {
+    // cursor 的 load 回执不带 sessionId，而整段历史重放先于回执到达。认领只能
+    // 发生在请求上；否则重放帧被当成无人认领而 HOLD，之后的实时帧也会走丢。
+    const h = harness()
+    const agent = await makeSessionFactory(CURSOR_CONFIG, {
+      answerPermission: async () => ({ outcome: 'allow' }),
+      transport: () => h.transport,
+    }).openShared('acp-cursor')
+    try {
+      const session = await agent.openSession({
+        dshSessionId: 'd1', cwd: '/p1', dialect: cursorDialect, resumeOf: () => 'journaled-cursor',
+      })
+      const run = session.run(decision, turnOf('d1', []) as never)
+      await answerEach(h, method => {
+        if (method === 'initialize' || method === 'authenticate') return { result: {} }
+        return undefined
+      })
+      await waitFor(() => sentFrames(h.transport).some(frame => frame.method === 'session/load'), 2_000)
+      const load = sentFrames(h.transport).find(frame => frame.method === 'session/load')!
+      // 重放先到：属于旧对话，不是这次提问的回答。
+      h.transport.receive(update('journaled-cursor', '重放的旧内容'))
+      h.transport.receive({ jsonrpc: '2.0', id: load.id, result: { configOptions: [] } })
+      await flush()
+      // 回执之后、prompt 之前没有别的合法帧；prompt 已随上面的 flush 发出，
+      // 这一帧是加载完成后的实时内容，必须归这个会话。
+      h.transport.receive(update('journaled-cursor', '加载后的新帧'))
+      await flush()
+      await answerEach(h, method => (method === 'session/prompt' ? { result: { stopReason: 'end_turn' } } : undefined))
+      const result = await run
+
+      const methods = sentFrames(h.transport).map(frame => frame.method)
+      expect(methods).toContain('session/load')
+      expect(methods).not.toContain('session/resume')
+      expect(methods).not.toContain('session/new')
+      const prompt = sentFrames(h.transport).find(frame => frame.method === 'session/prompt')
+      expect((prompt?.params as { sessionId?: string } | undefined)?.sessionId).toBe('journaled-cursor')
+      const frames = JSON.stringify(result.frames)
+      expect(frames).not.toContain('重放的旧内容')
+      expect(frames).toContain('加载后的新帧')
     } finally {
       agent.kill('test over')
     }

@@ -177,16 +177,26 @@ export type RunnerOptions = {
    * session, when one is remembered.
    *
    * A dialect whose capabilities declare `supportsSessionResume` gets one
-   * `session/resume` attempt against that id before any `session/new` — the
-   * agent-side conversation is then reattached as-is, and the first prompt
-   * carries no text replay (the agent still has the history; riding the
-   * transcript would read it to the agent twice). A resume that fails for any
-   * reason falls through to the ordinary open, replay included — an agent that
-   * dropped its sessions must not take the DSH session down with it. Absent,
-   * or naming an id for a dialect without the capability, means open exactly
-   * as before.
+   * `session/resume` attempt against that id before any `session/new`; one that
+   * declares only `supportsSessionLoad` (cursor answers -32601 to resume) gets
+   * `session/load` on the same terms. Either way the agent-side conversation is
+   * reattached as-is, and the first prompt carries no text replay (the agent
+   * still has the history; riding the transcript would read it to the agent
+   * twice). A reattach that fails for any reason falls through to the ordinary
+   * open, replay included — an agent that dropped its sessions must not take the
+   * DSH session down with it. Absent, or naming an id for a dialect without
+   * either capability, means open exactly as before.
    */
   readonly resumeOf?: (dshSessionId: string) => string | undefined
+  /**
+   * The external session id this open settled on, fresh or reattached.
+   *
+   * Reported so the host can journal it: the next open of this DSH session
+   * (after a manual restart, an agent crash) then reattaches server-side
+   * instead of starting a new conversation and replaying text. Absent means
+   * nobody journals; the open proceeds exactly as before.
+   */
+  readonly onExternalSession?: (dshSessionId: string, externalSessionId: string) => void
 }
 
 /** Long enough for a cold process to start, short enough to not strand a turn. */
@@ -549,12 +559,25 @@ export class AcpTurnRunner {
   private dshSessionId: string | undefined
   private opening: Promise<string> | undefined
   /**
-   * The last open reattached a journaled external session (`session/resume`)
-   * rather than opening a fresh one. One turn's worth of state: the first
-   * prompt after a resume must not ride the text replay, and any later open
-   * (a different DSH session, a dropped connection) starts the question over.
+   * The last open reattached a journaled external session (`session/resume` or
+   * `session/load`) rather than opening a fresh one. One turn's worth of state:
+   * the first prompt after a reattach must not ride the text replay, and any
+   * later open (a different DSH session, a dropped connection) starts the
+   * question over.
    */
   private resumedLastOpen = false
+  /**
+   * The session being `session/load`ed: its history replay is the agent
+   * restating a conversation we already have, not this turn's content.
+   *
+   * `session/load` streams the whole transcript as `session/update` before it
+   * replies (710 of 711 frames measured on cursor, 2026-10-29), and those
+   * frames are indistinguishable from a live turn's except by session id. Set
+   * before the request, cleared when the prompt lifecycle begins — nothing else
+   * can legitimately arrive for that session in between, and the queue clear in
+   * `beginPrompt` covers whatever slipped in before it.
+   */
+  private replayOnlySessionId: string | undefined
   /**
    * 帧队列：observe 只入队，泵从队首消费。
    *
@@ -748,6 +771,10 @@ export class AcpTurnRunner {
     // kept talking. Those frames belong to a turn nobody is reading, and
     // projecting them would resurrect text under a turn that ended aborted.
     if (this.aborted) return
+    // `session/load` 的历史重放不是本回合的内容：整个旧对话会先于回执到来，
+    // 照常入队就会被当成这次回答播出，甚至顶掉正在进行的回合。按会话 id 丢弃。
+    if (this.replayOnlySessionId !== undefined
+      && recordOf(recordOf(frame)['params'])['sessionId'] === this.replayOnlySessionId) return
     this.queue.push(frame)
     if (this.promptMode === 'run') {
       // 网关路径：入队后立即泵空。同一 tick 内逐帧处理，实时行为与旧的逐帧
@@ -1113,6 +1140,9 @@ export class AcpTurnRunner {
    */
   private beginPrompt(mode: 'run' | 'steps'): void {
     this.queue.length = 0
+    // 重放守卫只覆盖 open 到回合开始之间：历史帧已随上面的清队丢掉，此后
+    // 同一会话的帧都是这次提问的应答。
+    this.replayOnlySessionId = undefined
     this.frames = []
     this.promptMode = mode
     this.segmenter = mode === 'steps' && this.options.dialect !== undefined
@@ -2143,40 +2173,39 @@ export class AcpTurnRunner {
     // A journaled external session gets one reattach attempt first: when it
     // works, the conversation continues exactly as the agent kept it — same
     // history, same model selection state — and the first prompt rides no text
-    // replay. Anything else (no journal, dialect not measured for resume,
-    // agent-side session gone) opens fresh through the ordinary path below.
+    // replay. Anything else (no journal, dialect not measured for either
+    // method, agent-side session gone) opens fresh through the ordinary path
+    // below. The capability picks the method: cursor implements loading but
+    // answers -32601 to resume.
     this.resumedLastOpen = false
-    const journaled = this.dshSessionId !== undefined && this.options.dialect?.capabilities.supportsSessionResume === true
-      ? this.options.resumeOf?.(this.dshSessionId)
+    const reattachVia = capabilities?.supportsSessionResume === true
+      ? 'session/resume' as const
+      : capabilities?.supportsSessionLoad === true ? 'session/load' as const : undefined
+    const dshSessionId = this.dshSessionId
+    const journaled = reattachVia !== undefined && dshSessionId !== undefined
+      ? this.options.resumeOf?.(dshSessionId)
       : undefined
-    if (journaled !== undefined) {
-      onStage('session/resume')
+    if (journaled !== undefined && reattachVia !== undefined && dshSessionId !== undefined) {
+      onStage(reattachVia)
+      // `session/load` streams the whole transcript before it answers; those
+      // frames restate a conversation we already hold, so they are dropped by
+      // session id while the load is in flight.
+      if (reattachVia === 'session/load') this.replayOnlySessionId = journaled
       try {
-        const resumed = await this.client.request('session/resume', {
+        const reattached = await this.client.request(reattachVia, {
           sessionId: journaled,
           cwd: this.options.cwd,
           mcpServers: [],
         })
         this.resumedLastOpen = true
-        this.appliedModelId = undefined
-        this.appliedEffort = undefined
-        this.modelConfigId = this.options.dialect?.modelConfigId?.(resumed)
-        this.modelConfigValues = configValueAliases(resumed, this.modelConfigId)
-        this.modelWireIds = reportedModelIds(resumed, this.options.dialect)
-        this.currentModelId = reportedCurrentModelId(resumed)
-        this.effortOption = reportedEffortOption(resumed)
-        if (this.options.dialect !== undefined && this.options.onModels !== undefined) {
-          this.options.onModels(this.options.dialect.readModels(resumed))
-        }
-        if (this.options.modeId !== undefined) {
-          onStage('session/set_mode')
-          await this.client.request('session/set_mode', { sessionId: journaled, modeId: this.options.modeId })
-        }
+        await this.adoptSession(reattached, journaled, onStage)
+        this.options.onExternalSession?.(dshSessionId, journaled)
         return journaled
       } catch {
         // The agent-side session is gone or refuses (its own retention, a CLI
         // update, another machine). Fall through: a fresh open plus the text
         // replay is the degraded-but-working path, and has been all along.
+        this.replayOnlySessionId = undefined
       }
     }
     onStage('session/new')
@@ -2196,7 +2225,22 @@ export class AcpTurnRunner {
     if (typeof reply?.sessionId !== 'string') {
       throw new Error('acp session/new returned no sessionId')
     }
-    // A fresh session knows no model selection, whatever the last one had.
+    await this.adoptSession(reply, reply.sessionId, onStage)
+    if (dshSessionId !== undefined) this.options.onExternalSession?.(dshSessionId, reply.sessionId)
+    return reply.sessionId
+  }
+
+  /**
+   * Adopt the model/mode state a session reply reports, then write the
+   * requested mode.
+   *
+   * Shared by the fresh and reattach paths: a fresh `session/new` knows no
+   * model selection whatever the last session had, and `session/resume` /
+   * `session/load` answer with the same modes/models/configOptions shape, so
+   * both reset and re-read it the same way. cursor's load reply carries no
+   * sessionId — the caller already holds the id it loaded.
+   */
+  private async adoptSession(reply: unknown, sessionId: string, onStage: (stage: string) => void): Promise<void> {
     this.appliedModelId = undefined
     this.appliedEffort = undefined
     this.modelConfigId = this.options.dialect?.modelConfigId?.(reply)
@@ -2212,9 +2256,8 @@ export class AcpTurnRunner {
     }
     if (this.options.modeId !== undefined) {
       onStage('session/set_mode')
-      await this.client.request('session/set_mode', { sessionId: reply.sessionId, modeId: this.options.modeId })
+      await this.client.request('session/set_mode', { sessionId, modeId: this.options.modeId })
     }
-    return reply.sessionId
   }
 
   /**

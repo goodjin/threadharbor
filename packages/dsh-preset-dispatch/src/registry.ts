@@ -231,7 +231,8 @@ export type OpenSessionOptions = {
     take(sessionId: string): string | undefined
   }
   /**
-   * A journaled external session id to reattach to (`session/resume`).
+   * A journaled external session id to reattach to (`session/resume`, or
+   * `session/load` for a dialect that only implements loading).
    * When present and the dialect supports it, the runner reattaches instead
    * of opening fresh.
    */
@@ -326,8 +327,9 @@ export type PresetTableOptions = {
   /**
    * A journaled external session id to reattach to, per DSH session.
    *
-   * When present and the dialect supports `session/resume`, the runner
-   * reattaches to the server-side conversation instead of opening fresh.
+   * When present and the dialect supports `session/resume` or
+   * `session/load`, the runner reattaches to the server-side conversation
+   * instead of opening fresh.
    */
   readonly resumeOf?: (dshSessionId: string) => string | undefined
   /**
@@ -379,10 +381,11 @@ export function buildPresetTable(
     const stopsTurns = dialect.capabilities?.cancelsTurns === true
     // One shared agent process per preset, serving all DSH sessions on it.
     //
-    // Each DSH session gets its own ACP session (session/new or session/resume)
-    // on the shared connection, so conversation histories stay isolated. When
-    // the process dies, the shared agent is revived on next use: a fresh process
-    // spawns and all cached sessions reattach via session/resume.
+    // Each DSH session gets its own ACP session (session/new, or the journaled
+    // one via session/resume or session/load) on the shared connection, so
+    // conversation histories stay isolated. When the process dies, the shared
+    // agent is revived on next use: a fresh process spawns and all journaled
+    // sessions reattach.
     const opened = new Map<string, AcpSession>()
     sessions.set(presetId, opened)
     let sharedAgent: SharedAgent | undefined
@@ -433,7 +436,8 @@ export function buildPresetTable(
       restart: async () => {
         // Kill the shared agent and drop all cached sessions. The next turn
         // for any session on this preset will spawn a fresh process and
-        // resume via session/resume (or fall back to text replay).
+        // reattach via session/resume or session/load (or fall back to text
+        // replay).
         if (sharedAgent !== undefined && sharedAgent.alive) {
           sharedAgent.kill('manual restart')
         }
