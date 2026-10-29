@@ -426,14 +426,17 @@ describe('会话停下来的善后', () => {
 
   it('连接死亡的自愈上报走 report，说得出会话和原因', async () => {
     const counters = transportCounter()
-    const said: string[] = []
-    const row = installedRow({ transport: counters.transport, report: message => { said.push(message) } })
+    let saidMessage: string | undefined
+    const row = installedRow({ transport: counters.transport, report: message => { saidMessage = message } })
     row.startTurn('s1').catch(() => {})
     // The death listener is wired once the async open resolves; yield so the
     // die() lands on a session that is actually being watched.
     await new Promise(resolve => setTimeout(resolve, 0))
     row.transports[0]!.die('socket died')
-    expect(said.some(message => message.includes('s1') && message.includes('socket died'))).toBe(true)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(saidMessage).toBeDefined()
+    expect(saidMessage!.includes('s1')).toBe(true)
+    expect(saidMessage!.includes('socket died')).toBe(true)
   })
 
   it('这条行只登记事件监听，不再往上下文写句柄表', () => {

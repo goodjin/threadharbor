@@ -147,7 +147,7 @@ describe('stop wiring — dispatch to runner', () => {
     const agent = new StoppableAgent()
 
     const factory: AcpSessionFactory = {
-      dialectFor: () => ({ id: 'fake', capabilities }) as AcpDialect,
+      dialectFor: () => ({ id: 'fake', capabilities, readModels: () => [], foldTool: () => ({ callId: '', name: '', arguments: {} }), toolOutput: () => '', isContent: () => true, readReplyUsage: () => undefined }) as unknown as AcpDialect,
       open: async (_presetId, options) => {
         const runner = new AcpTurnRunner(client, options)
         return {
@@ -155,6 +155,28 @@ describe('stop wiring — dispatch to runner', () => {
           close: () => {},
           diagnostics: () => ({ lastFrameAt: Date.now(), lastDiagnosticAt: Date.now(), stderrTail: [] }),
           onDead: () => {},
+        }
+      },
+      openShared: async () => {
+        let dead = false
+        return {
+          get alive() { return !dead },
+          openSession: async (opts) => {
+            const runner = new AcpTurnRunner(client, {
+              cwd: opts.cwd,
+              dialect: opts.dialect,
+              ...(opts.abort !== undefined ? { abort: opts.abort } : {}),
+            })
+            return {
+              run: async (decision, turn) => await runner.run(decision, turn),
+              close: () => {},
+              onDead: () => {},
+              diagnostics: () => ({ lastFrameAt: Date.now(), lastDiagnosticAt: Date.now(), stderrTail: [] }),
+            }
+          },
+          kill: () => { dead = true },
+          dropSession: () => {},
+          sessionIds: () => [],
         }
       },
     }
@@ -169,6 +191,7 @@ describe('stop wiring — dispatch to runner', () => {
     // The host's stop, the way the loop makes it: a method call on the agent.
     setTimeout(() => agent.cancel(), 10)
     const end = await p
+
     expect(end.kind).toBe('aborted')
     expect(client.cancelled).toEqual([{ method: 'session/cancel', params: { sessionId: 's1' } }])
   })

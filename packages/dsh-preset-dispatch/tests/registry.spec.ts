@@ -61,6 +61,20 @@ function killableFactory(): AcpSessionFactory & { built: string[]; sessions: Kil
       sessions.push(session)
       return Promise.resolve(session)
     },
+    openShared: async (presetId: string) => {
+      built.push(presetId)
+      return {
+        alive: true,
+        openSession: async () => {
+          const session = killableSession()
+          sessions.push(session)
+          return session
+        },
+        kill: () => {},
+        dropSession: () => {},
+        sessionIds: () => [],
+      }
+    },
   }
 }
 
@@ -76,6 +90,13 @@ describe('buildPresetTable', () => {
     const factory: AcpSessionFactory = {
       dialectFor: (presetId, config) => config.agent === 'native' ? undefined : stubDialect(presetId),
       open: () => Promise.resolve(killableSession()),
+      openShared: async () => ({
+        alive: true,
+        openSession: async () => killableSession(),
+        kill: () => {},
+        dropSession: () => {},
+        sessionIds: () => [],
+      }),
     }
     const table = buildPresetTable({ presets: { dsh: { agent: 'native' }, 'acp-grok': CONFIG.presets['acp-grok'] } }, factory, sessionsRegistry())
     expect(table.has('dsh')).toBe(false)
@@ -109,10 +130,17 @@ describe('buildPresetTable', () => {
     const opened: { presetId: string; modelId?: string; modeId?: string }[] = []
     const factory: AcpSessionFactory = {
       dialectFor: () => stubDialect('x'),
-      open: (presetId, options) => {
-        opened.push({ presetId, ...(options.modelId === undefined ? {} : { modelId: options.modelId }), ...(options.modeId === undefined ? {} : { modeId: options.modeId }) })
-        return Promise.resolve(killableSession())
-      },
+      open: () => Promise.resolve(killableSession()),
+      openShared: async (presetId: string) => ({
+        alive: true,
+        openSession: async (opts: { modelId?: string; modeId?: string }) => {
+          opened.push({ presetId, ...(opts.modelId === undefined ? {} : { modelId: opts.modelId }), ...(opts.modeId === undefined ? {} : { modeId: opts.modeId }) })
+          return killableSession()
+        },
+        kill: () => {},
+        dropSession: () => {},
+        sessionIds: () => [],
+      }),
     }
 
     const table = buildPresetTable(CONFIG, factory, sessionsRegistry(), inProject)
@@ -131,10 +159,17 @@ describe('buildPresetTable', () => {
     const opened: string[] = []
     const factory: AcpSessionFactory = {
       dialectFor: () => stubDialect('x'),
-      open: (_presetId, options) => {
-        opened.push(options.cwd)
-        return Promise.resolve(killableSession())
-      },
+      open: () => Promise.resolve(killableSession()),
+      openShared: async () => ({
+        alive: true,
+        openSession: async (opts: { cwd: string }) => {
+          opened.push(opts.cwd)
+          return killableSession()
+        },
+        kill: () => {},
+        dropSession: () => {},
+        sessionIds: () => [],
+      }),
     }
     const table = buildPresetTable(
       { presets: { 'acp-grok': { agent: 'grok', cwd: '/Users/good/Documents/deepseek-harness' } } },
@@ -180,7 +215,8 @@ describe('连接死亡后的自愈', () => {
     expect(dropped).toEqual([{ presetId: 'acp-grok', sessionId: 's1', reason: 'acp agent exited (code=1)' }])
 
     await binding.run(decision, turnOf('s1'))
-    expect(factory.built).toEqual(['acp-grok', 'acp-grok'])
+    // Session was dropped; next turn opens a new session on the same shared agent
+    expect(factory.sessions.length).toBe(2)
   })
 
   it('一个会话的连接死了，别的会话的连接不受影响', async () => {
@@ -190,15 +226,15 @@ describe('连接死亡后的自愈', () => {
 
     await binding.run(decision, turnOf('s1'))
     await binding.run(decision, turnOf('s2'))
-    expect(factory.built).toEqual(['acp-grok', 'acp-grok'])
+    expect(factory.built).toEqual(['acp-grok'])
 
     factory.sessions[0]!.die('socket closed')
     await binding.run(decision, turnOf('s2'))
     // s2's connection was alive, so its next turn must not pay for a reopen.
-    expect(factory.built).toEqual(['acp-grok', 'acp-grok'])
+    expect(factory.built).toEqual(['acp-grok'])
 
     await binding.run(decision, turnOf('s1'))
-    expect(factory.built).toEqual(['acp-grok', 'acp-grok', 'acp-grok'])
+    expect(factory.sessions.length).toBe(3)
   })
 
   it('连接没死时下一回合照旧复用，不无故重开', async () => {
@@ -219,7 +255,8 @@ describe('连接死亡后的自愈', () => {
     await binding.run(decision, turnOf('s1'))
     factory.sessions[0]!.die('process exited between turns')
     await binding.run(decision, turnOf('s1'))
-    expect(factory.built).toEqual(['acp-grok', 'acp-grok'])
+    // Session was dropped and re-opened on the same shared agent
+    expect(factory.sessions.length).toBe(2)
   })
 })
 
@@ -232,7 +269,16 @@ describe('buildPresetTable — runSteps 透传', () => {
     const base = killableFactory()
     return {
       ...base,
-      open: (presetId, options) => base.open(presetId, options).then(session => ({ ...session, runSteps })),
+      openShared: async (presetId: string) => {
+        const agent = await base.openShared(presetId)
+        return {
+          ...agent,
+          openSession: async (opts: Parameters<typeof agent.openSession>[0]) => {
+            const session = await agent.openSession(opts)
+            return { ...session, runSteps }
+          },
+        }
+      },
     }
   }
 

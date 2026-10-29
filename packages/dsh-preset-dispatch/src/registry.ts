@@ -170,6 +170,82 @@ export type AcpSessionDiagnostics = {
   readonly progress?: () => ProgressReading | undefined
 }
 
+/**
+ * A shared agent process: one transport + client, serving multiple DSH sessions
+ * each with their own ACP session.
+ *
+ * Created once per preset (on first use), reused by all DSH sessions on that
+ * preset. Each DSH session opens its own `session/new` (or `session/resume`)
+ * on the shared connection, keeping conversation histories isolated.
+ */
+export type SharedAgent = {
+  /**
+   * Open a new ACP session on this shared agent for one DSH session.
+   *
+   * Each call creates a new runner that will `session/new` or `session/resume`
+   * on the shared client. The returned `AcpSession` is scoped to one DSH
+   * session but rides the shared transport.
+   */
+  openSession(options: OpenSessionOptions): Promise<AcpSession>
+  /**
+   * Kill the transport and mark this agent as dead.
+   *
+   * The next call to `openSession` (or `revive`) will spawn a fresh process
+   * and resume all cached sessions via `session/resume`.
+   */
+  kill(reason: string): void
+  /**
+   * Whether this shared agent's transport is still alive.
+   */
+  readonly alive: boolean
+  /**
+   * Drop one DSH session's runner from the shared agent (e.g. on session
+   * archive). The transport stays alive for other sessions.
+   */
+  dropSession(dshSessionId: string): void
+  /**
+   * All DSH session ids currently holding a runner on this shared agent.
+   */
+  sessionIds(): readonly string[]
+}
+
+/** Options for opening a session on a shared agent. */
+export type OpenSessionOptions = {
+  /** The DSH session id this external conversation belongs to. */
+  readonly dshSessionId: string
+  /** The project directory for this session's workspace. */
+  readonly cwd: string
+  /** Applied once, before the first turn; claude needs `default` to ask at all. */
+  readonly modeId?: string
+  readonly modelId?: string
+  /** How long to wait for the agent to open a session before giving up. */
+  readonly openTimeoutMs?: number
+  readonly dialect: AcpDialect
+  /** Conversation handed over from another session by a switch. */
+  readonly primer?: {
+    take(sessionId: string): string | undefined
+    restore(sessionId: string, text: string): void
+  }
+  /** This session's earlier conversation, read from the host's own transcript. */
+  readonly replay?: {
+    take(sessionId: string): string | undefined
+  }
+  /**
+   * A journaled external session id to reattach to (`session/resume`).
+   * When present and the dialect supports it, the runner reattaches instead
+   * of opening fresh.
+   */
+  readonly resumeOf?: (dshSessionId: string) => string | undefined
+  /** Whether the agent can be stopped at all (capability table). */
+  readonly stopsTurns?: boolean
+  /** A getter the runner consults per turn for the stop signal. */
+  readonly abort?: () => AbortSignal | undefined
+  /** Called when the agent reports its model list after opening. */
+  readonly onModels?: (models: readonly { id: string; name: string; description?: string }[]) => void
+  /** Subagent session host, when composed. */
+  readonly subagents?: import('./subagent-sessions.ts').SubagentSessionHost
+}
+
 /** How an agent is reached; separate so tests can stand in for spawning. */
 export type AcpSessionFactory = {
   /**
@@ -181,6 +257,14 @@ export type AcpSessionFactory = {
    * sessions are the one thing that must never change.
    */
   dialectFor(presetId: string, config: AcpPresetConfig): AcpDialect | undefined
+  /**
+   * Open a shared agent process for one preset: spawn the transport, perform
+   * the ACP handshake (`initialize` + `initialized` + optional `authenticate`),
+   * and return a handle that can serve multiple DSH sessions.
+   *
+   * Called once per preset (on first use), reused by all sessions on that preset.
+   */
+  openShared(presetId: string): Promise<SharedAgent>
   /** Open the agent for one DSH session. Called once per session. */
   open(presetId: string, options: RunnerOptions): Promise<AcpSession>
 }
@@ -240,6 +324,13 @@ export type PresetTableOptions = {
     take(sessionId: string): string | undefined
   }
   /**
+   * A journaled external session id to reattach to, per DSH session.
+   *
+   * When present and the dialect supports `session/resume`, the runner
+   * reattaches to the server-side conversation instead of opening fresh.
+   */
+  readonly resumeOf?: (dshSessionId: string) => string | undefined
+  /**
    * The project directory of one DSH session, when the host can name it.
    *
    * A new external conversation opens there and nowhere else. No directory
@@ -263,10 +354,12 @@ export function cwdForOpen(sessionCwd: string | undefined): string {
 /**
  * Build the preset table.
  *
- * One agent is opened per session on first use and reused after — opening is
- * the expensive part, and a DSH session runs many turns. When a connection
- * dies, its cached session is dropped here and the next turn opens a fresh
- * one: the host heals on its own, with no instruction from the page.
+ * One agent process is shared per preset on first use and reused by all DSH
+ * sessions on that preset. Each DSH session opens its own ACP session
+ * (`session/new` or `session/resume`) on the shared connection, keeping
+ * conversation histories isolated. When a connection dies, the shared agent
+ * is revived on next use: a fresh process spawns and all cached sessions
+ * reattach via `session/resume` (or fall back to text replay).
  */
 export function buildPresetTable(
   config: PresetConfig,
@@ -284,40 +377,41 @@ export function buildPresetTable(
     // a dialect that does not declare `cancelsTurns` gets no cancel notice,
     // keeping the table the single source of truth for what an agent can do.
     const stopsTurns = dialect.capabilities?.cancelsTurns === true
-    // One external conversation per DSH session, not per preset.
+    // One shared agent process per preset, serving all DSH sessions on it.
     //
-    // Sharing one across sessions is the original bug: two conversations in
-    // the same preset land in the same external session, so each one's answer
-    // shows up in the other's history. The keys are session ids, and a session
-    // whose connection dies drops its entry with it (see the onDead hookup).
-    // Open-and-cache is shared by `run` and `runSteps` on purpose: the takeover
-    // path iterates one external turn across several calls, and a reopen
-    // between segments would scatter the conversation's context.
+    // Each DSH session gets its own ACP session (session/new or session/resume)
+    // on the shared connection, so conversation histories stay isolated. When
+    // the process dies, the shared agent is revived on next use: a fresh process
+    // spawns and all cached sessions reattach via session/resume.
     const opened = new Map<string, AcpSession>()
     sessions.set(presetId, opened)
+    let sharedAgent: SharedAgent | undefined
     const sessionFor = async (sessionId: string, abort: (() => AbortSignal | undefined) | undefined): Promise<AcpSession> => {
       let session = opened.get(sessionId)
       if (session === undefined) {
-        session = await factory.open(presetId, {
-          cwd: cwdForOpen(options.cwdOfSession?.(sessionId)),
-          // Named so the opened client can put the host session on any
-          // question it asks the human — the session host services resolve
-          // an agent by.
+        // Lazily create the shared agent on first session open
+        if (sharedAgent === undefined || !sharedAgent.alive) {
+          if (sharedAgent !== undefined) {
+            // Previous agent died; revive it
+            options.onDropped?.({ presetId, sessionId, reason: 'shared agent died — reviving' })
+          }
+          sharedAgent = await factory.openShared(presetId)
+        }
+        session = await sharedAgent.openSession({
           dshSessionId: sessionId,
+          cwd: cwdForOpen(options.cwdOfSession?.(sessionId)),
           ...(preset.model === undefined ? {} : { modelId: preset.model }),
           ...(preset.mode === undefined ? {} : { modeId: preset.mode }),
           ...(options.primer === undefined ? {} : { primer: options.primer }),
           ...(options.replay === undefined ? {} : { replay: options.replay }),
-          // The turn's stop signal, as a getter the runner consults per turn,
-          // and only when the dialect claims the capability. The getter
-          // closes over the agent, not over this turn, so the one entry
-          // stored here at open stays correct for every later turn of the
-          // session — each turn's signal is read live, when the turn runs.
           ...(stopsTurns && abort !== undefined ? { abort } : {}),
+          dialect,
+          ...(options.resumeOf === undefined ? {} : { resumeOf: options.resumeOf }),
         })
         session.onDead(reason => {
-          // Drop only this session's entry: another session's connection is
-          // a different socket and stays exactly as alive as it is.
+          // Drop only this session's entry from the cache. The shared agent
+          // may still be alive for other sessions; if it died too, the next
+          // sessionFor call will revive it.
           if (opened.get(sessionId) === session) opened.delete(sessionId)
           options.onDropped?.({ presetId, sessionId, reason })
         })

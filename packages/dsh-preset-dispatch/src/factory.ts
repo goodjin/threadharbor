@@ -31,6 +31,7 @@ import type {
 import { cwdForOpen } from './registry.ts'
 import type { AcpPresetConfig, AcpSession, AcpSessionFactory, PresetConfig } from './registry.ts'
 import { codexProgressProbe, grokProgressProbe, qoderProgressProbe } from './agent-progress.ts'
+import type { SharedAgent, OpenSessionOptions } from './registry.ts'
 import { AcpTurnRunner } from './runner.ts'
 import type { AcpClientPort } from './runner.ts'
 import type { SubagentSessionHost } from './subagent-sessions.ts'
@@ -300,6 +301,153 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
           }
         },
       }
+    },
+
+    /**
+     * Open a shared agent process: spawn transport, create client, and return
+     * a handle that can serve multiple DSH sessions.
+     *
+     * The ACP handshake (initialize + initialized + optional authenticate) is
+     * performed lazily on the first openSession call, so this method returns
+     * immediately after spawning the transport.
+     */
+    openShared: async (presetId: string): Promise<SharedAgent> => {
+      const preset = config.presets[presetId]
+      if (preset === undefined) throw new Error(`acp dispatch: no preset named ${presetId}`)
+      if (preset.agent === 'zcode') {
+        throw new Error('zcode answers as a model inside the native loop; it is not opened as an ACP session')
+      }
+      if (preset.agent === 'minimaxi') {
+        throw new Error('minimaxi answers as a model inside the native loop; it is not opened as an ACP session')
+      }
+
+      // Spawn transport using a neutral cwd (session-specific cwd is set per session/new)
+      const childEnv = acpStdioEnvFor(preset.agent)
+      const raw = deps.transport?.(preset) ?? (preset.url !== undefined
+        ? new WebSocketAcpTransport({ url: preset.url })
+        : preset.agent === 'grok'
+          ? await GrokServeTransport.create({
+              command: preset.command ?? 'grok',
+              cwd: process.cwd(),
+            })
+          : new StdioAcpTransport({
+              command: preset.command ?? '',
+              args: stdioArgsFor(preset),
+              cwd: process.cwd(),
+              ...(childEnv === undefined ? {} : { env: childEnv }),
+            }))
+      const transport = new DeathFanoutTransport(raw)
+
+      const dialect = DIALECTS[preset.agent ?? ''] ?? grokDialect
+      const client = new AcpClient(transport, dialect)
+      const terminalService = new TerminalService()
+      client.terminals = terminalService
+      terminalService.onOutput = (terminalId, data) => {
+        client.onTerminalOutput?.(terminalId, data)
+      }
+      terminalService.onExit = (info) => {
+        client.onTerminalExit?.(info.terminalId, info.exitCode)
+      }
+      client.onPermissionRequest = async request => await deps.answerPermission(request)
+      if (preset.agent === 'cursor') {
+        if (deps.answerAskQuestion !== undefined) {
+          client.onAskQuestion = async request => await deps.answerAskQuestion!(request)
+        }
+        client.onExtensionRequest = frame => {
+          if (typeof frame.id !== 'number') return false
+          if (frame.method === 'cursor/ask_question') { client.reply(frame.id, { outcome: { outcome: 'skipped' } }); return true }
+          if (frame.method === 'cursor/create_plan') { client.reply(frame.id, { outcome: { outcome: 'cancelled' } }); return true }
+          if (frame.method === 'cursor/task'
+            || frame.method === 'cursor/update_todos'
+            || frame.method === 'cursor/generate_image') {
+            client.reply(frame.id, {})
+            return true
+          }
+          return false
+        }
+      }
+
+      // Track per-session death handlers so transport death propagates to all
+      const sessionDeathHandlers = new Map<string, (reason: string) => void>()
+
+      // Track per-session runners on this shared agent
+      const sessionRunners = new Map<string, AcpSession>()
+      let alive = true
+
+      const sharedAgent: SharedAgent = {
+        get alive() { return alive },
+
+        openSession: async (opts: OpenSessionOptions): Promise<AcpSession> => {
+          const runner = new AcpTurnRunner(adaptClient(client, dialect), {
+            cwd: opts.cwd,
+            dshSessionId: opts.dshSessionId,
+            dialect: opts.dialect,
+            ...(opts.modeId === undefined ? {} : { modeId: opts.modeId }),
+            ...(opts.modelId === undefined ? {} : { modelId: opts.modelId }),
+            ...(opts.openTimeoutMs === undefined ? {} : { openTimeoutMs: opts.openTimeoutMs }),
+            ...(opts.primer === undefined ? {} : { primer: opts.primer }),
+            ...(opts.replay === undefined ? {} : { replay: opts.replay }),
+            ...(opts.resumeOf === undefined ? {} : { resumeOf: opts.resumeOf }),
+            ...(deps.subagents === undefined ? {} : { subagents: deps.subagents }),
+            ...(deps.onRuntimeModels === undefined ? {} : { onModels: (models: readonly { id: string; name: string; description?: string }[]) => { deps.onRuntimeModels!(presetId, models) } }),
+            ...(opts.stopsTurns && opts.abort !== undefined ? { abort: opts.abort } : {}),
+          })
+          const acpSession: AcpSession = {
+            run: async (decision, turn) => await runner.run(decision, turn),
+            runSteps: (decision, turn, at) => runner.runSteps(decision, turn, at),
+            close: () => {
+              sessionRunners.delete(opts.dshSessionId)
+              sessionDeathHandlers.delete(opts.dshSessionId)
+              // When the last session on this shared agent leaves, kill the
+              // transport to avoid leaking a process for an idle preset.
+              if (sessionRunners.size === 0 && alive) {
+                alive = false
+                transport.close()
+              }
+            },
+            onDead: handler => {
+              sessionDeathHandlers.set(opts.dshSessionId, handler)
+            },
+            diagnostics: () => {
+              const lastStatus = runner.lastStatusSnapshot()
+              return {
+                lastFrameAt: transport.lastFrameAt(),
+                lastDiagnosticAt: transport.lastDiagnosticAt(),
+                stderrTail: transport.stderrTail(),
+                liveDelegatedRuns: runner.liveDelegatedRuns(),
+                ...(lastStatus === undefined ? {} : { lastStatus }),
+              }
+            },
+          }
+          sessionRunners.set(opts.dshSessionId, acpSession)
+          return acpSession
+        },
+
+        kill: (reason: string) => {
+          if (!alive) return
+          alive = false
+          transport.close()
+          for (const handler of sessionDeathHandlers.values()) handler(reason)
+          sessionDeathHandlers.clear()
+          sessionRunners.clear()
+        },
+
+        dropSession: (dshSessionId: string) => {
+          sessionRunners.delete(dshSessionId)
+          sessionDeathHandlers.delete(dshSessionId)
+        },
+
+        sessionIds: () => Array.from(sessionRunners.keys()),
+      }
+
+      // Watch for transport death — propagate to all sessions with the actual reason
+      transport.onDeath(reason => {
+        if (!alive) return
+        alive = false
+        for (const handler of sessionDeathHandlers.values()) handler(reason)
+      })
+
+      return sharedAgent
     },
   }
 }
