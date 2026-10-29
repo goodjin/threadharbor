@@ -4,12 +4,12 @@
  * 挂在 `conversation.chat.turnTail` 上，排在官方改动卡片之后。官方卡片照旧
  * 打开右侧对比。Markdown 按文档排版，其它文本按原文显示。默认收起，点击才展开并读取。
  * 展开后路径栏与正文隔开。双击正文收回。路径栏右侧可打开所在文件夹。
- * 点开或收起时，路径栏留在点击时的视口位置。
+ * 点开或收起时，路径栏留在点击时的视口位置。文件多于四篇时先只列出四篇。
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { FileTypeIcon, MarkdownText, classifyFileType } from '@deepseek-ai/dsh-client-ui-primitives'
+import { FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, MarkdownText, classifyFileType } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
 import { fallbackT, NAMESPACE } from './locales.ts'
 import type { RuntimeT } from './locales.ts'
@@ -23,6 +23,9 @@ import {
 } from './markdown-turn-sources.ts'
 import type { MarkdownTurnReaders } from './markdown-turn-sources.ts'
 import css from './markdown-turn.module.css'
+
+/** 和官方改动列表一样，超过这个数量先只列出这些，其余折在「全部」后面。 */
+export const FOLDED_FILE_COUNT = 4
 
 /** turnTail 座位条目的 id。order 在官方卡片（默认 0）之后、找回入口（10）之前。 */
 export const MARKDOWN_TAIL_ID = 'threadharbor-markdown-turn'
@@ -70,14 +73,16 @@ function conversationScroller(node: HTMLElement): HTMLElement | null {
  * 会话停在底部时，阅读区一变高，官方跟随就会把滚动拉到最底。
  * 变高发生在布局之后，所以要等这一帧的尺寸通知再改滚动。
  * 用户自己滚动会话区之后不再干涉。
+ * @param bar - 要对齐的元素。
+ * @param block - 只观察这块的尺寸。缺省时用路径栏所在的文件块。
  */
-function holdFileTop(bar: HTMLElement | null): void {
+function holdFileTop(bar: HTMLElement | null, block?: HTMLElement | null): void {
   activeFileTopHold?.release()
   activeFileTopHold = null
   if (bar === null || typeof ResizeObserver === 'undefined') return
   const scroller = conversationScroller(bar)
   if (scroller === null) return
-  const section = bar.closest('section') ?? bar
+  const section = block ?? bar.closest('section') ?? bar
   const top = bar.getBoundingClientRect().top
   let generation = 0
   let writing = false
@@ -267,7 +272,10 @@ export function MarkdownTurnTail({ sessionId, turn, t, readers }: MarkdownTurnPr
   const id = typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : undefined
   const changesSeq = sources?.changesSeq
   const translate = t ?? fallbackT
+  const rootRef = useRef<HTMLDivElement>(null)
   const [extra, setExtra] = useState<SummaryExtra>([])
+  const [listOpen, setListOpen] = useState(false)
+  useEffect(() => () => { releaseHeldFileTop(rootRef.current) }, [])
   useEffect(() => {
     if (id === undefined || changesSeq === undefined) {
       setExtra(current => current.length === 0 ? current : [])
@@ -293,8 +301,24 @@ export function MarkdownTurnTail({ sessionId, turn, t, readers }: MarkdownTurnPr
   if (id === undefined || sources === null) return null
   const paths = mergeMarkdownPaths(sources.paths, extra)
   if (paths.length === 0) return null
-  return <div className={css.root} data-markdown-turn="">
-    {paths.map(path => <MarkdownDocument key={path} sessionId={id} path={path} readers={readers} t={translate} />)}
+  const folded = paths.length > FOLDED_FILE_COUNT && !listOpen
+  const shown = folded ? paths.slice(0, FOLDED_FILE_COUNT) : paths
+  return <div ref={rootRef} className={css.root} data-markdown-turn="" {...(folded ? { 'data-markdown-folded': '' } : {})}>
+    {shown.map(path => <MarkdownDocument key={path} sessionId={id} path={path} readers={readers} t={translate} />)}
+    {paths.length > FOLDED_FILE_COUNT && <button
+      type="button"
+      className={css.more}
+      data-markdown-more=""
+      aria-expanded={listOpen}
+      aria-label={translate(listOpen ? 'markdownTurn.filesCollapseAria' : 'markdownTurn.filesAllAria', { count: String(paths.length) })}
+      onClick={() => {
+        holdFileTop(rootRef.current, rootRef.current)
+        setListOpen(value => !value)
+      }}
+    >
+      <span>{translate(listOpen ? 'markdownTurn.collapse' : 'markdownTurn.filesAll', { count: String(paths.length) })}</span>
+      {listOpen ? <IconChevronUpOutlineRegular /> : <IconChevronDownOutlineRegular />}
+    </button>}
   </div>
 }
 

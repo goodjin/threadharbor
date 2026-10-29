@@ -63,6 +63,9 @@ const KEYS_USED_BY_COMPONENTS: readonly ClientLocaleKey[] = [
   'markdownTurn.wrap',
   'markdownTurn.unwrap',
   'markdownTurn.footnotes',
+  'markdownTurn.filesAll',
+  'markdownTurn.filesAllAria',
+  'markdownTurn.filesCollapseAria',
 ]
 
 /** Every `{name}` placeholder a value carries, in order. */

@@ -115,6 +115,34 @@
   font-size: 12.5px;
 }
 
+.more {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid rgb(0 0 0 / 12%);
+  border-radius: 8px;
+  background: transparent;
+  color: rgb(0 0 0 / 55%);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  text-align: start;
+  cursor: pointer;
+}
+
+.more svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+
+.more:hover {
+  background: rgb(0 0 0 / 4%);
+}
+
 @media (prefers-color-scheme: dark) {
   .document {
     border-color: rgb(255 255 255 / 16%);
@@ -139,7 +167,16 @@
   }
 
   .action,
-  .status {
+  .status,
+  .more {
     color: rgb(255 255 255 / 55%);
+  }
+
+  .more {
+    border-color: rgb(255 255 255 / 16%);
+  }
+
+  .more:hover {
+    background: rgb(255 255 255 / 6%);
   }
 }

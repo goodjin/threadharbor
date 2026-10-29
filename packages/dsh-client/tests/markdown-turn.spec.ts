@@ -25,6 +25,7 @@ const {
   readMarkdownText,
 } = await import('../src/markdown-turn-sources.ts')
 const {
+  FOLDED_FILE_COUNT,
   MARKDOWN_TAIL_ID,
   MARKDOWN_TAIL_ORDER,
   MarkdownTurnTail,
@@ -279,6 +280,52 @@ describe('MarkdownTurnTail', () => {
     expect(container.querySelector('[data-reveal-error]')).not.toBeNull()
     expect(container.textContent).toContain('文件夹没有打开')
     await act(async () => { root.unmount() })
+  })
+
+  it('超过四篇先只列出四篇，点全部才展开', async () => {
+    const face = readers()
+    const paths = Array.from({ length: FOLDED_FILE_COUNT + 1 }, (_, index) => `file-${index}.ts`)
+    const container = document.createElement('div')
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: paths.map(path => ({ path })) }),
+        readers: face,
+      }))
+    })
+    expect(container.querySelectorAll('[data-markdown-path]')).toHaveLength(FOLDED_FILE_COUNT)
+    expect(container.querySelector(`[data-markdown-path="${paths.at(-1)}"]`)).toBeNull()
+    expect(container.hasAttribute('data-markdown-folded') || container.querySelector('[data-markdown-folded]') !== null).toBe(true)
+    const more = container.querySelector('[data-markdown-more]')
+    expect(more?.textContent).toContain(`全部 ${paths.length} 个文件`)
+    expect(more?.getAttribute('aria-expanded')).toBe('false')
+    expect(face.readPage).not.toHaveBeenCalled()
+
+    await act(async () => { more?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(container.querySelectorAll('[data-markdown-path]')).toHaveLength(paths.length)
+    expect(container.querySelector('[data-markdown-folded]')).toBeNull()
+    expect(container.querySelector('[data-markdown-more]')?.textContent).toContain('收起')
+    expect(container.querySelector('[data-markdown-more]')?.getAttribute('aria-expanded')).toBe('true')
+
+    await act(async () => {
+      container.querySelector('[data-markdown-more]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(container.querySelectorAll('[data-markdown-path]')).toHaveLength(FOLDED_FILE_COUNT)
+    expect(container.querySelector(`[data-markdown-path="${paths.at(-1)}"]`)).toBeNull()
+
+    const four = document.createElement('div')
+    const fourRoot: Root = createRoot(four)
+    await act(async () => {
+      fourRoot.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: paths.slice(0, FOLDED_FILE_COUNT).map(path => ({ path })) }),
+        readers: readers(),
+      }))
+    })
+    expect(four.querySelector('[data-markdown-more]')).toBeNull()
+    expect(four.querySelectorAll('[data-markdown-path]')).toHaveLength(FOLDED_FILE_COUNT)
+    await act(async () => { fourRoot.unmount(); root.unmount() })
   })
 
   it('改动摘要里的文本会补进来，图片不会', async () => {
