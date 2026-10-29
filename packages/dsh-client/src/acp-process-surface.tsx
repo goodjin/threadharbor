@@ -74,7 +74,19 @@ export function registerAcpProcessSurface(ctx: Surface): void {
         const Native = entry.component as ComponentType<ChatNodeViewProps<'assistant-step'>>
         const Renderer = (props: ChatNodeViewProps<'assistant-step'>) => {
           const segment = (props.node.data as SegmentChatData).acpProcessSegment
-          return segment === undefined ? createElement(Native, props) : <AcpProcessBlock segment={segment} t={props.t} />
+          if (segment !== undefined) return <AcpProcessBlock segment={segment} t={props.t} />
+          // The turn-process projection marks the finalized answer step. Wrapping it
+          // here boxes the final answer for every session type (plain DSH and ACP);
+          // thinking stays inside and keeps its native fold/expand behavior.
+          const answerStep = props.turnProcess?.spec.answerStep
+          const isAnswer = answerStep != null && answerStep === props.node.data.step
+          const native = createElement(Native, props)
+          if (!isAnswer) return native
+          const hasProse = props.node.data.blocks.some(block =>
+            (block.kind === 'text' || block.kind === 'reasoning') && block.text.trim() !== '')
+          return hasProse
+            ? <div className={styles.answerCard} data-acp-answer-card>{native}</div>
+            : native
         }
         removeRenderer = slots.register({
           name: 'conversation.chat.node', key: 'assistant-step', priority: -20,
