@@ -80,6 +80,132 @@ const CURSOR_NOTIFICATION_FORMATTERS: Readonly<Record<string, {
   },
 }
 
+/**
+ * grok 私有包装 `_x.ai/session_notification` 内层种类的可读行。
+ *
+ * 形状来自真机会话日志（2026-10-28，grok 桌面版现场逐类取样）。这些帧原先以整帧
+ * JSON 落进未知块：每轮 token 用量被 signature 巨串淹没、后端重试与上下文压缩
+ * （正是「静默那几分钟在干嘛」的答案）藏在原始字段里看不懂。
+ *
+ * `tool_call_delta_chunk` 不在此列：它的内容（工具名与参数流）已由工具卡展示，
+ * 返回 undefined 归为已映射，避免同一信息铺两遍。`subagent_progress` 也没有专列
+ * ——本机没有它的真实样本，字段不猜；认不出的照旧走 JSON 原样展示。
+ */
+const GROK_NOTIFICATION_FORMATTERS: Readonly<Record<string, {
+  readonly kind: string
+  format: (update: Record<string, unknown>) => string
+}>> = {
+  model_changed: {
+    kind: 'grok 模型切换',
+    format: update => {
+      const model = stringOf(update['model_id']) ?? '未知模型'
+      const effort = stringOf(update['reasoning_effort'])
+      return `模型切换：${model}${effort === undefined ? '' : `（推理档 ${effort}）`}`
+    },
+  },
+  response_completed: {
+    kind: 'grok 每轮用量',
+    format: update => {
+      const usage = recordOf(update['usage'])
+      const parts: string[] = []
+      const input = typeof usage['input_tokens'] === 'number' ? usage['input_tokens'] : undefined
+      const output = typeof usage['output_tokens'] === 'number' ? usage['output_tokens'] : undefined
+      const reasoning = typeof usage['reasoning_tokens'] === 'number' ? usage['reasoning_tokens'] : undefined
+      const cacheRead = typeof usage['cache_read_input_tokens'] === 'number' ? usage['cache_read_input_tokens'] : undefined
+      if (input !== undefined) parts.push(`输入 ${grouped(input)}`)
+      if (output !== undefined) parts.push(`输出 ${grouped(output)}`)
+      if (reasoning !== undefined && reasoning > 0) parts.push(`思考 ${grouped(reasoning)}`)
+      if (cacheRead !== undefined && cacheRead > 0) parts.push(`缓存读 ${grouped(cacheRead)}`)
+      return parts.length === 0 ? '模型响应完成' : `本轮用量：${parts.join(' / ')} tokens`
+    },
+  },
+  retry_state: {
+    kind: 'grok 后端重试',
+    format: update => {
+      const type = stringOf(update['type']) ?? 'unknown'
+      const attempt = typeof update['attempt'] === 'number' ? update['attempt'] : undefined
+      const max = typeof update['max_retries'] === 'number' ? update['max_retries'] : undefined
+      const nth = attempt !== undefined && max !== undefined ? `（第 ${String(attempt)}/${String(max)} 次）` : ''
+      const reason = oneLine(stringOf(update['reason']) ?? '', 160)
+      return `后端重试${nth}：${type}${reason === '' ? '' : ` —— ${reason}`}`
+    },
+  },
+  auto_compact_started: {
+    kind: 'grok 上下文压缩',
+    format: update => {
+      const used = typeof update['tokens_used'] === 'number' ? update['tokens_used'] : undefined
+      const window = typeof update['context_window'] === 'number' ? update['context_window'] : undefined
+      const pct = typeof update['percentage'] === 'number' ? update['percentage'] : undefined
+      const size = used !== undefined && window !== undefined ? `已用 ${grouped(used)} / ${grouped(window)} tokens` : ''
+      const tail = pct !== undefined ? `（${String(pct)}%）` : ''
+      return `上下文压缩开始：${size}${tail}`
+    },
+  },
+  auto_compact_completed: {
+    kind: 'grok 上下文压缩',
+    format: update => {
+      const before = typeof update['tokens_before'] === 'number' ? update['tokens_before'] : undefined
+      const after = typeof update['tokens_after'] === 'number' ? update['tokens_after'] : undefined
+      const elapsed = typeof update['elapsed_ms'] === 'number' ? update['elapsed_ms'] : undefined
+      const shrink = before !== undefined && after !== undefined ? `${grouped(before)} → ${grouped(after)} tokens` : ''
+      const time = elapsed !== undefined ? `（用时 ${String(Math.round(elapsed / 1000))}s）` : ''
+      return `上下文压缩完成：${shrink}${time}`
+    },
+  },
+  background_tasks: {
+    kind: 'grok 后台任务',
+    format: update => {
+      const tasks = Array.isArray(update['tasks']) ? update['tasks'].map(recordOf) : []
+      if (tasks.length === 0) return '后台任务：无'
+      const previews = tasks.slice(0, 2)
+        .map(task => oneLine(stringOf(task['command']) ?? '', 80))
+        .filter(command => command !== '')
+        .map(command => `「${command}」`)
+      return `后台任务（${String(tasks.length)} 个）：${previews.join(' ')}`
+    },
+  },
+  turn_completed: {
+    kind: 'grok 回合完成',
+    format: update => {
+      const usage = recordOf(update['usage'])
+      const parts: string[] = []
+      const total = typeof usage['totalTokens'] === 'number' ? usage['totalTokens'] : undefined
+      const input = typeof usage['inputTokens'] === 'number' ? usage['inputTokens'] : undefined
+      const output = typeof usage['outputTokens'] === 'number' ? usage['outputTokens'] : undefined
+      const reasoning = typeof usage['reasoningTokens'] === 'number' ? usage['reasoningTokens'] : undefined
+      const cached = typeof usage['cachedReadTokens'] === 'number' ? usage['cachedReadTokens'] : undefined
+      const calls = typeof usage['modelCalls'] === 'number' ? usage['modelCalls'] : undefined
+      const apiMs = typeof usage['apiDurationMs'] === 'number' ? usage['apiDurationMs'] : undefined
+      if (total !== undefined) parts.push(`共 ${grouped(total)}`)
+      if (input !== undefined) parts.push(`输入 ${grouped(input)}`)
+      if (output !== undefined) parts.push(`输出 ${grouped(output)}`)
+      if (reasoning !== undefined && reasoning > 0) parts.push(`思考 ${grouped(reasoning)}`)
+      if (cached !== undefined && cached > 0) parts.push(`缓存读 ${grouped(cached)}`)
+      if (calls !== undefined) parts.push(`模型调用 ${String(calls)} 次`)
+      if (apiMs !== undefined) parts.push(`API 用时 ${String(Math.round(apiMs / 100) / 10)}s`)
+      return parts.length === 0 ? '回合完成' : `回合完成：${parts.join(' / ')} tokens 起`
+    },
+  },
+  session_summary_generated: {
+    kind: 'grok 会话摘要',
+    format: update => {
+      const summary = oneLine(stringOf(update['session_summary']) ?? '', 200)
+      return summary === '' ? '会话摘要已生成' : `会话摘要：${summary}`
+    },
+  },
+  pending_interaction: {
+    kind: 'grok 等待交互',
+    format: update => {
+      const kind = stringOf(update['kind']) ?? 'interaction'
+      return `等待交互（${kind}）`
+    },
+  },
+  interaction_resolved: {
+    kind: 'grok 交互已解决',
+    format: () => '交互已解决',
+  },
+}
+
 const DEDICATED_METHODS = new Set([
   'session/request_permission',
   // cursor 的阻塞式提问与计划请求由各自的流程回答（client.ts 的扩展处理），
@@ -107,6 +233,15 @@ const TELEMETRY_KINDS = new Set([
   'available_commands_update',
   // cursor 的模式切换（agent/ask/...）：和遥测一样只在回合末汇总，过程区不留噪音。
   'current_mode_update',
+  // grok 的高频通知（可读行在 GROK_NOTIFICATION_FORMATTERS）：每轮用量、交互
+  // 等待/解决、后台任务快照、回合完成的用量小结——信息保留，回合末各汇总一块，
+  // 不在过程区逐帧铺开。后端重试与上下文压缩**有意不走这里**：它们是「静默那
+  // 几分钟在干嘛」的实时答案，要当场看见。
+  'grok 每轮用量',
+  'grok 等待交互',
+  'grok 交互已解决',
+  'grok 后台任务',
+  'grok 回合完成',
 ])
 
 function recordOf(value: unknown): Record<string, unknown> {
@@ -274,6 +409,17 @@ export function classifyRawOutput(
     if (formatter !== undefined) {
       const line = formatter(update)
       return line === undefined ? 'mapped' : { kind, format: 'text', line }
+    }
+    return { kind: kind === '' ? frame.method : kind, format: 'json', line: JSON.stringify(update) }
+  }
+  // grok 把一部分生命周期事件包在私有 `_x.ai/session_notification` 里。解包与
+  // 已映射判定在函数开头同样适用（内层 update 就在 params.update）；走到这里的
+  // 都是投影不认识的内层种类——模型切换、每轮用量、后端重试、上下文压缩……
+  // 按真机载荷给可读行（2026-10-28 逐类取样），认不得的照旧内层原样 JSON。
+  if (frame.method === '_x.ai/session_notification') {
+    const grokNotification = GROK_NOTIFICATION_FORMATTERS[kind]
+    if (grokNotification !== undefined) {
+      return { kind: grokNotification.kind, format: 'text', line: grokNotification.format(update) }
     }
     return { kind: kind === '' ? frame.method : kind, format: 'json', line: JSON.stringify(update) }
   }

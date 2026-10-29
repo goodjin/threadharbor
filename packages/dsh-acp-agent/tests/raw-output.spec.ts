@@ -112,6 +112,87 @@ describe('classifyRawOutput', () => {
   })
 })
 
+/** grok 私有包装帧：内层 update 挂在 params.update（真机载荷形状，2026-10-28 取样）。 */
+function grokNotify(kind: string, extra: Record<string, unknown> = {}): AcpFrame {
+  return { method: '_x.ai/session_notification', params: { sessionId: 's1', update: { sessionUpdate: kind, ...extra } } }
+}
+
+describe('classifyRawOutput — grok _x.ai/session_notification', () => {
+  it('模型切换给可读行', () => {
+    expect(classifyRawOutput(grokNotify('model_changed', { model_id: 'grok-4.7-build-fast', reasoning_effort: 'high' }), { childSession: false }))
+      .toEqual({ kind: 'grok 模型切换', format: 'text', line: '模型切换：grok-4.7-build-fast（推理档 high）' })
+  })
+
+  it('每轮用量给可读行，signature 巨串不进展示', () => {
+    const classified = classifyRawOutput(grokNotify('response_completed', {
+      usage: { input_tokens: 17_694, output_tokens: 160, cache_read_input_tokens: 1664, cache_creation_input_tokens: 0, reasoning_tokens: 58 },
+      signature: 'tco_' + 'x'.repeat(400),
+    }), { childSession: false })
+    expect(classified).toMatchObject({ kind: 'grok 每轮用量', format: 'text' })
+    const line = (classified as { line: string }).line
+    expect(line).toBe('本轮用量：输入 17,694 / 输出 160 / 思考 58 / 缓存读 1,664 tokens')
+    expect(line).not.toContain('tco_')
+  })
+
+  it('后端重试点明第几次与原因（截断到一行）', () => {
+    const classified = classifyRawOutput(grokNotify('retry_state', {
+      type: 'retrying', attempt: 1, max_retries: 15, error_type: 'http',
+      reason: 'request error: error sending request for url (https://cli-chat-proxy.grok.com/v1/responses): client error (SendRequest): http2 error: keep-alive timed out',
+    }), { childSession: false })
+    expect(classified).toMatchObject({ kind: 'grok 后端重试', format: 'text' })
+    const line = (classified as { line: string }).line
+    expect(line).toContain('后端重试（第 1/15 次）：retrying')
+    expect(line).toContain('keep-alive timed out')
+  })
+
+  it('上下文压缩开始/完成各一行，数字来自真实载荷', () => {
+    const started = classifyRawOutput(grokNotify('auto_compact_started', {
+      tokens_used: 206_513, context_window: 256_000, percentage: 81, reason: 'Context window 81% full',
+    }), { childSession: false })
+    expect((started as { line: string }).line).toBe('上下文压缩开始：已用 206,513 / 256,000 tokens（81%）')
+
+    const done = classifyRawOutput(grokNotify('auto_compact_completed', {
+      tokens_before: 206_513, tokens_after: 20_618, elapsed_ms: 57_969, summary_preview: null,
+    }), { childSession: false })
+    expect((done as { line: string }).line).toBe('上下文压缩完成：206,513 → 20,618 tokens（用时 58s）')
+  })
+
+  it('回合完成的小结带总量、模型调用与 API 用时', () => {
+    const classified = classifyRawOutput(grokNotify('turn_completed', {
+      prompt_id: 'p1', stop_reason: 'end_turn',
+      usage: { inputTokens: 94_757, outputTokens: 669, totalTokens: 95_426, cachedReadTokens: 70_144, cacheCreationTokens: 0, reasoningTokens: 186, modelCalls: 4, apiDurationMs: 11_899, costUsdTicks: 650_521_600 },
+    }), { childSession: false })
+    expect((classified as { line: string }).line)
+      .toBe('回合完成：共 95,426 / 输入 94,757 / 输出 669 / 思考 186 / 缓存读 70,144 / 模型调用 4 次 / API 用时 11.9s tokens 起')
+  })
+
+  it('后台任务、会话摘要、交互等待/解决各一行', () => {
+    const tasks = classifyRawOutput(grokNotify('background_tasks', {
+      tasks: [{ task_id: 't1', command: 'npm run test' }, { task_id: 't2', command: 'sleep 100' }],
+    }), { childSession: false })
+    expect((tasks as { line: string }).line).toBe('后台任务（2 个）：「npm run test」 「sleep 100」')
+
+    const summary = classifyRawOutput(grokNotify('session_summary_generated', { session_summary: 'Find AR1 repo simplification CI document' }), { childSession: false })
+    expect((summary as { line: string }).line).toBe('会话摘要：Find AR1 repo simplification CI document')
+
+    const pending = classifyRawOutput(grokNotify('pending_interaction', { tool_call_id: 'call-x', kind: 'permission' }), { childSession: false })
+    expect(pending).toEqual({ kind: 'grok 等待交互', format: 'text', line: '等待交互（permission）' })
+
+    const resolved = classifyRawOutput(grokNotify('interaction_resolved', { tool_call_id: 'call-x' }), { childSession: false })
+    expect(resolved).toEqual({ kind: 'grok 交互已解决', format: 'text', line: '交互已解决' })
+  })
+
+  it('内层是标准已映射种类时跳过（工具卡/思考流里已有），不重复展示', () => {
+    expect(classifyRawOutput(grokNotify('tool_call_delta_chunk', { name: 'grep' }), { childSession: false })).toBe('mapped')
+    expect(classifyRawOutput(grokNotify('agent_thought_chunk', { content: { type: 'text', text: '想' } }), { childSession: false })).toBe('mapped')
+  })
+
+  it('认不得的内层种类照旧原样 JSON，种类用内层名', () => {
+    expect(classifyRawOutput(grokNotify('brand_new_kind', { a: 1 }), { childSession: false }))
+      .toEqual({ kind: 'brand_new_kind', format: 'json', line: JSON.stringify({ sessionUpdate: 'brand_new_kind', a: 1 }) })
+  })
+})
+
 describe('RawOutputAggregator', () => {
   // config_option_update is a known, non-mapped, non-telemetry session update
   // (plan is now owned by the projection's todo card, so it can no longer stand
@@ -238,6 +319,29 @@ describe('RawOutputAggregator', () => {
     expect(block).toMatchObject({ kind: 'compaction_update', count: 1, format: 'text' })
     expect(block!.content).toContain('上下文压缩进行中')
     expect(agg.summary(AT)).toEqual([])
+  })
+
+  it('grok 后端重试实时成块；每轮用量走回合末遥测汇总', () => {
+    // 重试与压缩同类：是「静默那几分钟在干嘛」的现场答案，必须当场看见。
+    const agg = new RawOutputAggregator()
+    expect(agg.observe(grokNotify('retry_state', {
+      type: 'retrying', attempt: 2, max_retries: 15, reason: 'keep-alive timed out',
+    }), AT, { childSession: false })).toBeUndefined()
+    const live = agg.flush(AT)
+    expect(live).toMatchObject({ kind: 'grok 后端重试', count: 1, format: 'text' })
+    expect(live!.content).toContain('后端重试（第 2/15 次）：retrying')
+
+    // 用量是高频遥测：不实时出块，回合末按种类汇总。
+    expect(agg.observe(grokNotify('response_completed', {
+      usage: { input_tokens: 100, output_tokens: 10, reasoning_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    }), AT, { childSession: false })).toBeUndefined()
+    expect(agg.observe(grokNotify('response_completed', {
+      usage: { input_tokens: 200, output_tokens: 20, reasoning_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    }), AT, { childSession: false })).toBeUndefined()
+    expect(agg.flush(AT)).toBeUndefined()
+    const summary = agg.summary(AT)
+    expect(summary.map(block => [block.kind, block.count])).toEqual([['grok 每轮用量', 2]])
+    expect(summary[0]!.content).toContain('本轮用量：输入 200 / 输出 20')
   })
 
   it('cursor/update_todos 格式化为可读的待办行', () => {
