@@ -27,6 +27,20 @@
   cursor: pointer;
 }
 
+.identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.icon {
+  display: flex;
+  flex: none;
+  line-height: 0;
+}
+
 .name {
   min-width: 0;
   overflow: hidden;

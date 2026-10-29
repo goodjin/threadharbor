@@ -8,7 +8,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
+import { FileTypeIcon, MarkdownText, classifyFileType } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
 import { fallbackT, NAMESPACE } from './locales.ts'
 import type { RuntimeT } from './locales.ts'
@@ -65,11 +65,12 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
   readers: MarkdownTurnReaders
   t: RuntimeT
 }): ReactNode {
-  const [open, setOpen] = useState(true)
+  const [open, setOpen] = useState(false)
   const [attempt, setAttempt] = useState(0)
   const [body, setBody] = useState<DocumentBody>({ kind: 'loading' })
   const labels = useMemo(() => labelsFor(t), [t])
   useEffect(() => {
+    if (!open) return
     const controller = new AbortController()
     let cancelled = false
     setBody({ kind: 'loading' })
@@ -85,7 +86,7 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
       cancelled = true
       controller.abort()
     }
-  }, [sessionId, path, readers, attempt])
+  }, [open, sessionId, path, readers, attempt])
   return <section className={css.document} data-markdown-path={path}>
     <button
       type="button"
@@ -94,7 +95,12 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
       aria-label={t(open ? 'markdownTurn.collapseAria' : 'markdownTurn.expandAria', { name: path })}
       onClick={() => { setOpen(value => !value) }}
     >
-      <span className={css.name} title={path}>{path}</span>
+      <span className={css.identity}>
+        <span className={css.icon} data-file-icon={classifyFileType(path)}>
+          <FileTypeIcon path={path} size={16} />
+        </span>
+        <span className={css.name} title={path}>{path}</span>
+      </span>
       <span className={css.action}>{t(open ? 'markdownTurn.collapse' : 'markdownTurn.expand')}</span>
     </button>
     {open && <div className={css.body} data-markdown-body={path} style={BODY_STYLE}>

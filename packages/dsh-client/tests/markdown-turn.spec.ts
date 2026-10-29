@@ -115,7 +115,7 @@ describe('markdownSources', () => {
 })
 
 describe('MarkdownTurnTail', () => {
-  it('产出的 Markdown 默认展开，一屏高，正文进来后可收起', async () => {
+  it('产出的 Markdown 默认收起，点开后一屏高，再点收回', async () => {
     let resolvePage: (value: { text: string, lines: number, eof: boolean }) => void = () => {}
     const face = readers({
       readPage: vi.fn(() => new Promise(resolve => { resolvePage = resolve })),
@@ -131,17 +131,25 @@ describe('MarkdownTurnTail', () => {
     })
     expect(container.querySelector('[data-markdown-turn]')).not.toBeNull()
     expect(container.querySelector('[data-markdown-path="docs/a.md"]')).not.toBeNull()
+    expect(container.querySelector('[data-file-icon="markdown"] svg')).not.toBeNull()
+    expect(container.querySelector('[data-markdown-body]')).toBeNull()
+    expect(container.textContent).not.toContain('正在读取文档')
+    expect(face.readPage).not.toHaveBeenCalled()
+    expect(container.querySelector('button')?.getAttribute('aria-expanded')).toBe('false')
+
+    const toggle = container.querySelector('button')
+    await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     expect(container.textContent).toContain('正在读取文档')
     const body = container.querySelector('[data-markdown-body="docs/a.md"]')
     expect(body).not.toBeNull()
     expect((body as HTMLElement).style.maxHeight).toBe('100dvh')
     expect((body as HTMLElement).style.overflow).toBe('auto')
+    expect(container.querySelector('button')?.getAttribute('aria-expanded')).toBe('true')
 
     await act(async () => { resolvePage(page('# Hello', 1, true)) })
     expect(container.textContent).toContain('Hello')
     expect(face.readPage).toHaveBeenCalledWith('sess', 'docs/a.md', 1, expect.any(AbortSignal))
 
-    const toggle = container.querySelector('button[aria-expanded="true"]')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     expect(container.querySelector('[data-markdown-body]')).toBeNull()
     expect(container.querySelector('button')?.getAttribute('aria-expanded')).toBe('false')
@@ -184,6 +192,11 @@ describe('MarkdownTurnTail', () => {
       }))
     })
     await act(async () => { await Promise.resolve() })
+    expect(container.querySelector('[data-file-icon="typescript"] svg')).not.toBeNull()
+    expect(container.querySelector('[data-markdown-plain="src/a.ts"]')).toBeNull()
+    const toggle = container.querySelector('button')
+    await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await Promise.resolve() })
     const plain = container.querySelector('[data-markdown-plain="src/a.ts"]')
     expect(plain?.textContent).toBe('const n = 1')
     expect(plain?.tagName).toBe('PRE')
@@ -217,6 +230,10 @@ describe('MarkdownTurnTail', () => {
         readers: face,
       }))
     })
+    await act(async () => { await Promise.resolve() })
+    expect(container.textContent).not.toContain('文档没有读出来')
+    const toggle = container.querySelector('button')
+    await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
     expect(container.textContent).toContain('文档没有读出来')
     const retry = [...container.querySelectorAll('button')].find(button => button.textContent === '重试')
