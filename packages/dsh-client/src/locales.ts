@@ -40,8 +40,7 @@ export const zh = {
   /** 交接卡：被切走的回合显示的中性行。 */
   'handover.title': '已切换到 {target}，对话已移到新会话',
   'handover.open': '打开新会话',
-  /** 结果卡：回合最终答案的卡片头与复制按钮。 */
-  'answerCard.label': '结果',
+  /** 结果卡：回合最终答案的复制按钮。 */
   'answerCard.copy': '复制结果',
   'answerCard.copied': '已复制',
   /** 失败回合的恢复行：请求在 claim 之后、落盘之前失败时把原文留下。 */
@@ -541,8 +540,7 @@ export const en = {
   'progress.ready': 'New session ready, switching · {target}',
   'handover.title': 'Switched to {target}; the conversation moved to the new session',
   'handover.open': 'Open the new session',
-  /** Answer card: header and copy button for a turn's final answer. */
-  'answerCard.label': 'Result',
+  /** Answer card: copy button for a turn's final answer. */
   'answerCard.copy': 'Copy result',
   'answerCard.copied': 'Copied',
   'lostInput.title': 'This request was not delivered',

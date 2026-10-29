@@ -83,16 +83,15 @@ describe('ACP process surface', () => {
     expect(renderToStaticMarkup(createElement(renderer, emptyAnswer))).not.toContain('data-acp-answer-card')
     f.dispose()
   })
-  it('renders the answer card header with the thinking icon, a copy button, and the localized label', () => {
+  it('renders the answer card header with the thinking icon and a copy button, no label', () => {
     const f = fixture(); registerAcpProcessSurface(f.ctx)
     const renderer = f.entries.at(-1)!.component as any
-    const t = (key: string) => ({ 'answerCard.label': '结果', 'answerCard.copy': '复制结果' })[key] ?? key
+    const t = (key: string) => ({ 'answerCard.copy': '复制结果' })[key] ?? key
     const html = renderToStaticMarkup(createElement(renderer, {
       node: { data: { step: 3, blocks: [{ kind: 'text', text: 'The final answer' }] } },
       t, turnProcess: { spec: { answerStep: 3 } },
     }))
-    // Header label, copy button, and its initial (uncopied) state.
-    expect(html).toContain('结果')
+    // Just the thinking icon and the copy button in its initial state — no text label.
     expect(html).toContain('data-action="copy-answer"')
     expect(html).toContain('aria-label="复制结果"')
     expect(html).not.toContain('data-copied="true"')
