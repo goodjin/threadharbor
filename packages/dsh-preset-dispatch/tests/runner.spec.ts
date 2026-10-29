@@ -677,6 +677,32 @@ describe('AcpTurnRunner', () => {
     expect((result.end as { error: { message: string } }).error.message).toContain('could not run')
   })
 
+  it('seals prose before the first tool announcement, never again for its updates', async () => {
+    const order: string[] = []
+    const announcements: unknown[] = []
+    let emit: (frame: AcpFrame) => void = () => {}
+    const client: AcpClientPort = {
+      request: async method => {
+        if (method === 'session/new') return { sessionId: 's1' }
+        if (method === 'session/prompt') {
+          emit(agentThoughtChunk('before'))
+          emit({ method: 'session/update', params: { update: { sessionUpdate: 'tool_call', toolCallId: 'c1', kind: 'execute', title: 'pwd', rawInput: { command: 'pwd' }, status: 'in_progress' } } })
+          emit(agentThoughtChunk('after'))
+          emit({ method: 'session/update', params: { update: { sessionUpdate: 'tool_call_update', toolCallId: 'c1', status: 'completed' } } })
+          return { stopReason: 'end_turn' }
+        }
+        return {}
+      }, notify: () => {}, onFrame: handler => { emit = handler },
+    }
+    await new AcpTurnRunner(client, { cwd: '/tmp', dialect: codexDialect }).run(DECISION, {
+      ...TURN({ reasoningDelta: (text: string) => order.push(text), textDelta: () => {}, toolBoundary: () => { order.push('sealed'); return 1 } }),
+      write: events => { if (events.some(e => e.type === 'tool/call')) { order.push('tool'); announcements.push(...events.filter(e => e.type === 'assistant/message')) }; return 1 },
+    })
+    expect(order.slice(0, 4)).toEqual(['before', 'sealed', 'tool', 'after'])
+    expect(order.filter(value => value === 'sealed')).toHaveLength(1)
+    expect(announcements[0]).toMatchObject({ payload: { message: { source: { replayState: { response: { threadharborAcpBoundary: { version: 1, beforeBlock: 1 } } } } } } })
+  })
+
   it('feeds text to the stream as frames arrive, not after the turn ends', async () => {
     // The whole point of streaming: a delta reaching the UI while the agent is
     // still working. Collecting frames and replaying them afterwards is exactly

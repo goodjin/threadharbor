@@ -1,0 +1,8 @@
+.segment {
+  border-inline-start: 2px solid var(--dsw-alias-border-primary, rgba(127, 127, 127, 0.25));
+  padding-inline-start: 12px;
+  margin-block: 6px;
+  display: grid;
+  gap: 8px;
+}
+.reasoning { color: var(--dsw-alias-label-secondary, inherit); }

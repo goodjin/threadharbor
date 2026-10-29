@@ -204,6 +204,23 @@ describe('GatewayChunkStream — the native loop’s chunk vocabulary', () => {
     expect(chunks[4]).toMatchObject({ reason: { kind: 'stop' } })
   })
 
+  it('seals prose before a tool and never reopens or repeats that block at finish', () => {
+    const chunks: GatewayChunk[] = []
+    const stream = new GatewayChunkStream({ chunk: c => { chunks.push(c) } })
+    const port = stream.port()
+    port.reasoningDelta('first')
+    port.toolBoundary?.()
+    expect(chunks.at(-1)).toMatchObject({ type: 'block-end', index: 0, block: { text: 'first' } })
+    port.toolBoundary?.()
+    port.reasoningDelta('second')
+    port.toolBoundary?.()
+    port.textDelta('answer')
+    stream.finish({ kind: 'completed' })
+    expect(chunks.filter(c => c.type === 'block-end').map(c => c.block.text)).toEqual(['first', 'second', 'answer'])
+    expect(chunks.filter(c => c.type === 'block-start').map(c => c.index)).toEqual([0, 1, 2])
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish' })
+  })
+
   it('gives reasoning its own block before the text block', () => {
     const chunks: GatewayChunk[] = []
     const stream = new GatewayChunkStream({ chunk: c => { chunks.push(c) } })
@@ -230,7 +247,7 @@ describe('GatewayChunkStream — the native loop’s chunk vocabulary', () => {
     expect(starts.map(c => c.blockType)).toEqual(['reasoning', 'text', 'reasoning'])
   })
 
-  it('emits block-start once per switch, then closes every block in order at finish', () => {
+  it('opens and closes blocks in order, with finish strictly last', () => {
     const chunks: GatewayChunk[] = []
     const stream = new GatewayChunkStream({ chunk: c => { chunks.push(c) } })
     const port = stream.port()

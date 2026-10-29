@@ -25,6 +25,18 @@ function collector() {
 }
 
 describe('AcpAssistantStream', () => {
+  it('ends the live block at a tool boundary and records the next same-kind prose separately', () => {
+    const { frames, nextRevision } = collector()
+    const stream = new AcpAssistantStream({ emit: f => frames.push(f), nextRevision, sessionId: 's', attempt: 1, turn: 1, step: 1 })
+    stream.reasoningDelta('first')
+    stream.toolBoundary()
+    expect(frames.at(-1)).toMatchObject({ type: 'chunk', chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'first' } } })
+    stream.toolBoundary()
+    stream.reasoningDelta('second')
+    expect(stream.records().map(r => r.index)).toEqual([0, 1])
+    expect(frames).toHaveLength(3)
+  })
+
   it('opens with a start frame naming the attempt', () => {
     const { frames, nextRevision } = collector()
     const stream = new AcpAssistantStream({ emit: f => frames.push(f), nextRevision, sessionId: 'sess-7', attempt: 2, turn: 1, step: 1 })

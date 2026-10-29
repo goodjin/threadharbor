@@ -207,6 +207,7 @@ export class GatewayChunkStream {
       start: () => {},
       textDelta: text => { this.push('text', text) },
       reasoningDelta: text => { this.push('reasoning', text) },
+      toolBoundary: () => { this.closeBlock(); return this.blocks.length },
       records: () => [],
       settle: () => {},
       abandon: () => {},
@@ -216,6 +217,7 @@ export class GatewayChunkStream {
   private push(kind: 'text' | 'reasoning', text: string): void {
     if (text === '') return
     if (this.current === undefined || this.current.blockType !== kind) {
+      this.closeBlock()
       this.current = { blockType: kind, index: this.blocks.length, text: '' }
       this.blocks.push(this.current)
       this.sink.chunk({ type: 'block-start', index: this.current.index, blockType: kind })
@@ -226,11 +228,17 @@ export class GatewayChunkStream {
       : { type: 'reasoning-delta', index: this.current.index, text })
   }
 
-  /** Close the open blocks and finish, mapping the step ending. */
+  /** A sealed block never accepts later deltas, even when their kind matches. */
+  private closeBlock(): void {
+    const block = this.current
+    if (block === undefined) return
+    this.current = undefined
+    this.sink.chunk({ type: 'block-end', index: block.index, block: { type: block.blockType, text: block.text } })
+  }
+
+  /** Close the last block exactly once and finish the external response. */
   finish(end: GatewayStepEnd): void {
-    for (const block of [...this.blocks].sort((a, b) => a.index - b.index)) {
-      this.sink.chunk({ type: 'block-end', index: block.index, block: { type: block.blockType, text: block.text } })
-    }
+    this.closeBlock()
     this.sink.chunk({ type: 'finish', reason: this.finishReason(end) })
   }
 

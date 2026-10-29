@@ -63,6 +63,8 @@ export type AcpClientPort = {
 export type TurnStreamPort = {
   textDelta(text: string): void
   reasoningDelta(text: string): void
+  /** Seal preceding prose; return the next block index when the stream can expose it. */
+  toolBoundary?(): number | void
 }
 
 /** How to reach an agent, and where its work happens. */
@@ -597,6 +599,7 @@ export class AcpTurnRunner {
    * segment close does not write the same card again.
    */
   private readonly writtenCards = new Set<string>()
+  private readonly proseBoundaries = new Map<string, number>()
   /**
    * 外部 agent 自己的委托运行（子代理 / 后台任务）里还开着的那几个。
    *
@@ -1087,6 +1090,7 @@ export class AcpTurnRunner {
     this.spawnedByChild.clear()
     this.subagentTools.clear()
     this.writtenCards.clear()
+    this.proseBoundaries.clear()
     // 委托运行的账本随 prompt 重开：上一回合的子代理属于上一回合。
     this.delegatedRuns.clear()
     this.aborted = false
@@ -1138,6 +1142,12 @@ export class AcpTurnRunner {
         ? (deltaFold(carried, update) ?? dialect.foldTool(carried, update))
         : dialect.foldTool(carried, update)
       foldedCall = folded
+      // First frame of a call seals prose BEFORE the announcement/card. Updates
+      // and terminal results for an existing call must not split later prose.
+      if (carried === undefined) {
+        const beforeBlock = this.stream?.toolBoundary?.()
+        if (typeof beforeBlock === 'number') this.proseBoundaries.set(resolvedId, beforeBlock)
+      }
       live.tools.set(resolvedId, folded)
       if (deltaIndex !== undefined) live.deltaToolByIndex.set(deltaIndex, resolvedId)
       // 子代理经**工具调用**派发时（cursor 的 `task` 工具，2026-10-21 真机抓帧：
@@ -1178,9 +1188,20 @@ export class AcpTurnRunner {
     const callId = recordOf(event.payload)['callId']
     if (typeof callId !== 'string') return
     if (!live.written.has(callId)) {
-      const announcement = isDeltaTool && foldedCall !== undefined
+      let announcement = isDeltaTool && foldedCall !== undefined
         ? projectToolCallAnnouncementCall(foldedCall, options)
         : projectToolCallAnnouncement(frame, options)
+      // Adapter-private replay metadata preserves the exact stream boundary.
+      // Text chunks and durable tool events travel on different channels, so
+      // timestamps (or arrival order) alone cannot reliably place a same-tick tool.
+      const beforeBlock = resolvedId === undefined ? undefined : this.proseBoundaries.get(resolvedId)
+      if (announcement !== undefined && beforeBlock !== undefined) {
+        const payload = recordOf(announcement.payload)
+        const message = recordOf(payload['message'])
+        announcement = { ...announcement, payload: { ...payload, message: { ...message,
+          source: { ...recordOf(message['source']), replayState: { response: { threadharborAcpBoundary: { version: 1, beforeBlock } } } },
+        } } }
+      }
       try {
         live.write(announcement === undefined ? [event] : [announcement, event])
       } catch {

@@ -58,6 +58,7 @@ export class AcpAssistantStream {
    * switch; same-kind deltas keep writing the current one.
    */
   private nextBlockIndex = 0
+  private boundary = false
   /** Position the attempt's next chunk frame takes; also the end frame's index. */
   private index = 0
   private ended = false
@@ -89,6 +90,21 @@ export class AcpAssistantStream {
 
   reasoningDelta(text: string): void {
     this.pushDelta('reasoning-chunks', text)
+  }
+
+  /** Keep same-kind text on opposite sides of a tool in separate blocks. */
+  toolBoundary(): number {
+    const previous = this.runs.at(-1)
+    if (this.boundary || previous === undefined) return this.nextBlockIndex
+    this.boundary = true
+    const text = this.runs.filter(run => run.index === previous.index).flatMap(run => run.texts).join('')
+    this.options.emit({
+      type: 'chunk', attemptId: this.attemptId, revision: this.options.nextRevision(),
+      index: this.index++, time: this.options.now?.() ?? Date.now(),
+      chunk: { type: 'block-end', index: previous.index,
+        block: { type: previous.type === 'text-chunks' ? 'text' : 'reasoning', text } },
+    })
+    return this.nextBlockIndex
   }
 
   /** The compacted stream the durable message embeds. */
@@ -151,7 +167,8 @@ export class AcpAssistantStream {
     // Same kind keeps writing the current block; a reasoning↔text switch takes
     // the next number. So a matching index always implies a matching kind —
     // which is the whole run-merge condition below, next to the time guard.
-    const index = previous !== undefined && previous.type === type ? previous.index : this.nextBlockIndex++
+    const index = !this.boundary && previous !== undefined && previous.type === type ? previous.index : this.nextBlockIndex++
+    this.boundary = false
     if (previous !== undefined && previous.index === index && time >= previous.lastTime) {
       previous.dt.push(time - previous.lastTime)
       previous.texts.push(text)

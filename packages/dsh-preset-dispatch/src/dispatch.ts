@@ -156,6 +156,9 @@ export type TurnStreamHandle = {
   start(): void
   textDelta(text: string): void
   reasoningDelta(text: string): void
+  /** Seal the preceding prose before a newly announced external tool. */
+  /** Seal preceding prose; return the next block index when the stream can expose it. */
+  toolBoundary?(): number | void
   /** The compacted stream for the durable message. */
   records(): readonly StreamRecord[]
   /**
