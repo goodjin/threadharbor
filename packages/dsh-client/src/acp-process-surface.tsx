@@ -84,7 +84,8 @@ export function registerAcpProcessSurface(ctx: Surface): void {
           const native = createElement(Native, props)
           if (!isAnswer) return native
           const hasProse = props.node.data.blocks.some(block =>
-            (block.kind === 'text' || block.kind === 'reasoning') && block.text.trim() !== '')
+            (block.kind === 'text' || block.kind === 'reasoning') &&
+            (block.text?.trim() ?? '') !== '')
           return hasProse
             ? <AnswerCard blocks={props.node.data.blocks} t={props.t as (key: string) => string}>{native}</AnswerCard>
             : native

@@ -81,6 +81,18 @@ describe('ACP process surface', () => {
       t: (key: string) => key, ...turnProcess(2),
     }
     expect(renderToStaticMarkup(createElement(renderer, emptyAnswer))).not.toContain('data-acp-answer-card')
+    // An answer step whose blocks include a text block with no `text` field must not
+    // throw while probing for prose (the real answer step carries tool-call blocks
+    // and reasoning alongside text).
+    const undefinedText = {
+      node: { data: { step: 2, blocks: [
+        { kind: 'tool-call', callId: 'c1', name: 'bash', argsRaw: '{}' },
+        { kind: 'reasoning', text: 'thinking' },
+        { kind: 'text' as const },
+      ] } },
+      t: (key: string) => key, ...turnProcess(2),
+    }
+    expect(() => renderToStaticMarkup(createElement(renderer, undefinedText))).not.toThrow()
     f.dispose()
   })
   it('renders the answer card header with the thinking icon and a copy button, no label', () => {
