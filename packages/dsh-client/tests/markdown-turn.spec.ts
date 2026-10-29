@@ -44,10 +44,12 @@ function page(text: string, lines: number, eof: boolean) {
 function readers(overrides?: Partial<{
   readPage: ReturnType<typeof vi.fn>
   loadSummary: ReturnType<typeof vi.fn>
+  revealFile: ReturnType<typeof vi.fn>
 }>) {
   return {
     readPage: overrides?.readPage ?? vi.fn(async () => page('# Hello', 1, true)),
     loadSummary: overrides?.loadSummary ?? vi.fn(async () => ({ files: [] })),
+    revealFile: overrides?.revealFile ?? vi.fn(async () => {}),
   }
 }
 
@@ -153,6 +155,52 @@ describe('MarkdownTurnTail', () => {
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     expect(container.querySelector('[data-markdown-body]')).toBeNull()
     expect(container.querySelector('button')?.getAttribute('aria-expanded')).toBe('false')
+    await act(async () => { root.unmount() })
+  })
+
+  it('展开后路径栏与正文分开，双击正文收回', async () => {
+    const face = readers({ readPage: vi.fn(async () => page('# Hello', 1, true)) })
+    const container = document.createElement('div')
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+        readers: face,
+      }))
+    })
+    expect(container.querySelector('[data-path-bar]')?.hasAttribute('data-expanded')).toBe(false)
+    const toggle = container.querySelector('button[aria-expanded]')
+    await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await Promise.resolve() })
+    expect(container.querySelector('[data-path-bar]')?.hasAttribute('data-expanded')).toBe(true)
+    const body = container.querySelector('[data-markdown-body="docs/a.md"]')
+    expect(body).not.toBeNull()
+    await act(async () => { body?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    expect(container.querySelector('[data-markdown-body]')).toBeNull()
+    expect(container.querySelector('[data-path-bar]')?.hasAttribute('data-expanded')).toBe(false)
+    await act(async () => { root.unmount() })
+  })
+
+  it('打开所在文件夹不展开正文，失败时在按钮上说出来', async () => {
+    const revealFile = vi.fn(async () => { throw new Error('no') })
+    const face = readers({ revealFile })
+    const container = document.createElement('div')
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+        readers: face,
+      }))
+    })
+    const reveal = [...container.querySelectorAll('button')].find(button => button.textContent === '打开所在文件夹')
+    await act(async () => { reveal?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await Promise.resolve() })
+    expect(revealFile).toHaveBeenCalledWith('sess', 'docs/a.md')
+    expect(container.querySelector('[data-markdown-body]')).toBeNull()
+    expect(container.querySelector('[data-reveal-error]')).not.toBeNull()
+    expect(container.textContent).toContain('文件夹没有打开')
     await act(async () => { root.unmount() })
   })
 
@@ -301,5 +349,23 @@ describe('createMarkdownTurnReaders', () => {
     const read = vi.fn(async () => ({ ok: false, error: { message: 'workspace-file/not-found' } }))
     const face = createMarkdownTurnReaders(() => ({ workspaceFiles: { read } }))
     await expect(face.readPage('sess', 'a.md', 1, new AbortController().signal)).rejects.toThrow('workspace-file/not-found')
+  })
+
+  it('打开所在文件夹先取绝对路径，再请主机在文件管理器里显示', async () => {
+    const stat = vi.fn(async () => ({ ok: true, value: { absolutePath: '/ws/docs/a.md', version: '1' } }))
+    const openWorkspacePath = vi.fn(async () => ({ ok: true, value: { opened: true } }))
+    const face = createMarkdownTurnReaders(() => ({ workspaceFiles: { stat }, session: { openWorkspacePath } }))
+    await face.revealFile('sess', 'docs/a.md')
+    expect(stat).toHaveBeenCalledWith('sess', 'docs/a.md')
+    expect(openWorkspacePath).toHaveBeenCalledWith({ path: '/ws/docs/a.md', action: 'reveal' })
+  })
+
+  it('没有绝对路径时，打开文件夹失败', async () => {
+    const stat = vi.fn(async () => ({ ok: true, value: { version: '1' } }))
+    const face = createMarkdownTurnReaders(() => ({
+      workspaceFiles: { stat },
+      session: { openWorkspacePath: vi.fn() },
+    }))
+    await expect(face.revealFile('sess', 'a.md')).rejects.toThrow(/absolute path/)
   })
 })

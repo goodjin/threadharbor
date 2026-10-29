@@ -2,8 +2,8 @@
  * 在会话区展开这一轮产出、交付或改动过的文本文件。
  *
  * 挂在 `conversation.chat.turnTail` 上，排在官方改动卡片之后。官方卡片照旧
- * 打开右侧对比。Markdown 按文档排版，其它文本按原文显示。默认展开，高度一屏，
- * 超出滚动，可收起。
+ * 打开右侧对比。Markdown 按文档排版，其它文本按原文显示。默认收起，点击才展开并读取。
+ * 展开后路径栏与正文隔开。双击正文收回。路径栏右侧可打开所在文件夹。
  */
 
 import { useEffect, useMemo, useState } from 'react'
@@ -68,6 +68,7 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
   const [open, setOpen] = useState(false)
   const [attempt, setAttempt] = useState(0)
   const [body, setBody] = useState<DocumentBody>({ kind: 'loading' })
+  const [revealError, setRevealError] = useState(false)
   const labels = useMemo(() => labelsFor(t), [t])
   useEffect(() => {
     if (!open) return
@@ -88,22 +89,46 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
     }
   }, [open, sessionId, path, readers, attempt])
   return <section className={css.document} data-markdown-path={path}>
-    <button
-      type="button"
-      className={css.header}
-      aria-expanded={open}
-      aria-label={t(open ? 'markdownTurn.collapseAria' : 'markdownTurn.expandAria', { name: path })}
-      onClick={() => { setOpen(value => !value) }}
-    >
-      <span className={css.identity}>
-        <span className={css.icon} data-file-icon={classifyFileType(path)}>
-          <FileTypeIcon path={path} size={16} />
+    <div className={css.bar} data-path-bar="" {...(open ? { 'data-expanded': '' } : {})}>
+      <button
+        type="button"
+        className={css.toggle}
+        aria-expanded={open}
+        aria-label={t(open ? 'markdownTurn.collapseAria' : 'markdownTurn.expandAria', { name: path })}
+        onClick={() => { setOpen(value => !value) }}
+      >
+        <span className={css.identity}>
+          <span className={css.icon} data-file-icon={classifyFileType(path)}>
+            <FileTypeIcon path={path} size={16} />
+          </span>
+          <span className={css.name} title={path}>{path}</span>
         </span>
-        <span className={css.name} title={path}>{path}</span>
-      </span>
-      <span className={css.action}>{t(open ? 'markdownTurn.collapse' : 'markdownTurn.expand')}</span>
-    </button>
-    {open && <div className={css.body} data-markdown-body={path} style={BODY_STYLE}>
+        <span className={css.action}>{t(open ? 'markdownTurn.collapse' : 'markdownTurn.expand')}</span>
+      </button>
+      <button
+        type="button"
+        className={css.reveal}
+        aria-label={t('markdownTurn.reveal')}
+        {...(revealError ? { 'data-reveal-error': '' } : {})}
+        title={revealError ? t('markdownTurn.revealError') : t('markdownTurn.reveal')}
+        onClick={() => {
+          setRevealError(false)
+          void readers.revealFile(sessionId, path).catch(() => { setRevealError(true) })
+        }}
+      >
+        {revealError ? t('markdownTurn.revealError') : t('markdownTurn.reveal')}
+      </button>
+    </div>
+    {open && <div
+      className={css.body}
+      data-markdown-body={path}
+      style={BODY_STYLE}
+      onDoubleClick={(event) => {
+        const target = event.target
+        if (target instanceof Element && target.closest('button, a')) return
+        setOpen(false)
+      }}
+    >
       {body.kind === 'loading' && <p className={css.status}>{t('markdownTurn.loading')}</p>}
       {body.kind === 'error' && <p className={css.status}>
         {t('markdownTurn.error')}

@@ -19,6 +19,8 @@ export interface MarkdownTextPage {
 export interface MarkdownTurnReaders {
   readPage(sessionId: string, path: string, offset: number, signal: AbortSignal): Promise<MarkdownTextPage>
   loadSummary(sessionId: string, seq: number, signal: AbortSignal): Promise<unknown>
+  /** 在文件管理器里显示这个文件所在的文件夹。 */
+  revealFile(sessionId: string, path: string): Promise<void>
 }
 
 /** 一轮里已经能确定的文本路径，外加改动摘要的序号（有的话）。 */
@@ -199,14 +201,6 @@ export async function readMarkdownText(
 }
 
 /**
- * 用当下的 remote 读文件，用页面同源的 fetch 读改动摘要。
- *
- * 每次调用都重新取 remote：连接换过之后，挂在旧对象上的方法会抛。
- * @param remote - 返回当前 `ctx.remote`。
- * @returns 阅读区用的两个口子。
- */
-
-/**
  * 从 `workspaceFiles.read` 的返回值里取出正文页。
  *
  * 客户端远程方法不直接给页，而是 `{ ok: true, value }` 或 `{ ok: false, error }`。
@@ -224,6 +218,20 @@ function textPageFromRead(value: unknown): MarkdownTextPage {
   throw new Error(message)
 }
 
+/** 从 `workspaceFiles.stat` 的成功结果里取出主机上的绝对路径。 */
+function absolutePathFromStat(value: unknown): string | undefined {
+  if (!isRecord(value) || value.ok !== true || !isRecord(value.value)) return undefined
+  const path = value.value.absolutePath
+  return typeof path === 'string' && path.length > 0 ? path : undefined
+}
+
+/**
+ * 用当下的 remote 读文件、在文件管理器里显示文件，并用页面同源的 fetch 读改动摘要。
+ *
+ * 每次调用都重新取 remote：连接换过之后，挂在旧对象上的方法会抛。
+ * @param remote - 返回当前 `ctx.remote`。
+ * @returns 阅读区用的读取口。
+ */
 export function createMarkdownTurnReaders(remote: () => unknown): MarkdownTurnReaders {
   return {
     async readPage(sessionId, path, offset, signal) {
@@ -233,6 +241,29 @@ export function createMarkdownTurnReaders(remote: () => unknown): MarkdownTurnRe
       if (read === undefined) throw new Error('workspaceFiles.read is missing')
       const value: unknown = await read.call(files, sessionId, path, { offset }, signal)
       return textPageFromRead(value)
+    },
+    async revealFile(sessionId, path) {
+      const holder = remote()
+      const files = isRecord(holder) ? holder.workspaceFiles : undefined
+      const stat = isRecord(files) && typeof files.stat === 'function' ? files.stat : undefined
+      const session = isRecord(holder) && isRecord(holder.session) ? holder.session : undefined
+      const open = session !== undefined && typeof session.openWorkspacePath === 'function'
+        ? session.openWorkspacePath
+        : undefined
+      if (stat === undefined || open === undefined || session === undefined) {
+        throw new Error('workspace file reveal is missing')
+      }
+      const stated: unknown = await stat.call(files, sessionId, path)
+      const absolutePath = absolutePathFromStat(stated)
+      if (absolutePath === undefined) throw new Error('workspace file has no absolute path')
+      const opened: unknown = await open.call(session, { path: absolutePath, action: 'reveal' })
+      if (!isRecord(opened) || opened.ok !== true) {
+        const error = isRecord(opened) && opened.ok === false ? opened.error : undefined
+        const message = isRecord(error) && typeof error.message === 'string' && error.message.length > 0
+          ? error.message
+          : 'workspace file reveal failed'
+        throw new Error(message)
+      }
     },
     async loadSummary(sessionId, seq, signal) {
       const response = await fetch(changesSummaryUrl(sessionId, seq), { signal })

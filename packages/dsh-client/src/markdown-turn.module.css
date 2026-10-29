@@ -12,12 +12,25 @@
   background: rgb(0 0 0 / 3%);
 }
 
-.header {
+.bar {
+  display: flex;
+  align-items: stretch;
+  background: rgb(0 0 0 / 6%);
+  border-radius: 7px;
+}
+
+.bar[data-expanded] {
+  border-bottom: 1px solid rgb(0 0 0 / 14%);
+  border-radius: 7px 7px 0 0;
+}
+
+.toggle {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   padding: 8px 12px;
   border: none;
   background: transparent;
@@ -25,6 +38,23 @@
   font: inherit;
   text-align: start;
   cursor: pointer;
+}
+
+.reveal {
+  flex: none;
+  margin: 6px 8px 6px 0;
+  padding: 4px 8px;
+  border: 1px solid rgb(0 0 0 / 18%);
+  border-radius: 6px;
+  background: rgb(255 255 255 / 55%);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.reveal:hover {
+  background: rgb(255 255 255 / 80%);
 }
 
 .identity {
@@ -57,7 +87,7 @@
 }
 
 .body {
-  padding: 0 12px 12px;
+  padding: 12px;
 }
 
 .status {
@@ -83,4 +113,33 @@
   overflow-wrap: anywhere;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12.5px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .document {
+    border-color: rgb(255 255 255 / 16%);
+    background: rgb(255 255 255 / 4%);
+  }
+
+  .bar {
+    background: rgb(255 255 255 / 8%);
+  }
+
+  .bar[data-expanded] {
+    border-bottom-color: rgb(255 255 255 / 16%);
+  }
+
+  .reveal {
+    border-color: rgb(255 255 255 / 24%);
+    background: rgb(255 255 255 / 8%);
+  }
+
+  .reveal:hover {
+    background: rgb(255 255 255 / 14%);
+  }
+
+  .action,
+  .status {
+    color: rgb(255 255 255 / 55%);
+  }
 }
