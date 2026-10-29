@@ -47,6 +47,12 @@ export const codexDialect: AcpDialect = {
   capabilities: {
     cancelsTurns: true,
     acceptsImageContent: true,
+    // `session/resume` is real: codex's `initialize` advertises
+    // `sessionCapabilities.resume` among its seven session capabilities
+    // (resume/list/close/delete/fork/subagents/additionalDirectories,
+    // measured 2026-10-09). A session reattached in a freshly spawned
+    // process resumes server-side — no text replay needed.
+    supportsSessionResume: true,
     // codex emits an opening frame and a completed frame per call — no
     // in-progress status in between.
     toolFrameShape: 'two_frame',
