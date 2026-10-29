@@ -256,9 +256,9 @@ describe('registerMarkdownTurn', () => {
 
 describe('createMarkdownTurnReaders', () => {
   it('每次读取都用当下的 workspaceFiles.read，摘要走文档相对地址', async () => {
-    const read = vi.fn(async () => page('body', 1, true))
+    const read = vi.fn(async () => ({ ok: true, value: page('body', 1, true) }))
     const first = { workspaceFiles: { read } }
-    const second = { workspaceFiles: { read: vi.fn(async () => page('next', 1, true)) } }
+    const second = { workspaceFiles: { read: vi.fn(async () => ({ ok: true, value: page('next', 1, true) })) } }
     let current: unknown = first
     const face = createMarkdownTurnReaders(() => current)
     const signal = new AbortController().signal
@@ -278,5 +278,11 @@ describe('createMarkdownTurnReaders', () => {
   it('没有 read 方法时抛错，不把缺席说成空文档', async () => {
     const face = createMarkdownTurnReaders(() => ({}))
     await expect(face.readPage('sess', 'a.md', 1, new AbortController().signal)).rejects.toThrow(/workspaceFiles\.read/)
+  })
+
+  it('远程调用失败时抛出宿主的错误，不把信封当成正文', async () => {
+    const read = vi.fn(async () => ({ ok: false, error: { message: 'workspace-file/not-found' } }))
+    const face = createMarkdownTurnReaders(() => ({ workspaceFiles: { read } }))
+    await expect(face.readPage('sess', 'a.md', 1, new AbortController().signal)).rejects.toThrow('workspace-file/not-found')
   })
 })

@@ -205,6 +205,25 @@ export async function readMarkdownText(
  * @param remote - 返回当前 `ctx.remote`。
  * @returns 阅读区用的两个口子。
  */
+
+/**
+ * 从 `workspaceFiles.read` 的返回值里取出正文页。
+ *
+ * 客户端远程方法不直接给页，而是 `{ ok: true, value }` 或 `{ ok: false, error }`。
+ * 把信封当成页会让每篇文档都读失败。
+ * @param value - 远程调用的返回值。
+ * @returns 正文页。
+ * @throws 调用失败，或成功结果里没有正文页时。
+ */
+function textPageFromRead(value: unknown): MarkdownTextPage {
+  if (isRecord(value) && value.ok === true && isTextPage(value.value)) return value.value
+  const error = isRecord(value) && value.ok === false ? value.error : undefined
+  const message = isRecord(error) && typeof error.message === 'string' && error.message.length > 0
+    ? error.message
+    : 'workspaceFiles.read returned an unexpected page'
+  throw new Error(message)
+}
+
 export function createMarkdownTurnReaders(remote: () => unknown): MarkdownTurnReaders {
   return {
     async readPage(sessionId, path, offset, signal) {
@@ -213,8 +232,7 @@ export function createMarkdownTurnReaders(remote: () => unknown): MarkdownTurnRe
       const read = isRecord(files) && typeof files.read === 'function' ? files.read : undefined
       if (read === undefined) throw new Error('workspaceFiles.read is missing')
       const value: unknown = await read.call(files, sessionId, path, { offset }, signal)
-      if (!isTextPage(value)) throw new Error('workspaceFiles.read returned an unexpected page')
-      return value
+      return textPageFromRead(value)
     },
     async loadSummary(sessionId, seq, signal) {
       const response = await fetch(changesSummaryUrl(sessionId, seq), { signal })
