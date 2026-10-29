@@ -450,7 +450,7 @@ describe('会话停下来的善后', () => {
       transport: transportCounter().transport,
     })
     expect([...context.handlers.keys()].sort())
-      .toEqual(['agent/created', 'session/event', 'workspace/session-stop'])
+      .toEqual(['agent/created', 'session/event', 'workspace/restart-agent', 'workspace/session-stop'])
   })
 })
 

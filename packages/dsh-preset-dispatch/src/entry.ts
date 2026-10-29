@@ -178,6 +178,10 @@ export function apply(ctx: unknown, config: Config): void {
      */
     on(event: 'workspace/session-stop', handler: (payload: { sessionId: unknown }) => void): unknown
     /**
+     * An operator's request to restart the external agent process.
+     */
+    on(event: 'workspace/restart-agent', handler: (payload: { sessionId: unknown }) => void): unknown
+    /**
      * The loop's per-step notice, fired before the boundaries are appended. Its
      * payload carries the turn and step numbers the loop is about to use — the
      * only source the replaced step has for placing its content.

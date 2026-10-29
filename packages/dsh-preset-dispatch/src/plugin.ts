@@ -62,6 +62,14 @@ export type AcpPluginContext = {
    */
   on(event: 'workspace/session-stop', handler: (payload: { sessionId: unknown }) => void): unknown
   /**
+   * An operator's request to restart the external agent process.
+   *
+   * Fired when the user clicks a "restart" button in the UI or runs a restart
+   * command. The row kills the shared agent and drops all cached sessions; the
+   * next turn spawns a fresh process and resumes via `session/resume`.
+   */
+  on(event: 'workspace/restart-agent', handler: (payload: { sessionId: unknown }) => void): unknown
+  /**
    * Read a host service by name; how this row reaches the model registry and
    * the switch services. Optional: a host offering neither still mounts, and
    * the pieces that need them say so loudly when they are asked.
@@ -374,6 +382,18 @@ export function applyAcpPlugin(
     opened.delete(sessionId)
     entry.close()
     deps.report?.(`acp ${presetId}: session ${sessionId} was stopped — its external connection was closed`)
+  })
+
+  ctx.on('workspace/restart-agent', payload => {
+    const sessionId = payload.sessionId
+    if (typeof sessionId !== 'string') return
+    const binding = table.get(presetId)
+    if (binding?.restart === undefined) return
+    void binding.restart().then(() => {
+      deps.report?.(`acp ${presetId}: agent restarted by operator`)
+    }).catch(error => {
+      deps.report?.(`acp ${presetId}: restart failed: ${String(error)}`)
+    })
   })
 
   ctx.on('agent/created', payload => {

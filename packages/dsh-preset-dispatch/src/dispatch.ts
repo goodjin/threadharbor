@@ -113,6 +113,16 @@ export type AcpPresetBinding = {
     turn: TurnContext,
     options: { readonly first: boolean },
   ) => Promise<StepEndReason | null>
+  /**
+   * Restart the shared agent process: kill the current transport and all its
+   * sessions, then spawn a fresh one on next use.
+   *
+   * Called when an operator explicitly restarts the external agent (e.g. via
+   * a UI button or CLI command). All cached sessions are dropped; the next
+   * turn for any session on this preset will reopen and resume via
+   * `session/resume` (or fall back to text replay).
+   */
+  readonly restart?: () => Promise<void>
 }
 
 /** Where in the loop the current step sits, as the loop itself numbers it. */

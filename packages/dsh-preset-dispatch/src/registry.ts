@@ -430,6 +430,17 @@ export function buildPresetTable(
           ? session.runSteps(decision, turn, at)
           : (await session.run(decision, turn)).end
       },
+      restart: async () => {
+        // Kill the shared agent and drop all cached sessions. The next turn
+        // for any session on this preset will spawn a fresh process and
+        // resume via session/resume (or fall back to text replay).
+        if (sharedAgent !== undefined && sharedAgent.alive) {
+          sharedAgent.kill('manual restart')
+        }
+        opened.clear()
+        sharedAgent = undefined
+        options.onDropped?.({ presetId, sessionId: '*', reason: 'manual restart' })
+      },
     })
   }
   return table
