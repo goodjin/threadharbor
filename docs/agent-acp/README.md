@@ -130,7 +130,7 @@ agent  → client:  session/prompt 响应 { stopReason, usage? }
 **两条要紧的结论：**
 
 - **「声明了 authMethods」不等于「必须先鉴权」。** codex 声明了 `api-key`/`chat-gpt`，Qoder 声明了 `qoderclicn-login`，但 `initialize` 后直接 `session/new` 照样成功（实测）。**只有 Cursor 是硬门槛**——不 `authenticate` 直接 `-32000`；Qoder 只在未登录时被同一个错误拒绝，登录后无需主动认证。
-- **`sessionCapabilities` 里的 `resume` / `list` / `fork` 是五家广泛支持的一组会话操作**，和本项目「中途换 agent 要带历史」「恢复会话」的需求直接相关。客户端恢复目前只接 `session/resume`（CLI 侧已实测的方言才声明 `supportsSessionResume`；Cursor 不声明——它的 `session/resume` 返回 `-32601`）。`subagents` 已接：codex / claude 按草案顶层字段，Cursor 按 `_meta.subagents`（均经真机验证，2026-10-20/21）。
+- **`sessionCapabilities` 里的 `resume` / `list` / `fork` 是五家广泛支持的一组会话操作**，和本项目「中途换 agent 要带历史」「恢复会话」的需求直接相关。客户端恢复接两种：`session/resume`（CLI 侧已实测的方言才声明 `supportsSessionResume`）与 `session/load`（Cursor 声明 `supportsSessionLoad`——它的 `session/resume` 返回 `-32601`，load 同进程/换进程都能接上，2026-10-29 实测）。`subagents` 已接：codex / claude 按草案顶层字段，Cursor 按 `_meta.subagents`（均经真机验证，2026-10-20/21）。
 
 ### 私有扩展方法
 
@@ -147,7 +147,7 @@ agent 可能发标准之外的方法，本项目的客户端对不认识的会�
 
 | 项 | 说明 |
 |---|---|
-| `session/load` / `resume` 的实际行为 | Cursor 的 `session/resume` 探针实测为 `-32601`（未实现，只有 `session/load`）；其余四家与 `session/load` 都没有真加载过旧会话 |
+| `session/load` / `resume` 的实际行为 | **Cursor 已实测**（2026-10-29）：`session/resume` 为 `-32601`；`session/load` 同进程与换进程都能接上，先重放整段历史再回执且回执不带 `sessionId`。其余四家的 `session/load` 没有真加载过旧会话 |
 | `session/cancel` 的实际取消 | **Qoder 已实测**（3.7 秒内 `stopReason: cancelled`）；其余四家只在无回合运行时发过，没验证能否中断进行中的回合 |
 | `session/delete`、`session/fork`、`session/close` | 五家声明了但未调用 |
 | `fs/read_text_file`、`fs/write_text_file` | 声明了能力但没观察到 agent 真的发起 |
