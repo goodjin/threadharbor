@@ -25,15 +25,7 @@
   padding: 8px 12px;
   border-block-end: 1px solid var(--dsw-alias-settings-card-stroke, rgba(127, 127, 127, 0.2));
 }
-.answerCardTitle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--dsw-content-font-size-secondary, 13px);
-  font-weight: 600;
-  color: var(--dsw-alias-label-secondary, inherit);
-}
-.answerCardIcon { flex: none; }
+.answerCardIcon { flex: none; color: var(--dsw-alias-label-secondary, inherit); }
 .answerCardCopy {
   display: inline-flex;
   align-items: center;
