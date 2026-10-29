@@ -291,7 +291,7 @@ describe('目录包装', () => {
         throw new Error('cannot get required service "remote.session" in inactive context')
       },
     }
-    fresh.installAcpVisibilityFilter(disposed, fakeVisibility())
+    fresh.installAcpVisibilityFilter(disposed, fakeVisibility(setAgentHidden(emptyAcpVisibility(), 'cursor', true)))
     // 新一代：模块被重新求值（新的一份），包装装到新实例上。
     vi.resetModules()
     const newer = await import('../src/acp-visibility-filter.ts')
@@ -303,6 +303,8 @@ describe('目录包装', () => {
     const viaOld = disposed.directoryFor('s1') as ProxiedDirectory
     expect(viaOld).toBeDefined()
     expect(viaOld.store.getSnapshot()?.groups.map(group => group.id)).toContain('acp:codex')
+    // The live generation unhid Cursor; the old wrapper must not hide it again.
+    expect(viaOld.store.getSnapshot()?.groups.map(group => group.id)).toContain('acp:cursor')
   })
 
   it('服务已经没了时不把异常抛给调用方：座位照常渲染', async () => {
@@ -324,9 +326,12 @@ describe('目录包装', () => {
     expect(typeof directory.store.subscribe).toBe('function')
     expect(typeof directory.load).toBe('function')
     expect(typeof directory.select).toBe('function')
-    // 目录是空的：座位退回占位文案，选择器列出全部 provider。
-    expect(directory.store.getSnapshot()).toBeUndefined()
-    await expect(directory.load()).resolves.toBeUndefined()
+    // The official seat reads groups/current directly; undefined crashes it.
+    const snapshot = directory.store.getSnapshot()
+    expect(snapshot).toMatchObject({ groups: [], current: null, status: 'error' })
+    expect(directory.store.getSnapshot()).toBe(snapshot)
+    await expect(directory.load()).resolves.toBe(snapshot)
+    await expect(directory.select({ provider: codex, model: 'gpt' })).rejects.toThrow('inactive context')
     expect(reports.some(message => message.includes('inactive context'))).toBe(true)
   })
 

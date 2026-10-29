@@ -63,20 +63,25 @@ function isDirectoryLike(value: unknown): value is DirectoryLike {
     && typeof value['load'] === 'function'
 }
 
-/**
- * 一个什么都不答的目录，给「服务已经没了」的那一档用。
- *
- * 形状与真目录一致（store / load / select），所以座位与选择器都能照常渲染：
- * 目录是空的，触发按钮退回占位文案，选择器列出全部 provider（不筛选）。
- */
-function degradedDirectory(): DirectoryLike {
+/** A real snapshot is required: the official seat reads state.groups directly. */
+function degradedDirectory(error: unknown): DirectoryLike {
+  const message = describeError(error)
+  const snapshot: ModelDirectoryState = {
+    current: null,
+    routable: null,
+    groups: [],
+    failures: [],
+    status: 'error',
+    pending: null,
+    error: message,
+  }
   return {
     store: {
-      getSnapshot: () => undefined as unknown as ModelDirectoryState,
+      getSnapshot: () => snapshot,
       subscribe: () => () => {},
     },
-    load: async () => undefined,
-    select: async () => undefined,
+    load: async () => snapshot,
+    select: async () => { throw new Error(message) },
   }
 }
 
@@ -246,11 +251,15 @@ function currentServiceSlot(): { service?: object } {
   return created
 }
 
-/** 一个实例上未被包装的 `directoryFor`（装过就用装前那个，免得叠层）。 */
-function pristineOf(instance: object): ((...args: unknown[]) => unknown) | undefined {
-  const installed = patches.get(instance)
-  const candidate = installed?.original ?? (instance as { directoryFor?: unknown }).directoryFor
-  return typeof candidate === 'function' ? candidate as (...args: unknown[]) => unknown : undefined
+/**
+ * Cordis reads return a new caller-context proxy, including a new method proxy
+ * on every read. Patch the underlying instance so identity and cleanup work,
+ * and never retain the installing plugin's context as the method receiver.
+ * This is Cordis's exported symbols.original key, shared across module copies.
+ */
+function serviceInstance(service: object): object {
+  const original: unknown = (service as Record<symbol, unknown>)[Symbol.for('cordis.original')]
+  return isRecord(original) ? original : service
 }
 
 /**
@@ -271,8 +280,9 @@ export function installAcpVisibilityFilter(
     report('acp visibility: modelDirectories is not an object — the pickers list every provider')
     return undefined
   }
-  const holder = service as { directoryFor?: unknown }
-  const patch = patches.get(service)
+  const instance = serviceInstance(service)
+  const holder = instance as { directoryFor?: unknown }
+  const patch = patches.get(instance)
   const candidate = patch?.original ?? holder.directoryFor
   if (typeof candidate !== 'function') {
     report('acp visibility: modelDirectories has no directoryFor — the pickers list every provider')
@@ -280,51 +290,34 @@ export function installAcpVisibilityFilter(
   }
   const original = candidate as (...args: unknown[]) => unknown
   // 这一代就是当下这一代：后面装的（新一代的）会覆盖同一个槽位。
-  currentServiceSlot().service = service
+  currentServiceSlot().service = instance
   // Weak refs: this installation must not keep every session's directory
   // alive. Dead refs are pruned whenever the choice changes.
   const live = new Set<WeakRef<FilteredStore>>()
   const cache = new WeakMap<object, DirectoryLike>()
   let shapeReported = false
-  const wrapper = (...args: unknown[]): unknown => {
-    // 先找当下这一代的服务：图被热替换后，这个实例可能已经是上一代的了
-    // （而上一代已被处置，一调就抛）。当下这一代取不到或取不到能用的，就退回
-    // 自己这个实例。
+  const wrapper = function (this: unknown, ...args: unknown[]): unknown {
+    // Retained wrappers follow the live generation, including its visibility
+    // settings. Do not wrap its already-filtered result with stale settings.
     const shared = currentServiceSlot().service
-    const candidates = shared === undefined || shared === service ? [service] : [shared, service]
-    let raw: unknown
-    let failed = false
-    let failure: unknown
-    for (const target of candidates) {
-      const targetOriginal = target === service ? original : pristineOf(target)
-      if (targetOriginal === undefined) continue
-      try {
-        raw = targetOriginal.apply(target, args)
-        failed = false
-        break
-      } catch (error) {
-        failed = true
-        failure = error
-      }
+    if (shared !== undefined && shared !== instance) {
+      const current = (shared as { directoryFor?: (...args: unknown[]) => unknown }).directoryFor
+      if (typeof current === 'function') return current.apply(shared, args)
     }
-    if (failed) {
-      const error = failure
-      // 服务没了（连接重建后旧实例被处置，它的上下文已失效）：原方法一调就抛
-      // 「cannot get required service "remote.session" in inactive context」。
-      // 异常顺着调用方冒上去，崩的是**座位条目**——2026-10-20 桌面版：官方那个
-      // 模型座位崩了，输入框的模型入口整个消失。
-      //
-      // 这里给一个「什么都不答」的目录：座位照常渲染（目录是空的，触发按钮退回
-      // 占位文案），选择器列出全部 provider（不筛选），而崩溃没有了。
+    // Preserve Cordis's caller context for normal calls. The installer is only
+    // responsible for the patch's lifetime, never for later directory reads.
+    const receiver = isRecord(this) ? this : instance
+    let raw: unknown
+    try {
+      raw = original.apply(receiver, args)
+    } catch (error) {
       if (!shapeReported) {
         shapeReported = true
-        const note = `acp visibility: the model directory service is gone (${describeError(error)}) — the pickers keep working, unfiltered`
+        const note = `acp visibility: model directory unavailable (${describeError(error)})`
         report(note)
-        // 宿主日志在浏览器里看不见，而这一档正是用户在浏览器控制台里排查的那一档：
-        // 不留一条，症状就只剩「模型列表空了」，没有任何线索（2026-10-20 桌面版）。
         console.warn(`[threadharbor] ${note}`)
       }
-      return degradedDirectory()
+      return degradedDirectory(error)
     }
     if (!isDirectoryLike(raw)) {
       if (!shapeReported) {
@@ -360,11 +353,14 @@ export function installAcpVisibilityFilter(
       store.sync()
     }
   })
-  patches.set(service, { original, wrapper })
+  patches.set(instance, { original, wrapper })
   return () => {
     unsubscribe()
     if (holder.directoryFor === wrapper) holder.directoryFor = original
-    const installed = patches.get(service)
-    if (installed?.wrapper === wrapper) patches.delete(service)
+    const installed = patches.get(instance)
+    if (installed?.wrapper === wrapper) {
+      patches.delete(instance)
+      if (currentServiceSlot().service === instance) delete currentServiceSlot().service
+    }
   }
 }
