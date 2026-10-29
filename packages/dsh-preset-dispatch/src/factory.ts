@@ -30,7 +30,7 @@ import type {
 } from '@threadharbor/dsh-acp-agent'
 import { cwdForOpen } from './registry.ts'
 import type { AcpPresetConfig, AcpSession, AcpSessionFactory, PresetConfig } from './registry.ts'
-import { codexProgressProbe, qoderProgressProbe } from './agent-progress.ts'
+import { codexProgressProbe, grokProgressProbe, qoderProgressProbe } from './agent-progress.ts'
 import { AcpTurnRunner } from './runner.ts'
 import type { AcpClientPort } from './runner.ts'
 import type { SubagentSessionHost } from './subagent-sessions.ts'
@@ -254,15 +254,19 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
       })
       // 外部 agent 在回合中途长时间不吐 ACP 帧时，读它自己的日志判断是否还在
       // 干活（2026-10-27 codex 压缩上下文；2026-10-28 qoder 长工具执行——模型
-      // 请求期间思考帧照常流，不发帧的是工具在跑的那段）。
+      // 请求期间思考帧照常流，不发帧的是工具在跑的那段；同一天 grok 自动压缩
+      // 上下文——它把压缩事件包在方言不收的私有方法里，帧里看不见）。
       // 只给接了这种日志信号的 agent 接这层：codex 读 ~/.codex/logs_2.sqlite，
-      // qoder 读 <config>/logs/sessions/.../segments/*.jsonl。别的 agent 没有
+      // qoder 读 <config>/logs/sessions/.../segments/*.jsonl，grok 读
+      // $GROK_HOME/sessions/<项目>/<sessionId>/updates.jsonl。别的 agent 没有
       // 这个库，接上也只会是空操作。
       const progressProbe = preset.agent === 'codex'
         ? codexProgressProbe()
         : preset.agent === 'qoder'
           ? qoderProgressProbe()
-          : undefined
+          : preset.agent === 'grok'
+            ? grokProgressProbe()
+            : undefined
       return {
         run: async (decision, turn) => await runner.run(decision, turn),
         // The segmented path, passed through with its `first` marker untouched:
