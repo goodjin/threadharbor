@@ -71,6 +71,10 @@ describe('ACP prose is sealed when the tool starts', () => {
     expect(historical.usable).toBe(true)
     expect(historical.segments).toEqual(step.segments)
     expect(pendingBlocks(historical)).toEqual(pendingBlocks(step))
+    const toolArrivesLate = fold([chunk(10, 'before', 0), chunk(10, 'after', 1), announced, call(10)]).steps.get(1)!
+    expect(toolArrivesLate.segments[0]!.blocks).toEqual(step.segments[0]!.blocks)
+    expect(pendingBlocks(toolArrivesLate)).toEqual(pendingBlocks(step))
+    expect(toolArrivesLate.anchorSeq).toBeGreaterThan(10)
   })
   it('ignores result updates, repeated calls, empty calls and telemetry as boundaries', () => {
     const state = fold([announce, chunk(5, 'before'), call(10), chunk(15, 'after'), call(16),

@@ -69,7 +69,7 @@ function seal(step: StepProse, call: Boundary): StepProse {
   return {
     ...step,
     segments: [...step.segments, completedSegment(call, entries, step.time)],
-    pending, anchorSeq: pending.length === 0 ? undefined : step.anchorSeq,
+    pending, anchorSeq: pending.length === 0 ? undefined : call.seq + 0.1,
   }
 }
 
