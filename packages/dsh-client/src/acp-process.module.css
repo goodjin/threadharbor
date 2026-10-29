@@ -14,6 +14,40 @@
   border: 1px solid var(--dsw-alias-settings-card-stroke, rgba(127, 127, 127, 0.25));
   border-radius: var(--dsw-radius-md, 8px);
   background: var(--dsw-alias-settings-card-fill, transparent);
-  padding: 12px 16px;
   margin-block: 6px;
+  overflow: hidden;
 }
+.answerCardHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-block-end: 1px solid var(--dsw-alias-settings-card-stroke, rgba(127, 127, 127, 0.2));
+}
+.answerCardTitle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--dsw-content-font-size-secondary, 13px);
+  font-weight: 600;
+  color: var(--dsw-alias-label-secondary, inherit);
+}
+.answerCardIcon { flex: none; }
+.answerCardCopy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--dsw-radius-sm, 4px);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, inherit);
+  cursor: pointer;
+}
+.answerCardCopy:hover { background: var(--dsw-alias-bg-hover, rgba(127, 127, 127, 0.12)); }
+.answerCardCopy[data-copied] { color: var(--dsw-alias-state-success-primary, var(--dsw-alias-brand-primary, inherit)); }
+.answerCardBody { padding: 12px 16px; }
