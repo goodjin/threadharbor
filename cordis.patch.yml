@@ -207,6 +207,14 @@
               # 会先拉起 `grok agent serve`（随机端口 + 密钥、等它就绪、关闭时
               # 回收），再连上它返回的 ws url。command 指向 grok 二进制本身。
               command: /Users/good/.local/bin/grok
+              # 静默看门狗的期限放宽到 5 分钟（默认 120 秒）。
+              #
+              # 2026-10-28 桌面版现场（session-983e4ad7）：grok 说完最后一段
+              # 文字就转入自动压缩上下文（它自己的 updates.jsonl 记着 93% /
+              # 238k token），此后 120 秒零帧，看门狗把这一轮杀了。这台机器上
+              # 历史压缩耗时 50–121 秒，120 秒的期限本身就贴着最坏情况；与
+              # codex / qoder 一样改成 5 分钟。
+              stallMs: 300000
               # 清单 = 2026-10-23 真机探针（grok 1.0.67 的 session/new）
               # 读到的 availableModels，一字不差。
               #

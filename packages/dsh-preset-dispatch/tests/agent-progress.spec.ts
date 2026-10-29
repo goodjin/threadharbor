@@ -10,10 +10,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  classifyGrokRow,
   classifyProgressRow,
   classifyQoderRow,
   codexProgressProbe,
   createProgressProbe,
+  grokProgressProbe,
   qoderProgressProbe,
 } from '../src/agent-progress.ts'
 import type { ProgressReader, ProgressRow } from '../src/agent-progress.ts'
@@ -266,5 +268,167 @@ describe('qoderProgressProbe（文件系统）', () => {
     home = mkdtempSync(join(tmpdir(), 'qoder-probe-'))
     process.env['QODERCN_CONFIG_DIR'] = home
     expect(qoderProgressProbe()?.read('nope')).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// grok 会话更新日志进度探针：帧静默时判断上下文压缩是否还在推进。
+//
+// 2026-10-28 的现场：grok 发完最后一段文字就转入自动压缩，之后 120 秒零帧被杀
+// （ACP_STALLED）；同一时刻它的 updates.jsonl 里躺着 `auto_compact_started`。
+// 压缩事件包在方言不收的 `_x.ai/session/update` 里，界面看不见，只能读日志。
+// ---------------------------------------------------------------------------
+
+describe('classifyGrokRow', () => {
+  const at = 1793245281000
+
+  function update(kind: string, extra: Record<string, unknown> = {}): ProgressRow {
+    return row(1, 'grok', JSON.stringify({
+      timestamp: at / 1000,
+      method: '_x.ai/session/update',
+      params: { update: { sessionUpdate: kind, ...extra } },
+    }), at)
+  }
+
+  it('压缩的三个节点都是进展，并把压缩到哪了说清', () => {
+    expect(classifyGrokRow(update('auto_compact_started', {
+      tokens_used: 238525,
+      context_window: 256000,
+      percentage: 93,
+    }))).toEqual({
+      key: `grok:auto_compact_started@${String(at)}`,
+      label: 'grok 正在压缩上下文（已用 238,525 / 256,000 tokens，93%）',
+    })
+    expect(classifyGrokRow(update('compaction_checkpoint'))?.key).toBe(`grok:compaction_checkpoint@${String(at)}`)
+    expect(classifyGrokRow(update('auto_compact_completed', {
+      tokens_before: 206299,
+      tokens_after: 20430,
+      elapsed_ms: 49327,
+    }))).toEqual({
+      key: `grok:auto_compact_completed@${String(at)}`,
+      label: 'grok 已完成上下文压缩（206,299 → 20,430 tokens，用时 49s）',
+    })
+  })
+
+  it('字段缺席时不编造细节', () => {
+    expect(classifyGrokRow(update('auto_compact_started'))?.label).toBe('grok 正在压缩上下文')
+    expect(classifyGrokRow(update('auto_compact_completed'))?.label).toBe('grok 已完成上下文压缩')
+  })
+
+  it('一轮里压缩两次：时间不同，提示不去重', () => {
+    const first = classifyGrokRow(update('auto_compact_started'))
+    const later = classifyGrokRow(row(2, 'grok', JSON.stringify({
+      timestamp: (at + 60_000) / 1000,
+      method: '_x.ai/session/update',
+      params: { update: { sessionUpdate: 'auto_compact_started' } },
+    }), at + 60_000))
+    expect(first?.key).not.toBe(later?.key)
+  })
+
+  it('文本块/工具/未知种类不算进展', () => {
+    // 这些每轮上千行，认了就把死回合说成活回合。
+    expect(classifyGrokRow(update('agent_message_chunk'))).toBeUndefined()
+    expect(classifyGrokRow(update('tool_call_update'))).toBeUndefined()
+    expect(classifyGrokRow(update('usage_update'))).toBeUndefined()
+  })
+
+  it('body 不是 JSON / 没有内层 update 时不崩、不算进展', () => {
+    expect(classifyGrokRow(row(1, 'grok', 'not json'))).toBeUndefined()
+    expect(classifyGrokRow(row(1, 'grok', JSON.stringify({ timestamp: 1793245281 })))).toBeUndefined()
+    expect(classifyGrokRow(row(1, 'grok', JSON.stringify({ params: { update: { sessionUpdate: 3 } } })))).toBeUndefined()
+  })
+})
+
+describe('grokProgressProbe', () => {
+  function update(kind: string, at = Date.now()): ProgressRow {
+    return row(1, 'grok', JSON.stringify({
+      timestamp: Math.floor(at / 1000),
+      method: '_x.ai/session/update',
+      params: { update: { sessionUpdate: kind } },
+    }), at)
+  }
+
+  it('注入源时直接可用；close 后重新接入', () => {
+    const rows: ProgressRow[] = []
+    const live = liveSource(rows)
+    const probe = grokProgressProbe({ source: live.source })
+    expect(probe).toBeDefined()
+    expect(probe!.read('session-1')).toBeUndefined()
+    rows.push(update('auto_compact_started'))
+    expect(probe!.read('session-1')?.key.startsWith('grok:auto_compact_started@')).toBe(true)
+    rows.push(update('tool_call_update'))
+    expect(probe!.read('session-1')).toBeUndefined()
+    probe!.close()
+    probe!.read('session-1')
+    expect(live.calls).toBe(2)
+  })
+
+  it('会话没有更新日志时读不到东西', () => {
+    const probe = grokProgressProbe({ source: () => undefined })
+    expect(probe).toBeDefined()
+    expect(probe!.read('session-1')).toBeUndefined()
+  })
+})
+
+// 真走文件系统：在临时 GROK_HOME 下落 updates.jsonl，验证源能找到会话目录、
+// 挡住旧历史、首读仍能看见「最后一帧之后」写下的压缩行、并处理半行。
+describe('grokProgressProbe（文件系统）', () => {
+  const savedHome = process.env['GROK_HOME']
+  let home: string
+
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env['GROK_HOME']
+    else process.env['GROK_HOME'] = savedHome
+    if (home !== undefined) rmSync(home, { recursive: true, force: true })
+  })
+
+  function sessionFile(sessionId: string): string {
+    const dir = join(home, 'sessions', '%2FUsers%2Ftest%2Fproj', sessionId)
+    mkdirSync(dir, { recursive: true })
+    return join(dir, 'updates.jsonl')
+  }
+
+  function line(kind: string, at = Date.now()): string {
+    return JSON.stringify({
+      timestamp: Math.floor(at / 1000),
+      method: '_x.ai/session/update',
+      params: { update: { sessionUpdate: kind } },
+    })
+  }
+
+  it('首读看得见刚写下的压缩行；一分钟前的旧行不算', () => {
+    home = mkdtempSync(join(tmpdir(), 'grok-probe-'))
+    process.env['GROK_HOME'] = home
+    const path = sessionFile('sess-fs')
+    // 旧的压缩与刚发生的压缩同时存在：探针首次接入时，前者是历史、后者是
+    // 「最后一帧之后 1ms」写下的、要看的那条信号。
+    writeFileSync(path, [
+      line('auto_compact_started', Date.now() - 120_000),
+      line('auto_compact_started'),
+    ].join('\n') + '\n')
+    const probe = grokProgressProbe()
+    expect(probe).toBeDefined()
+    expect(probe!.read('sess-fs')?.key.startsWith('grok:auto_compact_started@')).toBe(true)
+
+    // 追加 checkpoint 与半行：完整行算进展，半行留到下次。
+    writeFileSync(path, line('auto_compact_started', Date.now() - 120_000) + '\n'
+      + line('auto_compact_started') + '\n'
+      + line('compaction_checkpoint') + '\n'
+      + '{"timestamp":1793245281,"method":"_x.ai/session/update","params":{"update":{"sess')
+    expect(probe!.read('sess-fs')?.key.startsWith('grok:compaction_checkpoint@')).toBe(true)
+    expect(probe!.read('sess-fs')).toBeUndefined()
+
+    // 半行补全后，下一段读到。
+    writeFileSync(path, line('auto_compact_started', Date.now() - 120_000) + '\n'
+      + line('auto_compact_started') + '\n'
+      + line('compaction_checkpoint') + '\n'
+      + line('auto_compact_completed') + '\n')
+    expect(probe!.read('sess-fs')?.key.startsWith('grok:auto_compact_completed@')).toBe(true)
+  })
+
+  it('会话目录不存在时读不到东西', () => {
+    home = mkdtempSync(join(tmpdir(), 'grok-probe-'))
+    process.env['GROK_HOME'] = home
+    expect(grokProgressProbe()?.read('nope')).toBeUndefined()
   })
 })

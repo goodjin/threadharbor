@@ -11,7 +11,7 @@
  * 一律当「没有这层信号」处理，绝不影响回合本身。
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -412,4 +412,222 @@ export function qoderProgressProbe(options?: { readonly source?: ProgressSource 
   const source = options?.source ?? qoderSegmentSource()
   if (source === undefined) return undefined
   return createProgressProbe(source, classifyQoderRow)
+}
+
+// ---------------------------------------------------------------------------
+// grok: 读它自己的会话更新日志，判断压缩上下文是否还在推进。
+//
+// 2026-10-28 桌面版现场（session-983e4ad7）：grok 发完最后一段文字就转入自动
+// 压缩（它自己的 updates.jsonl 记着 93% / 238k token），之后 120 秒零帧，看门
+// 狗把回合杀了。压缩本身是会发事件的——`auto_compact_started`、
+// `compaction_checkpoint`、`auto_compact_completed`——但都包在私有方法
+// `_x.ai/session/update` 里，DSH 的 grok 方言不收这个方法，界面上一个都看不到。
+// 既然帧里看不见，就去日志里看：这些种类出现在 updates.jsonl 就是还在推进。
+//
+// 与 codex/qoder 的差别在「历史怎么挡」：压缩开始那一行写在最后一帧之后不到
+// 一毫秒，第一次静默探针（≥5 秒）若按「游标停在末尾」处理，恰好把它当历史
+// 跳过——要看的就是它。这里改用时间窗：只认最近一分钟内写入的行。
+// ---------------------------------------------------------------------------
+
+/** grok 的会话更新里算「还在推进」的种类；其余（工具/文本块）不是这层信号。 */
+const GROK_PROGRESS_UPDATES = new Set([
+  'auto_compact_started',
+  'compaction_checkpoint',
+  'auto_compact_completed',
+])
+
+/** 只认这么新的行：日志里的旧压缩不能把十分钟后的死回合说成活回合。 */
+const GROK_FRESH_MS = 60_000
+
+/**
+ * 首次接入时最多往回扫这么多字节。
+ *
+ * updates.jsonl 不轮转，本机见过 50MB 的会话；每次静默探针整文件重读会把
+ * 主线程卡住。一分钟里的压缩行一定落在文件末尾附近，往回 4MB 足够覆盖。
+ */
+const GROK_TAIL_BYTES = 4 * 1024 * 1024
+
+/** grok 的 updates.jsonl 行；只取分类与时间需要的字段。 */
+type GrokUpdateRow = {
+  timestamp?: unknown
+  params?: unknown
+  _meta?: unknown
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {}
+}
+
+/** 行时间：`timestamp` 是 epoch 秒；缺了退回 `_meta.agentTimestampMs`。 */
+function grokRowAt(row: GrokUpdateRow): number {
+  if (typeof row.timestamp === 'number' && Number.isFinite(row.timestamp)) return row.timestamp * 1000
+  const ms = asRecord(row._meta)['agentTimestampMs']
+  return typeof ms === 'number' && Number.isFinite(ms) ? ms : 0
+}
+
+/**
+ * 一行 grok 会话更新的分类器。
+ *
+ * 只看 `params.update.sessionUpdate`，不看外面的方法名：压缩事件只写进 grok
+ * 自己的 updates.jsonl（`_x.ai/session/update`），根本不走 ACP 线——线上私有
+ * 通知 `_x.ai/session_notification` 里没有这几个种类，界面无从展示，日志是
+ * 唯一能看见它们的通道。认不得的种类按噪音跳过——工具与文本块每轮上千行，
+ * 认了就把死回合说成活回合。
+ *
+ * `key` 带上行时间：一轮里压缩两次时，两次都要各给一条提示。
+ */
+export function classifyGrokRow(row: ProgressRow): { key: string; label: string } | undefined {
+  let parsed: GrokUpdateRow
+  try {
+    parsed = JSON.parse(row.body) as GrokUpdateRow
+  } catch {
+    return undefined
+  }
+  const update = asRecord(asRecord(parsed.params)['update'])
+  const kind = update['sessionUpdate']
+  if (typeof kind !== 'string' || !GROK_PROGRESS_UPDATES.has(kind)) return undefined
+  return { key: `grok:${kind}@${String(row.at)}`, label: grokLabel(kind, update) }
+}
+
+function numberAt(update: Record<string, unknown>, key: string): number | undefined {
+  const value = update[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+/** 千分位，不依赖 locale：提示里读到的都是同一个形状。 */
+function grouped(value: number): string {
+  return String(Math.round(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+}
+
+/** 提示要当场说清「它在干什么、压到哪了」，而不是只报一个种类名。 */
+function grokLabel(kind: string, update: Record<string, unknown>): string {
+  switch (kind) {
+    case 'auto_compact_started': {
+      const used = numberAt(update, 'tokens_used')
+      const window = numberAt(update, 'context_window')
+      const pct = numberAt(update, 'percentage')
+      const size = used !== undefined && window !== undefined ? `已用 ${grouped(used)} / ${grouped(window)} tokens` : ''
+      const tail = pct !== undefined ? `${size === '' ? '' : '，'}${String(pct)}%` : ''
+      const detail = size === '' && tail === '' ? '' : `（${size}${tail}）`
+      return `grok 正在压缩上下文${detail}`
+    }
+    case 'compaction_checkpoint': return 'grok 已写入压缩检查点'
+    case 'auto_compact_completed': {
+      const before = numberAt(update, 'tokens_before')
+      const after = numberAt(update, 'tokens_after')
+      const elapsed = numberAt(update, 'elapsed_ms')
+      const shrink = before !== undefined && after !== undefined ? `${grouped(before)} → ${grouped(after)} tokens` : ''
+      const time = elapsed !== undefined ? `用时 ${String(Math.round(elapsed / 1000))}s` : ''
+      const parts = [shrink, time].filter(part => part !== '')
+      return `grok 已完成上下文压缩${parts.length === 0 ? '' : `（${parts.join('，')}）`}`
+    }
+    default: return `grok 日志活动：${kind}`
+  }
+}
+
+/** grok 配置目录：官方 `GROK_HOME`，缺省本机 `~/.grok`。 */
+function grokHome(): string {
+  return process.env['GROK_HOME'] ?? join(homedir(), '.grok')
+}
+
+/** 该会话的 updates.jsonl 路径；还没落日志时 undefined。 */
+function grokUpdatesPath(sessionId: string): string | undefined {
+  const sessionsRoot = join(grokHome(), 'sessions')
+  if (!existsSync(sessionsRoot)) return undefined
+  // 会话按 <URL 编码的工作目录>/<sessionId>/updates.jsonl 存；工作目录 DSH
+  // 不知道，只能遍历。会话目录只有一个，命中即停。
+  let projectDirs: string[]
+  try {
+    projectDirs = readdirSync(sessionsRoot)
+  } catch {
+    return undefined
+  }
+  for (const project of projectDirs) {
+    const path = join(sessionsRoot, project, sessionId, 'updates.jsonl')
+    if (existsSync(path)) return path
+  }
+  return undefined
+}
+
+/** 只读一段字节；读不到返回 undefined，短读按实际长度交回。 */
+function readRange(path: string, start: number, length: number): Buffer | undefined {
+  let fd: number | undefined
+  try {
+    fd = openSync(path, 'r')
+    const buffer = Buffer.allocUnsafe(length)
+    let offset = 0
+    while (offset < length) {
+      const got = readSync(fd, buffer, offset, length - offset, start + offset)
+      if (got === 0) break
+      offset += got
+    }
+    return offset === length ? buffer : buffer.subarray(0, offset)
+  } catch {
+    return undefined
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+  }
+}
+
+/**
+ * 按会话 id 拿 grok 会话更新读取器。
+ *
+ * 按字节偏移增量读，只读追加的尾巴；末尾没有换行的半行留到下次再拼。文件被
+ * 换/截断时从头重读。不把游标先停在末尾，而是交给 `GROK_FRESH_MS` 挡历史——
+ * 原因见本节开头。
+ */
+function grokUpdatesSource(): ProgressSource {
+  return sessionId => {
+    const path = grokUpdatesPath(sessionId)
+    if (path === undefined) return undefined
+    let cursor: number | undefined
+    const read = (): readonly ProgressRow[] => {
+      let size: number
+      try {
+        size = statSync(path).size
+      } catch {
+        return []
+      }
+      if (cursor === undefined) cursor = Math.max(0, size - GROK_TAIL_BYTES)
+      // 文件被换/截断：从新文件头重读。
+      if (size < cursor) cursor = 0
+      if (size <= cursor) return []
+      const chunk = readRange(path, cursor, size - cursor)
+      if (chunk === undefined) return []
+      // 末尾没有换行的是还没写完的半行，不算数，下次再读。
+      const lastNewline = chunk.lastIndexOf(0x0a)
+      if (lastNewline < 0) return []
+      const complete = chunk.subarray(0, lastNewline + 1)
+      cursor += complete.length
+      const now = Date.now()
+      const fresh: ProgressRow[] = []
+      let seq = 0
+      for (const line of splitLines(complete.toString('utf8'))) {
+        if (line.trim() === '') continue
+        let parsed: GrokUpdateRow
+        try {
+          parsed = JSON.parse(line) as GrokUpdateRow
+        } catch {
+          continue
+        }
+        const at = grokRowAt(parsed)
+        // 旧行不是「现在还在动」的证据（恢复的旧会话尤其明显）。
+        if (now - at > GROK_FRESH_MS) continue
+        seq += 1
+        fresh.push({ id: seq, at, target: 'grok', body: line })
+      }
+      return fresh
+    }
+    return { read }
+  }
+}
+
+/**
+ * grok 进度探针；宿主环境里没有会话更新日志时返回 undefined。
+ *
+ * `source` 仅供测试注入——生产路径永远走只读 updates.jsonl。
+ */
+export function grokProgressProbe(options?: { readonly source?: ProgressSource }): ProgressProbe | undefined {
+  const source = options?.source ?? grokUpdatesSource()
+  return createProgressProbe(source, classifyGrokRow)
 }
