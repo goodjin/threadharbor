@@ -882,7 +882,8 @@ describe('AcpTurnRunner — resumed external sessions', () => {
 
   it('never attempts a resume for a dialect that does not declare the capability', async () => {
     const client = resumableClient()
-    const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: cursorDialect, resumeOf: () => 'old-s1' })
+    // claude declares neither capability: cursor has since gained load.
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: claudeDialect, resumeOf: () => 'old-s1' })
 
     await runner.run(DECISION, TURN_S1)
 
