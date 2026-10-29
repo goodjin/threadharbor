@@ -482,8 +482,10 @@ export function projectToolCallFrame(
   if (kind !== 'tool_call' && kind !== 'tool_call_update') {
     // A spawned run opens its card the same way — the live writer calls this
     // the moment the frame arrives, and the shared construction keeps the
-    // mid-turn card identical to the turn-end one.
-    const spawned = spawnedCallOf(update)
+    // mid-turn card identical to the turn-end one. Normalize first: grok's
+    // background-task lifecycle arrives under private kinds, and the card
+    // must open while the task is still running, not only at turn end.
+    const spawned = spawnedCallOf(subagentUpdateOf(options.dialect, update) ?? update)
     return spawned === undefined ? undefined : toolCallEvent(options.dialect, spawned, options.turn, options.step)
   }
   const call = options.dialect.foldTool(options.carried, update)
@@ -523,7 +525,7 @@ export function projectToolCallAnnouncement(
   const update = recordOf(recordOf(frame.params)['update'])
   const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
   if (kind !== 'tool_call' && kind !== 'tool_call_update') {
-    const spawned = spawnedCallOf(update)
+    const spawned = spawnedCallOf(subagentUpdateOf(options.dialect, update) ?? update)
     return spawned === undefined ? undefined : announcementEvent(options.dialect, spawned, options.turn, options.step)
   }
   const call = options.dialect.foldTool(options.carried, update)

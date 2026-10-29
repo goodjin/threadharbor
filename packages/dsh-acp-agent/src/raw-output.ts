@@ -40,6 +40,10 @@ const MAPPED_KINDS = new Set([
   'async_task_spawned',
   'async_task_progress',
   'async_task_state_update',
+  // grok 的私有后台任务生命周期由方言归一成上面的 async_task 种类
+  // （dialects/grok.ts），卡片已承担展示，原帧不再进未知块。
+  'task_backgrounded',
+  'task_completed',
   'user_message_chunk',
 ])
 
@@ -157,11 +161,22 @@ const GROK_NOTIFICATION_FORMATTERS: Readonly<Record<string, {
     format: update => {
       const tasks = Array.isArray(update['tasks']) ? update['tasks'].map(recordOf) : []
       if (tasks.length === 0) return '后台任务：无'
-      const previews = tasks.slice(0, 2)
-        .map(task => oneLine(stringOf(task['command']) ?? '', 80))
-        .filter(command => command !== '')
-        .map(command => `「${command}」`)
-      return `后台任务（${String(tasks.length)} 个）：${previews.join(' ')}`
+      const running = tasks.filter(task => task['status'] === 'running').length
+      const state = running > 0 ? `${String(running)} 个运行中` : '均未在运行'
+      const statusLabels: Record<string, string> = {
+        running: '运行中',
+        completed: '已完成',
+        failed: '失败',
+        stopped: '已停止',
+      }
+      const previews = tasks.slice(0, 2).flatMap(task => {
+        const command = oneLine(stringOf(task['command']) ?? '', 80)
+        if (command === '') return []
+        const status = stringOf(task['status'])
+        const label = status === undefined ? '' : `（${statusLabels[status] ?? status}）`
+        return [`「${command}」${label}`]
+      })
+      return `后台任务（${String(tasks.length)} 个，${state}）：${previews.join(' ')}`
     },
   },
   turn_completed: {
@@ -234,13 +249,13 @@ const TELEMETRY_KINDS = new Set([
   // cursor 的模式切换（agent/ask/...）：和遥测一样只在回合末汇总，过程区不留噪音。
   'current_mode_update',
   // grok 的高频通知（可读行在 GROK_NOTIFICATION_FORMATTERS）：每轮用量、交互
-  // 等待/解决、后台任务快照、回合完成的用量小结——信息保留，回合末各汇总一块，
-  // 不在过程区逐帧铺开。后端重试与上下文压缩**有意不走这里**：它们是「静默那
-  // 几分钟在干嘛」的实时答案，要当场看见。
+  // 等待/解决、回合完成的用量小结——信息保留，回合末各汇总一块，不在过程区逐帧
+  // 铺开。后端重试与上下文压缩**有意不走这里**：它们是「静默那几分钟在干嘛」的
+  // 实时答案，要当场看见。后台任务快照同样**不走这里**：它回答的正是「现在有
+  // 没有任务在跑」，回合末才说就等于没说。
   'grok 每轮用量',
   'grok 等待交互',
   'grok 交互已解决',
-  'grok 后台任务',
   'grok 回合完成',
 ])
 

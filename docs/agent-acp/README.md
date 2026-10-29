@@ -95,11 +95,13 @@ agent  → client:  session/prompt 响应 { stopReason, usage? }
 | `subagent_spawned` | `subagentSessionId` / `name` / `task` | DSH 的 `subagent` 卡片（参数 `{prompt: task, agent: name}`），帧到达即实时开卡 |
 | `subagent_state_update` | `state`: completed / failed / cancelled / disconnected | 该卡片的结果；failed 等非 completed 记为错误 |
 | 子会话帧（`params.sessionId` = 子会话编号） | 子代理自己的消息/思考/工具帧 | 消息块折进卡片的回复文本；其余不进父转录 |
-| `async_task_spawned` / `async_task_progress` / `async_task_state_update`（claude 的后台任务） | 任务名、描述、进度摘要、状态 | `async_task` 卡片；最新 summary 作结果文本 |
+| `async_task_spawned` / `async_task_progress` / `async_task_state_update`（claude、grok 的后台任务） | 任务名、描述、进度摘要、状态 | `async_task` 卡片；最新 summary 作结果文本 |
 
 两条刻意的设计：**子会话帧绝不漏进父回答**（按 `params.sessionId` 归属路由）；**回合结束时仍未报终态的运行**（claude 的后台任务可能跨回合活着）结果文本带 `[still running]` 前缀，不冒充成功——会话日志不允许步骤在开着的工具调用上收尾，诚实只能写在文本里。
 
 **grok 是第三种方言**（2026-10-20 真机抓包）：它不实现草案，用自己的方法名（`_x.ai/session_notification`）和蛇形字段发同一套生命周期——`subagent_spawned`（`child_session_id` / `subagent_type` / `description`）、`subagent_progress`（纯指标，丢弃）、`subagent_finished`（`status` / `output`，子代理回答整段在此，不流子会话内容帧）。经 grok 方言的 `frameUpdate` + `normalizeSubagentUpdate` 两个钩子归一化后走同一条投影路；详见 [grok.md](./grok.md)。
+
+grok 的后台任务另有两个专用方法（2026-10-29 真机抓帧，grok 1.0.70）：`_x.ai/task_backgrounded`（派发瞬间）与 `_x.ai/task_completed`（任务结束），同样由 `frameUpdate` 认领、归一成 `async_task_spawned` / `async_task_state_update`，卡片在**派发瞬间**实时开出——用户抱怨过「后台任务在跑却看不出来」。它的 `background_tasks` 快照也改为实时块（`后台任务（N 个，M 个运行中）：…`），回合末不再汇总：这句话回答的正是「现在有没有任务在跑」。跨回合收尾的已知缺口见 [grok.md](./grok.md)。
 
 **Cursor 把同一套生命周期发两遍**（2026-10-21 真机抓帧）：一条 `task` 工具调用（`kind: "other"`、`rawInput._toolName: "task"`，带全量 prompt 与代理名）加一组原生帧（`subagent_spawned` 带子会话 id、截断的 task、通用 name）。两边的 `_meta.cursor.toolCallId` 相同，是本项目的关联键；卡片只开一张、参数取工具调用的全量值，`task` 在派发瞬间报的 `completed` 不算收尾，终态只认 `subagent_state_update`。详见 [cursor.md](./cursor.md)。
 

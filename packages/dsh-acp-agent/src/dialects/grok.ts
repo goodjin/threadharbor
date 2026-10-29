@@ -70,6 +70,26 @@ function modelSelector(reply: unknown): Record<string, unknown> | undefined {
 
 const CHATTER = new Set(['available_commands_update', 'usage_update', 'session_info_update'])
 
+/**
+ * grok's methods whose `params.update` is a session update.
+ *
+ * `session/update` is the standard one; `_x.ai/session_notification` carries the
+ * vendor-only kinds (subagents, usage, compaction), and the two background-task
+ * methods carry their own lifecycle (measured 2026-10-29).
+ */
+const UPDATE_METHODS = new Set([
+  'session/update',
+  '_x.ai/session_notification',
+  '_x.ai/task_backgrounded',
+  '_x.ai/task_completed',
+])
+
+/** Collapse a multi-line value into one readable line, bounded. */
+function oneLine(text: string, max: number): string {
+  const collapsed = text.replace(/\s+/g, ' ').trim()
+  return collapsed.length > max ? `${collapsed.slice(0, max)}…` : collapsed
+}
+
 export const grokDialect: AcpDialect = {
   id: 'grok',
 
@@ -181,20 +201,22 @@ export const grokDialect: AcpDialect = {
   },
 
   /**
-   * grok wraps part of its lifecycle in a private `_x.ai/session_notification`
-   * method beside the standard `session/update` (measured 2026-10-20): the
-   * whole subagent vocabulary, plus vendor-only kinds the projection chain
-   * ignores. Claiming the method here is what lets those frames through the
-   * shared gate at all.
+   * grok wraps part of its lifecycle in private methods beside the standard
+   * `session/update` (measured 2026-10-20): the whole subagent vocabulary, and
+   * its background-task lifecycle on two dedicated methods (measured
+   * 2026-10-29). Claiming them here is what lets those frames through the
+   * shared gate at all; without it they only reach the raw-output block as
+   * opaque JSON, and a running background task has no card.
    */
   frameUpdate(frame) {
-    if (frame.method !== 'session/update' && frame.method !== '_x.ai/session_notification') return undefined
+    if (frame.method === undefined || !UPDATE_METHODS.has(frame.method)) return undefined
     return record(record(frame.params)['update'])
   },
 
   /**
    * grok's private subagent lifecycle (real capture 2026-10-20, grok 1.0.60)
-   * onto the draft-#1992 shape the shared projection speaks:
+   * and background-task lifecycle (real capture 2026-10-29, grok 1.0.70) onto
+   * the draft-#1992 shape the shared projection speaks:
    *
    *   subagent_spawned  { child_session_id, subagent_type, description } →
    *       spawned { subagentSessionId, name: subagent_type, task: description }
@@ -203,6 +225,14 @@ export const grokDialect: AcpDialect = {
    *   subagent_progress → dropped: pure metrics (tokens, duration, context
    *       usage) with no text; inventing a line from them would fabricate a
    *       progress string the agent never wrote.
+   *   task_backgrounded { task_id, command, description, output_file } →
+   *       async_task_spawned { asyncTaskId, name, taskType: 'bash', ... }
+   *   task_completed { task_snapshot: { task_id, output, exit_code, ... } } →
+   *       async_task_state_update { asyncTaskId, state, summary }
+   *
+   * The background-task card is what tells the user a command is still
+   * running: grok returns the prompt reply right after backgrounding, so
+   * without this card the only visible trace is a completed dispatch call.
    */
   normalizeSubagentUpdate(update) {
     const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
@@ -225,6 +255,46 @@ export const grokDialect: AcpDialect = {
       }
       if (typeof update['output'] === 'string') normalized['output'] = update['output']
       return normalized
+    }
+    if (kind === 'task_backgrounded') {
+      const taskId = typeof update['task_id'] === 'string' ? update['task_id'] : undefined
+      if (taskId === undefined) return undefined
+      const command = typeof update['command'] === 'string' ? update['command'] : ''
+      const description = typeof update['description'] === 'string' ? update['description'] : ''
+      const normalized: Record<string, unknown> = {
+        sessionUpdate: 'async_task_spawned',
+        asyncTaskId: taskId,
+        // The card's title is what the user saw when the task started; the
+        // command follows it in the arguments so the row says what is running.
+        name: oneLine(description !== '' ? description : command, 160) || taskId,
+        taskType: 'bash',
+        description: command,
+      }
+      if (typeof update['output_file'] === 'string') normalized['outputFilePath'] = update['output_file']
+      return normalized
+    }
+    if (kind === 'task_completed') {
+      const snapshot = record(update['task_snapshot'])
+      const taskId = typeof snapshot['task_id'] === 'string' ? snapshot['task_id'] : undefined
+      if (taskId === undefined) return undefined
+      const killed = snapshot['explicitly_killed'] === true
+      const completed = snapshot['completed'] === true
+      const exitCode = typeof snapshot['exit_code'] === 'number' ? snapshot['exit_code'] : undefined
+      const signal = typeof snapshot['signal'] === 'string' ? snapshot['signal'] : undefined
+      const failed = !completed || signal !== undefined || (exitCode !== undefined && exitCode !== 0)
+      const state = killed ? 'stopped' : failed ? 'failed' : 'completed'
+      const head = state === 'completed'
+        ? `后台任务完成${exitCode === undefined ? '' : `（退出码 ${String(exitCode)}）`}`
+        : state === 'stopped'
+          ? '后台任务已停止'
+          : `后台任务失败${exitCode === undefined ? '' : `（退出码 ${String(exitCode)}）`}${signal === undefined ? '' : `（信号 ${signal}）`}`
+      const output = typeof snapshot['output'] === 'string' ? snapshot['output'].trimEnd() : ''
+      return {
+        sessionUpdate: 'async_task_state_update',
+        asyncTaskId: taskId,
+        state,
+        summary: output === '' ? head : `${head}\n${output}`,
+      }
     }
     return undefined
   },

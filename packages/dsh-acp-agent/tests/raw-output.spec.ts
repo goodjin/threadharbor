@@ -168,9 +168,13 @@ describe('classifyRawOutput — grok _x.ai/session_notification', () => {
 
   it('后台任务、会话摘要、交互等待/解决各一行', () => {
     const tasks = classifyRawOutput(grokNotify('background_tasks', {
-      tasks: [{ task_id: 't1', command: 'npm run test' }, { task_id: 't2', command: 'sleep 100' }],
+      tasks: [
+        { task_id: 't1', command: 'npm run test', status: 'running' },
+        { task_id: 't2', command: 'sleep 100', status: 'completed' },
+      ],
     }), { childSession: false })
-    expect((tasks as { line: string }).line).toBe('后台任务（2 个）：「npm run test」 「sleep 100」')
+    expect((tasks as { line: string }).line)
+      .toBe('后台任务（2 个，1 个运行中）：「npm run test」（运行中） 「sleep 100」（已完成）')
 
     const summary = classifyRawOutput(grokNotify('session_summary_generated', { session_summary: 'Find AR1 repo simplification CI document' }), { childSession: false })
     expect((summary as { line: string }).line).toBe('会话摘要：Find AR1 repo simplification CI document')
