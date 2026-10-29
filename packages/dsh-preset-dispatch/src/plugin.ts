@@ -213,6 +213,13 @@ export function applyAcpPlugin(
   // The entry may supply the ledger so its per-turn selection gate reads the
   // same reports the catalog serves.
   const runtimeModelReports = deps.runtimeModels ?? runtimeModels()
+  // The external session id each DSH session of this row last opened, fresh or
+  // reattached. Kept for the life of the host process: a manual restart or an
+  // agent crash then reattaches server-side (`session/resume`, or cursor's
+  // `session/load`) instead of starting a new conversation and replaying text.
+  // A host restart still loses it — host-side persistence is not wired — and
+  // that path falls back to the text replay exactly as before.
+  const externalSessions = new Map<string, string>()
   const factory = makeSessionFactory(presets, {
     // Refusing without asking is the safe default and the honest one when there
     // is nowhere to ask. Where there IS a host that answers, use it — a row
@@ -224,6 +231,9 @@ export function applyAcpPlugin(
     ...(deps.answerAskQuestion === undefined ? {} : { answerAskQuestion: deps.answerAskQuestion }),
     ...(deps.transport === undefined ? {} : { transport: deps.transport }),
     onRuntimeModels: (reportedPresetId, models) => { runtimeModelReports.record(reportedPresetId, models) },
+    onExternalSession: (reportedPresetId, dshSessionId, externalSessionId) => {
+      if (reportedPresetId === presetId) externalSessions.set(dshSessionId, externalSessionId)
+    },
     ...(deps.subagents === undefined ? {} : { subagents: deps.subagents }),
   })
   const dialect = factory.dialectFor(presetId, config)
@@ -274,6 +284,10 @@ export function applyAcpPlugin(
     replay: {
       take: sessionId => switchShared.replayPrimer(sessionId),
     },
+    // What this process still remembers of the session's external conversation:
+    // the id its last open settled on. A dialect that can reattach uses it
+    // before replaying text; one that cannot ignores it.
+    resumeOf: sessionId => externalSessions.get(sessionId),
     // The session's project directory, not the directory this process was
     // started in and not a directory pinned on the preset.
     cwdOfSession: sessionId => projectDirectory(ctx, sessionId),

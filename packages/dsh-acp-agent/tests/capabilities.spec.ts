@@ -35,9 +35,13 @@ describe('capabilities', () => {
     expect(grokDialect.capabilities.supportsSessionResume).toBe(true)
   })
 
-  it('cursor: 认图片、工具帧有执行中', () => {
+  it('cursor: 认图片、工具帧有执行中、只能 load 不能 resume', () => {
     expect(cursorDialect.capabilities.acceptsImageContent).toBe(true)
     expect(cursorDialect.capabilities.toolFrameShape).toBe('in_progress')
+    // 2026-10-29 真机探针：session/resume 回 -32601；session/load 在同一进程
+    // 与换进程后都能接上磁盘上的会话（重放整段历史后才回执）。
+    expect(cursorDialect.capabilities.supportsSessionResume).toBeUndefined()
+    expect(cursorDialect.capabilities.supportsSessionLoad).toBe(true)
   })
 
   it('qoder: 认图片、工具帧两段、命令经工具帧、可取消', () => {

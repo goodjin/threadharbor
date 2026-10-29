@@ -85,6 +85,14 @@ export type TurnUsage = {
  *                        kept server-side (its initialize advertised
  *                        `loadSession`). Absent means unmeasured — the runner
  *                        then never resumes, exactly as before.
+ *   supportsSessionLoad  `session/load` can reattach a session the agent kept
+ *                        server-side, for agents that implement loading but
+ *                        not resuming (cursor answers -32601 to resume; load
+ *                        works, measured 2026-10-29). The agent replays the
+ *                        whole history as `session/update` notifications
+ *                        before replying; the runner drops those frames while
+ *                        the load is in flight so they cannot read as this
+ *                        turn's content. Checked only when resume is absent.
  *   metaSubagents        the agent reads the ACP subagent draft capability
  *                        from `clientCapabilities._meta.subagents`, not from
  *                        the draft's top-level field (cursor, measured
@@ -104,6 +112,7 @@ export type AcpCapabilities = {
   readonly commandVia: 'tool_frame'
   readonly toolNameMap: Readonly<Record<string, string>>
   readonly supportsSessionResume?: boolean | undefined
+  readonly supportsSessionLoad?: boolean | undefined
   readonly metaSubagents?: boolean | undefined
   readonly nativeSubagentFrames?: boolean | undefined
 }
