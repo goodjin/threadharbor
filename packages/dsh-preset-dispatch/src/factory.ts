@@ -22,6 +22,7 @@ import {
 } from '@threadharbor/dsh-acp-agent'
 import type {
   AcpDialect,
+  AcpFrame,
   AcpTransport,
   AskQuestionAnswer,
   AskQuestionRequest,
@@ -31,6 +32,7 @@ import type {
 import { cwdForOpen } from './registry.ts'
 import type { AcpPresetConfig, AcpSession, AcpSessionFactory, PresetConfig } from './registry.ts'
 import { codexProgressProbe, grokProgressProbe, qoderProgressProbe } from './agent-progress.ts'
+import type { ProgressProbe } from './agent-progress.ts'
 import type { SharedAgent, OpenSessionOptions } from './registry.ts'
 import { AcpTurnRunner } from './runner.ts'
 import type { AcpClientPort } from './runner.ts'
@@ -89,6 +91,28 @@ const DIALECTS: Readonly<Record<string, AcpDialect>> = {
   codex: codexDialect,
   cursor: cursorDialect,
   qoder: qoderDialect,
+}
+
+/**
+ * 外部 agent 在回合中途长时间不吐 ACP 帧时，读它自己的日志判断是否还在
+ * 干活（2026-10-27 codex 压缩上下文；2026-10-28 qoder 长工具执行——模型
+ * 请求期间思考帧照常流，不发帧的是工具在跑的那段；同一天 grok 自动压缩
+ * 上下文——它把压缩事件包在方言不收的私有方法里，帧里看不见）。
+ * 只给接了这种日志信号的 agent 接这层：codex 读 ~/.codex/logs_2.sqlite，
+ * qoder 读 <config>/logs/sessions/.../segments/*.jsonl，grok 读
+ * $GROK_HOME/sessions/<项目>/<sessionId>/updates.jsonl。别的 agent 没有
+ * 这个库，接上也只会是空操作。
+ *
+ * 开连接的两条路径（独占与共享）都用这一处选型：共享连接上探针按会话 id
+ * 读数，读者各记各的游标，不会互相串。
+ */
+function progressProbeFor(agent: string | undefined): ProgressProbe | undefined {
+  switch (agent) {
+    case 'codex': return codexProgressProbe()
+    case 'qoder': return qoderProgressProbe()
+    case 'grok': return grokProgressProbe()
+    default: return undefined
+  }
 }
 
 /**
@@ -253,21 +277,8 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
         ...(deps.resumeOf === undefined ? {} : { resumeOf: dshSessionId => deps.resumeOf!(presetId, dshSessionId) }),
         ...(deps.subagents === undefined ? {} : { subagents: deps.subagents }),
       })
-      // 外部 agent 在回合中途长时间不吐 ACP 帧时，读它自己的日志判断是否还在
-      // 干活（2026-10-27 codex 压缩上下文；2026-10-28 qoder 长工具执行——模型
-      // 请求期间思考帧照常流，不发帧的是工具在跑的那段；同一天 grok 自动压缩
-      // 上下文——它把压缩事件包在方言不收的私有方法里，帧里看不见）。
-      // 只给接了这种日志信号的 agent 接这层：codex 读 ~/.codex/logs_2.sqlite，
-      // qoder 读 <config>/logs/sessions/.../segments/*.jsonl，grok 读
-      // $GROK_HOME/sessions/<项目>/<sessionId>/updates.jsonl。别的 agent 没有
-      // 这个库，接上也只会是空操作。
-      const progressProbe = preset.agent === 'codex'
-        ? codexProgressProbe()
-        : preset.agent === 'qoder'
-          ? qoderProgressProbe()
-          : preset.agent === 'grok'
-            ? grokProgressProbe()
-            : undefined
+      // 外部 agent 自己的日志进度信号（选型见 progressProbeFor）。
+      const progressProbe = progressProbeFor(preset.agent)
       return {
         run: async (decision, turn) => await runner.run(decision, turn),
         // The segmented path, passed through with its `first` marker untouched:
@@ -342,12 +353,6 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
       const client = new AcpClient(transport, dialect)
       const terminalService = new TerminalService()
       client.terminals = terminalService
-      terminalService.onOutput = (terminalId, data) => {
-        client.onTerminalOutput?.(terminalId, data)
-      }
-      terminalService.onExit = (info) => {
-        client.onTerminalExit?.(info.terminalId, info.exitCode)
-      }
       client.onPermissionRequest = async request => await deps.answerPermission(request)
       if (preset.agent === 'cursor') {
         if (deps.answerAskQuestion !== undefined) {
@@ -367,18 +372,190 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
         }
       }
 
+      // ── 共享连接上的按会话分流 ──────────────────────────────────────────
+      // 一条连接挂着许多 ACP 会话：帧、终端回调与看门狗信标都必须按会话 id
+      // 归位。否则一个会话的正文会流进另一个会话，一个会话的动静会把另一个
+      // 会话的静默期限重新点亮（120s/300s 的超时判断就再也不会响）。回执帧
+      // 不带会话 id，只能靠请求 id 认领——谁发的请求，回执就只给谁。
+      type SharedRoute = {
+        /** 这条会话有权收到帧的 ACP 会话 id：它自己的，加上它子代理的。 */
+        readonly claimed: Set<string>
+        readonly deliver: Set<(frame: AcpFrame) => void>
+        readonly terminalOutput: Set<(terminalId: string, data: string) => void>
+        readonly terminalExit: Set<(terminalId: string, exitCode: number) => void>
+        /** 在途请求的回执 id，关闭时一并退订。 */
+        readonly pending: Set<number>
+        /** 这条会话自己的进展信标；别的会话的帧不会动它。 */
+        lastFrameAt: number
+        /** 在途 session/new 的请求 id——它的回执带出这个会话的 id。 */
+        openingId: number | undefined
+      }
+      const routes = new Set<SharedRoute>()
+      const bySession = new Map<string, SharedRoute>()
+      const replyOwner = new Map<number, SharedRoute>()
+      /**
+       * 尚未被认领的会话帧。子会话的首帧可能先于父会话处理出生帧到达（接管
+       * 路径的泵是按段驱动的），先存着，认领时按序补投。每会话有界：一直无人
+       * 认领的 id 不能把内存撑大。
+       */
+      const heldFrames = new Map<string, AcpFrame[]>()
+      const HELD_FRAMES_LIMIT = 200
+
+      const deliver = (route: SharedRoute, frame: AcpFrame, at: number, stamp = true): void => {
+        if (stamp) route.lastFrameAt = at
+        for (const handler of route.deliver) {
+          try {
+            handler(frame)
+          } catch {
+            // 一个观察者出事不能带走这条连接上的其他会话。
+          }
+        }
+      }
+
+      const claim = (route: SharedRoute, sessionId: string): void => {
+        if (route.claimed.has(sessionId)) return
+        route.claimed.add(sessionId)
+        bySession.set(sessionId, route)
+        const held = heldFrames.get(sessionId)
+        if (held === undefined) return
+        heldFrames.delete(sessionId)
+        const at = Date.now()
+        for (const frame of held) deliver(route, frame, at)
+      }
+
+      const disposeRoute = (route: SharedRoute): void => {
+        routes.delete(route)
+        for (const sessionId of route.claimed) {
+          if (bySession.get(sessionId) === route) bySession.delete(sessionId)
+        }
+        for (const id of route.pending) {
+          if (replyOwner.get(id) === route) replyOwner.delete(id)
+        }
+        route.claimed.clear()
+        route.pending.clear()
+        route.deliver.clear()
+        route.terminalOutput.clear()
+        route.terminalExit.clear()
+      }
+
+      // 帧归位：回执给请求者；带会话 id 的给该会话的所有者（没人认领就先存着
+      // 等认领——子会话首帧可能先到）；不带会话 id 的通知是全局的，广播。
+      client.onFrame(frame => {
+        const at = Date.now()
+        if (typeof frame.id === 'number' && frame.method === undefined) {
+          const route = replyOwner.get(frame.id)
+          if (route === undefined) return
+          replyOwner.delete(frame.id)
+          route.pending.delete(frame.id)
+          if (route.openingId === frame.id) {
+            route.openingId = undefined
+            const sessionId = (frame.result as { sessionId?: unknown } | null | undefined)?.sessionId
+            if (typeof sessionId === 'string') claim(route, sessionId)
+          }
+          deliver(route, frame, at)
+          return
+        }
+        const params = (frame.params ?? {}) as { sessionId?: unknown }
+        if (typeof params.sessionId !== 'string') {
+          // 不带会话 id 的通知是全局的（握手、代理自己的信令），广播给每个
+          // 会话，但不点亮它们的进展信标——谁在动，只有带 id 的帧说得清。
+          for (const route of [...routes]) deliver(route, frame, at, false)
+          return
+        }
+        const owner = bySession.get(params.sessionId)
+        if (owner !== undefined) {
+          deliver(owner, frame, at)
+          return
+        }
+        const held = heldFrames.get(params.sessionId)
+        if (held === undefined) heldFrames.set(params.sessionId, [frame])
+        else {
+          held.push(frame)
+          if (held.length > HELD_FRAMES_LIMIT) held.shift()
+        }
+      })
+
+      // 终端输出按 terminal/create 上写明的会话归位（配对表在 AcpClient 里）。
+      // 代理没写会话、而连接上开着不止一个会话时宁可不投：猜错会把一段命令
+      // 输出追加到另一个会话的工具卡上。代理自己的 tool_call_update 仍会把
+      // 结果送到，丢的只是实时流。
+      const terminalRoutes = (terminalId: string): readonly SharedRoute[] => {
+        const owner = client.sessionOfTerminal(terminalId)
+        if (owner !== undefined) {
+          const route = bySession.get(owner)
+          return route === undefined ? [] : [route]
+        }
+        return routes.size === 1 ? [...routes] : []
+      }
+
+      terminalService.onOutput = (terminalId, data) => {
+        for (const route of terminalRoutes(terminalId)) {
+          for (const handler of route.terminalOutput) {
+            try {
+              handler(terminalId, data)
+            } catch {
+              // 同上：一条输出投递失败不带走其他会话。
+            }
+          }
+        }
+      }
+      terminalService.onExit = ({ terminalId, exitCode }) => {
+        for (const route of terminalRoutes(terminalId)) {
+          for (const handler of route.terminalExit) {
+            try {
+              handler(terminalId, exitCode)
+            } catch {
+              // 同上。
+            }
+          }
+        }
+      }
+
       // Track per-session death handlers so transport death propagates to all
       const sessionDeathHandlers = new Map<string, (reason: string) => void>()
 
       // Track per-session runners on this shared agent
       const sessionRunners = new Map<string, AcpSession>()
+      /** DSH 会话 → 它在共享连接上的分流表。 */
+      const routeByDsh = new Map<string, SharedRoute>()
       let alive = true
+      // 日志层的进度信号：一条连接一个探针，按 ACP 会话 id 各读各的游标。
+      const progressProbe = progressProbeFor(preset.agent)
 
       const sharedAgent: SharedAgent = {
         get alive() { return alive },
 
         openSession: async (opts: OpenSessionOptions): Promise<AcpSession> => {
-          const runner = new AcpTurnRunner(adaptClient(client, dialect), {
+          const route: SharedRoute = {
+            claimed: new Set(),
+            deliver: new Set(),
+            terminalOutput: new Set(),
+            terminalExit: new Set(),
+            pending: new Set(),
+            lastFrameAt: Date.now(),
+            openingId: undefined,
+          }
+          routes.add(route)
+          const port = adaptClient(client, dialect, {
+            request: (method, params) => {
+              // session/resume 的目标 id 发请求时就知道；先认领，回执之前到达的
+              // 帧也不会被当成无人认领。
+              if (method === 'session/resume') {
+                const resumed = (params as { sessionId?: unknown } | null | undefined)?.sessionId
+                if (typeof resumed === 'string') claim(route, resumed)
+              }
+              const { id, reply } = client.requestWithId(method, params)
+              replyOwner.set(id, route)
+              route.pending.add(id)
+              if (method === 'session/new') route.openingId = id
+              return reply
+            },
+            onFrame: handler => { route.deliver.add(handler) },
+            onTerminalOutput: handler => { route.terminalOutput.add(handler) },
+            onTerminalExit: handler => { route.terminalExit.add(handler) },
+            claimSession: sessionId => { claim(route, sessionId) },
+          })
+          const runner = new AcpTurnRunner(port, {
             cwd: opts.cwd,
             dshSessionId: opts.dshSessionId,
             dialect: opts.dialect,
@@ -398,10 +575,13 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
             close: () => {
               sessionRunners.delete(opts.dshSessionId)
               sessionDeathHandlers.delete(opts.dshSessionId)
+              routeByDsh.delete(opts.dshSessionId)
+              disposeRoute(route)
               // When the last session on this shared agent leaves, kill the
               // transport to avoid leaking a process for an idle preset.
               if (sessionRunners.size === 0 && alive) {
                 alive = false
+                progressProbe?.close()
                 transport.close()
               }
             },
@@ -411,30 +591,46 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
             diagnostics: () => {
               const lastStatus = runner.lastStatusSnapshot()
               return {
-                lastFrameAt: transport.lastFrameAt(),
+                // 这条会话自己的信标：同一连接上别的会话有帧，不代表这条在动。
+                lastFrameAt: route.lastFrameAt,
                 lastDiagnosticAt: transport.lastDiagnosticAt(),
                 stderrTail: transport.stderrTail(),
                 liveDelegatedRuns: runner.liveDelegatedRuns(),
                 ...(lastStatus === undefined ? {} : { lastStatus }),
+                ...(progressProbe === undefined ? {} : {
+                  progress: () => {
+                    const external = runner.externalSessionId()
+                    return external === undefined ? undefined : progressProbe.read(external)
+                  },
+                }),
               }
             },
           }
           sessionRunners.set(opts.dshSessionId, acpSession)
+          routeByDsh.set(opts.dshSessionId, route)
           return acpSession
         },
 
         kill: (reason: string) => {
           if (!alive) return
           alive = false
+          progressProbe?.close()
           transport.close()
+          for (const route of [...routes]) disposeRoute(route)
           for (const handler of sessionDeathHandlers.values()) handler(reason)
           sessionDeathHandlers.clear()
           sessionRunners.clear()
+          routeByDsh.clear()
         },
 
         dropSession: (dshSessionId: string) => {
           sessionRunners.delete(dshSessionId)
           sessionDeathHandlers.delete(dshSessionId)
+          const route = routeByDsh.get(dshSessionId)
+          if (route !== undefined) {
+            routeByDsh.delete(dshSessionId)
+            disposeRoute(route)
+          }
         },
 
         sessionIds: () => Array.from(sessionRunners.keys()),
@@ -444,12 +640,32 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
       transport.onDeath(reason => {
         if (!alive) return
         alive = false
+        progressProbe?.close()
+        for (const route of [...routes]) disposeRoute(route)
         for (const handler of sessionDeathHandlers.values()) handler(reason)
+        sessionDeathHandlers.clear()
+        sessionRunners.clear()
+        routeByDsh.clear()
       })
 
       return sharedAgent
     },
   }
+}
+
+/**
+ * The parts of the port a shared connection replaces.
+ *
+ * On a client serving one conversation the default wiring is right: every
+ * frame and every terminal belongs to the one runner. A shared client needs
+ * each of those seams pointed at the owning session instead.
+ */
+export type ClientPortOverrides = {
+  request?(method: string, params: unknown): Promise<unknown>
+  onFrame?(handler: (frame: AcpFrame) => void): void
+  onTerminalOutput?(handler: (terminalId: string, data: string) => void): void
+  onTerminalExit?(handler: (terminalId: string, exitCode: number) => void): void
+  claimSession?(sessionId: string): void
 }
 
 /**
@@ -459,13 +675,15 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
  * reaches it as it lands, which is what lets text reach the UI while the agent
  * is still working.
  */
-export function adaptClient(client: AcpClient, dialect: AcpDialect): AcpClientPort {
+export function adaptClient(client: AcpClient, dialect: AcpDialect, overrides?: ClientPortOverrides): AcpClientPort {
+  const request = overrides?.request ?? ((method: string, params: unknown) => client.request(method, params))
   return {
-    request: (method, params) => client.request(method, params),
+    request,
     notify: (method, params) => { client.notify(method, params) },
-    onFrame: handler => { client.onFrame(frame => { handler(frame) }) },
-    onTerminalOutput: (handler) => { client.onTerminalOutput = handler },
-    onTerminalExit: (handler) => { client.onTerminalExit = handler },
+    onFrame: overrides?.onFrame ?? (handler => { client.onFrame(frame => { handler(frame) }) }),
+    onTerminalOutput: overrides?.onTerminalOutput ?? (handler => { client.onTerminalOutput = handler }),
+    onTerminalExit: overrides?.onTerminalExit ?? (handler => { client.onTerminalExit = handler }),
+    ...(overrides?.claimSession === undefined ? {} : { claimSession: overrides.claimSession }),
     // Cursor must authenticate (after an interactive `agent login`) before
     // session/new; qoder derives its own method id (CN and international builds
     // differ) from the initialize reply and authenticates only when
@@ -477,7 +695,7 @@ export function adaptClient(client: AcpClient, dialect: AcpDialect): AcpClientPo
             const methodId = dialect.authenticateMethodId ?? dialect.authenticateMethodIdFrom?.(initializeResult)
             return methodId === undefined
               ? Promise.resolve(undefined)
-              : client.request('authenticate', { methodId })
+              : request('authenticate', { methodId })
           },
         }),
   }

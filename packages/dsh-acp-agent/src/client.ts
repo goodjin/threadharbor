@@ -89,6 +89,15 @@ type PermissionToolNameReader = {
 export class AcpClient {
   private readonly pending = new Map<number, Pending>()
   private readonly frameObservers = new Set<(frame: AcpFrame) => void>()
+  /**
+   * terminalId → the ACP session that asked for it.
+   *
+   * `terminal/create` names its session on the wire (measured on grok); the
+   * output and exit callbacks do not. Keeping the pairing here is what lets a
+   * client serving several sessions hand each terminal's stream back to the
+   * session that opened it instead of to whichever one is watching.
+   */
+  private readonly terminalOwners = new Map<string, string>()
   private nextId = 1
 
   onNotification: (frame: AcpFrame) => void = () => {}
@@ -169,11 +178,23 @@ export class AcpClient {
 
   /** Send a request and resolve when the agent answers it. */
   request(method: string, params: unknown): Promise<unknown> {
+    return this.requestWithId(method, params).reply
+  }
+
+  /**
+   * Send a request and hand back its JSON-RPC id along with the reply.
+   *
+   * A reply carries no session id, so a client shared by several sessions has
+   * no other way to tell whose answer it is: the caller remembers the id and
+   * matches it on the way back.
+   */
+  requestWithId(method: string, params: unknown): { id: number; reply: Promise<unknown> } {
     const id = this.nextId++
-    return new Promise<unknown>((resolve, reject) => {
+    const reply = new Promise<unknown>((resolve, reject) => {
       this.pending.set(id, { resolve, reject })
       this.transport.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }))
     })
+    return { id, reply }
   }
 
   /** Tell the agent something without waiting for an answer. */
@@ -244,9 +265,16 @@ export class AcpClient {
     if (frame.method !== undefined) this.onNotification(frame)
   }
 
-  /** Register an observer of every inbound frame, replies included. */
-  onFrame(handler: (frame: AcpFrame) => void): void {
+  /**
+   * Register an observer of every inbound frame, replies included.
+   *
+   * Returns the disposer: a connection shared by several sessions lets each
+   * session drop its observer when it leaves, instead of leaking one closure
+   * per closed conversation onto the surviving connection.
+   */
+  onFrame(handler: (frame: AcpFrame) => void): () => void {
     this.frameObservers.add(handler)
+    return () => { this.frameObservers.delete(handler) }
   }
 
   /**
@@ -286,6 +314,17 @@ export class AcpClient {
   }
 
   /**
+   * The ACP session a terminal was created for, when the agent named one.
+   *
+   * undefined means either "no such terminal" or "the agent omitted the
+   * session id"; a caller sharing the connection must decide for itself what
+   * to do with a terminal it cannot attribute.
+   */
+  sessionOfTerminal(terminalId: string): string | undefined {
+    return this.terminalOwners.get(terminalId)
+  }
+
+  /**
    * Serve one `terminal/*` call.
    *
    * All five are handled together on purpose: serving `terminal/create` but not
@@ -305,19 +344,25 @@ export class AcpClient {
     try {
       const result = await (async () => {
         switch (frame.method) {
-          case 'terminal/create':
-            return this.terminals!.create({
+          case 'terminal/create': {
+            const created = await this.terminals!.create({
               command: typeof params.command === 'string' ? params.command : '',
               ...(typeof params.cwd === 'string' ? { cwd: params.cwd } : {}),
             })
+            if (typeof params.sessionId === 'string') this.terminalOwners.set(created.terminalId, params.sessionId)
+            return created
+          }
           case 'terminal/wait_for_exit':
             return this.terminals!.waitForExit(terminalId)
           case 'terminal/output':
             return this.terminals!.output(terminalId)
           case 'terminal/kill':
             return this.terminals!.kill(terminalId)
-          case 'terminal/release':
-            return this.terminals!.release(terminalId)
+          case 'terminal/release': {
+            const released = await this.terminals!.release(terminalId)
+            this.terminalOwners.delete(terminalId)
+            return released
+          }
           default:
             throw new Error(`unsupported terminal call ${String(frame.method)}`)
         }
