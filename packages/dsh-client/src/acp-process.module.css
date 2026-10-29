@@ -15,7 +15,11 @@
   border-radius: var(--dsw-radius-md, 8px);
   background: var(--dsw-alias-settings-card-fill, transparent);
   margin-block: 6px;
-  overflow: hidden;
+  /* Clip vertical overflow so long content keeps the rounded corners, but let a
+     wide markdown table's own horizontal scroll wrapper reach the card edge —
+     `overflow: hidden` here would clip it and hide the table's scrollbar. */
+  overflow-x: clip;
+  overflow-y: hidden;
 }
 .answerCardHeader {
   display: flex;
