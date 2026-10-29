@@ -8,6 +8,7 @@ import { acpProcessDefinition } from './acp-process-segments.ts'
 import { wrapChatView } from './acp-process-view.ts'
 import type { SegmentChatData } from './acp-process-view.ts'
 import type { ProcessSegment } from './acp-process-segments.ts'
+import { AnswerCard } from './answer-card.tsx'
 import styles from './acp-process.module.css'
 
 /** The segment is one presentation unit; individual deltas never create separate rows. */
@@ -85,7 +86,7 @@ export function registerAcpProcessSurface(ctx: Surface): void {
           const hasProse = props.node.data.blocks.some(block =>
             (block.kind === 'text' || block.kind === 'reasoning') && block.text.trim() !== '')
           return hasProse
-            ? <div className={styles.answerCard} data-acp-answer-card>{native}</div>
+            ? <AnswerCard blocks={props.node.data.blocks} t={props.t as (key: string) => string}>{native}</AnswerCard>
             : native
         }
         removeRenderer = slots.register({
