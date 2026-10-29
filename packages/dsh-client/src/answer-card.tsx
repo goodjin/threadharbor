@@ -37,10 +37,7 @@ export function AnswerCard(props: {
   return (
     <div className={styles.answerCard} data-acp-answer-card>
       <div className={styles.answerCardHeader}>
-        <span className={styles.answerCardTitle}>
-          <IconThinkOutlineRegular size={14} className={styles.answerCardIcon} />
-          {props.t('answerCard.label')}
-        </span>
+        <IconThinkOutlineRegular size={14} className={styles.answerCardIcon} />
         <button
           type="button"
           className={styles.answerCardCopy}
