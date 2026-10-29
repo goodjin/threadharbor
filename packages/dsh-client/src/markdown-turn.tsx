@@ -4,9 +4,10 @@
  * 挂在 `conversation.chat.turnTail` 上，排在官方改动卡片之后。官方卡片照旧
  * 打开右侧对比。Markdown 按文档排版，其它文本按原文显示。默认收起，点击才展开并读取。
  * 展开后路径栏与正文隔开。双击正文收回。路径栏右侧可打开所在文件夹。
+ * 点开或收起时，路径栏留在点击时的视口位置。
  */
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { FileTypeIcon, MarkdownText, classifyFileType } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -39,6 +40,107 @@ interface MarkdownTurnProps {
 
 type SummaryExtra = readonly string[]
 
+
+const SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '])
+
+interface FileTopHold {
+  readonly bar: HTMLElement
+  release(): void
+}
+
+/** 后一次点击替换前一次，避免两篇文件同时抢滚动位置。 */
+let activeFileTopHold: FileTopHold | null = null
+
+/** 会话真正滚动的那一层。网页外壳标了 `data-conversation-scroll`，否则沿祖先找可滚动的盒子。 */
+function conversationScroller(node: HTMLElement): HTMLElement | null {
+  const marked = node.closest<HTMLElement>('[data-conversation-scroll]')
+  if (marked !== null) return marked
+  let current = node.parentElement
+  while (current !== null && current !== document.body && current !== document.documentElement) {
+    const overflow = getComputedStyle(current).overflowY
+    if (overflow === 'auto' || overflow === 'scroll' || overflow === 'overlay') return current
+    current = current.parentElement
+  }
+  return null
+}
+
+/**
+ * 记下路径栏此刻的视口位置，这块文件变高或变矮之后放回去。
+ *
+ * 会话停在底部时，阅读区一变高，官方跟随就会把滚动拉到最底。
+ * 变高发生在布局之后，所以要等这一帧的尺寸通知再改滚动。
+ * 用户自己滚动会话区之后不再干涉。
+ */
+function holdFileTop(bar: HTMLElement | null): void {
+  activeFileTopHold?.release()
+  activeFileTopHold = null
+  if (bar === null || typeof ResizeObserver === 'undefined') return
+  const scroller = conversationScroller(bar)
+  if (scroller === null) return
+  const section = bar.closest('section') ?? bar
+  const top = bar.getBoundingClientRect().top
+  let generation = 0
+  let writing = false
+  const apply = (): void => {
+    if (generation !== 0) return
+    const delta = bar.getBoundingClientRect().top - top
+    if (Math.abs(delta) < 1) return
+    writing = true
+    scroller.scrollTop += delta
+    writing = false
+  }
+  const release = (): void => {
+    if (generation !== 0) return
+    generation = 1
+    observer.disconnect()
+    scroller.removeEventListener('scroll', onScroll)
+    scroller.removeEventListener('wheel', onUser, true)
+    scroller.removeEventListener('touchmove', onUser, true)
+    scroller.removeEventListener('keydown', onUser, true)
+    if (activeFileTopHold === hold) activeFileTopHold = null
+  }
+  const onUser = (event: Event): void => {
+    if (event instanceof KeyboardEvent) {
+      if (!SCROLL_KEYS.has(event.key)) return
+      release()
+      return
+    }
+    // 滚轮落在正文里时，会话本身未必动。只有会话滚动变了才放手。
+    const before = scroller.scrollTop
+    requestAnimationFrame(() => {
+      if (generation !== 0) return
+      if (scroller.scrollTop !== before) release()
+    })
+  }
+  const onScroll = (): void => {
+    if (writing || generation !== 0) return
+    // 跟随底部造成的滚动会在同一帧被 apply 抵消；两帧后路径栏仍偏离，才是用户自己在滚。
+    requestAnimationFrame(() => {
+      if (generation !== 0) return
+      requestAnimationFrame(() => {
+        if (generation !== 0) return
+        if (Math.abs(bar.getBoundingClientRect().top - top) >= 1) release()
+      })
+    })
+  }
+  const observer = new ResizeObserver(() => {
+    apply()
+    requestAnimationFrame(() => { apply() })
+  })
+  observer.observe(section)
+  scroller.addEventListener('scroll', onScroll, { passive: true })
+  scroller.addEventListener('wheel', onUser, { passive: true, capture: true })
+  scroller.addEventListener('touchmove', onUser, { passive: true, capture: true })
+  scroller.addEventListener('keydown', onUser, true)
+  requestAnimationFrame(() => { apply() })
+  const hold: FileTopHold = { bar, release }
+  activeFileTopHold = hold
+}
+
+function releaseHeldFileTop(bar: HTMLElement | null): void {
+  if (bar !== null && activeFileTopHold?.bar === bar) activeFileTopHold.release()
+}
+
 type DocumentBody =
   | { readonly kind: 'loading' }
   | { readonly kind: 'error' }
@@ -69,7 +171,9 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
   const [attempt, setAttempt] = useState(0)
   const [body, setBody] = useState<DocumentBody>({ kind: 'loading' })
   const [revealError, setRevealError] = useState(false)
+  const barRef = useRef<HTMLDivElement>(null)
   const labels = useMemo(() => labelsFor(t), [t])
+  useEffect(() => () => { releaseHeldFileTop(barRef.current) }, [])
   useEffect(() => {
     if (!open) return
     const controller = new AbortController()
@@ -89,13 +193,16 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
     }
   }, [open, sessionId, path, readers, attempt])
   return <section className={css.document} data-markdown-path={path}>
-    <div className={css.bar} data-path-bar="" {...(open ? { 'data-expanded': '' } : {})}>
+    <div ref={barRef} className={css.bar} data-path-bar="" {...(open ? { 'data-expanded': '' } : {})}>
       <button
         type="button"
         className={css.toggle}
         aria-expanded={open}
         aria-label={t(open ? 'markdownTurn.collapseAria' : 'markdownTurn.expandAria', { name: path })}
-        onClick={() => { setOpen(value => !value) }}
+        onClick={() => {
+          holdFileTop(barRef.current)
+          setOpen(value => !value)
+        }}
       >
         <span className={css.identity}>
           <span className={css.icon} data-file-icon={classifyFileType(path)}>
@@ -126,13 +233,17 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
       onDoubleClick={(event) => {
         const target = event.target
         if (target instanceof Element && target.closest('button, a')) return
+        holdFileTop(barRef.current)
         setOpen(false)
       }}
     >
       {body.kind === 'loading' && <p className={css.status}>{t('markdownTurn.loading')}</p>}
       {body.kind === 'error' && <p className={css.status}>
         {t('markdownTurn.error')}
-        <button type="button" className={css.retry} onClick={() => { setAttempt(value => value + 1) }}>
+        <button type="button" className={css.retry} onClick={() => {
+          holdFileTop(barRef.current)
+          setAttempt(value => value + 1)
+        }}>
           {t('markdownTurn.retry')}
         </button>
       </p>}

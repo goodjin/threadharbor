@@ -182,6 +182,83 @@ describe('MarkdownTurnTail', () => {
     await act(async () => { root.unmount() })
   })
 
+  it('展开和收起都把路径栏留在点击时的位置，自己滚动之后不再拉回', async () => {
+    const callbacks: ResizeObserverCallback[] = []
+    class FakeResizeObserver {
+      constructor(private readonly callback: ResizeObserverCallback) { callbacks.push(callback) }
+      observe(): void {}
+      disconnect(): void {
+        const index = callbacks.indexOf(this.callback)
+        if (index >= 0) callbacks.splice(index, 1)
+      }
+    }
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver)
+    const scroller = document.createElement('div')
+    scroller.setAttribute('data-conversation-scroll', '')
+    let scrollTop = 500
+    let barTop = 240
+    Object.defineProperty(scroller, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        if (value === scrollTop) return
+        const previous = scrollTop
+        scrollTop = value
+        barTop += previous - value
+        scroller.dispatchEvent(new Event('scroll'))
+      },
+    })
+    document.body.appendChild(scroller)
+    const container = document.createElement('div')
+    scroller.appendChild(container)
+    const root: Root = createRoot(container)
+    const fire = (): void => {
+      callbacks.at(-1)?.([], undefined as unknown as ResizeObserver)
+    }
+    const frames = async (count: number): Promise<void> => {
+      for (let index = 0; index < count; index += 1) {
+        await new Promise<void>(resolve => { requestAnimationFrame(() => { resolve() }) })
+      }
+    }
+    try {
+      await act(async () => {
+        root.render(createElement(MarkdownTurnTail, {
+          sessionId: 'sess',
+          turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+          readers: readers({ readPage: vi.fn(async () => page('# Hello', 1, true)) }),
+        }))
+      })
+      const bar = container.querySelector('[data-path-bar]') as HTMLElement
+      bar.getBoundingClientRect = () => ({ top: barTop }) as DOMRect
+      const toggle = container.querySelector('button[aria-expanded]')
+      await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      scroller.scrollTop = 900
+      expect(barTop).toBe(-160)
+      await act(async () => { fire() })
+      expect(scrollTop).toBe(500)
+      expect(barTop).toBe(240)
+      await act(async () => { await frames(2) })
+
+      await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      expect(container.querySelector('[data-markdown-body]')).toBeNull()
+      scroller.scrollTop = 200
+      await act(async () => { fire() })
+      expect(scrollTop).toBe(500)
+      expect(barTop).toBe(240)
+      await act(async () => { await frames(2) })
+
+      scroller.scrollTop = 800
+      await act(async () => { await frames(2) })
+      scroller.scrollTop = 1100
+      await act(async () => { fire() })
+      expect(scrollTop).toBe(1100)
+    } finally {
+      await act(async () => { root.unmount() })
+      scroller.remove()
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('打开所在文件夹不展开正文，失败时在按钮上说出来', async () => {
     const revealFile = vi.fn(async () => { throw new Error('no') })
     const face = readers({ revealFile })
