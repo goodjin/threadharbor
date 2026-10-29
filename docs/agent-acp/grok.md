@@ -133,6 +133,25 @@ grok 不实现草案 #1992，但**确实报告子代理生命周期**，用自�
 三个要点：全部帧挂在**父会话**名下（不像草案用子会话编号标内容帧，grok 不流子会话内容）；方法名是私有的 `_x.ai/session_notification`（方言的 `frameUpdate` 钩子认领它，否则帧进不了投影门）；委派同时还有一次普通的 `spawn_subagent` 工具调用帧——工具卡和子代理卡**并存**，各自如实。
 - **排查时注意**：受限网络环境下 serve 拉不起来（启动时回连 grok.com 被挡，横幅后无声悬挂）——这是之前误判「serve 坏了」的原因，不代表生产故障。
 
+## 后台任务帧：`task_backgrounded` / `task_completed`（2026-10-29 真机抓帧，grok 1.0.70）
+
+跑一次 `sleep 20 && echo PROBE_DONE` 后台命令，抓到的时序：
+
+1. 派发瞬间、`session/prompt` 回执**之前**，grok 发 `_x.ai/task_backgrounded`（`task_id` / `tool_call_id` / `command` / `cwd` / `output_file` / `description`）。
+2. 约 2.5 秒后 `session/prompt` 回执——任务还在跑，回合已经结束。同时 `_x.ai/session_notification` 发 `background_tasks` 快照（`tasks[].status`: running / completed）。
+3. 任务结束时发 `_x.ai/task_completed`（`task_snapshot`：`task_id` / `output` / `exit_code` / `signal` / `completed` / `explicitly_killed`，附 `will_wake: true`），随后自动唤醒一个新回合。
+
+两个专用方法由方言的 `frameUpdate` 钩子认领（`UPDATE_METHODS`），`normalizeSubagentUpdate` 归一：
+
+| 原帧 | 归一为 | 投影 |
+|---|---|---|
+| `task_backgrounded` | `async_task_spawned`（`asyncTaskId: task_id`；`name` 取 description/command 首行；`taskType: 'bash'`；`description: command`；`outputFilePath: output_file`） | `async_task` 卡片，**派发瞬间实时开卡**（`projectToolCallFrame` 先归一化再 `spawnedCallOf`，否则只有回合末投影认得私有帧） |
+| `task_completed` | `async_task_state_update`（`state`: completed / failed / stopped；`summary`: `后台任务完成（退出码 0）` 加输出） | 卡片结果；`explicitly_killed` 记 stopped，非零退出/信号记 failed |
+
+`background_tasks` 快照改为**实时块**（不再是回合末汇总）：`后台任务（1 个，1 个运行中）：「sleep 20 && echo PROBE_DONE」（运行中）`——这句话回答的正是「现在有没有任务在跑」。两个原帧本身归 `mapped`，不再落进未知输出块。
+
+**已知缺口（跨回合收尾）**：grok 在任务完成前就结束了 `session/prompt`，`task_completed` 落在两次回合之间。DSH 的 runner 在 `beginPrompt` 清队（「两次回合之间的帧属于无主回合」），这条完成帧目前写不进转录，卡片结果停在 `[still running]`。要补上，得让回合之间到达、且能落定已开运行（或属于自动唤醒）的帧有地方可写——那是一个跨回合的回合启动机制，另行安排。
+
 ## 一个 `agent serve` 承载多个会话，`session/resume` 跨进程可用（2026-10-29 真机探针）
 
 两件事一起测的，都影响进程模型：
