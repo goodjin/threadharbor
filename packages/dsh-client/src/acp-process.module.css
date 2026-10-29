@@ -6,3 +6,14 @@
   gap: 8px;
 }
 .reasoning { color: var(--dsw-alias-label-secondary, inherit); }
+
+/* Final answer of a turn: a four-sided card, distinct from the left-bar process
+   segments. Applied to the answer step only; thinking (reasoning) stays inside and
+   keeps its native fold/expand behavior. */
+.answerCard {
+  border: 1px solid var(--dsw-alias-settings-card-stroke, rgba(127, 127, 127, 0.25));
+  border-radius: var(--dsw-radius-md, 8px);
+  background: var(--dsw-alias-settings-card-fill, transparent);
+  padding: 12px 16px;
+  margin-block: 6px;
+}

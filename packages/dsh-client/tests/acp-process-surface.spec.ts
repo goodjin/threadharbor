@@ -55,4 +55,29 @@ describe('ACP process surface', () => {
     registerAcpProcessSurface({ get: () => undefined, slots: undefined, effect })
     expect(effect).not.toHaveBeenCalled()
   })
+  it('boxes the turn answer step while leaving process steps and empty answers in the native renderer', () => {
+    const f = fixture(); registerAcpProcessSurface(f.ctx)
+    const renderer = f.entries.at(-1)!.component as any
+    const turnProcess = (answerStep: number) => ({ turnProcess: { spec: { answerStep } } })
+    const answerNode = {
+      node: { data: { step: 2, blocks: [{ kind: 'text', text: 'Final answer' }] } },
+      t: (key: string) => key, ...turnProcess(2),
+    }
+    const html = renderToStaticMarkup(createElement(renderer, answerNode))
+    expect(html).toContain('data-acp-answer-card="true"')
+    expect(html).toContain('data-native="true"')
+    // A non-answer step keeps the native renderer with no card.
+    const processNode = {
+      node: { data: { step: 1, blocks: [{ kind: 'text', text: 'Mid-turn prose' }] } },
+      t: (key: string) => key, ...turnProcess(2),
+    }
+    expect(renderToStaticMarkup(createElement(renderer, processNode))).not.toContain('data-acp-answer-card')
+    // An answer step with no prose does not get an empty card.
+    const emptyAnswer = {
+      node: { data: { step: 2, blocks: [{ kind: 'tool-call', callId: 'c9', name: 'bash', argsRaw: '{}' }] } },
+      t: (key: string) => key, ...turnProcess(2),
+    }
+    expect(renderToStaticMarkup(createElement(renderer, emptyAnswer))).not.toContain('data-acp-answer-card')
+    f.dispose()
+  })
 })
