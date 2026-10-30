@@ -47,6 +47,22 @@ preset 里默认只挂两个：**M3.1 Flash** 与 **MiniMax M3**。这是官方 
 
 相比之下 MiniMax 开放平台的 `https://api.minimax.cn/anthropic/v1/messages` 是有文档的稳定接口，但它认的是平台密钥或订阅密钥，与桌面版登录**不是同一套凭据**，官方明确写了二者不可互换。本插件走前者，是为了「装了 MiniMax Code 就能用」。
 
+## 出错时怎么看（核对时间 2026-10-30）
+
+**网络层的失败按 `TRANSPORT` 上报，宿主会自己重试。** 代理断了、连接被拒、域名解析不了、
+流到一半断掉——这些都归成 `TRANSPORT`，而 `TRANSPORT` 在宿主的自动重试白名单里
+（默认最多 5 次，退避 0.5 秒起、封顶 10 秒），所以界面显示的是「正在重试模型请求」，
+一次抖动不必终结整轮。
+
+文案里带的是**最深一层的原因**。Node 的 fetch 对这类失败只说「fetch failed」，真正的原因
+（`connect ECONNREFUSED 127.0.0.1:7897`、`getaddrinfo ENOTFOUND …`）在 error 的 cause 链里，
+插件把它挖出来放进文案，访问令牌照样抹掉。
+
+取消（AbortError）仍按原样抛出，不进重试。
+
+**HTTP 状态码类失败还没分类**：401、404、429、5xx 仍是普通错误，错误码显示为 `UNKNOWN`，
+也不会自动重试。这一条只到网络层为止。
+
 ## 验收
 
 `packages/minimaxi-acp/tests/` 覆盖：凭据定位与区域判定、过期后经官方端点刷新、刷新结果留在同一个文件里、请求地址与鉴权头、思考开关与档位、签名回放、流式帧到块的投影、失败信息里令牌被抹掉。工具配对的重放由 `packages/dsh-preset-dispatch/tests/tool-pairing.spec.ts` 覆盖。
