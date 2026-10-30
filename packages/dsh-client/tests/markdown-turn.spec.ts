@@ -809,3 +809,23 @@ describe('createMarkdownTurnReaders', () => {
     await expect(missing.canOpenFiles()).resolves.toBe(false)
   })
 })
+
+describe('createMarkdownTurnReaders sendToSession', () => {
+  it('sendToSession 把文本作为一条消息发给会话', async () => {
+    const prompt = vi.fn(async () => ({ ok: true }))
+    const remote = () => ({ session: { prompt } })
+    const face = createMarkdownTurnReaders(remote)
+    await face.sendToSession('sess', 'hello world')
+    expect(prompt).toHaveBeenCalledTimes(1)
+    const payload = prompt.mock.calls[0][0]
+    expect(payload.sessionId).toBe('sess')
+    expect(payload.mode).toBe('queue')
+    expect(payload.content).toEqual([{ type: 'text', text: 'hello world' }])
+    expect(typeof payload.requestId).toBe('string')
+  })
+
+  it('sendToSession 在宿主没有 prompt 能力时抛错', async () => {
+    const face = createMarkdownTurnReaders(() => ({}))
+    await expect(face.sendToSession('sess', 'x')).rejects.toThrow(/prompt/)
+  })
+})
