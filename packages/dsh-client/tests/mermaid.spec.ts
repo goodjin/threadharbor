@@ -417,6 +417,20 @@ describe('会话区 Mermaid 预览', () => {
     expect(logs).toHaveLength(1)
   })
 
+  it('预览上的双击不再冒泡：阅读卡片靠它收起，画图时不该收起', async () => {
+    const block = mountBlock('graph TD\n  A-->B')
+    const runtime = fakeRuntime()
+    start({ loadApi: async () => runtime.api })
+
+    await waitFor(() => block.hasAttribute(ACTIVE), 'diagram')
+    let bubbled = 0
+    const listener = (): void => { bubbled += 1 }
+    document.body.addEventListener('dblclick', listener)
+    block.querySelector(`[${CANVAS}]`)!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    document.body.removeEventListener('dblclick', listener)
+    expect(bubbled).toBe(0)
+  })
+
   it('连续两次 scan 不产生额外写入或渲染', async () => {
     const block = mountBlock('graph TD\n  A-->B')
     const runtime = fakeRuntime()
