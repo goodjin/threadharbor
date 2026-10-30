@@ -18,12 +18,17 @@
       "types": "./src/zcode-quota.ts",
       "default": "./src/zcode-quota.ts"
     },
+    "./mermaid-asset": {
+      "types": "./src/mermaid-asset.ts",
+      "default": "./src/mermaid-asset.ts"
+    },
     "./package.json": "./package.json"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1",
     "@threadharbor/dsh-acp-agent": "workspace:^",
     "@threadharbor/minimaxi-acp": "workspace:^",
-    "@threadharbor/zcode-acp": "workspace:^"
+    "@threadharbor/zcode-acp": "workspace:^",
+    "mermaid": "^11.16.0"
   }
 }

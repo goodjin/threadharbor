@@ -61,6 +61,7 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 agent 接进 
 - 手机直连（核对时间 2026-10-22）：手机装 Tailscale，扫桌面端「手机配对」面板的二维码，打开的是该机的**完整 DSH 界面**（配对网址由 `/threadharbor/federation/pair-url` 生成，带进程令牌）。面板里的「手机访问地址」保存这台机器的对外源（`dsh.host.accessOrigin`），保存即生效；地址是 loopback 时面板会提示手机进不来。手机宽度下侧栏变抽屉、主机列表隐去 IP 列；从主机面板或远端页顶部的切换器可整页切到其余已登记主机。主机之间由 `threadharbor-federation-sync` 互推「自己 + 登记簿」与令牌入口，对端只补缺失、不改本机事实。可达性由 `tailscale serve --bg` 提供，dsh 启动须带 `--trusted-host`；`scripts/mobile-setup.sh <dsh端口>` 一键完成发布并打印步骤，详见 [docs/mobile-client.zh.md](docs/mobile-client.zh.md)。云主机中转那条精简手机页通道见上一条。
 - 同一窗口管理多台主机（核对时间 2026-10-18）：左侧树列出本机和其他已登记主机的项目与会话。点其他主机，主区通过本机网关打开那台机器自己的 DSH 界面，浏览器调的还是那套接口，只是地址换成了登记簿里的那台；审批、流式、模型选择和上传都在这个界面里。会话仍跑在那台主机上。登录 cookie 留在本机网关，不写进浏览器。
 - 原生 dsh preset 的行为不受影响：组合行只认得自己 presetId 下的会话，其余一律不接管。
+- 会话区 Markdown 里的 Mermaid 图（核对时间 2026-10-30）：助手回复与 `.md` 阅读卡片中的 mermaid 代码块会画成图，预览头可在「图表 / 源码」间切换（切到源码仍是原来的代码块，复制按钮照常复制源码）。Mermaid 运行时由本机 `/threadharbor/mermaid.js` 按需提供——第一次遇到图才加载，客户端包不内联 3.5 MB；同一登录准入，ETag/304 缓存；网关下的页面按 `<base href>` 从网关取。
 - 各 agent 的端到端活测（建会话 → 提问 → 收到回答 → 工具调用正确投影、权限批准后回合继续）默认跳过，带 `THREADHARBOR_LIVE_ACP=1` 运行；见下文「真机活测」。
 - ACP 五家里的委派看得见（核对时间 2026-10-20）：握手声明 [ACP 子代理草案](https://github.com/agentclientprotocol/agent-client-protocol/pull/1992)的 `subagents` 能力后，codex 与 claude 的子代理委派、claude 的后台任务以原生帧（`subagent_spawned` 等）到达，实时投成 `subagent` / `async_task` 卡片，子会话内容不漏进父回答（单测照真实抓包钉死投影行为；codex / claude / grok 三家帧级真机验收均已通过，2026-10-20）；grok 不实现草案但发自己的一套子代理帧（私有方法名＋蛇形字段，经方言归一化后同样投成卡片，真机抓包已钉死）；cursor 与 qoder 忽略该字段。帧表与投影规则见 [docs/agent-acp/README.md](docs/agent-acp/README.md)。
 
@@ -85,6 +86,7 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 agent 接进 
 | `@threadharbor/dsh-mobile-relay` | `threadharbor-mobile-relay` | 云主机侧的手机中转：公网 HTTPS 入口、手机页壳、`pair-url` / `peers`、SSH 隧道、会话/审批/事件转发。本机没有中转配置时默认停用、不注册。 |
 | `@threadharbor/dsh-preset-dispatch/roster-filter` | `threadharbor-roster-filter` | 把标了 `hideFromRoster: true` 的 ACP preset 从新建会话/预设选择器中隐藏；注册本身保留，所以模型列表切换和会话接管仍可用。内部 `list()` 不过滤。 |
 | `@threadharbor/dsh-preset-dispatch/zcode-quota` | `threadharbor-zcode-quota` | 宿主侧读取本机 ZCode 登录凭据并查询 Coding Plan 的 5 小时/周限额，供输入框下方的 GLM 配额胶囊显示；密钥不出宿主进程。 |
+| `@threadharbor/dsh-preset-dispatch/mermaid-asset` | `threadharbor-mermaid-asset` | 本机 `/threadharbor/mermaid.js`：按需提供给会话区 Mermaid 代码块（mermaid fence）渲染的运行时（来自本包依赖，客户端包不内联 3.5 MB；同一登录准入，ETag/304 缓存）。 |
 
 ### Agent preset 行
 

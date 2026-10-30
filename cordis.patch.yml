@@ -57,6 +57,11 @@
     # 配额胶囊从这里读（密钥不出宿主进程，成功应答带 30 秒缓存）。
     - id: threadharbor-zcode-quota
       name: '@threadharbor/dsh-preset-dispatch/zcode-quota'
+    # Mermaid 运行时的同源静态路由：会话区里的 ```mermaid 代码块在第一次出现时
+    # 才注入 <script> 加载这个文件（客户端包不内联 3.5 MB 的 mermaid）；资产
+    # 来自本包的 mermaid 依赖，与页面同一登录准入，缓存走 ETag/304。
+    - id: threadharbor-mermaid-asset
+      name: '@threadharbor/dsh-preset-dispatch/mermaid-asset'
     - id: acp-codex
       name: '@deepseek-ai/dsh-agent-preset'
       config:
