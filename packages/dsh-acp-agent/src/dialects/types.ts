@@ -197,6 +197,20 @@ export interface AcpDialect {
    */
   foldToolDelta?(carried: ToolCall | undefined, update: Record<string, unknown>): ToolCall | undefined
 
+  /**
+   * A tool call's own declared timeout budget, in ms, read off its folded
+   * arguments — or undefined when the agent's tools declare none.
+   *
+   * The watchdog treats a running tool inside its own budget as work, not
+   * silence: during execution such an agent sends no frames and its own logs
+   * write nothing (qoder's Bash pipes output through `tail`, so not even
+   * streamed output arrives — 2026-10-30 session 2c030c08: a gradle compile
+   * declaring 600000 was killed at 300s mid-run, exit 143, result unknown).
+   * Only agents whose tool schema actually carries a timeout field implement
+   * this; for every other dialect the watchdog behaves exactly as before.
+   */
+  readonly toolTimeoutMs?: ((args: unknown) => number | undefined) | undefined
+
   /** Output text for one update frame. Empty means "nothing new yet". */
   toolOutput(update: Record<string, unknown>): string
 

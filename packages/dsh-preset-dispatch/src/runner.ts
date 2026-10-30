@@ -646,6 +646,14 @@ export class AcpTurnRunner {
    * 5 个子代理的结果全部丢失，界面上主会话报超时、子会话还在跑）。
    */
   private readonly delegatedRuns = new Set<string>()
+  /**
+   * 每个工具调用首次被看见的时刻（epoch ms），键是调用 id。
+   *
+   * 只为「声明超时预算」服务（openToolDeadline）：工具执行期间 agent 不发
+   * 帧、它自己的日志也不写行，看门狗要靠这个表区分「长跑」和「挂死」。
+   * 随 prompt 生命周期清空——上一回合的工具属于上一回合。
+   */
+  private readonly toolStartedAt = new Map<string, number>()
   private stream: TurnStreamPort | undefined
   /** Set when this turn's stop signal fired; everything after it is dropped. */
   private aborted = false
@@ -1051,6 +1059,30 @@ export class AcpTurnRunner {
     return this.delegatedRuns.size
   }
 
+  /**
+   * 未收尾工具里最晚的「声明超时截止」（epoch ms），没有这层信号时 undefined。
+   *
+   * 网关的静默看门狗读它：工具在自己的预算内跑，静默就不是挂死——预算
+   * 耗尽或工具收尾（活动重挂期限）才轮到看门狗说话。只认方言声明了
+   * `toolTimeoutMs` 且参数里真带着超时的调用（qoder 的 Bash）；已收尾的
+   * 调用不计。取 max 而不是 min：并行的多个工具里，最晚到期的那个还在
+   * 预算内，回合就还有活着的证据。
+   */
+  openToolDeadline(): number | undefined {
+    const live = this.liveCards
+    const read = this.options.dialect?.toolTimeoutMs
+    if (live === undefined || read === undefined) return undefined
+    let deadline: number | undefined
+    for (const [callId, startedAt] of this.toolStartedAt) {
+      if (live.settled.has(callId)) continue
+      const timeout = read(live.tools.get(callId)?.arguments)
+      if (timeout === undefined) continue
+      const at = startedAt + timeout
+      if (deadline === undefined || at > deadline) deadline = at
+    }
+    return deadline
+  }
+
   /** 外部对话的 id（ACP session id，codex 里就是 thread id）；未开会话时 undefined。 */
   externalSessionId(): string | undefined {
     return this.sessionId
@@ -1155,6 +1187,7 @@ export class AcpTurnRunner {
     this.proseBoundaries.clear()
     // 委托运行的账本随 prompt 重开：上一回合的子代理属于上一回合。
     this.delegatedRuns.clear()
+    this.toolStartedAt.clear()
     this.aborted = false
     this.promptSettled = false
     this.replyStop = undefined
@@ -1209,6 +1242,7 @@ export class AcpTurnRunner {
       if (carried === undefined) {
         const beforeBlock = this.stream?.toolBoundary?.()
         if (typeof beforeBlock === 'number') this.proseBoundaries.set(resolvedId, beforeBlock)
+        this.toolStartedAt.set(resolvedId, Date.now())
       }
       live.tools.set(resolvedId, folded)
       if (deltaIndex !== undefined) live.deltaToolByIndex.set(deltaIndex, resolvedId)

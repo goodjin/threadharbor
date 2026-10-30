@@ -554,6 +554,18 @@ export class GatewayConversations {
       return parts.join('；')
     }
     const fireStall = (): void => {
+      // 工具自己的声明超时还在走，静默就不是挂死：让路到预算耗尽。工具
+      // 执行期间 agent 不发帧、它自己的日志也不写行（qoder 的 Bash 还把
+      // 输出接进 tail，连流式输出都没有）——2026-10-30 会话 2c030c08：声明
+      // 600s 的 gradle 编译在 300s 被杀，exit 143，结果未知。工具收尾会是
+      // 一次活动，正常重挂期限；总上限仍是「工具再也不回来」的兜底。
+      const toolDeadline = entry.session?.diagnostics().toolDeadline?.()
+      if (toolDeadline !== undefined && Date.now() < toolDeadline) {
+        this.report(`acp gateway: session ${sessionId} stall deferred — a tool with a declared timeout runs until ${String(toolDeadline)}`)
+        if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
+        deadlineTimer = setTimeout(fireStall, toolDeadline - Date.now() + 50)
+        return
+      }
       const silentForMs = Date.now() - lastActivityWall
       const state = stateText()
       this.report(`acp gateway: session ${sessionId} answer stalled — no agent activity for ${String(silentForMs)}ms (limit ${String(timeoutMs)}ms)${state === '' ? '' : `; last state: ${state}`}${delegatedNote()}${crashNote()} — ending the turn as error`)

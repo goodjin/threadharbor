@@ -416,3 +416,19 @@ describe('Cursor 文件工具的真实记录', () => {
     expect(diff).toContain('after')
   })
 })
+
+// 声明超时：qoder 的 Bash 参数自带 timeout（毫秒）——看门狗在工具自己的
+// 预算内不按「静默」收场（2026-10-30 会话 2c030c08：gradle 编译声明 600s，
+// 300s 看门狗把还在跑的编译杀了，exit 143，结果未知）。
+describe('qoder dialect — toolTimeoutMs', () => {
+  it('reads the declared Bash timeout from the folded arguments', () => {
+    expect(qoderDialect.toolTimeoutMs!({ command: 'gradlew compile', timeout: 600000 })).toBe(600000)
+  })
+  it('absent, non-finite, or non-positive timeouts are not budgets', () => {
+    expect(qoderDialect.toolTimeoutMs!({ command: 'ls' })).toBeUndefined()
+    expect(qoderDialect.toolTimeoutMs!({ timeout: '600000' })).toBeUndefined()
+    expect(qoderDialect.toolTimeoutMs!({ timeout: 0 })).toBeUndefined()
+    expect(qoderDialect.toolTimeoutMs!({ timeout: -5 })).toBeUndefined()
+    expect(qoderDialect.toolTimeoutMs!('garbage')).toBeUndefined()
+  })
+})

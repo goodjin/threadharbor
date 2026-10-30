@@ -147,6 +147,8 @@ function fakeSession() {
     lastStatus: undefined as { key: string; label: string; working: boolean; notable: boolean; at: number } | undefined,
     // 日志层进度读数；缺省表示这层信号不可用（帧静默就是真静默）。
     progress: undefined as (() => { at: number; key: string; label: string } | undefined) | undefined,
+    // 未收尾工具的声明超时预算截止（epoch ms）；缺省表示没有这层信号。
+    toolDeadline: undefined as (() => number | undefined) | undefined,
   }
   const endResult = (end: GatewayStepEnd) => ({ frames: [], end })
   const session: AcpSession = {
@@ -177,6 +179,7 @@ function fakeSession() {
       liveDelegatedRuns: diagnosticsState.liveDelegatedRuns,
       ...(diagnosticsState.lastStatus === undefined ? {} : { lastStatus: diagnosticsState.lastStatus }),
       ...(diagnosticsState.progress === undefined ? {} : { progress: () => diagnosticsState.progress!() }),
+      ...(diagnosticsState.toolDeadline === undefined ? {} : { toolDeadline: () => diagnosticsState.toolDeadline!() }),
     }),
   } as unknown as AcpSession
   return {
@@ -972,6 +975,41 @@ describe('GatewayConversations — 帧静默超时、提示与诊断包', () => 
     )
     return { fake, append, reports, gate, opens }
   }
+
+  it('工具声明超时在预算内：静默不收场，预算耗尽才按 ACP_STALLED 收', async () => {
+    // 2026-10-30 会话 2c030c08：qoder 跑一个声明 600s 的 gradle 编译，300s
+    // 看门狗把还在跑的编译杀了（exit 143，结果未知）。工具自己的预算还在走，
+    // 「静默」就该让路——预算耗尽才轮到看门狗说话。
+    vi.useFakeTimers()
+    try {
+      const fake = fakeSession()
+      fake.answerWith(() => new Promise<GatewayStepEnd>(() => {}))
+      // 固定的绝对截止：静默期限 3s 到点时它还剩 1s 预算——恰好让一次路。
+      const budgetEndsAt = Date.now() + 4_000
+      fake.diagnosticsState.toolDeadline = () => budgetEndsAt
+      const gate = new GatewayConversations(async () => fake.session, undefined, undefined, undefined, () => ({ stallMs: 3_000 }))
+      const chunks: GatewayChunk[] = []
+      const answering = gate.answer('s1', 'acp-qoder', { messages: [user('编译')], position }, { chunk: c => { chunks.push(c) } })
+      // 静默期限过了，工具预算还剩：不收场（让路把定时器推到预算后 50ms）。
+      const held = await Promise.race([
+        answering.then(() => 'ended-early'),
+        vi.advanceTimersByTimeAsync(3_500).then(() => 'still-running'),
+      ])
+      expect(held).toBe('still-running')
+      // 预算耗尽：静默收场照旧，静默时长按真实起点算（≈4s，不是 3s）。
+      const outcome = await Promise.race([
+        answering.then(() => 'resolved'),
+        vi.advanceTimersByTimeAsync(1_200).then(() => 'still-hanging'),
+      ])
+      expect(outcome).toBe('resolved')
+      const finish = chunks.at(-1) as { reason: { failure?: { code?: string; message?: string } } }
+      expect(finish.reason.failure?.code).toBe('ACP_STALLED')
+      expect(finish.reason.failure?.message).toContain('外部 agent 静默 4s')
+      expect(fake.closes.count).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 
   it('帧静默达 stallMs：ACP_STALLED 收场，消息带尾部与会话处置，会话被杀', async () => {
     vi.useFakeTimers()
