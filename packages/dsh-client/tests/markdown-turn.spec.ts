@@ -159,6 +159,39 @@ describe('MarkdownTurnTail', () => {
     await act(async () => { root.unmount() })
   })
 
+  it('路径文字在按钮外面，点路径不展开', async () => {
+    const face = readers()
+    const container = document.createElement('div')
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+        readers: face,
+      }))
+    })
+    const pathText = container.querySelector('[data-path="docs/a.md"]')
+    expect(pathText?.textContent).toBe('docs/a.md')
+    expect(pathText?.closest('button')).toBeNull()
+    expect(pathText?.closest('a')).toBeNull()
+    const copied = new Map<string, string>()
+    const copy = new Event('copy', { bubbles: true, cancelable: true })
+    Object.defineProperty(copy, 'clipboardData', {
+      value: { setData: (type: string, value: string) => { copied.set(type, value) } },
+    })
+    pathText?.dispatchEvent(copy)
+    expect(copied.get('text/plain')).toBe('docs/a.md')
+    expect(copy.defaultPrevented).toBe(true)
+    await act(async () => { pathText?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(container.querySelector('[data-markdown-body]')).toBeNull()
+    expect(face.readPage).not.toHaveBeenCalled()
+    const toggle = container.querySelector('button')
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false')
+    await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(container.querySelector('[data-markdown-body]')).not.toBeNull()
+    await act(async () => { root.unmount() })
+  })
+
   it('展开后路径栏与正文分开，双击正文收回', async () => {
     const face = readers({ readPage: vi.fn(async () => page('# Hello', 1, true)) })
     const container = document.createElement('div')

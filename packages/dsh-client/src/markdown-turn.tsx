@@ -5,6 +5,7 @@
  * 打开右侧对比。Markdown 按文档排版，其它文本按原文显示。默认收起，点击才展开并读取。
  * 展开后路径栏与正文隔开。双击正文收回。路径栏右侧可打开所在文件夹。
  * 点开或收起时，路径栏留在点击时的视口位置。文件多于四篇时先只列出四篇。
+ * 路径文字在按钮外面，可以选中复制。
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -178,6 +179,10 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
   const [revealError, setRevealError] = useState(false)
   const barRef = useRef<HTMLDivElement>(null)
   const labels = useMemo(() => labelsFor(t), [t])
+  const toggleOpen = (): void => {
+    holdFileTop(barRef.current)
+    setOpen(value => !value)
+  }
   useEffect(() => () => { releaseHeldFileTop(barRef.current) }, [])
   useEffect(() => {
     if (!open) return
@@ -204,18 +209,25 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
         className={css.toggle}
         aria-expanded={open}
         aria-label={t(open ? 'markdownTurn.collapseAria' : 'markdownTurn.expandAria', { name: path })}
-        onClick={() => {
-          holdFileTop(barRef.current)
-          setOpen(value => !value)
-        }}
+        onClick={toggleOpen}
       >
-        <span className={css.identity}>
-          <span className={css.icon} data-file-icon={classifyFileType(path)}>
-            <FileTypeIcon path={path} size={16} />
-          </span>
-          <span className={css.name} title={path}>{path}</span>
+        <span className={css.icon} data-file-icon={classifyFileType(path)}>
+          <FileTypeIcon path={path} size={16} />
         </span>
-        <span className={css.action}>{t(open ? 'markdownTurn.collapse' : 'markdownTurn.expand')}</span>
+      </button>
+      <span
+        className={css.name}
+        data-path={path}
+        title={path}
+        onCopy={(event) => {
+          const board = event.clipboardData
+          if (board === null) return
+          board.setData('text/plain', path)
+          event.preventDefault()
+        }}
+      >{path}</span>
+      <button type="button" className={css.action} onClick={toggleOpen}>
+        {t(open ? 'markdownTurn.collapse' : 'markdownTurn.expand')}
       </button>
       <button
         type="button"
