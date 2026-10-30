@@ -398,7 +398,11 @@ describe('MarkdownTurnTail', () => {
     expect(open?.textContent?.trim()).toBe('')
     expect(open?.querySelector('svg')).not.toBeNull()
     expect(open?.getAttribute('aria-label')).toBe('打开文件夹')
-    expect(container.querySelector('[data-open-path-more]')).toBeNull()
+    await act(async () => {
+      container.querySelector('[data-open-path-more]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect([...document.querySelectorAll('[role="menuitem"]')].map(node => node.textContent?.trim()))
+      .toEqual(['复制', '打开文件夹（默认）'])
     await act(async () => { open?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
     expect(openFile).toHaveBeenCalledWith('sess', 'docs/a.md', { kind: 'reveal' })
@@ -435,10 +439,10 @@ describe('MarkdownTurnTail', () => {
       split.querySelector('[data-open-path-more]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
     const labels = [...document.querySelectorAll('[role="menuitem"]')].map(node => node.textContent?.trim())
-    expect(labels).toEqual(['TextEdit', 'VS Code（默认）', '打开文件夹'])
+    expect(labels).toEqual(['复制', 'TextEdit', 'VS Code（默认）', '打开文件夹'])
     expect(labels).not.toContain('显示文件位置')
     const rows = [...document.querySelectorAll('[role="menuitem"]')]
-    await act(async () => { rows[0]?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { rows[1]?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     expect(openFile).toHaveBeenCalledWith('sess', 'docs/a.md', { kind: 'application', id: 'notes' })
     await act(async () => {
       split.querySelector('[data-open-path-more]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
@@ -447,6 +451,41 @@ describe('MarkdownTurnTail', () => {
     await act(async () => { again[again.length - 1]?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     expect(openFile).toHaveBeenCalledWith('sess', 'docs/a.md', { kind: 'reveal' })
     await act(async () => { root.unmount() })
+  })
+
+  it('打开方式下拉的第一项复制路径', async () => {
+    const writeText = vi.fn(async () => {})
+    const previous = navigator.clipboard
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    try {
+      const face = readers({
+        fileApplications: vi.fn(async () => [
+          { id: 'code', name: 'VS Code', icon: null, default: true },
+        ]),
+      })
+      const container = document.createElement('div')
+      const root: Root = createRoot(container)
+      await act(async () => {
+        root.render(createElement(MarkdownTurnTail, {
+          sessionId: 'sess',
+          turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+          readers: face,
+        }))
+      })
+      const split = await openReady(container)
+      await act(async () => {
+        split.querySelector('[data-open-path-more]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+      const copy = [...document.querySelectorAll('[role="menuitem"]')][0]
+      expect(copy?.textContent?.trim()).toBe('复制')
+      await act(async () => { copy?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      expect(writeText).toHaveBeenCalledWith('docs/a.md')
+      expect(face.openFile).not.toHaveBeenCalled()
+      expect(document.body.textContent).toContain('已复制')
+      await act(async () => { root.unmount() })
+    } finally {
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: previous })
+    }
   })
 
   it('问不到应用时仍能打开文件夹', async () => {
@@ -465,7 +504,7 @@ describe('MarkdownTurnTail', () => {
       split.querySelector('[data-open-path-more]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
     const labels = [...document.querySelectorAll('[role="menuitem"]')].map(node => node.textContent?.trim())
-    expect(labels).toEqual(['无法获取应用列表', '打开文件夹（默认）'])
+    expect(labels).toEqual(['复制', '无法获取应用列表', '打开文件夹（默认）'])
     await act(async () => { root.unmount() })
   })
 

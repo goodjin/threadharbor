@@ -2,7 +2,7 @@
  * 文件路径栏上的打开方式。
  *
  * 和右侧文档预览标题栏的分体按钮同一套动作：主按钮打开默认应用，
- * 下拉列出已注册的应用，最后一项在文件管理器里打开文件夹。
+ * 下拉最上面复制这条路径，接着是已注册的应用，最后一项在文件管理器里打开文件夹。
  * 右侧预览仍写「显示文件位置」；这里的最后一项写「打开文件夹」。
  * 主机报没有桌面时不渲染，和右侧预览一样。
  */
@@ -10,7 +10,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
+  IconCheckOutlineRegular,
   IconChevronDownOutlineRegular,
+  IconCopyOutlineRegular,
   IconFolderOpenOutlineRegular,
   IconRightUpOutlineRegular,
   IconWarningOutlineRegular,
@@ -46,7 +48,7 @@ export function FileOpenSplit({ sessionId, path, readers, t }: {
   const [failed, setFailed] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const [pending, setPending] = useState(false)
-  const [toast, setToast] = useState<{ seq: number; text: string } | null>(null)
+  const [toast, setToast] = useState<{ seq: number; text: string; ok: boolean } | null>(null)
   const inFlight = useRef(false)
   const toastSeq = useRef(0)
   const alive = useRef(true)
@@ -95,9 +97,23 @@ export function FileOpenSplit({ sessionId, path, readers, t }: {
     }
   }, [readers, queryApps])
 
-  const show = (text: string): void => {
+  const show = (text: string, ok = false): void => {
     toastSeq.current += 1
-    setToast({ seq: toastSeq.current, text })
+    setToast({ seq: toastSeq.current, text, ok })
+  }
+
+  const copyPath = (): void => {
+    setMenuOpen(false)
+    const write = navigator.clipboard?.writeText.bind(navigator.clipboard)
+    if (write === undefined) {
+      show(t('markdownTurn.copyFailed'))
+      return
+    }
+    void write(path).then(() => {
+      if (alive.current) show(t('markdownTurn.copied'), true)
+    }, () => {
+      if (alive.current) show(t('markdownTurn.copyFailed'))
+    })
   }
 
   const act = (action: MarkdownFileOpen): void => {
@@ -118,7 +134,6 @@ export function FileOpenSplit({ sessionId, path, readers, t }: {
   const marked = applications.find(app => app.default)
   const preferred = marked ?? applications[0]
   const disabled = pending || loading
-  const hasMenu = loading || failed || applications.length > 0
   const revealDefault = preferred === undefined && !loading
   const primaryLabel = preferred === undefined
     ? t('markdownTurn.openFolder')
@@ -135,13 +150,14 @@ export function FileOpenSplit({ sessionId, path, readers, t }: {
   return <>
     <Menu
       className={css.openMenu}
-      open={menuOpen && !disabled && hasMenu}
+      open={menuOpen && !disabled}
       autoFocus
       portal
       dense
       align="end"
       onClose={() => { setMenuOpen(false) }}
       items={[
+        { id: 'copy', icon: <IconCopyOutlineRegular />, label: t('markdownTurn.copy') },
         ...applications.map(app => ({
           id: `app:${app.id}`,
           icon: <ApplicationIcon key={app.icon} source={app.icon} />,
@@ -157,7 +173,8 @@ export function FileOpenSplit({ sessionId, path, readers, t }: {
         label: folderLabel,
       }]}
       onSelect={(id) => {
-        if (id === 'reveal') act({ kind: 'reveal' })
+        if (id === 'copy') copyPath()
+        else if (id === 'reveal') act({ kind: 'reveal' })
         else if (id.startsWith('app:')) act({ kind: 'application', id: id.slice(4) })
       }}
       anchor={(
@@ -181,7 +198,7 @@ export function FileOpenSplit({ sessionId, path, readers, t }: {
               {icon}
             </button>
           </Tooltip>
-          {hasMenu && <button
+          <button
             type="button"
             className={css.openChevron}
             disabled={disabled}
@@ -195,14 +212,14 @@ export function FileOpenSplit({ sessionId, path, readers, t }: {
             }}
           >
             <IconChevronDownOutlineRegular size={10} />
-          </button>}
+          </button>
         </div>
       )}
     />
     {toast !== null && <Toast
       key={toast.seq}
       text={toast.text}
-      icon={<IconWarningOutlineRegular />}
+      icon={toast.ok ? <IconCheckOutlineRegular /> : <IconWarningOutlineRegular />}
       onDone={() => { setToast(null) }}
     />}
   </>
