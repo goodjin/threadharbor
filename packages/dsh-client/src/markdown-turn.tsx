@@ -13,7 +13,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, MarkdownText, classifyFileType } from '@deepseek-ai/dsh-client-ui-primitives'
+import { CodeBlock, FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, MarkdownText, classifyFileType, languageForPath } from '@deepseek-ai/dsh-client-ui-primitives'
 import { FileOpenSplit } from './markdown-turn-open.tsx'
 import type { MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
 import { fallbackT, NAMESPACE } from './locales.ts'
@@ -273,7 +273,18 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
         {body.truncated && <p className={css.status}>{t('markdownTurn.truncated')}</p>}
         {isMarkdownPath(path)
           ? <MarkdownText text={body.text} streaming={false} labels={labels} />
-          : <pre className={css.plain} data-markdown-plain={path}>{body.text}</pre>}
+          : <CodeBlock
+              code={body.text}
+              lang={languageForPath(path)}
+              streaming={false}
+              copyLabel={t('markdownTurn.copy')}
+              copiedLabel={t('markdownTurn.copied')}
+              toolbarLabels={{
+                codeLabel: t('markdownTurn.code'),
+                wrapLabel: t('markdownTurn.wrap'),
+                unwrapLabel: t('markdownTurn.unwrap'),
+              }}
+            />}
       </>}
     </div>}
     {open && <div className={css.foot}>
