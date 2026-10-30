@@ -87,6 +87,30 @@ describe('ACP prose is sealed when the tool starts', () => {
     expect(state.steps.get(1)!.segments[0]!.blocks).toEqual([{ kind: 'reasoning', text: 'before' }])
     expect(pendingBlocks(state.steps.get(1)!)).toEqual([])
   })
+  it('keeps the final answer out of the turn-end plan card segment', () => {
+    // The projection appends its plan update last as a settled `todo_write`
+    // call. It owns no prose: sealing there would pull the answer into the
+    // process segment, where a folded turn hides it.
+    const plan = event('tool/call', 25, { callId: 'acp-plan', name: 'todo_write' })
+    const message = event('assistant/message', 30, {
+      message: {
+        source: { provider: 'acp:acp-codex' },
+        content: [{ type: 'reasoning', text: 'beforeprogress' }, { type: 'text', text: 'answer' }],
+      },
+      stream: [run('reasoning', 0, ['before'], 5), run('reasoning', 1, ['progress'], 20), run('text', 2, ['answer'], 22)],
+    })
+    const state = fold([announce, chunk(5, 'before'), call(10), chunk(20, 'progress'), plan, message])
+    const step = state.steps.get(1)!
+    expect(step.usable).toBe(true)
+    expect(step.segments.map(segment => segment.callId)).toEqual(['c1'])
+    expect(pendingBlocks(step)).toEqual([
+      { kind: 'reasoning', text: 'progress' },
+      { kind: 'text', text: 'answer' },
+    ])
+    const projected = new AcpProcessNodes().replace([assistant(state)], timeline(state))
+    expect(projected.map(node => node.anchorSeq)).toEqual([9.9, 10.1])
+    expect(projected.at(-1)!.data).toMatchObject({ blocks: pendingBlocks(step) })
+  })
   it('leaves incomplete historical streams and native provider output intact', () => {
     const missing = fold([announce, call(10), final([])])
     expect(missing.steps.get(1)!.usable).toBe(false)
@@ -160,6 +184,26 @@ describe('ACP prose reconstructs from content order when the stream is absent', 
       [{ kind: 'reasoning', text: 'now apply it' }, { kind: 'text', text: 'done' }],
     ])
     expect(pendingBlocks(step)).toEqual([{ kind: 'text', text: '已完成并提交。' }])
+  })
+  it('does not let a trailing plan card separate prose in a stream-less log', () => {
+    const blocks = [
+      { type: 'reasoning', text: 'plan the edit' },
+      { type: 'text', text: 'working' },
+      { type: 'tool-call', id: 'c1', name: 'read' },
+      { type: 'reasoning', text: 'now apply it' },
+      { type: 'text', text: 'done' },
+      { type: 'tool-call', id: 'acp-plan', name: 'todo_write' },
+      { type: 'text', text: '已完成并提交。' },
+    ]
+    const step = fold([call(10, 'c1'), call(20, 'acp-plan', 'todo_write'), history(blocks)]).steps.get(1)!
+    expect(step.segments.map(s => s.blocks)).toEqual([
+      [{ kind: 'reasoning', text: 'plan the edit' }, { kind: 'text', text: 'working' }],
+    ])
+    expect(pendingBlocks(step)).toEqual([
+      { kind: 'reasoning', text: 'now apply it' },
+      { kind: 'text', text: 'done' },
+      { kind: 'text', text: '已完成并提交。' },
+    ])
   })
   it('reconstructs the raw alternation even when no tool-call separates blocks', () => {
     // qoder's final message carries the whole turn's prose as one raw sequence:
