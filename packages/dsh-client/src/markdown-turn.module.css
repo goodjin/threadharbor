@@ -24,41 +24,48 @@
   border-radius: 7px 7px 0 0;
 }
 
-.toggle {
-  display: flex;
-  align-items: center;
-  flex: none;
-  margin: 0;
-  padding: 8px 0 8px 12px;
-  border: none;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  line-height: 0;
-  cursor: pointer;
-}
-
-.reveal {
-  flex: none;
-  margin: 6px 8px 6px 0;
-  padding: 4px 8px;
-  border: 1px solid rgb(0 0 0 / 18%);
-  border-radius: 6px;
-  background: rgb(255 255 255 / 55%);
-  color: inherit;
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.reveal:hover {
-  background: rgb(255 255 255 / 80%);
-}
-
 .icon {
   display: flex;
   flex: none;
+  margin-left: 12px;
   line-height: 0;
+}
+
+.iconButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  margin: 4px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: rgb(0 0 0 / 62%);
+  cursor: pointer;
+}
+
+.iconButton:hover {
+  background: rgb(0 0 0 / 6%);
+}
+
+.iconButton[data-reveal-error] {
+  color: #b42318;
+}
+
+.foot {
+  display: flex;
+  justify-content: flex-end;
+  background: rgb(0 0 0 / 6%);
+  border-top: 1px solid rgb(0 0 0 / 14%);
+  border-radius: 0 0 7px 7px;
+}
+
+.edge {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .name {
@@ -76,18 +83,6 @@
   -webkit-user-select: all;
   user-select: text;
   user-select: all;
-}
-
-.action {
-  flex: none;
-  margin: 0;
-  padding: 8px 12px;
-  border: none;
-  background: transparent;
-  color: rgb(0 0 0 / 55%);
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
 }
 
 .body {
@@ -119,34 +114,6 @@
   font-size: 12.5px;
 }
 
-.more {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  width: 100%;
-  margin: 0;
-  padding: 8px 12px;
-  border: 1px solid rgb(0 0 0 / 12%);
-  border-radius: 8px;
-  background: transparent;
-  color: rgb(0 0 0 / 55%);
-  font: inherit;
-  font-size: 12px;
-  line-height: 18px;
-  text-align: start;
-  cursor: pointer;
-}
-
-.more svg {
-  flex: none;
-  width: 14px;
-  height: 14px;
-}
-
-.more:hover {
-  background: rgb(0 0 0 / 4%);
-}
-
 @media (prefers-color-scheme: dark) {
   .document {
     border-color: rgb(255 255 255 / 16%);
@@ -161,26 +128,24 @@
     border-bottom-color: rgb(255 255 255 / 16%);
   }
 
-  .reveal {
-    border-color: rgb(255 255 255 / 24%);
+  .iconButton {
+    color: rgb(255 255 255 / 70%);
+  }
+
+  .iconButton:hover {
     background: rgb(255 255 255 / 8%);
   }
 
-  .reveal:hover {
-    background: rgb(255 255 255 / 14%);
+  .iconButton[data-reveal-error] {
+    color: #ffb4ab;
   }
 
-  .action,
-  .status,
-  .more {
+  .foot {
+    background: rgb(255 255 255 / 8%);
+    border-top-color: rgb(255 255 255 / 16%);
+  }
+
+  .status {
     color: rgb(255 255 255 / 55%);
-  }
-
-  .more {
-    border-color: rgb(255 255 255 / 16%);
-  }
-
-  .more:hover {
-    background: rgb(255 255 255 / 6%);
   }
 }

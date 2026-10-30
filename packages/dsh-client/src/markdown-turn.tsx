@@ -3,14 +3,15 @@
  *
  * 挂在 `conversation.chat.turnTail` 上，排在官方改动卡片之后。官方卡片照旧
  * 打开右侧对比。Markdown 按文档排版，其它文本按原文显示。默认收起，点击才展开并读取。
- * 展开后路径栏与正文隔开。双击正文收回。路径栏右侧可打开所在文件夹。
+ * 展开后路径栏与正文隔开。双击正文收回。路径栏右侧用图标打开所在文件夹。
  * 点开或收起时，路径栏留在点击时的视口位置。文件多于四篇时先只列出四篇。
+ * 文件列表和每个文件框的右上、右下都用图标展开或收起。
  * 路径文字在按钮外面，可以选中复制。
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, MarkdownText, classifyFileType } from '@deepseek-ai/dsh-client-ui-primitives'
+import { FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconFolderOpenOutlineRegular, MarkdownText, classifyFileType } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
 import { fallbackT, NAMESPACE } from './locales.ts'
 import type { RuntimeT } from './locales.ts'
@@ -152,6 +153,26 @@ type DocumentBody =
   | { readonly kind: 'error' }
   | { readonly kind: 'ready'; readonly text: string; readonly truncated: boolean }
 
+function ExpandButton({ open, label, onClick, kind }: {
+  open: boolean
+  label: string
+  onClick: () => void
+  kind?: 'more' | 'foot'
+}): ReactNode {
+  return <button
+    type="button"
+    className={css.iconButton}
+    aria-expanded={open}
+    aria-label={label}
+    title={label}
+    onClick={onClick}
+    {...(kind === 'more' ? { 'data-markdown-more': '' } : {})}
+    {...(kind === 'foot' ? { 'data-path-foot': '' } : {})}
+  >
+    {open ? <IconChevronUpOutlineRegular size={16} /> : <IconChevronDownOutlineRegular size={16} />}
+  </button>
+}
+
 function labelsFor(t: RuntimeT): MarkdownLabels {
   return {
     code: {
@@ -202,19 +223,13 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
       controller.abort()
     }
   }, [open, sessionId, path, readers, attempt])
+  const toggleLabel = t(open ? 'markdownTurn.collapseAria' : 'markdownTurn.expandAria', { name: path })
+  const revealLabel = t(revealError ? 'markdownTurn.revealError' : 'markdownTurn.reveal')
   return <section className={css.document} data-markdown-path={path}>
     <div ref={barRef} className={css.bar} data-path-bar="" {...(open ? { 'data-expanded': '' } : {})}>
-      <button
-        type="button"
-        className={css.toggle}
-        aria-expanded={open}
-        aria-label={t(open ? 'markdownTurn.collapseAria' : 'markdownTurn.expandAria', { name: path })}
-        onClick={toggleOpen}
-      >
-        <span className={css.icon} data-file-icon={classifyFileType(path)}>
-          <FileTypeIcon path={path} size={16} />
-        </span>
-      </button>
+      <span className={css.icon} data-file-icon={classifyFileType(path)}>
+        <FileTypeIcon path={path} size={16} />
+      </span>
       <span
         className={css.name}
         data-path={path}
@@ -226,21 +241,20 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
           event.preventDefault()
         }}
       >{path}</span>
-      <button type="button" className={css.action} onClick={toggleOpen}>
-        {t(open ? 'markdownTurn.collapse' : 'markdownTurn.expand')}
-      </button>
+      <ExpandButton open={open} label={toggleLabel} onClick={toggleOpen} />
       <button
         type="button"
-        className={css.reveal}
-        aria-label={t('markdownTurn.reveal')}
+        className={css.iconButton}
+        data-reveal=""
+        aria-label={revealLabel}
+        title={revealLabel}
         {...(revealError ? { 'data-reveal-error': '' } : {})}
-        title={revealError ? t('markdownTurn.revealError') : t('markdownTurn.reveal')}
         onClick={() => {
           setRevealError(false)
           void readers.revealFile(sessionId, path).catch(() => { setRevealError(true) })
         }}
       >
-        {revealError ? t('markdownTurn.revealError') : t('markdownTurn.reveal')}
+        <IconFolderOpenOutlineRegular size={16} />
       </button>
     </div>
     {open && <div
@@ -270,6 +284,9 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
           ? <MarkdownText text={body.text} streaming={false} labels={labels} />
           : <pre className={css.plain} data-markdown-plain={path}>{body.text}</pre>}
       </>}
+    </div>}
+    {open && <div className={css.foot}>
+      <ExpandButton open={open} label={toggleLabel} onClick={toggleOpen} kind="foot" />
     </div>}
   </section>
 }
@@ -315,22 +332,18 @@ export function MarkdownTurnTail({ sessionId, turn, t, readers }: MarkdownTurnPr
   if (paths.length === 0) return null
   const folded = paths.length > FOLDED_FILE_COUNT && !listOpen
   const shown = folded ? paths.slice(0, FOLDED_FILE_COUNT) : paths
+  const listLabel = translate(listOpen ? 'markdownTurn.filesCollapseAria' : 'markdownTurn.filesAllAria', { count: String(paths.length) })
+  const toggleList = (): void => {
+    holdFileTop(rootRef.current, rootRef.current)
+    setListOpen(value => !value)
+  }
+  const listToggle = (): ReactNode => paths.length > FOLDED_FILE_COUNT
+    ? <div className={css.edge}><ExpandButton open={listOpen} label={listLabel} onClick={toggleList} kind="more" /></div>
+    : null
   return <div ref={rootRef} className={css.root} data-markdown-turn="" {...(folded ? { 'data-markdown-folded': '' } : {})}>
+    {listToggle()}
     {shown.map(path => <MarkdownDocument key={path} sessionId={id} path={path} readers={readers} t={translate} />)}
-    {paths.length > FOLDED_FILE_COUNT && <button
-      type="button"
-      className={css.more}
-      data-markdown-more=""
-      aria-expanded={listOpen}
-      aria-label={translate(listOpen ? 'markdownTurn.filesCollapseAria' : 'markdownTurn.filesAllAria', { count: String(paths.length) })}
-      onClick={() => {
-        holdFileTop(rootRef.current, rootRef.current)
-        setListOpen(value => !value)
-      }}
-    >
-      <span>{translate(listOpen ? 'markdownTurn.collapse' : 'markdownTurn.filesAll', { count: String(paths.length) })}</span>
-      {listOpen ? <IconChevronUpOutlineRegular /> : <IconChevronDownOutlineRegular />}
-    </button>}
+    {listToggle()}
   </div>
 }
 
