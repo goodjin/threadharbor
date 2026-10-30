@@ -111,6 +111,13 @@ export const claudeDialect: AcpDialect = {
     },
   },
 
+  // Claude Code 的 Bash schema 有可选 timeout；本机无工具样本，读不到就
+  // 当没有预算（claude 自身还会杀超时命令并发完成帧，那是另一层保护）。
+  toolTimeoutMs(value) {
+    const timeout = record(value)['timeout']
+    return typeof timeout === 'number' && Number.isFinite(timeout) && timeout > 0 ? timeout : undefined
+  },
+
   foldTool(carried, update) {
     const toolCallId = typeof update['toolCallId'] === 'string' ? update['toolCallId'] : randomUUID()
     const meta = record(record(update['_meta'])['claudeCode'])

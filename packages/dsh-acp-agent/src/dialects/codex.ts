@@ -69,6 +69,13 @@ export const codexDialect: AcpDialect = {
     },
   },
 
+  // 模型偶尔在 rawInput 里声明 timeoutMs（约 6% 的 bash，如 worktree 构建
+  // timeoutMs: 600000）——2026-10-30 全机会话扫描。读不到就当没有预算。
+  toolTimeoutMs(value) {
+    const timeout = record(value)['timeoutMs']
+    return typeof timeout === 'number' && Number.isFinite(timeout) && timeout > 0 ? timeout : undefined
+  },
+
   foldTool(carried, update) {
     const toolCallId = typeof update['toolCallId'] === 'string' ? update['toolCallId'] : randomUUID()
     // `kind` is the tool category ("execute"), which is the only identity codex

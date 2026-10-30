@@ -116,6 +116,13 @@ export const grokDialect: AcpDialect = {
     },
   },
 
+  // 静默命令（ssh 探测类）偶尔带 timeout（如 30000）；有输出流的时候
+  // terminal output 帧本身就是活动，这个钩子只补无输出的空窗。
+  toolTimeoutMs(value) {
+    const timeout = record(value)['timeout']
+    return typeof timeout === 'number' && Number.isFinite(timeout) && timeout > 0 ? timeout : undefined
+  },
+
   foldTool(carried, update) {
     const toolCallId = typeof update['toolCallId'] === 'string' ? update['toolCallId'] : randomUUID()
     // Latch the name: later updates replace `title` with a human line.
