@@ -31,6 +31,7 @@ const {
   MARKDOWN_TAIL_ID,
   MARKDOWN_TAIL_ORDER,
   MarkdownTurnTail,
+  composeWithComments,
   registerMarkdownTurn,
 } = await import('../src/markdown-turn.tsx')
 const { startMermaidDiagrams } = await import('../src/mermaid.ts')
@@ -861,6 +862,93 @@ describe('MarkdownDocument 行内工具条', () => {
     const sendBtn = body.querySelector('[data-line-action="send"]') as HTMLElement | null
     await act(async () => { sendBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     expect(send).toHaveBeenCalledWith('sess', '段落乙')
+    await act(async () => { root.unmount() })
+  })
+})
+
+describe('composeWithComments', () => {
+  it('把评论按文档顺序挂到所评段后，引用块标记', () => {
+    const source = '段落甲\n\n段落乙'
+    const out = composeWithComments(source, [
+      { blockText: '段落甲', comment: '甲的意见' },
+      { blockText: '段落乙', comment: '乙的意见' },
+    ])
+    expect(out).toBe(
+      '段落甲\n\n> 这是用户对此段话的评论：\n甲的意见\n\n段落乙\n\n> 这是用户对此段话的评论：\n乙的意见',
+    )
+  })
+
+  it('删一段评论不影响其它段', () => {
+    const source = '段落甲\n\n段落乙'
+    const withoutFirst = composeWithComments(source, [
+      { blockText: '段落乙', comment: '乙的意见' },
+    ])
+    expect(withoutFirst).toBe('段落甲\n\n段落乙\n\n> 这是用户对此段话的评论：\n乙的意见')
+    expect(withoutFirst).not.toContain('甲的意见')
+  })
+})
+
+describe('MarkdownDocument 选中文本操作条', () => {
+  it('选中文本出现操作条，点直接发送以选区原文调用 sendToSession；点评论弹出输入框', async () => {
+    const send = vi.fn(async () => {})
+    const face = readers({ readPage: vi.fn(async () => page('# 甲\n\n段落乙', 1, true)), sendToSession: send })
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+        readers: face,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+    const toggle = container.querySelector('button[aria-expanded]')
+    await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await Promise.resolve() })
+
+    const para = container.querySelector('[data-markdown-body] p') as HTMLElement
+    expect(para).not.toBeNull()
+    const range = document.createRange()
+    range.selectNodeContents(para.firstChild as Node)
+    const sel = window.getSelection()
+    sel?.removeAllRanges()
+    sel?.addRange(range)
+    await act(async () => { document.dispatchEvent(new Event('selectionchange')) })
+    const bar = container.querySelector('[data-selection-bar]')
+    expect(bar).not.toBeNull()
+    const directBtn = bar?.querySelector('[data-sel-action="direct"]') as HTMLElement | null
+    expect(directBtn).not.toBeNull()
+    await act(async () => { directBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(send).toHaveBeenCalledWith('sess', '段落乙')
+    await act(async () => { root.unmount() })
+  })
+
+  it('塌缩选区不出现操作条', async () => {
+    const face = readers({ readPage: vi.fn(async () => page('# 甲\n\n段落乙', 1, true)) })
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+        readers: face,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+    const toggle = container.querySelector('button[aria-expanded]')
+    await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await Promise.resolve() })
+    const para = container.querySelector('[data-markdown-body] p') as HTMLElement
+    const range = document.createRange()
+    range.selectNodeContents(para.firstChild as Node)
+    const sel = window.getSelection()
+    sel?.removeAllRanges()
+    sel?.addRange(range)
+    range.collapse(true)
+    await act(async () => { document.dispatchEvent(new Event('selectionchange')) })
+    expect(container.querySelector('[data-selection-bar]')).toBeNull()
     await act(async () => { root.unmount() })
   })
 })
