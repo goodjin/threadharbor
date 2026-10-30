@@ -74,6 +74,34 @@ function seal(step: StepProse, call: Boundary): StepProse {
 }
 
 /** Expand only actual text deltas; block-end repeats the completed body and is never appended. */
+function reconstructFromContent(step: StepProse, content: readonly unknown[], calls: readonly Boundary[], seq: number): StepProse {
+  // Walk the persisted blocks in order. A tool-call seals the prose accumulated
+  // before it; a trailing run of pure text/reasoning is left pending so the
+  // answer card can claim it. The usable check in `replay` still guards against
+  // any text the content holds that this walk fails to place.
+  let next: StepProse = { ...step, pending: [], segments: [], anchorSeq: undefined, usable: true }
+  const open: Pending[] = []
+  const flush = (): void => {
+    if (open.length === 0) return
+    const call = calls.find(candidate => !next.segments.some(segment => segment.callId === candidate.callId))
+    const segment = completedSegment(call ?? { callId: 'content', seq: seq + 0.1, time: next.time || seq }, open, next.time || seq)
+    next = { ...next, segments: [...next.segments, segment], anchorSeq: undefined }
+    open.length = 0
+  }
+  for (const value of content) {
+    const block = record(value)
+    if (block.type === 'text' || block.type === 'reasoning') {
+      const text = typeof block.text === 'string' ? block.text : ''
+      if (text !== '') open.push({ index: open.length, kind: block.type, text })
+    } else if (block.type === 'tool-call') {
+      flush()
+    }
+  }
+  next = { ...next, pending: [...open], anchorSeq: open.length === 0 ? undefined : seq + 0.1 }
+  return next
+}
+
+/** Expand only actual text deltas; block-end repeats the completed body and is never appended. */
 function replay(step: StepProse, stream: readonly unknown[], content: readonly unknown[], seq: number): StepProse {
   let next: StepProse = { ...step, pending: [], segments: [], anchorSeq: undefined, usable: true }
   let cursor = 0
@@ -104,6 +132,23 @@ function replay(step: StepProse, stream: readonly unknown[], content: readonly u
   }
   for (const token of timed.sort((a, b) => a.time - b.time)) feed(token.chunk, token.time)
   while (cursor < calls.length) next = seal(next, calls[cursor++]!)
+  // Historical logs (qoder and friends) persist the final message as the raw
+  // block sequence — reasoning and text as separate, un-merged blocks — but no
+  // replayable chunk stream. Replay cannot order prose against tool boundaries
+  // there, so fall back to the content block order itself: each tool-call seals
+  // the prose before it into its own segment, and a trailing run of pure
+  // text/reasoning stays pending for the answer card to claim. This keeps the
+  // final answer out of the native reasoning fold on old sessions. The
+  // discriminator is the block shape: a truncated live stream merges each kind
+  // into a single block (one reasoning + one text, no separators); a real
+  // history keeps the raw alternation, so some kind recurs or a tool-call
+  // separates blocks. Either signal means the content is reconstructable; the
+  // merged shape keeps the usable:false fallback to the stock card.
+  const blocks = content.map(record)
+  const hasToolCall = blocks.some(block => block.type === 'tool-call')
+  const kindCount = (type: string): number => blocks.filter(block => block.type === type).length
+  const isRawSequence = hasToolCall || kindCount('reasoning') > 1 || kindCount('text') > 1
+  if (timed.length === 0 && stream.length === 0 && isRawSequence) next = reconstructFromContent(next, content, calls, seq)
   // Refuse partial/mismatched stream reconstruction; never hide unreconstructed text.
   const reconstructed = [...next.segments.flatMap(segment => segment.blocks), ...pendingBlocks(next)]
   for (const kind of ['text', 'reasoning'] as const) {

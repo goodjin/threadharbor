@@ -130,3 +130,59 @@ describe('ACP prose is sealed when the tool starts', () => {
     expect(received).toHaveLength(2)
   })
 })
+
+describe('ACP prose reconstructs from content order when the stream is absent', () => {
+  // Historical ACP logs (qoder and friends) persist the final message blocks but no
+  // replayable chunk stream, so `replay` cannot rebuild segments and the whole step
+  // falls back to native rendering — where the final answer gets folded into the
+  // reasoning. Reconstruct straight from the content block order instead: each
+  // tool-call seals the prose before it, and a trailing run of pure text/reasoning
+  // stays pending so the answer card can claim it.
+  const history = (blocks: unknown[]) => event('assistant/message', 30, {
+    message: { source: { provider: 'acp-qoder' }, content: blocks },
+    // No `stream` key: the historical shape that currently disables segmentation.
+  })
+  it('seals a segment at each tool-call and leaves trailing text pending', () => {
+    const blocks = [
+      { type: 'reasoning', text: 'plan the edit' },
+      { type: 'text', text: 'reading the file first' },
+      { type: 'tool-call', id: 'c1', name: 'read' },
+      { type: 'reasoning', text: 'now apply it' },
+      { type: 'text', text: 'done' },
+      { type: 'tool-call', id: 'c2', name: 'edit' },
+      { type: 'text', text: '已完成并提交。' },
+    ]
+    const state = fold([call(10, 'c1'), call(20, 'c2'), history(blocks)])
+    const step = state.steps.get(1)!
+    expect(step.usable).toBe(true)
+    expect(step.segments.map(s => s.blocks)).toEqual([
+      [{ kind: 'reasoning', text: 'plan the edit' }, { kind: 'text', text: 'reading the file first' }],
+      [{ kind: 'reasoning', text: 'now apply it' }, { kind: 'text', text: 'done' }],
+    ])
+    expect(pendingBlocks(step)).toEqual([{ kind: 'text', text: '已完成并提交。' }])
+  })
+  it('reconstructs the raw alternation even when no tool-call separates blocks', () => {
+    // qoder's final message carries the whole turn's prose as one raw sequence:
+    // reasoning and text interleaved, tool-calls live in earlier messages.
+    const blocks = [
+      { type: 'reasoning', text: 'first thought' },
+      { type: 'text', text: 'progress note' },
+      { type: 'reasoning', text: 'second thought' },
+      { type: 'text', text: 'the answer' },
+    ]
+    const step = fold([call(10, 'c1'), history(blocks)]).steps.get(1)!
+    expect(step.usable).toBe(true)
+    expect(pendingBlocks(step)).toEqual([
+      { kind: 'reasoning', text: 'first thought' },
+      { kind: 'text', text: 'progress note' },
+      { kind: 'reasoning', text: 'second thought' },
+      { kind: 'text', text: 'the answer' },
+    ])
+  })
+  it('still falls back when the stream is absent and the prose is merged', () => {
+    // A truncated live stream leaves one merged reasoning + one text, no raw
+    // alternation, no tool-call separator: keep the usable:false fallback.
+    const blocks = [{ type: 'reasoning', text: 'beforeafter' }, { type: 'text', text: 'progressanswer' }]
+    expect(fold([call(10), history(blocks)]).steps.get(1)!.usable).toBe(false)
+  })
+})
