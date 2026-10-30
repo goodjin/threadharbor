@@ -81,21 +81,21 @@ function setSource(block: HTMLElement, text: string): void {
 
 type FakeRuntime = {
   api: MermaidApi
-  calls: Array<{ id: string; text: string }>
+  calls: Array<{ id: string; text: string; extra: number }>
   inits: Array<Record<string, unknown>>
   state: { fail: number }
 }
 
 function fakeRuntime(): FakeRuntime {
-  const calls: Array<{ id: string; text: string }> = []
+  const calls: Array<{ id: string; text: string; extra: number }> = []
   const inits: Array<Record<string, unknown>> = []
   const state = { fail: 0 }
   const api: MermaidApi = {
     initialize(config) {
       inits.push(config)
     },
-    async render(id, text) {
-      calls.push({ id, text })
+    async render(id, text, ...rest) {
+      calls.push({ id, text, extra: rest.length })
       if (state.fail > 0) {
         state.fail -= 1
         throw new Error('layout failed')
@@ -232,6 +232,9 @@ describe('会话区 Mermaid 预览', () => {
     expect(runtime.calls).toHaveLength(1)
     expect(runtime.calls[0]?.text).toBe(source)
     expect(runtime.calls[0]?.id).toMatch(/^th-mermaid-\d+$/)
+    // mermaid 11 传第三个容器参数会在内部 getAttribute 上抛错（真机抓到的
+    // 形状）；SVG 只取返回值，绝不把游离节点交进去。
+    expect(runtime.calls[0]?.extra).toBe(0)
     expect(runtime.inits).toHaveLength(1)
     expect(runtime.inits[0]).toMatchObject({
       startOnLoad: false,
