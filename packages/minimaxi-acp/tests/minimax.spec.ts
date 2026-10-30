@@ -86,6 +86,27 @@ describe('streamMiniMax', () => {
     await expect(failure).rejects.not.toThrow(TOKEN)
   })
 
+  it('reports a network failure as a retryable transport failure that names the real cause', async () => {
+    const chunks = await collect(streamMiniMax({
+      credential,
+      model: 'MiniMax-M3.1-Flash',
+      messages: [{ role: 'user', content: 'hi' }],
+      fetchImpl: (async () => {
+        throw Object.assign(new TypeError('fetch failed'), {
+          cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:7897'), { code: 'ECONNREFUSED' }),
+        })
+      }) as typeof fetch,
+    }))
+    expect(chunks).toHaveLength(1)
+    expect(chunks[0]).toMatchObject({
+      type: 'finish',
+      reason: { kind: 'error', failure: { code: 'TRANSPORT' } },
+    })
+    const failure = (chunks[0] as { reason: { failure: { message: string } } }).reason.failure
+    expect(failure.message).toContain('ECONNREFUSED')
+    expect(failure.message).not.toContain(TOKEN)
+  })
+
   it('propagates a cancellation instead of reporting a failed turn', async () => {
     const controller = new AbortController()
     const stream = streamMiniMax({
