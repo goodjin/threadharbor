@@ -802,10 +802,13 @@ describe('AcpTurnRunner — 工具声明超时的预算读数', () => {
         if (method === 'session/new') return { sessionId: 's1' }
         if (method === 'session/prompt') {
           readings.push(runner.openToolDeadline())
+          // 取窗而非取单点：预算起点是首帧被看见的时刻（emit 内部），测试
+          // 无法拿到那个确切毫秒，只断言截止落在 [窗首+超时, 窗尾+超时]。
+          const windowStart = Date.now()
           emit(qoderBash('c1', { command: 'gradlew compile', timeout: 600_000 }))
-          const before = Date.now()
           readings.push(runner.openToolDeadline())
-          startedBudget = before + 600_000
+          const windowEnd = Date.now()
+          budgetWindow = [windowStart + 600_000, windowEnd + 600_000]
           emit(qoderBashDone('c1'))
           readings.push(runner.openToolDeadline())
           return { stopReason: 'end_turn' }
@@ -815,19 +818,19 @@ describe('AcpTurnRunner — 工具声明超时的预算读数', () => {
       notify: () => {},
       onFrame: handler => { emit = handler },
     }
-    let startedBudget = 0
+    let budgetWindow: [number, number] = [0, 0]
     const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: qoderDialect })
     const result = await runner.run(DECISION, TURN())
     expect(result.end).toEqual({ kind: 'completed' })
     expect(readings).toHaveLength(3)
     expect(readings[0]).toBeUndefined()
     expect(readings[1]).toBeDefined()
-    expect(readings[1]!).toBeGreaterThanOrEqual(startedBudget)
-    expect(readings[1]).toBeLessThanOrEqual(Date.now() + 600_000)
+    expect(readings[1]!).toBeGreaterThanOrEqual(budgetWindow[0])
+    expect(readings[1]!).toBeLessThanOrEqual(budgetWindow[1])
     expect(readings[2]).toBeUndefined()
   })
 
-  it('方言不认声明超时（codex）或参数没带 timeout 时没有预算', async () => {
+  it('字段名对不上或参数没带超时时没有预算（codex 认 timeoutMs，裸 timeout 不认）', async () => {
     for (const [dialect, args] of [
       [codexDialect, { command: 'x', timeout: 600_000 }],
       [qoderDialect, { command: 'x' }],

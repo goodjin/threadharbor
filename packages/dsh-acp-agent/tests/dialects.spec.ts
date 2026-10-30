@@ -432,3 +432,25 @@ describe('qoder dialect — toolTimeoutMs', () => {
     expect(qoderDialect.toolTimeoutMs!('garbage')).toBeUndefined()
   })
 })
+
+// 声明超时的字段名各 agent 不同：codex 是 timeoutMs（模型在约 6% 的 bash 上
+// 声明，如 worktree 构建 timeoutMs: 600000）；grok 是 timeout（静默 ssh 探测
+// 类命令偶尔带，如 timeout: 30000）；claude 的 Bash schema 有可选 timeout
+// （本机无工具样本，读不到就是无预算，零风险）。
+describe('toolTimeoutMs — 其余方言', () => {
+  it('codex 读 timeoutMs，不认裸 timeout', () => {
+    expect(codexDialect.toolTimeoutMs!({ command: 'x', timeoutMs: 600_000 })).toBe(600_000)
+    expect(codexDialect.toolTimeoutMs!({ command: 'x', timeout: 600_000 })).toBeUndefined()
+    expect(codexDialect.toolTimeoutMs!({ command: 'x' })).toBeUndefined()
+    expect(codexDialect.toolTimeoutMs!({ timeoutMs: '600000' })).toBeUndefined()
+  })
+  it('grok 读 timeout；非正数不算预算', () => {
+    expect(grokDialect.toolTimeoutMs!({ command: 'ssh …', timeout: 30_000 })).toBe(30_000)
+    expect(grokDialect.toolTimeoutMs!({ command: 'x', timeout: 0 })).toBeUndefined()
+    expect(grokDialect.toolTimeoutMs!({ command: 'x' })).toBeUndefined()
+  })
+  it('claude 读可选 timeout（schema 有此参数；模型不写就没有）', () => {
+    expect(claudeDialect.toolTimeoutMs!({ command: 'x', timeout: 120_000 })).toBe(120_000)
+    expect(claudeDialect.toolTimeoutMs!({ command: 'x' })).toBeUndefined()
+  })
+})
