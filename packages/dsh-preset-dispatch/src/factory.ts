@@ -309,6 +309,7 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
             stderrTail: transport.stderrTail(),
             // 外部 agent 自己的子代理/后台任务还开着几个：网关的总上限据此让路。
             liveDelegatedRuns: runner.liveDelegatedRuns(),
+            toolDeadline: () => runner.openToolDeadline(),
             // 最后上报的状态与日志层进度：超时消息的解释与「没帧也算活着」的依据。
             ...(lastStatus === undefined ? {} : { lastStatus }),
             ...(progressProbe === undefined ? {} : {
@@ -606,6 +607,7 @@ export function makeSessionFactory(config: PresetConfig, deps: FactoryDeps): Acp
                 lastDiagnosticAt: transport.lastDiagnosticAt(),
                 stderrTail: transport.stderrTail(),
                 liveDelegatedRuns: runner.liveDelegatedRuns(),
+            toolDeadline: () => runner.openToolDeadline(),
                 ...(lastStatus === undefined ? {} : { lastStatus }),
                 ...(progressProbe === undefined ? {} : {
                   progress: () => {

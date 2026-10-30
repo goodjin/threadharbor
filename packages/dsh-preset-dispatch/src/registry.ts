@@ -168,6 +168,15 @@ export type AcpSessionDiagnostics = {
    * 信号（目前只有 codex 有）。
    */
   readonly progress?: () => ProgressReading | undefined
+  /**
+   * 未收尾工具的声明超时预算截止（epoch ms）；没有这层信号时 undefined。
+   *
+   * 看门狗在预算内不按「静默」收场——工具执行期间 agent 不发帧、它自己的
+   * 日志也不写行，三个信号全黑与「挂死」无法区分（2026-10-30 会话
+   * 2c030c08：声明 600s 的 gradle 编译在 300s 被杀，exit 143）。缺席表示
+   * 该 agent 的工具不带声明超时（只有 qoder 的 Bash 带）。
+   */
+  readonly toolDeadline?: () => number | undefined
 }
 
 /**

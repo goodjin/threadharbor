@@ -778,6 +778,86 @@ describe('AcpTurnRunner', () => {
   })
 })
 
+describe('AcpTurnRunner — 工具声明超时的预算读数', () => {
+  /** qoder 的一帧工具调用：Bash 参数里带 timeout。 */
+  const qoderBash = (id: string, args: Record<string, unknown>) => ({
+    method: 'session/update',
+    params: { sessionId: 's1', update: { sessionUpdate: 'tool_call', toolCallId: id, title: 'cmd',
+      rawInput: args, _meta: { qoder: { toolName: 'Bash' } } } },
+  })
+  const qoderBashDone = (id: string) => ({
+    method: 'session/update',
+    params: { sessionId: 's1', update: { sessionUpdate: 'tool_call_update', toolCallId: id, status: 'completed',
+      rawOutput: { formatted_output: 'ok', exit_code: 0 } } },
+  })
+  const TURN = () => ({ sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
+
+  it('带声明超时的未收尾工具给出预算截止；收尾后清零', async () => {
+    // 断言全部落在 run() 之外：mock 里抛出的错会被 runner 的错误处理吞掉，
+    // 测试就假通过了——所以 mock 只记读数，回合收尾后再算账。
+    const readings: (number | undefined)[] = []
+    let emit: (frame: AcpFrame) => void = () => {}
+    const client: AcpClientPort = {
+      request: async method => {
+        if (method === 'session/new') return { sessionId: 's1' }
+        if (method === 'session/prompt') {
+          readings.push(runner.openToolDeadline())
+          emit(qoderBash('c1', { command: 'gradlew compile', timeout: 600_000 }))
+          const before = Date.now()
+          readings.push(runner.openToolDeadline())
+          startedBudget = before + 600_000
+          emit(qoderBashDone('c1'))
+          readings.push(runner.openToolDeadline())
+          return { stopReason: 'end_turn' }
+        }
+        return {}
+      },
+      notify: () => {},
+      onFrame: handler => { emit = handler },
+    }
+    let startedBudget = 0
+    const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect: qoderDialect })
+    const result = await runner.run(DECISION, TURN())
+    expect(result.end).toEqual({ kind: 'completed' })
+    expect(readings).toHaveLength(3)
+    expect(readings[0]).toBeUndefined()
+    expect(readings[1]).toBeDefined()
+    expect(readings[1]!).toBeGreaterThanOrEqual(startedBudget)
+    expect(readings[1]).toBeLessThanOrEqual(Date.now() + 600_000)
+    expect(readings[2]).toBeUndefined()
+  })
+
+  it('方言不认声明超时（codex）或参数没带 timeout 时没有预算', async () => {
+    for (const [dialect, args] of [
+      [codexDialect, { command: 'x', timeout: 600_000 }],
+      [qoderDialect, { command: 'x' }],
+    ] as const) {
+      const readings: (number | undefined)[] = []
+      let emit: (frame: AcpFrame) => void = () => {}
+      const client: AcpClientPort = {
+        request: async method => {
+          if (method === 'session/new') return { sessionId: 's1' }
+          if (method === 'session/prompt') {
+            const update = dialect === qoderDialect
+              ? { sessionUpdate: 'tool_call', toolCallId: 'c1', title: 'cmd', rawInput: args, _meta: { qoder: { toolName: 'Bash' } } }
+              : { sessionUpdate: 'tool_call', toolCallId: 'c1', kind: 'execute', title: 'x', rawInput: args, status: 'in_progress' }
+            emit({ method: 'session/update', params: { sessionId: 's1', update } })
+            readings.push(runner.openToolDeadline())
+            return { stopReason: 'end_turn' }
+          }
+          return {}
+        },
+        notify: () => {},
+        onFrame: handler => { emit = handler },
+      }
+      const runner = new AcpTurnRunner(client, { cwd: '/tmp', dialect })
+      const result = await runner.run(DECISION, TURN())
+      expect(result.end).toEqual({ kind: 'completed' })
+      expect(readings).toEqual([undefined])
+    }
+  })
+})
+
 describe('AcpTurnRunner handshake', () => {
   it.each(['initialize', 'authenticate', 'session/new', 'session/set_mode'])(
     'names the stalled handshake operation: %s', async stage => {

@@ -112,6 +112,14 @@ export const qoderDialect: AcpDialect = {
     },
   },
 
+  // Bash 参数自带 timeout（ms）——真机抓帧 2026-10-30 会话 2c030c08 的
+  // `{"command":"./gradlew …","description":"…","timeout":600000}`。缺省、
+  // 非数字、非正数都不是预算，看门狗当没有这层信号处理。
+  toolTimeoutMs(value) {
+    const timeout = record(value)['timeout']
+    return typeof timeout === 'number' && Number.isFinite(timeout) && timeout > 0 ? timeout : undefined
+  },
+
   foldTool(carried, update) {
     const toolCallId = typeof update['toolCallId'] === 'string' ? update['toolCallId'] : randomUUID()
     // Latch the identity: the opening frame names the tool, later frames may
