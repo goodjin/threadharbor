@@ -13,7 +13,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { CodeBlock, FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, MarkdownText, classifyFileType, languageForPath } from '@deepseek-ai/dsh-client-ui-primitives'
+import { CodeBlock, FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconCopyOutlineRegular, IconEditOutlineRegular, IconSendOutlineRegular, MarkdownText, classifyFileType, languageForPath } from '@deepseek-ai/dsh-client-ui-primitives'
 import { FileOpenSplit } from './markdown-turn-open.tsx'
 import type { MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
 import { fallbackT, NAMESPACE } from './locales.ts'
@@ -45,6 +45,8 @@ interface MarkdownTurnProps {
   readonly turn?: { readonly data: { get(key: string): unknown } }
   readonly t?: RuntimeT
   readonly readers: MarkdownTurnReaders
+  /** 发送/复制失败的提示出口。缺省时不提示。 */
+  readonly onNotify?: (message: string) => void
 }
 
 type SummaryExtra = readonly string[]
@@ -194,16 +196,41 @@ function labelsFor(t: RuntimeT): MarkdownLabels {
   }
 }
 
-function MarkdownDocument({ sessionId, path, readers, t }: {
+/** 正文块级元素的选择器：编译包 class 运行时哈希，靠标签名定位。 */
+const MARKDOWN_BLOCK = ':is(h1,h2,h3,h4,h5,h6,p,li,blockquote,pre)'
+
+/** 取一段正文的纯文本：块级元素去掉首尾多余空白。 */
+function blockText(block: Element): string {
+  return (block.textContent ?? '').replace(/\s+/g, ' ').trim()
+}
+
+/** 找点击落在正文里的那个块级元素，没有返回 null。 */
+function markdownBlockFrom(target: EventTarget | null): Element | null {
+  if (!(target instanceof Element)) return null
+  return target.closest(MARKDOWN_BLOCK)
+}
+
+/** 复制一段文本到剪贴板；失败时回调 onFail。 */
+async function copyTextToClipboard(text: string, onFail: () => void): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    onFail()
+  }
+}
+
+function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
   sessionId: string
   path: string
   readers: MarkdownTurnReaders
   t: RuntimeT
+  onNotify?: (message: string) => void
 }): ReactNode {
   const [open, setOpen] = useState(false)
   const [attempt, setAttempt] = useState(0)
   const [body, setBody] = useState<DocumentBody>({ kind: 'loading' })
   const barRef = useRef<HTMLDivElement>(null)
+  const hoveredRef = useRef<Element | null>(null)
   const labels = useMemo(() => labelsFor(t), [t])
   const toggleOpen = (): void => {
     holdFileTop(barRef.current)
@@ -251,7 +278,30 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
     {open && <div
       className={css.body}
       data-markdown-body={path}
+      data-markdown-interactive=""
       style={BODY_STYLE}
+      onClick={(event) => {
+        const button = (event.target as HTMLElement).closest<HTMLElement>('[data-line-action]')
+        if (button === null) return
+        const block = hoveredRef.current
+        if (block === null) return
+        const text = blockText(block)
+        if (text === '') return
+        const action = button.getAttribute('data-line-action')
+        event.preventDefault()
+        event.stopPropagation()
+        if (action === 'copy') {
+          button.setAttribute('data-copy-text', text)
+          void copyTextToClipboard(text, () => onNotify?.(t('markdownTurn.copyFailed')))
+        } else {
+          void readers.sendToSession(sessionId, text)
+            .catch(() => onNotify?.(t('markdownTurn.sendFailed')))
+        }
+      }}
+      onMouseOver={(event) => {
+        const block = markdownBlockFrom(event.target)
+        hoveredRef.current = block
+      }}
       onDoubleClick={(event) => {
         const target = event.target
         if (target instanceof Element && target.closest('button, a')) return
@@ -285,6 +335,11 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
                 unwrapLabel: t('markdownTurn.unwrap'),
               }}
             />}
+        <div className={css.lineTools} data-line-tools="" role="toolbar" aria-label={t('markdownTurn.sendToSession')}>
+          <button type="button" className={css.lineTool} data-line-action="send" title={t('markdownTurn.sendToSession')} aria-label={t('markdownTurn.sendToSession')}><IconSendOutlineRegular size={15} /></button>
+          <button type="button" className={css.lineTool} data-line-action="direct" title={t('markdownTurn.send')} aria-label={t('markdownTurn.send')}><IconEditOutlineRegular size={15} /></button>
+          <button type="button" className={css.lineTool} data-line-action="copy" title={t('markdownTurn.copy')} aria-label={t('markdownTurn.copy')}><IconCopyOutlineRegular size={15} /></button>
+        </div>
       </>}
     </div>}
     {open && <div className={css.foot}>
@@ -298,7 +353,7 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
  * @param props - 轮次数据、会话编号、文案和读取口。
  * @returns 阅读区，或 null。
  */
-export function MarkdownTurnTail({ sessionId, turn, t, readers }: MarkdownTurnProps): ReactNode {
+export function MarkdownTurnTail({ sessionId, turn, t, readers, onNotify }: MarkdownTurnProps): ReactNode {
   const sources = markdownSources(turn?.data.get('deliverables'))
   const linked = linkedFilePathsFromTurn(turn)
   const id = typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : undefined
@@ -342,7 +397,7 @@ export function MarkdownTurnTail({ sessionId, turn, t, readers }: MarkdownTurnPr
     setListOpen(value => !value)
   }
   return <div ref={rootRef} className={css.root} data-markdown-turn="" {...(folded ? { 'data-markdown-folded': '' } : {})}>
-    {shown.map(path => <MarkdownDocument key={path} sessionId={id} path={path} readers={readers} t={translate} />)}
+    {shown.map(path => <MarkdownDocument key={path} sessionId={id} path={path} readers={readers} t={translate} onNotify={onNotify} />)}
     {paths.length > FOLDED_FILE_COUNT && <div className={css.edge}>
       <ExpandButton open={listOpen} label={listLabel} caption={listCount} onClick={toggleList} kind="more" />
     </div>}

@@ -91,7 +91,53 @@
 }
 
 .body {
+  position: relative;
   padding: 12px;
+}
+
+/* 正文块 hover 高亮（只作用块本身，不波及链接等内联）。 */
+.body :where(h1, h2, h3, h4, h5, h6, p, li, blockquote):hover {
+  background: rgb(0 0 0 / 4%);
+  border-radius: 4px;
+}
+
+/* 行内工具条：body hover 时浮出，跨主题半透明底衬。 */
+.lineTools {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 6px;
+  background: rgb(255 255 255 / 85%);
+  box-shadow: 0 1px 4px rgb(0 0 0 / 15%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--ds-transition-duration, 120ms) var(--ds-ease-in-out, ease);
+}
+
+.body:hover .lineTools {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.lineTool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: rgb(0 0 0 / 70%);
+  cursor: pointer;
+}
+
+.lineTool:hover {
+  background: rgb(0 0 0 / 8%);
 }
 
 .status {
@@ -141,6 +187,22 @@
 
   .status {
     color: rgb(255 255 255 / 55%);
+  }
+
+  .body :where(h1, h2, h3, h4, h5, h6, p, li, blockquote):hover {
+    background: rgb(255 255 255 / 6%);
+  }
+
+  .lineTools {
+    background: rgb(30 30 30 / 85%);
+  }
+
+  .lineTool {
+    color: rgb(255 255 255 / 80%);
+  }
+
+  .lineTool:hover {
+    background: rgb(255 255 255 / 10%);
   }
 }
 

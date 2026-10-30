@@ -62,6 +62,7 @@ function readers(overrides?: Partial<{
   canOpenFiles: ReturnType<typeof vi.fn>
   fileApplications: ReturnType<typeof vi.fn>
   openFile: ReturnType<typeof vi.fn>
+  sendToSession: ReturnType<typeof vi.fn>
 }>) {
   return {
     readPage: overrides?.readPage ?? vi.fn(async () => page('# Hello', 1, true)),
@@ -70,6 +71,7 @@ function readers(overrides?: Partial<{
     canOpenFiles: overrides?.canOpenFiles ?? vi.fn(async () => true),
     fileApplications: overrides?.fileApplications ?? vi.fn(async () => []),
     openFile: overrides?.openFile ?? vi.fn(async () => {}),
+    sendToSession: overrides?.sendToSession ?? vi.fn(async () => {}),
   }
 }
 
@@ -827,5 +829,38 @@ describe('createMarkdownTurnReaders sendToSession', () => {
   it('sendToSession 在宿主没有 prompt 能力时抛错', async () => {
     const face = createMarkdownTurnReaders(() => ({}))
     await expect(face.sendToSession('sess', 'x')).rejects.toThrow(/prompt/)
+  })
+})
+
+describe('MarkdownDocument 行内工具条', () => {
+  it('正文块 hover 出现行内按钮，点复制写剪贴板，点发送以块原文调用 sendToSession', async () => {
+    const send = vi.fn(async () => {})
+    const face = readers({ readPage: vi.fn(async () => page('# 甲\n\n段落乙', 1, true)), sendToSession: send })
+    const container = document.createElement('div')
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+        readers: face,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+    const toggle = container.querySelector('button[aria-expanded]')
+    await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await Promise.resolve() })
+    const para = container.querySelector('[data-markdown-body] p')
+    expect(para).not.toBeNull()
+    await act(async () => { para?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    const body = container.querySelector('[data-markdown-body]') as HTMLElement
+    const copyBtn = body.querySelector('[data-line-action="copy"]') as HTMLElement | null
+    expect(copyBtn).not.toBeNull()
+    await act(async () => { copyBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(copyBtn?.getAttribute('data-copy-text')).toBe('段落乙')
+
+    const sendBtn = body.querySelector('[data-line-action="send"]') as HTMLElement | null
+    await act(async () => { sendBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(send).toHaveBeenCalledWith('sess', '段落乙')
+    await act(async () => { root.unmount() })
   })
 })
