@@ -65,6 +65,11 @@ const KEYS_USED_BY_COMPONENTS: readonly ClientLocaleKey[] = [
   'markdownTurn.filesAll',
   'markdownTurn.filesAllAria',
   'markdownTurn.filesCollapseAria',
+  // The Mermaid preview head and its diagram/source toggle (mermaid.ts).
+  'mermaid.label',
+  'mermaid.diagram',
+  'mermaid.source',
+  'mermaid.toggleNamed',
 ]
 
 /** Every `{name}` placeholder a value carries, in order. */
