@@ -33,8 +33,19 @@ const {
   MarkdownTurnTail,
   registerMarkdownTurn,
 } = await import('../src/markdown-turn.tsx')
+const { startMermaidDiagrams } = await import('../src/mermaid.ts')
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+
+const sleep = (ms: number): Promise<void> => new Promise(resolve => { setTimeout(resolve, ms) })
+
+async function waitFor(check: () => boolean, what: string, timeoutMs = 1000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+    await sleep(5)
+  }
+}
 
 function deliverables(value: unknown) {
   return { data: { get: (key: string) => key === 'deliverables' ? value : undefined } }
@@ -549,7 +560,7 @@ describe('MarkdownTurnTail', () => {
     await act(async () => { root.unmount() })
   })
 
-  it('源码按原文放进阅读区，不按 Markdown 排版', async () => {
+  it('源码按原文放进共享代码块，不按 Markdown 排版', async () => {
     const face = readers({
       readPage: vi.fn(async () => ({ text: 'const n = 1', lines: 1, eof: true })),
     })
@@ -568,10 +579,55 @@ describe('MarkdownTurnTail', () => {
     const toggle = container.querySelector('button')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
-    const plain = container.querySelector('[data-markdown-plain="src/a.ts"]')
-    expect(plain?.textContent).toBe('const n = 1')
-    expect(plain?.tagName).toBe('PRE')
+    const block = container.querySelector('[data-markdown-body="src/a.ts"] .md-code-block')
+    expect(block).not.toBeNull()
+    expect(block?.querySelector('[data-code-block-content] pre')?.textContent).toBe('const n = 1')
+    expect(block?.textContent).toContain('typescript')
+    expect(container.querySelector('[data-markdown-plain="src/a.ts"]')).toBeNull()
     await act(async () => { root.unmount() })
+  })
+
+  it('mmd 文件展开后由 Mermaid 增强画成图', async () => {
+    const face = readers({
+      readPage: vi.fn(async () => page('flowchart TD\n  A[开始] --> B[结束]', 2, true)),
+    })
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root: Root = createRoot(container)
+    const handle = startMermaidDiagrams({
+      document,
+      window,
+      scanDelayMs: 1,
+      settleMs: 1,
+      t: key => key,
+      loadApi: async () => ({
+        initialize() {},
+        async render() {
+          return { svg: '<svg viewBox="0 0 10 10"><rect width="10" height="10"/></svg>' }
+        },
+      }),
+    })
+    try {
+      await act(async () => {
+        root.render(createElement(MarkdownTurnTail, {
+          sessionId: 'sess',
+          turn: deliverables({ produced: [{ path: 'docs/flow.mmd' }] }),
+          readers: face,
+        }))
+      })
+      const toggle = container.querySelector('button')
+      await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await Promise.resolve() })
+      expect(container.querySelector('.md-code-block')).not.toBeNull()
+      await waitFor(() => container.querySelector('[data-th-mermaid]') !== null, 'mermaid preview')
+      const block = container.querySelector('.md-code-block')
+      expect(block?.getAttribute('data-th-mermaid-view')).toBe('diagram')
+      expect(container.querySelector('[data-th-mermaid-canvas] svg')).not.toBeNull()
+    } finally {
+      handle.dispose()
+      await act(async () => { root.unmount() })
+      container.remove()
+    }
   })
 
   it('没有文本文件或没有会话编号时不渲染', () => {
