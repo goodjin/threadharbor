@@ -341,30 +341,27 @@ describe('MarkdownTurnTail', () => {
     expect(container.querySelector(`[data-markdown-path="${paths.at(-1)}"]`)).toBeNull()
     expect(container.hasAttribute('data-markdown-folded') || container.querySelector('[data-markdown-folded]') !== null).toBe(true)
     const mores = (): Element[] => [...container.querySelectorAll('[data-markdown-more]')]
-    expect(mores()).toHaveLength(2)
+    expect(mores()).toHaveLength(1)
     expect(mores()[0]?.textContent).toContain(`全部 ${paths.length} 个文件`)
-    expect(mores()[1]?.textContent).toContain(`全部 ${paths.length} 个文件`)
     expect(mores()[0]?.getAttribute('aria-label')).toBe(`展开全部 ${paths.length} 个文件`)
     expect(mores()[0]?.getAttribute('aria-expanded')).toBe('false')
-    expect(mores()[1]?.getAttribute('aria-expanded')).toBe('false')
     const order = [...(container.querySelector('[data-markdown-turn]')?.children ?? [])].map(node => (
       node.querySelector('[data-markdown-more]') !== null ? 'more' : 'file'
     ))
-    expect(order[0]).toBe('more')
+    expect(order[0]).toBe('file')
     expect(order.at(-1)).toBe('more')
     expect(face.readPage).not.toHaveBeenCalled()
 
     await act(async () => { mores()[0]?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     expect(container.querySelectorAll('[data-markdown-path]')).toHaveLength(paths.length)
     expect(container.querySelector('[data-markdown-folded]')).toBeNull()
-    expect(mores()[0]?.textContent).toContain(`全部 ${paths.length} 个文件`)
-    expect(mores()[1]?.textContent).toContain(`全部 ${paths.length} 个文件`)
+    expect(mores()[0]?.textContent).toContain('收起')
+    expect(mores()[0]?.textContent).not.toContain('全部')
     expect(mores()[0]?.getAttribute('aria-label')).toBe('收起文件列表')
     expect(mores()[0]?.getAttribute('aria-expanded')).toBe('true')
-    expect(mores()[1]?.getAttribute('aria-expanded')).toBe('true')
 
     await act(async () => {
-      mores().at(-1)?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      mores()[0]?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
     expect(container.querySelectorAll('[data-markdown-path]')).toHaveLength(FOLDED_FILE_COUNT)
     expect(container.querySelector(`[data-markdown-path="${paths.at(-1)}"]`)).toBeNull()

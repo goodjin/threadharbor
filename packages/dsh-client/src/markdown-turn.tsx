@@ -336,18 +336,16 @@ export function MarkdownTurnTail({ sessionId, turn, t, readers }: MarkdownTurnPr
   const folded = paths.length > FOLDED_FILE_COUNT && !listOpen
   const shown = folded ? paths.slice(0, FOLDED_FILE_COUNT) : paths
   const listLabel = translate(listOpen ? 'markdownTurn.filesCollapseAria' : 'markdownTurn.filesAllAria', { count: String(paths.length) })
-  const listCount = translate('markdownTurn.filesAll', { count: String(paths.length) })
+  const listCount = translate(listOpen ? 'markdownTurn.collapse' : 'markdownTurn.filesAll', { count: String(paths.length) })
   const toggleList = (): void => {
     holdFileTop(rootRef.current, rootRef.current)
     setListOpen(value => !value)
   }
-  const listToggle = (): ReactNode => paths.length > FOLDED_FILE_COUNT
-    ? <div className={css.edge}><ExpandButton open={listOpen} label={listLabel} caption={listCount} onClick={toggleList} kind="more" /></div>
-    : null
   return <div ref={rootRef} className={css.root} data-markdown-turn="" {...(folded ? { 'data-markdown-folded': '' } : {})}>
-    {listToggle()}
     {shown.map(path => <MarkdownDocument key={path} sessionId={id} path={path} readers={readers} t={translate} />)}
-    {listToggle()}
+    {paths.length > FOLDED_FILE_COUNT && <div className={css.edge}>
+      <ExpandButton open={listOpen} label={listLabel} caption={listCount} onClick={toggleList} kind="more" />
+    </div>}
   </div>
 }
 

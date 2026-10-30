@@ -51,6 +51,7 @@ const KEYS_USED_BY_COMPONENTS: readonly ClientLocaleKey[] = [
   'markdownTurn.error',
   'markdownTurn.retry',
   'markdownTurn.truncated',
+  'markdownTurn.collapse',
   'markdownTurn.collapseAria',
   'markdownTurn.expandAria',
   'markdownTurn.reveal',
