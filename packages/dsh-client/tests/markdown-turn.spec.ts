@@ -19,6 +19,8 @@ const {
   createMarkdownTurnReaders,
   isInlineTextPath,
   isMarkdownPath,
+  linkedFilePathsFromText,
+  linkedFilePathsFromTurn,
   markdownPathsFromSummary,
   markdownSources,
   mergeMarkdownPaths,
@@ -114,6 +116,55 @@ describe('markdownSources', () => {
 
   it('改动摘要地址带着会话和序号', () => {
     expect(changesSummaryUrl('sess/1', 4)).toBe('api/changes.summary?sessionId=sess%2F1&seq=4')
+  })
+})
+
+
+describe('linked file paths', () => {
+  it('从助手正文的本地文件链接里取出文本路径', () => {
+    const text = [
+      '入口：[build.py](/Users/good/qg/glasses/os/manifest/scripts/build.py)。',
+      '行号：[overlay()](/Users/good/qg/glasses/os/manifest/scripts/ar1_pipeline/stages.py:243)。',
+      '片段：[说明](/repo/docs/guide.md#L38)。',
+      '相对：[指针](../baselines/current.env) 和 [`清单`](audits/report.json)。',
+      '盘符：[win](C:/repo/a.md:12)。',
+      '网页：[文档](https://example.com/guide.md) 和 [协议](javascript:alert(1))。',
+      '图片：![图](/repo/pic.png) 以及 [图](/repo/shot.jpg)。',
+      '代码里的例子不算：`[隐藏](/repo/hidden.md)`',
+      '```',
+      '[围栏](/repo/fenced.md)',
+      '```',
+      '围栏之后：[笔记](/repo/after.md)。',
+      '标题：[带标题](/repo/titled.md "打开")。',
+    ].join('\n')
+    expect(linkedFilePathsFromText(text)).toEqual([
+      '/Users/good/qg/glasses/os/manifest/scripts/build.py',
+      '/Users/good/qg/glasses/os/manifest/scripts/ar1_pipeline/stages.py',
+      '/repo/docs/guide.md',
+      '../baselines/current.env',
+      'audits/report.json',
+      'C:/repo/a.md',
+      '/repo/after.md',
+      '/repo/titled.md',
+    ])
+  })
+
+  it('同一路径只留第一次，推理块不计入', () => {
+    const turn = {
+      steps: [
+        { data: { get: (key: string) => key === 'assistant-step' ? {
+          blocks: [
+            { kind: 'reasoning', text: '[草稿](/repo/draft.md)' },
+            { kind: 'text', text: '见 [甲](/repo/a.md) 和 [甲再次](/repo/a.md#L2)。' },
+          ],
+        } : undefined } },
+        { data: { get: (key: string) => key === 'assistant-step' ? {
+          blocks: [{ kind: 'text', text: '还有 [乙](notes/b.txt:4)。' }],
+        } : undefined } },
+      ],
+    }
+    expect(linkedFilePathsFromTurn(turn)).toEqual(['/repo/a.md', 'notes/b.txt'])
+    expect(linkedFilePathsFromTurn({ data: { get: () => undefined } })).toEqual([])
   })
 })
 
@@ -467,6 +518,30 @@ describe('MarkdownTurnTail', () => {
     expect(container.textContent).toContain('again')
     await act(async () => { root.unmount() })
   })
+
+  it('输出里的文件链接在会话区列出，并带打开文件夹', async () => {
+    const face = readers()
+    const container = document.createElement('div')
+    const root: Root = createRoot(container)
+    const turn = {
+      data: { get: (key: string) => key === 'deliverables' ? { produced: [{ path: '/repo/a.md' }] } : undefined },
+      steps: [{ data: { get: (key: string) => key === 'assistant-step' ? {
+        blocks: [{ kind: 'text', text: '已有 [甲](/repo/a.md)，另见 [乙](/repo/b.py:15)。' }],
+      } : undefined } }],
+    }
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, { sessionId: 'sess', turn, readers: face }))
+    })
+    const rows = [...container.querySelectorAll('[data-markdown-path]')].map(node => node.getAttribute('data-markdown-path'))
+    expect(rows).toEqual(['/repo/a.md', '/repo/b.py'])
+    const reveal = container.querySelector('[data-markdown-path="/repo/b.py"] [data-reveal]')
+    expect(reveal?.textContent).toBe('')
+    expect(reveal?.querySelector('svg')).not.toBeNull()
+    await act(async () => { reveal?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(face.revealFile).toHaveBeenCalledWith('sess', '/repo/b.py')
+    await act(async () => { root.unmount() })
+  })
+
 })
 
 describe('registerMarkdownTurn', () => {

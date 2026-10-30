@@ -1,5 +1,5 @@
 /**
- * 在会话区展开这一轮产出、交付或改动过的文本文件。
+ * 在会话区展开这一轮产出、交付、改动或输出里点名的文本文件。
  *
  * 挂在 `conversation.chat.turnTail` 上，排在官方改动卡片之后。官方卡片照旧
  * 打开右侧对比。Markdown 按文档排版，其它文本按原文显示。默认收起，点击才展开并读取。
@@ -8,6 +8,7 @@
  * 文件列表和每个文件框的右上、右下都用图标展开或收起。
  * 列表两端写着一共有多少个文件。
  * 路径文字在按钮外面，可以选中复制。
+ * 助手正文里的本地文件链接也列在这里，可以打开所在文件夹。链接上的点击由会话打开右侧。
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -19,6 +20,7 @@ import type { RuntimeT } from './locales.ts'
 import {
   MARKDOWN_READ_LINE_CAP,
   isMarkdownPath,
+  linkedFilePathsFromTurn,
   markdownSources,
   markdownPathsFromSummary,
   mergeMarkdownPaths,
@@ -301,6 +303,7 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
  */
 export function MarkdownTurnTail({ sessionId, turn, t, readers }: MarkdownTurnProps): ReactNode {
   const sources = markdownSources(turn?.data.get('deliverables'))
+  const linked = linkedFilePathsFromTurn(turn)
   const id = typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : undefined
   const changesSeq = sources?.changesSeq
   const translate = t ?? fallbackT
@@ -330,8 +333,8 @@ export function MarkdownTurnTail({ sessionId, turn, t, readers }: MarkdownTurnPr
       controller.abort()
     }
   }, [id, changesSeq, readers])
-  if (id === undefined || sources === null) return null
-  const paths = mergeMarkdownPaths(sources.paths, extra)
+  if (id === undefined) return null
+  const paths = mergeMarkdownPaths(mergeMarkdownPaths(sources?.paths ?? [], extra), linked)
   if (paths.length === 0) return null
   const folded = paths.length > FOLDED_FILE_COUNT && !listOpen
   const shown = folded ? paths.slice(0, FOLDED_FILE_COUNT) : paths

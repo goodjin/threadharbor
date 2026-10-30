@@ -4,8 +4,9 @@
  * 官方改动卡片、悬停对比和交付卡仍由 ui-deliverables 画，点它们仍打开右侧。
  * 这里从同一轮已经记下的产出路径、交付路径里挑文本文件（Markdown、源码、
  * 纯文本、无后缀的文本都算）。改动清单本身只留了序号，文件路径再向主机要一次
- * 摘要（和官方卡片同一条 `api/changes.summary`）。图片、PDF、Office 和压缩包
- * 不进阅读区。
+ * 摘要（和官方卡片同一条 `api/changes.summary`）。助手正文里指向本地文件的
+ * 链接也算：接受规则与会话里点开文件的规则相同。路径末尾的 `:行号` 和 `#L行号`
+ * 只用来定位，阅读区打开文件本身。图片、PDF、Office 和压缩包不进阅读区。
  */
 
 /** 一页工作区文本，对齐 `workspaceFiles.read` 里阅读区要用的三个字段。 */
@@ -153,6 +154,211 @@ export function mergeMarkdownPaths(base: readonly string[], extra: readonly stri
   }
   return out
 }
+
+
+/** 助手正文里一个本地文件链接的路径。行号后缀已经去掉。 */
+const LINE_SUFFIX = /:(\d+)(?:-\d+)?$/
+
+/**
+ * 去掉模型写在路径末尾的行号（`file.py:243`、`file.py:10-20`、`file.py:10:2`）。
+ * 盘符上的冒号（`C:`）留下。
+ * @param path - 解码后的路径，或还没解码的链接目标。
+ * @returns 去掉行号后的路径。没有行号时原样返回。
+ */
+function stripColonLine(path: string): string {
+  let current = path
+  for (;;) {
+    const match = LINE_SUFFIX.exec(current)
+    if (match === null) return current
+    const cut = current.slice(0, match.index)
+    if (cut.length === 0 || /^[a-z]:$/i.test(cut)) return current
+    current = cut
+  }
+}
+
+/**
+ * 判断一个链接目标是不是会话里会点开的本地文件。
+ *
+ * 与官方 `parseFileLink` 同一套拒绝条件：查询串、控制字符、UNC、`file:` 等
+ * 协议，以及不是 `L` 行号的片段。Windows 盘符保留。
+ * @param value - Markdown 链接目标，不含尖括号。
+ * @returns 本地路径；不是文件链接时为 undefined。
+ */
+function acceptFileDestination(value: string): string | undefined {
+  const hash = value.indexOf('#')
+  const destination = hash < 0 ? value : value.slice(0, hash)
+  if (destination.includes('?')) return undefined
+  let path: string
+  try {
+    path = decodeURIComponent(destination)
+  } catch {
+    return undefined
+  }
+  if (path.length === 0 || /[\u0000-\u001f\u007f]/.test(path)) return undefined
+  if (/^[\\/]{2}/.test(path)) return undefined
+  if (/^[a-z][a-z\d+.-]*:/i.test(path) && !/^[a-z]:[\\/]/i.test(path)) return undefined
+  if (hash >= 0 && !/^L[1-9]\d*(?:-L[1-9]\d*)?$/.test(value.slice(hash + 1))) return undefined
+  const slash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  const name = path.slice(slash + 1)
+  if (name.length === 0 || name === '.' || name === '..') return undefined
+  return path
+}
+
+/**
+ * 从链接目标取出要打开的文件。
+ *
+ * 绝对路径带 `:行号` 时，点开用的字符串里含行号，读文件会落空。这里先按文件
+ * 链接接受，再去掉行号。相对路径的 `:行号` 会被当成协议名，所以去掉后再认一次。
+ * @param destination - Markdown 链接目标。
+ * @returns 去掉行号后的本地路径；不是文件时为 undefined。
+ */
+function filePathFromDestination(destination: string): string | undefined {
+  const direct = acceptFileDestination(destination)
+  if (direct !== undefined) return stripColonLine(direct)
+  const stripped = stripColonLine(destination)
+  if (stripped === destination) return undefined
+  return acceptFileDestination(stripped)
+}
+
+/** 代码块和行内代码的区间。里面的链接是例子，不是点开的文件。 */
+function hiddenSpans(text: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = []
+  const fence = /```[\s\S]*?```|```[\s\S]*$/g
+  for (let match = fence.exec(text); match !== null; match = fence.exec(text)) {
+    spans.push([match.index, match.index + match[0].length])
+  }
+  const code = /`[^`\n]*`/g
+  for (let match = code.exec(text); match !== null; match = code.exec(text)) {
+    const at = match.index
+    const spanEnd = at + match[0].length
+    if (spans.some(([start, end]) => at >= start && at < end)) continue
+    spans.push([at, spanEnd])
+  }
+  return spans
+}
+
+function insideSpan(spans: readonly (readonly [number, number])[], index: number): boolean {
+  return spans.some(([start, end]) => index >= start && index < end)
+}
+
+/** 链接文字结束的 `]`。转义的括号不算。 */
+function closingBracket(source: string, open: number): number {
+  for (let index = open + 1; index < source.length; index += 1) {
+    if (source[index] === '\\') {
+      index += 1
+      continue
+    }
+    if (source[index] === ']') return index
+  }
+  return -1
+}
+
+/** 跳过可选的标题，停在链接结束的 `)` 之后。不是链接时为 undefined。 */
+function finishLink(source: string, index: number): number | undefined {
+  let cursor = index
+  while (source[cursor] === ' ' || source[cursor] === '\t' || source[cursor] === '\n') cursor += 1
+  const quote = source[cursor]
+  if (quote === '"' || quote === "'") {
+    cursor += 1
+    while (cursor < source.length && source[cursor] !== quote) cursor += 1
+    if (source[cursor] !== quote) return undefined
+    cursor += 1
+    while (source[cursor] === ' ' || source[cursor] === '\t' || source[cursor] === '\n') cursor += 1
+  }
+  if (source[cursor] !== ')') return undefined
+  return cursor + 1
+}
+
+/** 读出 `](` 后面的链接目标，以及链接结束位置。 */
+function readDestination(source: string, start: number): { value: string, end: number } | undefined {
+  let cursor = start
+  while (source[cursor] === ' ' || source[cursor] === '\n' || source[cursor] === '\t') cursor += 1
+  if (source[cursor] === '<') {
+    const close = source.indexOf('>', cursor + 1)
+    if (close < 0) return undefined
+    const end = finishLink(source, close + 1)
+    if (end === undefined) return undefined
+    return { value: source.slice(cursor + 1, close), end }
+  }
+  let endOfValue = cursor
+  while (
+    endOfValue < source.length
+    && source[endOfValue] !== ')'
+    && source[endOfValue] !== ' '
+    && source[endOfValue] !== '\n'
+    && source[endOfValue] !== '\t'
+  ) endOfValue += 1
+  if (endOfValue === cursor) return undefined
+  const end = finishLink(source, endOfValue)
+  if (end === undefined) return undefined
+  return { value: source.slice(cursor, endOfValue), end }
+}
+
+/**
+ * 从一段助手正文里取出本地文本文件链接。
+ *
+ * 代码块和行内代码里的链接不算。图片链接不算。同一路径只留第一次。
+ * @param text - 一个 `text` 块的原文。
+ * @returns 阅读区要打开的路径。
+ */
+export function linkedFilePathsFromText(text: string): readonly string[] {
+  const spans = hiddenSpans(text)
+  const paths: string[] = []
+  const seen = new Set<string>()
+  let index = 0
+  while (index < text.length) {
+    const start = text.indexOf('[', index)
+    if (start < 0) break
+    if (insideSpan(spans, start) || (start > 0 && (text[start - 1] === '!' || text[start - 1] === '\\'))) {
+      index = start + 1
+      continue
+    }
+    const labelEnd = closingBracket(text, start)
+    if (labelEnd < 0 || text[labelEnd + 1] !== '(') {
+      index = start + 1
+      continue
+    }
+    const destination = readDestination(text, labelEnd + 2)
+    if (destination === undefined) {
+      index = labelEnd + 1
+      continue
+    }
+    index = destination.end
+    const path = filePathFromDestination(destination.value)
+    if (path === undefined || !isInlineTextPath(path) || seen.has(path)) continue
+    seen.add(path)
+    paths.push(path)
+  }
+  return paths
+}
+
+/**
+ * 从这一轮各步的助手正文里收集文件链接。
+ *
+ * 步骤上的 `assistant-step` 是会话已经排好的正文。推理块不在输出结果里，跳过。
+ * @param turn - 轮次结尾拿到的轮次。没有步骤时返回空列表。
+ * @returns 按出现顺序去重后的文本路径。
+ */
+export function linkedFilePathsFromTurn(turn: unknown): readonly string[] {
+  if (!isRecord(turn) || !Array.isArray(turn.steps)) return []
+  const paths: string[] = []
+  const seen = new Set<string>()
+  for (const step of turn.steps) {
+    if (!isRecord(step) || !isRecord(step.data) || typeof step.data.get !== 'function') continue
+    const assistant = (step.data.get as (key: string) => unknown)('assistant-step')
+    if (!isRecord(assistant) || !Array.isArray(assistant.blocks)) continue
+    for (const block of assistant.blocks) {
+      if (!isRecord(block) || block.kind !== 'text' || typeof block.text !== 'string') continue
+      for (const path of linkedFilePathsFromText(block.text)) {
+        if (seen.has(path)) continue
+        seen.add(path)
+        paths.push(path)
+      }
+    }
+  }
+  return paths
+}
+
 
 /**
  * 官方改动摘要的文档相对地址。
