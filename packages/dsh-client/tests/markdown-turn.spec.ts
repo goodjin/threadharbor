@@ -48,12 +48,28 @@ function readers(overrides?: Partial<{
   readPage: ReturnType<typeof vi.fn>
   loadSummary: ReturnType<typeof vi.fn>
   revealFile: ReturnType<typeof vi.fn>
+  canOpenFiles: ReturnType<typeof vi.fn>
+  fileApplications: ReturnType<typeof vi.fn>
+  openFile: ReturnType<typeof vi.fn>
 }>) {
   return {
     readPage: overrides?.readPage ?? vi.fn(async () => page('# Hello', 1, true)),
     loadSummary: overrides?.loadSummary ?? vi.fn(async () => ({ files: [] })),
     revealFile: overrides?.revealFile ?? vi.fn(async () => {}),
+    canOpenFiles: overrides?.canOpenFiles ?? vi.fn(async () => true),
+    fileApplications: overrides?.fileApplications ?? vi.fn(async () => []),
+    openFile: overrides?.openFile ?? vi.fn(async () => {}),
   }
+}
+
+/** 等打开方式按钮问完桌面和应用名单。 */
+async function openReady(container: HTMLElement): Promise<Element> {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const node = container.querySelector('[data-open-path-state="ready"]')
+    if (node !== null) return node
+    await act(async () => { await Promise.resolve() })
+  }
+  throw new Error('open control did not settle')
 }
 
 describe('markdownSources', () => {
@@ -351,9 +367,9 @@ describe('MarkdownTurnTail', () => {
     }
   })
 
-  it('打开所在文件夹不展开正文，失败时在按钮上说出来', async () => {
-    const revealFile = vi.fn(async () => { throw new Error('no') })
-    const face = readers({ revealFile })
+  it('打开文件夹不展开正文，失败时另作提示', async () => {
+    const openFile = vi.fn(async () => { throw new Error('no') })
+    const face = readers({ openFile })
     const container = document.createElement('div')
     const root: Root = createRoot(container)
     await act(async () => {
@@ -363,16 +379,96 @@ describe('MarkdownTurnTail', () => {
         readers: face,
       }))
     })
-    const reveal = container.querySelector('[data-reveal]')
-    expect(reveal?.textContent?.trim()).toBe('')
-    expect(reveal?.querySelector('svg')).not.toBeNull()
-    await act(async () => { reveal?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await openReady(container)
+    const open = container.querySelector('[data-open-path-open]')
+    expect(open?.textContent?.trim()).toBe('')
+    expect(open?.querySelector('svg')).not.toBeNull()
+    expect(open?.getAttribute('aria-label')).toBe('打开文件夹')
+    expect(container.querySelector('[data-open-path-more]')).toBeNull()
+    await act(async () => { open?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
-    expect(revealFile).toHaveBeenCalledWith('sess', 'docs/a.md')
+    expect(openFile).toHaveBeenCalledWith('sess', 'docs/a.md', { kind: 'reveal' })
     expect(container.querySelector('[data-markdown-body]')).toBeNull()
-    expect(container.querySelector('[data-reveal-error]')).not.toBeNull()
-    expect(reveal?.getAttribute('aria-label')).toBe('文件夹没有打开')
-    expect(container.textContent).not.toContain('文件夹没有打开')
+    expect(document.body.textContent).toContain('文件夹没有打开')
+    await act(async () => { root.unmount() })
+  })
+
+  it('打开方式下拉的最后一项是打开文件夹', async () => {
+    const openFile = vi.fn(async () => {})
+    const face = readers({
+      openFile,
+      fileApplications: vi.fn(async () => [
+        { id: 'notes', name: 'TextEdit', icon: null, default: false },
+        { id: 'code', name: 'VS Code', icon: null, default: true },
+      ]),
+    })
+    const container = document.createElement('div')
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+        readers: face,
+      }))
+    })
+    const split = await openReady(container)
+    expect(split.querySelector('[data-open-path-open]')?.getAttribute('aria-label')).toBe('用 VS Code 打开')
+    await act(async () => {
+      split.querySelector('[data-open-path-open]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(openFile).toHaveBeenCalledWith('sess', 'docs/a.md', { kind: 'default' })
+    await act(async () => {
+      split.querySelector('[data-open-path-more]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    const labels = [...document.querySelectorAll('[role="menuitem"]')].map(node => node.textContent?.trim())
+    expect(labels).toEqual(['TextEdit', 'VS Code（默认）', '打开文件夹'])
+    expect(labels).not.toContain('显示文件位置')
+    const rows = [...document.querySelectorAll('[role="menuitem"]')]
+    await act(async () => { rows[0]?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(openFile).toHaveBeenCalledWith('sess', 'docs/a.md', { kind: 'application', id: 'notes' })
+    await act(async () => {
+      split.querySelector('[data-open-path-more]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    const again = [...document.querySelectorAll('[role="menuitem"]')]
+    await act(async () => { again[again.length - 1]?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(openFile).toHaveBeenCalledWith('sess', 'docs/a.md', { kind: 'reveal' })
+    await act(async () => { root.unmount() })
+  })
+
+  it('问不到应用时仍能打开文件夹', async () => {
+    const face = readers({ fileApplications: vi.fn(async () => null) })
+    const container = document.createElement('div')
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+        readers: face,
+      }))
+    })
+    const split = await openReady(container)
+    await act(async () => {
+      split.querySelector('[data-open-path-more]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    const labels = [...document.querySelectorAll('[role="menuitem"]')].map(node => node.textContent?.trim())
+    expect(labels).toEqual(['无法获取应用列表', '打开文件夹（默认）'])
+    await act(async () => { root.unmount() })
+  })
+
+  it('主机不能打开本地文件时不放打开按钮', async () => {
+    const face = readers({ canOpenFiles: vi.fn(async () => false) })
+    const container = document.createElement('div')
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+        readers: face,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+    expect(container.querySelector('[data-markdown-path]')).not.toBeNull()
+    expect(container.querySelector('[data-open-path]')).toBeNull()
     await act(async () => { root.unmount() })
   })
 
@@ -534,11 +630,14 @@ describe('MarkdownTurnTail', () => {
     })
     const rows = [...container.querySelectorAll('[data-markdown-path]')].map(node => node.getAttribute('data-markdown-path'))
     expect(rows).toEqual(['/repo/a.md', '/repo/b.py'])
-    const reveal = container.querySelector('[data-markdown-path="/repo/b.py"] [data-reveal]')
+    const row = container.querySelector('[data-markdown-path="/repo/b.py"]')
+    if (!(row instanceof HTMLElement)) throw new Error('missing row')
+    await openReady(row)
+    const reveal = row.querySelector('[data-open-path-open]')
     expect(reveal?.textContent).toBe('')
     expect(reveal?.querySelector('svg')).not.toBeNull()
     await act(async () => { reveal?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
-    expect(face.revealFile).toHaveBeenCalledWith('sess', '/repo/b.py')
+    expect(face.openFile).toHaveBeenCalledWith('sess', '/repo/b.py', { kind: 'reveal' })
     await act(async () => { root.unmount() })
   })
 
@@ -618,5 +717,39 @@ describe('createMarkdownTurnReaders', () => {
       session: { openWorkspacePath: vi.fn() },
     }))
     await expect(face.revealFile('sess', 'a.md')).rejects.toThrow(/absolute path/)
+  })
+
+  it('默认应用不带动作，指定应用带上应用编号', async () => {
+    const stat = vi.fn(async () => ({ ok: true, value: { absolutePath: '/ws/a.md' } }))
+    const openWorkspacePath = vi.fn(async () => ({ ok: true, value: { opened: true } }))
+    const face = createMarkdownTurnReaders(() => ({ workspaceFiles: { stat }, session: { openWorkspacePath } }))
+    await face.openFile('sess', 'a.md', { kind: 'default' })
+    expect(openWorkspacePath).toHaveBeenCalledWith({ path: '/ws/a.md' })
+    await face.openFile('sess', 'a.md', { kind: 'application', id: 'code' })
+    expect(openWorkspacePath).toHaveBeenLastCalledWith({ path: '/ws/a.md', application: 'code' })
+  })
+
+  it('列出文件关联；问失败和没有桌面分开', async () => {
+    const stat = vi.fn(async () => ({ ok: true, value: { absolutePath: '/ws/a.md' } }))
+    const signal = new AbortController().signal
+    const workspacePathApplications = vi.fn(async () => ({ ok: true, value: [
+      { id: 'code', name: 'VS Code', icon: 'data:image/svg+xml,abc', default: true },
+      { name: 'skip' },
+    ] }))
+    const canOpenWorkspacePath = vi.fn(async () => ({ ok: true, value: true }))
+    const face = createMarkdownTurnReaders(() => ({
+      workspaceFiles: { stat },
+      session: { workspacePathApplications, canOpenWorkspacePath, openWorkspacePath: vi.fn() },
+    }))
+    await expect(face.fileApplications('sess', 'a.md', signal)).resolves.toEqual([
+      { id: 'code', name: 'VS Code', icon: 'data:image/svg+xml,abc', default: true },
+    ])
+    expect(workspacePathApplications).toHaveBeenCalledWith({ path: '/ws/a.md' }, signal)
+    await expect(face.canOpenFiles()).resolves.toBe(true)
+    const closed = createMarkdownTurnReaders(() => ({ session: { canOpenWorkspacePath: vi.fn(async () => ({ ok: true, value: false })) } }))
+    await expect(closed.canOpenFiles()).resolves.toBe(false)
+    const missing = createMarkdownTurnReaders(() => ({}))
+    await expect(missing.fileApplications('sess', 'a.md', signal)).resolves.toBeNull()
+    await expect(missing.canOpenFiles()).resolves.toBe(false)
   })
 })

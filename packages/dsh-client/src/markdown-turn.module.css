@@ -59,9 +59,6 @@
   font-size: 12px;
 }
 
-.iconButton[data-reveal-error] {
-  color: #b42318;
-}
 
 .foot {
   display: flex;
@@ -144,9 +141,6 @@
     background: rgb(255 255 255 / 8%);
   }
 
-  .iconButton[data-reveal-error] {
-    color: #ffb4ab;
-  }
 
   .foot {
     background: rgb(255 255 255 / 8%);
@@ -156,4 +150,73 @@
   .status {
     color: rgb(255 255 255 / 55%);
   }
+}
+
+/* 和右侧文档预览标题栏同一只分体按钮：24px 描边胶囊，主按钮加窄箭头。 */
+.openMenu {
+  display: inline-flex;
+  flex: none;
+  align-self: center;
+  margin-right: 4px;
+}
+
+.openSplit {
+  display: inline-flex;
+  align-items: stretch;
+  box-sizing: border-box;
+  height: 24px;
+  overflow: hidden;
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: var(--dsw-radius-sm);
+  font-family: var(--dsw-font-family);
+}
+
+.openMain,
+.openChevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: none;
+  color: var(--dsw-alias-label-primary);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.openMain {
+  gap: 4px;
+  padding: 3px 5px;
+}
+
+.openChevron {
+  padding: 3px 4px 3px 3px;
+  border-left: 0.5px solid var(--dsw-alias-border-l4);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.openMain:hover:not(:disabled),
+.openMain:focus-visible,
+.openChevron:hover:not(:disabled),
+.openChevron:focus-visible {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.openMain:disabled,
+.openChevron:disabled {
+  cursor: default;
+}
+
+.openIcon {
+  object-fit: contain;
+}
+
+.openSkeleton {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  border-radius: var(--dsw-radius-xs);
+  background: var(--dsw-alias-interactive-bg-hover);
 }

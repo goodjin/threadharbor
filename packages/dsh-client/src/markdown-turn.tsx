@@ -3,17 +3,18 @@
  *
  * 挂在 `conversation.chat.turnTail` 上，排在官方改动卡片之后。官方卡片照旧
  * 打开右侧对比。Markdown 按文档排版，其它文本按原文显示。默认收起，点击才展开并读取。
- * 展开后路径栏与正文隔开。双击正文收回。路径栏右侧用图标打开所在文件夹。
+ * 展开后路径栏与正文隔开。双击正文收回。路径栏右侧是打开方式下拉，最后一项打开文件夹。
  * 点开或收起时，路径栏留在点击时的视口位置。文件多于四篇时先只列出四篇。
  * 文件列表和每个文件框的右上、右下都用图标展开或收起。
  * 列表两端写着一共有多少个文件。
  * 路径文字在按钮外面，可以选中复制。
- * 助手正文里的本地文件链接也列在这里，可以打开所在文件夹。链接上的点击由会话打开右侧。
+ * 助手正文里的本地文件链接也列在这里，用同一套下拉打开。链接上的点击由会话打开右侧。
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconFolderOpenOutlineRegular, MarkdownText, classifyFileType } from '@deepseek-ai/dsh-client-ui-primitives'
+import { FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, MarkdownText, classifyFileType } from '@deepseek-ai/dsh-client-ui-primitives'
+import { FileOpenSplit } from './markdown-turn-open.tsx'
 import type { MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
 import { fallbackT, NAMESPACE } from './locales.ts'
 import type { RuntimeT } from './locales.ts'
@@ -202,7 +203,6 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
   const [open, setOpen] = useState(false)
   const [attempt, setAttempt] = useState(0)
   const [body, setBody] = useState<DocumentBody>({ kind: 'loading' })
-  const [revealError, setRevealError] = useState(false)
   const barRef = useRef<HTMLDivElement>(null)
   const labels = useMemo(() => labelsFor(t), [t])
   const toggleOpen = (): void => {
@@ -229,7 +229,6 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
     }
   }, [open, sessionId, path, readers, attempt])
   const toggleLabel = t(open ? 'markdownTurn.collapseAria' : 'markdownTurn.expandAria', { name: path })
-  const revealLabel = t(revealError ? 'markdownTurn.revealError' : 'markdownTurn.reveal')
   return <section className={css.document} data-markdown-path={path}>
     <div ref={barRef} className={css.bar} data-path-bar="" {...(open ? { 'data-expanded': '' } : {})}>
       <span className={css.icon} data-file-icon={classifyFileType(path)}>
@@ -247,20 +246,7 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
         }}
       >{path}</span>
       <ExpandButton open={open} label={toggleLabel} onClick={toggleOpen} />
-      <button
-        type="button"
-        className={css.iconButton}
-        data-reveal=""
-        aria-label={revealLabel}
-        title={revealLabel}
-        {...(revealError ? { 'data-reveal-error': '' } : {})}
-        onClick={() => {
-          setRevealError(false)
-          void readers.revealFile(sessionId, path).catch(() => { setRevealError(true) })
-        }}
-      >
-        <IconFolderOpenOutlineRegular size={16} />
-      </button>
+      <FileOpenSplit sessionId={sessionId} path={path} readers={readers} t={t} />
     </div>
     {open && <div
       className={css.body}

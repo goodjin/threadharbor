@@ -6,7 +6,7 @@
  * 纯文本、无后缀的文本都算）。改动清单本身只留了序号，文件路径再向主机要一次
  * 摘要（和官方卡片同一条 `api/changes.summary`）。助手正文里指向本地文件的
  * 链接也算：接受规则与会话里点开文件的规则相同。路径末尾的 `:行号` 和 `#L行号`
- * 只用来定位，阅读区打开文件本身。图片、PDF、Office 和压缩包不进阅读区。
+ * 只用来定位，阅读区打开文件本身。图片、PDF、Office 和压缩包不进阅读区。打开方式走会话的桌面接口：默认应用、指定应用，或在文件管理器里显示。
  */
 
 /** 一页工作区文本，对齐 `workspaceFiles.read` 里阅读区要用的三个字段。 */
@@ -16,12 +16,35 @@ export interface MarkdownTextPage {
   readonly eof: boolean
 }
 
-/** 阅读区向宿主要正文和改动摘要的两个口子。注册时绑上，测试里换假的。 */
+/** 一台已注册、可以打开这个文件的应用。 */
+export interface MarkdownFileApplication {
+  readonly id: string
+  readonly name: string
+  readonly icon: string | null
+  readonly default: boolean
+}
+
+/** 打开方式：系统默认应用、指定应用，或在文件管理器里显示。 */
+export type MarkdownFileOpen =
+  | { readonly kind: 'default' }
+  | { readonly kind: 'application'; readonly id: string }
+  | { readonly kind: 'reveal' }
+
+/** 阅读区向宿主要正文、改动摘要和打开方式的口子。注册时绑上，测试里换假的。 */
 export interface MarkdownTurnReaders {
   readPage(sessionId: string, path: string, offset: number, signal: AbortSignal): Promise<MarkdownTextPage>
   loadSummary(sessionId: string, seq: number, signal: AbortSignal): Promise<unknown>
   /** 在文件管理器里显示这个文件所在的文件夹。 */
   revealFile(sessionId: string, path: string): Promise<void>
+  /** 主机能否把路径交给桌面。没有这个能力时文件栏不放打开按钮。 */
+  canOpenFiles(): Promise<boolean>
+  /**
+   * 这个文件在主机上注册了哪些应用。
+   * 查不到时返回 null，和一份空名单区分开：空名单表示没有应用，null 表示这次没问出来。
+   */
+  fileApplications(sessionId: string, path: string, signal: AbortSignal): Promise<readonly MarkdownFileApplication[] | null>
+  /** 用一种打开方式打开文件。失败时抛错，由按钮自己提示。 */
+  openFile(sessionId: string, path: string, action: MarkdownFileOpen): Promise<void>
 }
 
 /** 一轮里已经能确定的文本路径，外加改动摘要的序号（有的话）。 */
@@ -431,14 +454,67 @@ function absolutePathFromStat(value: unknown): string | undefined {
   return typeof path === 'string' && path.length > 0 ? path : undefined
 }
 
+function applicationsFrom(value: unknown): readonly MarkdownFileApplication[] | null {
+  if (!isRecord(value) || value.ok !== true || !Array.isArray(value.value)) return null
+  const apps: MarkdownFileApplication[] = []
+  for (const item of value.value) {
+    if (!isRecord(item)) continue
+    const id = item.id
+    const name = item.name
+    if (typeof id !== 'string' || id.length === 0 || typeof name !== 'string' || name.length === 0) continue
+    const icon = item.icon
+    apps.push({
+      id,
+      name,
+      icon: typeof icon === 'string' && icon.length > 0 ? icon : null,
+      default: item.default === true,
+    })
+  }
+  return apps
+}
+
+function openRequest(absolutePath: string, action: MarkdownFileOpen): { path: string; action?: 'reveal'; application?: string } {
+  if (action.kind === 'reveal') return { path: absolutePath, action: 'reveal' }
+  if (action.kind === 'application') return { path: absolutePath, application: action.id }
+  return { path: absolutePath }
+}
+
 /**
- * 用当下的 remote 读文件、在文件管理器里显示文件，并用页面同源的 fetch 读改动摘要。
+ * 用当下的 remote 读文件、问桌面怎么打开，并用页面同源的 fetch 读改动摘要。
  *
  * 每次调用都重新取 remote：连接换过之后，挂在旧对象上的方法会抛。
+ * 桌面有没有这个能力按 remote 对象记一次，换了连接再问。
  * @param remote - 返回当前 `ctx.remote`。
  * @returns 阅读区用的读取口。
  */
 export function createMarkdownTurnReaders(remote: () => unknown): MarkdownTurnReaders {
+  let desktopRemote: unknown
+  let desktopAnswer: Promise<boolean> | undefined
+
+  async function openAt(sessionId: string, path: string, action: MarkdownFileOpen): Promise<void> {
+    const holder = remote()
+    const files = isRecord(holder) ? holder.workspaceFiles : undefined
+    const stat = isRecord(files) && typeof files.stat === 'function' ? files.stat : undefined
+    const session = isRecord(holder) && isRecord(holder.session) ? holder.session : undefined
+    const open = session !== undefined && typeof session.openWorkspacePath === 'function'
+      ? session.openWorkspacePath
+      : undefined
+    if (stat === undefined || open === undefined || session === undefined) {
+      throw new Error('workspace file reveal is missing')
+    }
+    const stated: unknown = await stat.call(files, sessionId, path)
+    const resolved = absolutePathFromStat(stated)
+    if (resolved === undefined) throw new Error('workspace file has no absolute path')
+    const opened: unknown = await open.call(session, openRequest(resolved, action))
+    if (!isRecord(opened) || opened.ok !== true) {
+      const error = isRecord(opened) && opened.ok === false ? opened.error : undefined
+      const message = isRecord(error) && typeof error.message === 'string' && error.message.length > 0
+        ? error.message
+        : action.kind === 'reveal' ? 'workspace file reveal failed' : 'workspace file open failed'
+      throw new Error(message)
+    }
+  }
+
   return {
     async readPage(sessionId, path, offset, signal) {
       const holder = remote()
@@ -449,26 +525,50 @@ export function createMarkdownTurnReaders(remote: () => unknown): MarkdownTurnRe
       return textPageFromRead(value)
     },
     async revealFile(sessionId, path) {
+      await openAt(sessionId, path, { kind: 'reveal' })
+    },
+    async openFile(sessionId, path, action) {
+      await openAt(sessionId, path, action)
+    },
+    async canOpenFiles() {
       const holder = remote()
-      const files = isRecord(holder) ? holder.workspaceFiles : undefined
-      const stat = isRecord(files) && typeof files.stat === 'function' ? files.stat : undefined
-      const session = isRecord(holder) && isRecord(holder.session) ? holder.session : undefined
-      const open = session !== undefined && typeof session.openWorkspacePath === 'function'
-        ? session.openWorkspacePath
-        : undefined
-      if (stat === undefined || open === undefined || session === undefined) {
-        throw new Error('workspace file reveal is missing')
-      }
-      const stated: unknown = await stat.call(files, sessionId, path)
-      const absolutePath = absolutePathFromStat(stated)
-      if (absolutePath === undefined) throw new Error('workspace file has no absolute path')
-      const opened: unknown = await open.call(session, { path: absolutePath, action: 'reveal' })
-      if (!isRecord(opened) || opened.ok !== true) {
-        const error = isRecord(opened) && opened.ok === false ? opened.error : undefined
-        const message = isRecord(error) && typeof error.message === 'string' && error.message.length > 0
-          ? error.message
-          : 'workspace file reveal failed'
-        throw new Error(message)
+      if (desktopAnswer !== undefined && desktopRemote === holder) return desktopAnswer
+      desktopRemote = holder
+      desktopAnswer = (async () => {
+        const session = isRecord(holder) && isRecord(holder.session) ? holder.session : undefined
+        const can = session !== undefined && typeof session.canOpenWorkspacePath === 'function'
+          ? session.canOpenWorkspacePath
+          : undefined
+        if (can === undefined || session === undefined) return false
+        try {
+          const result: unknown = await can.call(session)
+          return isRecord(result) && result.ok === true && result.value === true
+        } catch {
+          return false
+        }
+      })()
+      return desktopAnswer
+    },
+    async fileApplications(sessionId, path, signal) {
+      try {
+        const holder = remote()
+        const files = isRecord(holder) ? holder.workspaceFiles : undefined
+        const stat = isRecord(files) && typeof files.stat === 'function' ? files.stat : undefined
+        const session = isRecord(holder) && isRecord(holder.session) ? holder.session : undefined
+        const query = session !== undefined && typeof session.workspacePathApplications === 'function'
+          ? session.workspacePathApplications
+          : undefined
+        if (stat === undefined || query === undefined || session === undefined) return null
+        const stated: unknown = await stat.call(files, sessionId, path)
+        if (signal.aborted) throw signal.reason
+        const resolved = absolutePathFromStat(stated)
+        if (resolved === undefined) return null
+        const listed: unknown = await query.call(session, { path: resolved }, signal)
+        if (signal.aborted) throw signal.reason
+        return applicationsFrom(listed)
+      } catch (error) {
+        if (signal.aborted) throw error
+        return null
       }
     },
     async loadSummary(sessionId, seq, signal) {
