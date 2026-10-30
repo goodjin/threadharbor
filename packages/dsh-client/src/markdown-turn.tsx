@@ -13,7 +13,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { CodeBlock, FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, MarkdownText, classifyFileType, languageForPath } from '@deepseek-ai/dsh-client-ui-primitives'
+import { CodeBlock, FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconCopyOutlineRegular, IconEditOutlineRegular, IconSendOutlineRegular, MarkdownText, classifyFileType, languageForPath } from '@deepseek-ai/dsh-client-ui-primitives'
 import { FileOpenSplit } from './markdown-turn-open.tsx'
 import type { MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
 import { fallbackT, NAMESPACE } from './locales.ts'
@@ -45,6 +45,8 @@ interface MarkdownTurnProps {
   readonly turn?: { readonly data: { get(key: string): unknown } }
   readonly t?: RuntimeT
   readonly readers: MarkdownTurnReaders
+  /** 发送/复制失败的提示出口。缺省时不提示。 */
+  readonly onNotify?: (message: string) => void
 }
 
 type SummaryExtra = readonly string[]
@@ -194,21 +196,120 @@ function labelsFor(t: RuntimeT): MarkdownLabels {
   }
 }
 
-function MarkdownDocument({ sessionId, path, readers, t }: {
+/** 正文块级元素的选择器：编译包 class 运行时哈希，靠标签名定位。 */
+const MARKDOWN_BLOCK = ':is(h1,h2,h3,h4,h5,h6,p,li,blockquote,pre)'
+
+/** 取一段正文的纯文本：块级元素去掉首尾多余空白。 */
+function blockText(block: Element): string {
+  return (block.textContent ?? '').replace(/\s+/g, ' ').trim()
+}
+
+/** 找点击落在正文里的那个块级元素，没有返回 null。 */
+function markdownBlockFrom(target: EventTarget | null): Element | null {
+  if (!(target instanceof Element)) return null
+  return target.closest(MARKDOWN_BLOCK)
+}
+
+/** 把宿主底部输入框滚动挤出视口（方案 A：不改宿主，只滚动）。 */
+function scrollComposerOutOfView(bar: HTMLElement | null): void {
+  const scroller = conversationScroller(bar ?? document.body)
+  if (scroller === null) return
+  const composer = document.querySelector<HTMLElement>('[data-composer-seat], [data-conversation-region="composer"]')
+  if (composer === null) return
+  const scrollerRect = scroller.getBoundingClientRect()
+  const composerRect = composer.getBoundingClientRect()
+  if (composerRect.top < scrollerRect.bottom && composerRect.bottom > scrollerRect.top) {
+    scroller.scrollTop += composerRect.bottom - scrollerRect.top + 8
+  }
+}
+
+/** 复制一段文本到剪贴板；失败时回调 onFail。 */
+async function copyTextToClipboard(text: string, onFail: () => void): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    onFail()
+  }
+}
+
+/**
+ * 把用户评论按文档顺序合进原文：每条评论挂在它所评的那段正文后，
+ * 用引用块 + 一句说明标记。段落之间、评论与下一段之间各加一个换行。
+ * @param source - 文档原文。
+ * @param comments - 每条评论及其所评正文的纯文本。
+ * @returns 合成后的文本。
+ */
+export function composeWithComments(source: string, comments: readonly { blockText: string; comment: string }[]): string {
+  const note = '> 这是用户对此段话的评论：'
+  let out = source
+  for (const { blockText, comment } of comments) {
+    if (blockText === '' || comment.trim() === '') continue
+    const at = out.indexOf(blockText)
+    if (at < 0) continue
+    const insertAt = at + blockText.length
+    // 紧接所评正文后插入「换行 + 引用标记 + 评论」；段间原有的空行分隔自然保留。
+    out = `${out.slice(0, insertAt)}\n\n${note}\n${comment.trim()}${out.slice(insertAt)}`
+  }
+  return out
+}
+
+function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
   sessionId: string
   path: string
   readers: MarkdownTurnReaders
   t: RuntimeT
+  onNotify?: (message: string) => void
 }): ReactNode {
   const [open, setOpen] = useState(false)
   const [attempt, setAttempt] = useState(0)
   const [body, setBody] = useState<DocumentBody>({ kind: 'loading' })
   const barRef = useRef<HTMLDivElement>(null)
+  const hoveredRef = useRef<Element | null>(null)
+  const bodyRef = useRef<HTMLDivElement>(null)
+  const selBarRef = useRef<HTMLDivElement>(null)
+  const [selBar, setSelBar] = useState<{ text: string } | null>(null)
+  const [commenting, setCommenting] = useState(false)
+  const [comments, setComments] = useState<readonly { blockText: string; comment: string }[]>([])
+  const [composeOpen, setComposeOpen] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const editRef = useRef<HTMLTextAreaElement>(null)
   const labels = useMemo(() => labelsFor(t), [t])
   const toggleOpen = (): void => {
     holdFileTop(barRef.current)
     setOpen(value => !value)
   }
+  const sendText = (text: string): void => {
+    if (text === '') return
+    void readers.sendToSession(sessionId, text)
+      .catch(() => onNotify?.(t('markdownTurn.sendFailed')))
+  }
+  const openCompose = (): void => {
+    setComposeOpen(true)
+    scrollComposerOutOfView(barRef.current)
+  }
+  useEffect(() => {
+    if (!open) return
+    const update = (): void => {
+      const sel = window.getSelection()
+      if (sel === null || sel.isCollapsed || sel.rangeCount === 0) { setSelBar(null); return }
+      const node = sel.anchorNode
+      const body = bodyRef.current
+      if (node === null || body === null || !body.contains(node)) { setSelBar(null); return }
+      const text = sel.toString().trim()
+      setSelBar(text === '' ? null : { text })
+    }
+    const onDown = (event: MouseEvent): void => {
+      if (selBarRef.current?.contains(event.target as Node)) return
+      if ((event.target as Element)?.closest?.('[data-markdown-body]')) return
+      setSelBar(null)
+    }
+    document.addEventListener('selectionchange', update)
+    document.addEventListener('mousedown', onDown, true)
+    return () => {
+      document.removeEventListener('selectionchange', update)
+      document.removeEventListener('mousedown', onDown, true)
+    }
+  }, [open])
   useEffect(() => () => { releaseHeldFileTop(barRef.current) }, [])
   useEffect(() => {
     if (!open) return
@@ -245,13 +346,49 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
           event.preventDefault()
         }}
       >{path}</span>
+      {body.kind === 'ready' && (
+        <button
+          type="button"
+          className={css.iconButton}
+          data-edit-toggle=""
+          aria-label={t('markdownTurn.edit')}
+          title={t('markdownTurn.edit')}
+          onClick={() => { holdFileTop(barRef.current); setEditing(value => !value) }}
+        >
+          <IconEditOutlineRegular size={16} />
+        </button>
+      )}
       <ExpandButton open={open} label={toggleLabel} onClick={toggleOpen} />
       <FileOpenSplit sessionId={sessionId} path={path} readers={readers} t={t} />
     </div>
     {open && <div
       className={css.body}
       data-markdown-body={path}
+      data-markdown-interactive=""
+      ref={bodyRef}
       style={BODY_STYLE}
+      onClick={(event) => {
+        const button = (event.target as HTMLElement).closest<HTMLElement>('[data-line-action]')
+        if (button === null) return
+        const block = hoveredRef.current
+        if (block === null) return
+        const text = blockText(block)
+        if (text === '') return
+        const action = button.getAttribute('data-line-action')
+        event.preventDefault()
+        event.stopPropagation()
+        if (action === 'copy') {
+          button.setAttribute('data-copy-text', text)
+          void copyTextToClipboard(text, () => onNotify?.(t('markdownTurn.copyFailed')))
+        } else {
+          void readers.sendToSession(sessionId, text)
+            .catch(() => onNotify?.(t('markdownTurn.sendFailed')))
+        }
+      }}
+      onMouseOver={(event) => {
+        const block = markdownBlockFrom(event.target)
+        hoveredRef.current = block
+      }}
       onDoubleClick={(event) => {
         const target = event.target
         if (target instanceof Element && target.closest('button, a')) return
@@ -271,20 +408,95 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
       </p>}
       {body.kind === 'ready' && <>
         {body.truncated && <p className={css.status}>{t('markdownTurn.truncated')}</p>}
-        {isMarkdownPath(path)
-          ? <MarkdownText text={body.text} streaming={false} labels={labels} />
-          : <CodeBlock
-              code={body.text}
-              lang={languageForPath(path)}
-              streaming={false}
-              copyLabel={t('markdownTurn.copy')}
-              copiedLabel={t('markdownTurn.copied')}
-              toolbarLabels={{
-                codeLabel: t('markdownTurn.code'),
-                wrapLabel: t('markdownTurn.wrap'),
-                unwrapLabel: t('markdownTurn.unwrap'),
-              }}
-            />}
+        {editing
+          ? (
+            <div className={css.editBox} data-editing="">
+              <textarea
+                ref={editRef}
+                className={css.editInput}
+                data-markdown-body=""
+                defaultValue={body.text}
+                aria-label={t('markdownTurn.edit')}
+              />
+              <div className={css.editActions}>
+                <button
+                  type="button"
+                  className={css.sendBtn}
+                  data-edit-send=""
+                  onClick={() => { sendText(editRef.current?.value ?? ''); setEditing(false) }}
+                >
+                  <IconSendOutlineRegular size={15} /> {t('markdownTurn.send')}
+                </button>
+              </div>
+            </div>
+          )
+          : isMarkdownPath(path)
+            ? <MarkdownText text={body.text} streaming={false} labels={labels} />
+            : <CodeBlock
+                code={body.text}
+                lang={languageForPath(path)}
+                streaming={false}
+                copyLabel={t('markdownTurn.copy')}
+                copiedLabel={t('markdownTurn.copied')}
+                toolbarLabels={{
+                  codeLabel: t('markdownTurn.code'),
+                  wrapLabel: t('markdownTurn.wrap'),
+                  unwrapLabel: t('markdownTurn.unwrap'),
+                }}
+              />}
+        <div className={css.lineTools} data-line-tools="" role="toolbar" aria-label={t('markdownTurn.sendToSession')}>
+          <button type="button" className={css.lineTool} data-line-action="send" title={t('markdownTurn.sendToSession')} aria-label={t('markdownTurn.sendToSession')}><IconSendOutlineRegular size={15} /></button>
+          <button type="button" className={css.lineTool} data-line-action="direct" title={t('markdownTurn.send')} aria-label={t('markdownTurn.send')}><IconEditOutlineRegular size={15} /></button>
+          <button type="button" className={css.lineTool} data-line-action="copy" title={t('markdownTurn.copy')} aria-label={t('markdownTurn.copy')}><IconCopyOutlineRegular size={15} /></button>
+        </div>
+        {selBar !== null && !commenting && (
+          <div ref={selBarRef} className={css.selBar} data-selection-bar="" role="toolbar">
+            <button type="button" className={css.selBtn} data-sel-action="add" onClick={() => { setCommenting(true); openCompose() }}>{t('markdownTurn.sendToSession')}</button>
+            <button type="button" className={css.selBtn} data-sel-action="direct" onClick={() => { sendText(selBar.text); setSelBar(null) }}>{t('markdownTurn.send')}</button>
+            <button type="button" className={css.selBtn} data-sel-action="comment" onClick={() => { setCommenting(true) }}>{t('markdownTurn.comment')}</button>
+          </div>
+        )}
+        {commenting && (
+          <div className={css.commentBox} data-comment-box="">
+            <textarea className={css.commentInput} data-comment-input="" placeholder={t('markdownTurn.commentPlaceholder')} rows={3} />
+            <div className={css.commentActions}>
+              <button type="button" className={css.selBtn} data-comment-send="" onClick={() => {
+                const ta = bodyRef.current?.querySelector('[data-comment-input]') as HTMLTextAreaElement | null
+                const text = ta?.value.trim() ?? ''
+                if (text !== '') setComments(cur => [...cur, { blockText: selBar?.text ?? '', comment: text }])
+                setCommenting(false)
+              }}>{t('markdownTurn.commentSend')}</button>
+            </div>
+          </div>
+        )}
+        {comments.length > 0 && (
+          <div className={css.commentList} data-comments="">
+            {comments.map((c, i) => (
+              <blockquote key={i} className={css.comment} data-comment-for={c.blockText}>
+                <span className={css.commentMark}>{t('markdownTurn.commentedAs')}</span>
+                <span className={css.commentText}>{c.comment}</span>
+                <button type="button" className={css.commentRemove} data-comment-remove="" aria-label="删除评论" onClick={() => setComments(cur => cur.filter((_, j) => j !== i))}>×</button>
+              </blockquote>
+            ))}
+            <button type="button" className={css.sendBtn} data-comments-send="" onClick={() => { sendText(composeWithComments(body.text, comments)); setComments([]) }}>
+              <IconSendOutlineRegular size={15} /> {t('markdownTurn.send')}
+            </button>
+          </div>
+        )}
+        {composeOpen && (
+          <div className={css.composeBox} data-compose-box="">
+            <textarea className={css.composeInput} data-compose-input="" placeholder={t('markdownTurn.composePlaceholder')} rows={3} defaultValue={selBar?.text ?? ''} />
+            <div className={css.composeActions}>
+              <button type="button" className={css.sendBtn} data-compose-send="" onClick={() => {
+                const ta = bodyRef.current?.querySelector('[data-compose-input]') as HTMLTextAreaElement | null
+                sendText(ta?.value ?? '')
+                setComposeOpen(false)
+              }}>
+                <IconSendOutlineRegular size={15} /> {t('markdownTurn.send')}
+              </button>
+            </div>
+          </div>
+        )}
       </>}
     </div>}
     {open && <div className={css.foot}>
@@ -298,7 +510,7 @@ function MarkdownDocument({ sessionId, path, readers, t }: {
  * @param props - 轮次数据、会话编号、文案和读取口。
  * @returns 阅读区，或 null。
  */
-export function MarkdownTurnTail({ sessionId, turn, t, readers }: MarkdownTurnProps): ReactNode {
+export function MarkdownTurnTail({ sessionId, turn, t, readers, onNotify }: MarkdownTurnProps): ReactNode {
   const sources = markdownSources(turn?.data.get('deliverables'))
   const linked = linkedFilePathsFromTurn(turn)
   const id = typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : undefined
@@ -342,7 +554,7 @@ export function MarkdownTurnTail({ sessionId, turn, t, readers }: MarkdownTurnPr
     setListOpen(value => !value)
   }
   return <div ref={rootRef} className={css.root} data-markdown-turn="" {...(folded ? { 'data-markdown-folded': '' } : {})}>
-    {shown.map(path => <MarkdownDocument key={path} sessionId={id} path={path} readers={readers} t={translate} />)}
+    {shown.map(path => <MarkdownDocument key={path} sessionId={id} path={path} readers={readers} t={translate} {...(onNotify === undefined ? {} : { onNotify })} />)}
     {paths.length > FOLDED_FILE_COUNT && <div className={css.edge}>
       <ExpandButton open={listOpen} label={listLabel} caption={listCount} onClick={toggleList} kind="more" />
     </div>}

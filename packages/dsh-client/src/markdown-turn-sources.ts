@@ -45,6 +45,8 @@ export interface MarkdownTurnReaders {
   fileApplications(sessionId: string, path: string, signal: AbortSignal): Promise<readonly MarkdownFileApplication[] | null>
   /** 用一种打开方式打开文件。失败时抛错，由按钮自己提示。 */
   openFile(sessionId: string, path: string, action: MarkdownFileOpen): Promise<void>
+  /** 把一段文本作为一条消息发给当前会话。失败时抛错，由按钮自己提示。 */
+  sendToSession(sessionId: string, text: string): Promise<void>
 }
 
 /** 一轮里已经能确定的文本路径，外加改动摘要的序号（有的话）。 */
@@ -575,6 +577,28 @@ export function createMarkdownTurnReaders(remote: () => unknown): MarkdownTurnRe
       const response = await fetch(changesSummaryUrl(sessionId, seq), { signal })
       if (!response.ok) return undefined
       return await response.json() as unknown
+    },
+    async sendToSession(sessionId, text) {
+      const holder = remote()
+      const session = isRecord(holder) && isRecord(holder.session) ? holder.session : undefined
+      const prompt = session !== undefined && typeof session.prompt === 'function'
+        ? session.prompt
+        : undefined
+      if (prompt === undefined) throw new Error('session.prompt is missing')
+      const payload = {
+        requestId: crypto.randomUUID(),
+        sessionId,
+        mode: 'queue' as const,
+        content: [{ type: 'text' as const, text }],
+      }
+      const result: unknown = await prompt.call(session, payload)
+      if (!isRecord(result) || result['ok'] !== true) {
+        const error = isRecord(result) ? result['error'] : undefined
+        const message = isRecord(error) && typeof error['message'] === 'string'
+          ? error['message']
+          : 'session.prompt failed'
+        throw new Error(message)
+      }
     },
   }
 }
