@@ -342,7 +342,8 @@ describe('MarkdownTurnTail', () => {
     expect(container.hasAttribute('data-markdown-folded') || container.querySelector('[data-markdown-folded]') !== null).toBe(true)
     const mores = (): Element[] => [...container.querySelectorAll('[data-markdown-more]')]
     expect(mores()).toHaveLength(2)
-    expect(mores()[0]?.textContent?.trim()).toBe('')
+    expect(mores()[0]?.textContent).toContain(`全部 ${paths.length} 个文件`)
+    expect(mores()[1]?.textContent).toContain(`全部 ${paths.length} 个文件`)
     expect(mores()[0]?.getAttribute('aria-label')).toBe(`展开全部 ${paths.length} 个文件`)
     expect(mores()[0]?.getAttribute('aria-expanded')).toBe('false')
     expect(mores()[1]?.getAttribute('aria-expanded')).toBe('false')
@@ -356,6 +357,8 @@ describe('MarkdownTurnTail', () => {
     await act(async () => { mores()[0]?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     expect(container.querySelectorAll('[data-markdown-path]')).toHaveLength(paths.length)
     expect(container.querySelector('[data-markdown-folded]')).toBeNull()
+    expect(mores()[0]?.textContent).toContain(`全部 ${paths.length} 个文件`)
+    expect(mores()[1]?.textContent).toContain(`全部 ${paths.length} 个文件`)
     expect(mores()[0]?.getAttribute('aria-label')).toBe('收起文件列表')
     expect(mores()[0]?.getAttribute('aria-expanded')).toBe('true')
     expect(mores()[1]?.getAttribute('aria-expanded')).toBe('true')

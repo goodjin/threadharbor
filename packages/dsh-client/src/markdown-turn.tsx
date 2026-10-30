@@ -6,6 +6,7 @@
  * 展开后路径栏与正文隔开。双击正文收回。路径栏右侧用图标打开所在文件夹。
  * 点开或收起时，路径栏留在点击时的视口位置。文件多于四篇时先只列出四篇。
  * 文件列表和每个文件框的右上、右下都用图标展开或收起。
+ * 列表两端写着一共有多少个文件。
  * 路径文字在按钮外面，可以选中复制。
  */
 
@@ -153,15 +154,16 @@ type DocumentBody =
   | { readonly kind: 'error' }
   | { readonly kind: 'ready'; readonly text: string; readonly truncated: boolean }
 
-function ExpandButton({ open, label, onClick, kind }: {
+function ExpandButton({ open, label, onClick, kind, caption }: {
   open: boolean
   label: string
   onClick: () => void
   kind?: 'more' | 'foot'
+  caption?: string
 }): ReactNode {
   return <button
     type="button"
-    className={css.iconButton}
+    className={caption === undefined ? css.iconButton : `${css.iconButton} ${css.withCount}`}
     aria-expanded={open}
     aria-label={label}
     title={label}
@@ -169,6 +171,7 @@ function ExpandButton({ open, label, onClick, kind }: {
     {...(kind === 'more' ? { 'data-markdown-more': '' } : {})}
     {...(kind === 'foot' ? { 'data-path-foot': '' } : {})}
   >
+    {caption !== undefined && <span>{caption}</span>}
     {open ? <IconChevronUpOutlineRegular size={16} /> : <IconChevronDownOutlineRegular size={16} />}
   </button>
 }
@@ -333,12 +336,13 @@ export function MarkdownTurnTail({ sessionId, turn, t, readers }: MarkdownTurnPr
   const folded = paths.length > FOLDED_FILE_COUNT && !listOpen
   const shown = folded ? paths.slice(0, FOLDED_FILE_COUNT) : paths
   const listLabel = translate(listOpen ? 'markdownTurn.filesCollapseAria' : 'markdownTurn.filesAllAria', { count: String(paths.length) })
+  const listCount = translate('markdownTurn.filesAll', { count: String(paths.length) })
   const toggleList = (): void => {
     holdFileTop(rootRef.current, rootRef.current)
     setListOpen(value => !value)
   }
   const listToggle = (): ReactNode => paths.length > FOLDED_FILE_COUNT
-    ? <div className={css.edge}><ExpandButton open={listOpen} label={listLabel} onClick={toggleList} kind="more" /></div>
+    ? <div className={css.edge}><ExpandButton open={listOpen} label={listLabel} caption={listCount} onClick={toggleList} kind="more" /></div>
     : null
   return <div ref={rootRef} className={css.root} data-markdown-turn="" {...(folded ? { 'data-markdown-folded': '' } : {})}>
     {listToggle()}

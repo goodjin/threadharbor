@@ -51,6 +51,14 @@
   background: rgb(0 0 0 / 6%);
 }
 
+.withCount {
+  width: auto;
+  gap: 4px;
+  padding: 0 8px 0 10px;
+  font: inherit;
+  font-size: 12px;
+}
+
 .iconButton[data-reveal-error] {
   color: #b42318;
 }
