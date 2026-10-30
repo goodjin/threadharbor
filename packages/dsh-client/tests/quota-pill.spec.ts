@@ -160,6 +160,35 @@ describe('QuotaPillRow（胶囊渲染）', () => {
     expect(html({ directory: undefined, quota: WINDOWS })).toBe('')
   })
 
+  it('钩子调用与模型、可见性无关：同一实例切到 GLM 时不该多出一个钩子', () => {
+    // 2026-10-30 真机：会话先选别的模型，再切 ZCode，useQuota 在已经挂载的
+    // 实例上第一次被调用，React 抛 #310，整个 dock 条目被错误边界收成空块。
+    const calls: string[] = []
+    const useModelDirectory = (selector: (value: unknown) => unknown): unknown => {
+      calls.push('directory')
+      return selector(OTHER_DIRECTORY)
+    }
+    const useQuota = (selector: (value: unknown) => unknown): unknown => {
+      calls.push('quota')
+      return selector(WINDOWS)
+    }
+    const markup = renderToString(createElement(QuotaPillRow, {
+      useModelDirectory: useModelDirectory as never,
+      useQuota: useQuota as never,
+      t: zhT,
+    }))
+    expect(markup).toBe('')
+    expect(calls).toEqual(['directory', 'quota'])
+    calls.length = 0
+    renderToString(createElement(QuotaPillRow, {
+      useModelDirectory: useModelDirectory as never,
+      useQuota: useQuota as never,
+      visible: false,
+      t: zhT,
+    }))
+    expect(calls).toEqual(['directory', 'quota'])
+  })
+
   it('渲染器绑定的选择器钩子必须带选择器：空参调用不该把它打崩', () => {
     // 真机上 ui-renderer 把注入的 hooks 源绑成 (selector, isEqual) => S；
     // 不给选择器时 use-sync-external-store 会抛 "selector is not a function"。

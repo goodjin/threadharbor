@@ -195,10 +195,13 @@ export function QuotaPillRow({ useQuota, useModelDirectory, visible = true, t = 
   visible?: boolean
   t?: RuntimeT
 }): ReactNode {
-  if (visible === false) return null
+  // 钩子必须每次渲染都按同一顺序调用：同一挂载实例会经历模型从非 GLM 切到
+  // GLM，条件调用让 hook 数 1→2，React #310 会把整个 dock 条目收成空块。
+  // （2026-10-30 真机：会话里切 ZCode 后胶囊消失。）
   const model = useModelDirectory?.((value) => value)?.current?.model
-  if (model === undefined || !model.startsWith(GLM_MODEL_PREFIX)) return null
   const quota = useQuota?.((value) => value)
+  if (visible === false) return null
+  if (model === undefined || !model.startsWith(GLM_MODEL_PREFIX)) return null
   if (quota === undefined) return null
   const windows = [quota.fiveHour, quota.weekly].filter((window): window is QuotaWindow => window !== undefined)
   if (windows.length === 0) return null
