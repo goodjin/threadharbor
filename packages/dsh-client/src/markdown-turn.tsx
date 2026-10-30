@@ -271,6 +271,8 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
   const [commenting, setCommenting] = useState(false)
   const [comments, setComments] = useState<readonly { blockText: string; comment: string }[]>([])
   const [composeOpen, setComposeOpen] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const editRef = useRef<HTMLTextAreaElement>(null)
   const labels = useMemo(() => labelsFor(t), [t])
   const toggleOpen = (): void => {
     holdFileTop(barRef.current)
@@ -344,6 +346,18 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
           event.preventDefault()
         }}
       >{path}</span>
+      {body.kind === 'ready' && (
+        <button
+          type="button"
+          className={css.iconButton}
+          data-edit-toggle=""
+          aria-label={t('markdownTurn.edit')}
+          title={t('markdownTurn.edit')}
+          onClick={() => { holdFileTop(barRef.current); setEditing(value => !value) }}
+        >
+          <IconEditOutlineRegular size={16} />
+        </button>
+      )}
       <ExpandButton open={open} label={toggleLabel} onClick={toggleOpen} />
       <FileOpenSplit sessionId={sessionId} path={path} readers={readers} t={t} />
     </div>
@@ -394,20 +408,42 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
       </p>}
       {body.kind === 'ready' && <>
         {body.truncated && <p className={css.status}>{t('markdownTurn.truncated')}</p>}
-        {isMarkdownPath(path)
-          ? <MarkdownText text={body.text} streaming={false} labels={labels} />
-          : <CodeBlock
-              code={body.text}
-              lang={languageForPath(path)}
-              streaming={false}
-              copyLabel={t('markdownTurn.copy')}
-              copiedLabel={t('markdownTurn.copied')}
-              toolbarLabels={{
-                codeLabel: t('markdownTurn.code'),
-                wrapLabel: t('markdownTurn.wrap'),
-                unwrapLabel: t('markdownTurn.unwrap'),
-              }}
-            />}
+        {editing
+          ? (
+            <div className={css.editBox} data-editing="">
+              <textarea
+                ref={editRef}
+                className={css.editInput}
+                data-markdown-body=""
+                defaultValue={body.text}
+                aria-label={t('markdownTurn.edit')}
+              />
+              <div className={css.editActions}>
+                <button
+                  type="button"
+                  className={css.sendBtn}
+                  data-edit-send=""
+                  onClick={() => { sendText(editRef.current?.value ?? ''); setEditing(false) }}
+                >
+                  <IconSendOutlineRegular size={15} /> {t('markdownTurn.send')}
+                </button>
+              </div>
+            </div>
+          )
+          : isMarkdownPath(path)
+            ? <MarkdownText text={body.text} streaming={false} labels={labels} />
+            : <CodeBlock
+                code={body.text}
+                lang={languageForPath(path)}
+                streaming={false}
+                copyLabel={t('markdownTurn.copy')}
+                copiedLabel={t('markdownTurn.copied')}
+                toolbarLabels={{
+                  codeLabel: t('markdownTurn.code'),
+                  wrapLabel: t('markdownTurn.wrap'),
+                  unwrapLabel: t('markdownTurn.unwrap'),
+                }}
+              />}
         <div className={css.lineTools} data-line-tools="" role="toolbar" aria-label={t('markdownTurn.sendToSession')}>
           <button type="button" className={css.lineTool} data-line-action="send" title={t('markdownTurn.sendToSession')} aria-label={t('markdownTurn.sendToSession')}><IconSendOutlineRegular size={15} /></button>
           <button type="button" className={css.lineTool} data-line-action="direct" title={t('markdownTurn.send')} aria-label={t('markdownTurn.send')}><IconEditOutlineRegular size={15} /></button>

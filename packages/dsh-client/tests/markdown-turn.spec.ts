@@ -219,16 +219,16 @@ describe('MarkdownTurnTail', () => {
     expect(container.querySelector('[data-markdown-body]')).toBeNull()
     expect(container.textContent).not.toContain('正在读取文档')
     expect(face.readPage).not.toHaveBeenCalled()
-    expect(container.querySelector('button')?.getAttribute('aria-expanded')).toBe('false')
+    expect(container.querySelector('button[aria-expanded]')?.getAttribute('aria-expanded')).toBe('false')
 
-    const toggle = container.querySelector('button')
+    const toggle = container.querySelector('button[aria-expanded]')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     expect(container.textContent).toContain('正在读取文档')
     const body = container.querySelector('[data-markdown-body="docs/a.md"]')
     expect(body).not.toBeNull()
     expect((body as HTMLElement).style.maxHeight).toBe('100dvh')
     expect((body as HTMLElement).style.overflow).toBe('auto')
-    expect(container.querySelector('button')?.getAttribute('aria-expanded')).toBe('true')
+    expect(container.querySelector('button[aria-expanded]')?.getAttribute('aria-expanded')).toBe('true')
 
     await act(async () => { resolvePage(page('# Hello', 1, true)) })
     expect(container.textContent).toContain('Hello')
@@ -236,7 +236,7 @@ describe('MarkdownTurnTail', () => {
 
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     expect(container.querySelector('[data-markdown-body]')).toBeNull()
-    expect(container.querySelector('button')?.getAttribute('aria-expanded')).toBe('false')
+    expect(container.querySelector('button[aria-expanded]')?.getAttribute('aria-expanded')).toBe('false')
     await act(async () => { root.unmount() })
   })
 
@@ -949,6 +949,80 @@ describe('MarkdownDocument 选中文本操作条', () => {
     range.collapse(true)
     await act(async () => { document.dispatchEvent(new Event('selectionchange')) })
     expect(container.querySelector('[data-selection-bar]')).toBeNull()
+    await act(async () => { root.unmount() })
+  })
+})
+
+describe('MarkdownDocument 编辑与 compose box', () => {
+  it('点编辑切成文本框，发送以编辑值调用 sendToSession', async () => {
+    const send = vi.fn(async () => {})
+    const face = readers({ readPage: vi.fn(async () => page('# 原始', 1, true)), sendToSession: send })
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+        readers: face,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+    const toggle = container.querySelector('button[aria-expanded]')
+    await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await Promise.resolve() })
+    const editBtn = container.querySelector('[data-edit-toggle]') as HTMLButtonElement
+    expect(editBtn).not.toBeNull()
+    await act(async () => { editBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const ta = container.querySelector('[data-markdown-body] textarea') as HTMLTextAreaElement
+    expect(ta).not.toBeNull()
+    expect(ta.value).toBe('# 原始')
+    await act(async () => {
+      ta.value = '# 改过'
+      ta.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const sendBtn = container.querySelector('[data-edit-send]')
+    await act(async () => { sendBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(send).toHaveBeenCalledWith('sess', '# 改过')
+    await act(async () => { root.unmount() })
+  })
+
+  it('添加到会话打开 compose box，发送后收起', async () => {
+    const send = vi.fn(async () => {})
+    const face = readers({ readPage: vi.fn(async () => page('段落', 1, true)), sendToSession: send })
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+        readers: face,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+    const toggle = container.querySelector('button[aria-expanded]')
+    await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await Promise.resolve() })
+    const para = container.querySelector('[data-markdown-body] p') as HTMLElement
+    const range = document.createRange()
+    range.selectNodeContents(para.firstChild as Node)
+    const sel = window.getSelection()
+    sel?.removeAllRanges()
+    sel?.addRange(range)
+    await act(async () => { document.dispatchEvent(new Event('selectionchange')) })
+    const addBtn = container.querySelector('[data-sel-action="add"]')
+    await act(async () => { addBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(container.querySelector('[data-compose-box]')).not.toBeNull()
+    const input = container.querySelector('[data-compose-input]') as HTMLTextAreaElement
+    await act(async () => {
+      input.value = '要加入会话'
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const csend = container.querySelector('[data-compose-send]')
+    await act(async () => { csend?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(send).toHaveBeenCalledWith('sess', '要加入会话')
+    expect(container.querySelector('[data-compose-box]')).toBeNull()
     await act(async () => { root.unmount() })
   })
 })
