@@ -45,7 +45,8 @@ export async function* streamMiniMax(request: MiniMaxRequest): AsyncGenerator<Mi
     })
   } catch (error) {
     if (isAbort(error) || request.signal?.aborted === true) throw error
-    throw new Error(scrub(error instanceof Error ? error.message : String(error), credential.accessToken))
+    yield transportFailure(error, credential.accessToken)
+    return
   }
   if (!response.ok) {
     const detail = scrub(await response.text().catch(() => ''), credential.accessToken).slice(0, 500)
@@ -63,8 +64,54 @@ export async function* streamMiniMax(request: MiniMaxRequest): AsyncGenerator<Mi
     }
   } catch (error) {
     if (isAbort(error) || request.signal?.aborted === true) throw error
-    throw new Error(scrub(error instanceof Error ? error.message : String(error), credential.accessToken))
+    yield transportFailure(error, credential.accessToken)
+    return
   }
+}
+
+/**
+ * The failure code the host retries on its own.
+ *
+ * A connection that dies is not a wrong answer, it is a moment lost: the host
+ * retries TRANSPORT failures itself, so a proxy hiccup costs a second instead
+ * of the turn. Any other code ends the turn outright.
+ */
+const TRANSPORT_CODE = 'TRANSPORT'
+
+/**
+ * The terminal chunk for a network failure.
+ *
+ * Undici names these only "fetch failed"; the reason that matters — the proxy
+ * that went away, the refused connection, the name that did not resolve — sits
+ * in the cause chain, so that is what the message names. The token never
+ * reaches it: the message is scrubbed like every other one.
+ */
+function transportFailure(error: unknown, secret: string): MiniMaxStreamChunk {
+  return {
+    type: 'finish',
+    reason: {
+      kind: 'error',
+      failure: {
+        message: scrub(`MiniMax request failed: ${describeTransportFailure(error)}`, secret),
+        code: TRANSPORT_CODE,
+      },
+    },
+  }
+}
+
+/** The one-line reason for a network failure: the deepest cause that says why. */
+function describeTransportFailure(error: unknown): string {
+  const base = error instanceof Error ? error.message : String(error)
+  let detail = ''
+  let current: unknown = (error as { cause?: unknown } | null | undefined)?.cause
+  for (let depth = 0; depth < 5 && current !== undefined && current !== null; depth += 1) {
+    const message = current instanceof Error
+      ? current.message
+      : typeof current === 'string' ? current : ''
+    if (message !== '' && message !== base) detail = message
+    current = (current as { cause?: unknown }).cause
+  }
+  return detail === '' ? base : detail
 }
 
 /** Drop the token from anything that might be shown. A short or empty secret is left alone. */

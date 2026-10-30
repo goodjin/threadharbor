@@ -218,6 +218,50 @@ describe('streamGlm', () => {
     expect(JSON.stringify(captured.body)).not.toContain(secret)
   })
 
+  it('reports a network failure as a retryable transport failure that names the real cause', async () => {
+    const fetchImpl = (async () => {
+      throw Object.assign(new TypeError('fetch failed'), {
+        cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:7897'), { code: 'ECONNREFUSED' }),
+      })
+    }) as typeof fetch
+    const chunks = await read(streamGlm({
+      model: 'GLM-5.3',
+      apiKey: KEY,
+      endpoint: BIGMODEL_CODING_PLAN_BASE,
+      fetchImpl,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    }))
+    expect(chunks).toHaveLength(1)
+    expect(chunks[0]).toMatchObject({
+      type: 'finish',
+      reason: { kind: 'error', failure: { code: 'TRANSPORT' } },
+    })
+    const failure = (chunks[0] as { reason: { failure: { message: string } } }).reason.failure
+    expect(failure.message).toContain('ECONNREFUSED')
+    expect(failure.message).not.toContain(KEY)
+  })
+
+  it('reports a stream that dies mid-flight as a transport failure', async () => {
+    const fetchImpl = (async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.error(Object.assign(new TypeError('terminated'), { cause: new Error('socket hang up') }))
+      },
+    }), { status: 200, headers: { 'content-type': 'text/event-stream' } })) as typeof fetch
+    const chunks = await read(streamGlm({
+      model: 'GLM-5.3',
+      apiKey: KEY,
+      endpoint: BIGMODEL_CODING_PLAN_BASE,
+      fetchImpl,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    }))
+    expect(chunks.at(-1)).toMatchObject({
+      type: 'finish',
+      reason: { kind: 'error', failure: { code: 'TRANSPORT' } },
+    })
+    const failure = (chunks.at(-1) as { reason: { failure: { message: string } } }).reason.failure
+    expect(failure.message).toContain('socket hang up')
+  })
+
   it('stops when the caller aborts', async () => {
     const fetchImpl = (async (_input, init) => {
       expect(init?.signal?.aborted).toBe(true)
