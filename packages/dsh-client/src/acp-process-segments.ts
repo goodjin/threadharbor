@@ -62,7 +62,16 @@ function delta(step: StepProse, chunk: Record<string, unknown>, time: number, se
   }
   return { ...step, pending: appendDelta(step.pending, chunk), anchorSeq: step.anchorSeq ?? seq, time: step.pending.length === 0 ? time : step.time }
 }
+
+/**
+ * Cards the ACP projection appends after the step's prose: its plan update
+ * rides last as a synthetic settled `todo_write` call. Such a card owns no
+ * prose, so it must never seal — otherwise the final answer ends up inside its
+ * process segment and disappears when the turn's process is folded.
+ */
+const PROSE_FREE_CALL_IDS = new Set(['acp-plan'])
 function seal(step: StepProse, call: Boundary): StepProse {
+  if (PROSE_FREE_CALL_IDS.has(call.callId)) return step
   const entries = step.pending.filter(entry => call.beforeBlock === undefined || entry.index < call.beforeBlock)
   if (entries.length === 0) return step
   const pending = step.pending.filter(entry => !entries.includes(entry))
@@ -83,7 +92,8 @@ function reconstructFromContent(step: StepProse, content: readonly unknown[], ca
   const open: Pending[] = []
   const flush = (): void => {
     if (open.length === 0) return
-    const call = calls.find(candidate => !next.segments.some(segment => segment.callId === candidate.callId))
+    const call = calls.find(candidate => !PROSE_FREE_CALL_IDS.has(candidate.callId)
+      && !next.segments.some(segment => segment.callId === candidate.callId))
     const segment = completedSegment(call ?? { callId: 'content', seq: seq + 0.1, time: next.time || seq }, open, next.time || seq)
     next = { ...next, segments: [...next.segments, segment], anchorSeq: undefined }
     open.length = 0
@@ -93,7 +103,7 @@ function reconstructFromContent(step: StepProse, content: readonly unknown[], ca
     if (block.type === 'text' || block.type === 'reasoning') {
       const text = typeof block.text === 'string' ? block.text : ''
       if (text !== '') open.push({ index: open.length, kind: block.type, text })
-    } else if (block.type === 'tool-call') {
+    } else if (block.type === 'tool-call' && !PROSE_FREE_CALL_IDS.has(String(block.id))) {
       flush()
     }
   }
