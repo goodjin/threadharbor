@@ -438,7 +438,9 @@ export function startMermaidDiagrams(deps: MermaidDiagramsDeps = {}): MermaidDia
     try {
       initializeFor(runtime, theme)
       const id = `th-mermaid-${String(++renderSeq)}`
-      const result = await enqueue(() => runtime.render(id, source, doc.createElement('div')))
+      // 只传两参：mermaid 11 传容器（尤其游离节点）会在内部 getAttribute
+      // 上抛错，SVG 由返回值得出、我们自己挂进画布（真机抓到的形状）。
+      const result = await enqueue(() => runtime.render(id, source))
       if (disposed || !block.isConnected || state.generation !== generation || state.source !== source) return
       remember(key, result.svg)
       applySvg(block, state, state.view, result.svg)
