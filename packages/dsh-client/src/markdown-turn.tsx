@@ -554,7 +554,7 @@ export function MarkdownTurnTail({ sessionId, turn, t, readers, onNotify }: Mark
     setListOpen(value => !value)
   }
   return <div ref={rootRef} className={css.root} data-markdown-turn="" {...(folded ? { 'data-markdown-folded': '' } : {})}>
-    {shown.map(path => <MarkdownDocument key={path} sessionId={id} path={path} readers={readers} t={translate} onNotify={onNotify} />)}
+    {shown.map(path => <MarkdownDocument key={path} sessionId={id} path={path} readers={readers} t={translate} {...(onNotify === undefined ? {} : { onNotify })} />)}
     {paths.length > FOLDED_FILE_COUNT && <div className={css.edge}>
       <ExpandButton open={listOpen} label={listLabel} caption={listCount} onClick={toggleList} kind="more" />
     </div>}
