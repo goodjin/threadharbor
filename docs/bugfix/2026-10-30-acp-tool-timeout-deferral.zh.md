@@ -41,6 +41,17 @@
 - 按本次现场回推：该编译的预算截止约在 13:04:05，看门狗会让路到那一刻；编译若在
   预算内完成，收尾帧是活动，回合正常继续。
 
+## 扩展：其余方言（同日合并）
+
+全机会话扫描后把钩子扩到另外三个方言，字段名按各自真机形态：
+
+| Agent | 字段 | 本机 bash 带声明的占比 | 备注 |
+|---|---|---|---|
+| codex | `timeoutMs` | 409/6549 ≈ 6% | 模型偶尔声明（如 worktree 构建 600000）；它自身还会杀超时命令并发完成帧，默认档天然安全 |
+| grok | `timeout` | 52/9084 ≈ 0.6% | 恰好是 ssh 探测这类静默命令；有输出时 terminal output 帧本身就是活动，钩子只补无输出的空窗。grok 的 stallMs 已由 fix/grok-compaction-watchdog 先行放宽到 300000 |
+| claude | `timeout` | 本机无工具样本 | Claude Code 的 Bash schema 有可选 timeout，读不到就当没有预算 |
+| cursor | 无 | 0（rawInput 只有 command） | 拿不到，维持现状；其进行中帧只有调用 id，无输出流 |
+
 ## 验证
 
 - 方言：`dialects.spec` 钉住 timeout 读取与缺省/非数字/非正数的边界。
