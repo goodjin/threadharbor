@@ -320,7 +320,7 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
       document.removeEventListener('selectionchange', update)
       document.removeEventListener('mousedown', onDown, true)
     }
-  }, [open])
+  }, [open, editing])
   useEffect(() => () => { releaseHeldFileTop(barRef.current) }, [])
   useEffect(() => {
     if (!open) return
@@ -458,19 +458,19 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
                   unwrapLabel: t('markdownTurn.unwrap'),
                 }}
               />}
-        <div className={css.lineTools} data-line-tools="" role="toolbar" aria-label={t('markdownTurn.sendToSession')}>
+        {!editing && <div className={css.lineTools} data-line-tools="" role="toolbar" aria-label={t('markdownTurn.sendToSession')}>
           <button type="button" className={css.lineTool} data-line-action="send" title={t('markdownTurn.sendToSession')} aria-label={t('markdownTurn.sendToSession')}><IconSendOutlineRegular size={15} /></button>
           <button type="button" className={css.lineTool} data-line-action="direct" title={t('markdownTurn.send')} aria-label={t('markdownTurn.send')}><IconEditOutlineRegular size={15} /></button>
           <button type="button" className={css.lineTool} data-line-action="copy" title={t('markdownTurn.copy')} aria-label={t('markdownTurn.copy')}><IconCopyOutlineRegular size={15} /></button>
-        </div>
-        {selBar !== null && !commenting && (
+        </div>}
+        {!editing && selBar !== null && !commenting && (
           <div ref={selBarRef} className={css.selBar} data-selection-bar="" role="toolbar">
             <button type="button" className={css.selBtn} data-sel-action="add" onClick={() => { setCommenting(false); setSelBar(null); openCompose() }}>{t('markdownTurn.sendToSession')}</button>
             <button type="button" className={css.selBtn} data-sel-action="direct" onClick={() => { sendText(selBar.text); setSelBar(null) }}>{t('markdownTurn.send')}</button>
             <button type="button" className={css.selBtn} data-sel-action="comment" onClick={() => { openComment() }}>{t('markdownTurn.comment')}</button>
           </div>
         )}
-        {commenting && (
+        {!editing && commenting && (
           <div className={css.commentBox} data-comment-box="">
             <textarea className={css.commentInput} data-comment-input="" placeholder={t('markdownTurn.commentPlaceholder')} rows={3} />
             <div className={css.commentActions}>

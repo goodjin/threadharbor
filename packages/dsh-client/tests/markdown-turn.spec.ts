@@ -1140,6 +1140,41 @@ describe('MarkdownDocument 编辑与 compose box', () => {
     await act(async () => { root.unmount() })
   })
 
+  it('编辑态隐藏行内工具条与选区操作条，选区也不弹条', async () => {
+    const send = vi.fn(async () => {})
+    const face = readers({ readPage: vi.fn(async () => page('# 甲\n\n段落乙', 1, true)), sendToSession: send })
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+        readers: face,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+    const toggle = container.querySelector('button[aria-expanded]')
+    await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await Promise.resolve() })
+
+    const para = container.querySelector('[data-markdown-body] p') as HTMLElement
+    const range = document.createRange()
+    range.selectNodeContents(para.firstChild as Node)
+    const sel = window.getSelection()
+    sel?.removeAllRanges()
+    sel?.addRange(range)
+    await act(async () => { document.dispatchEvent(new Event('selectionchange')) })
+    expect(container.querySelector('[data-line-tools]')).not.toBeNull()
+
+    const editBtn = container.querySelector('[data-edit-toggle]') as HTMLButtonElement
+    await act(async () => { editBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(container.querySelector('[data-line-tools]')).toBeNull()
+    await act(async () => { document.dispatchEvent(new Event('selectionchange')) })
+    expect(container.querySelector('[data-selection-bar]')).toBeNull()
+    await act(async () => { root.unmount() })
+  })
+
   it('添加到会话打开 compose box，发送后收起', async () => {
     const send = vi.fn(async () => {})
     const face = readers({ readPage: vi.fn(async () => page('段落', 1, true)), sendToSession: send })
