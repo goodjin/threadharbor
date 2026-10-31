@@ -268,6 +268,8 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
   const bodyRef = useRef<HTMLDivElement>(null)
   const selBarRef = useRef<HTMLDivElement>(null)
   const [selBar, setSelBar] = useState<{ text: string } | null>(null)
+  // 点「评论」那一刻快照所评块：此后聚焦输入框会塌缩文档选区，届时再读选区已拿不到锚点。
+  const commentAnchorRef = useRef<string>('')
   const [commenting, setCommenting] = useState(false)
   const [comments, setComments] = useState<readonly { blockText: string; comment: string }[]>([])
   const [composeOpen, setComposeOpen] = useState(false)
@@ -286,6 +288,15 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
   const openCompose = (): void => {
     setComposeOpen(true)
     scrollComposerOutOfView(barRef.current)
+  }
+  const openComment = (): void => {
+    // 此刻选区还在，快照选区所在块级元素的整段文本作为锚点（composeWithComments 按它在
+    // body.text 里定位）。之后聚焦输入框会塌缩选区，selBar 会被清空，故必须此刻取。
+    const sel = window.getSelection()
+    const anchor = sel?.anchorNode ?? null
+    const block = anchor === null ? null : markdownBlockFrom(anchor)
+    commentAnchorRef.current = block === null ? (selBar?.text ?? '') : blockText(block)
+    setCommenting(true)
   }
   useEffect(() => {
     if (!open) return
@@ -456,7 +467,7 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
           <div ref={selBarRef} className={css.selBar} data-selection-bar="" role="toolbar">
             <button type="button" className={css.selBtn} data-sel-action="add" onClick={() => { setCommenting(true); openCompose() }}>{t('markdownTurn.sendToSession')}</button>
             <button type="button" className={css.selBtn} data-sel-action="direct" onClick={() => { sendText(selBar.text); setSelBar(null) }}>{t('markdownTurn.send')}</button>
-            <button type="button" className={css.selBtn} data-sel-action="comment" onClick={() => { setCommenting(true) }}>{t('markdownTurn.comment')}</button>
+            <button type="button" className={css.selBtn} data-sel-action="comment" onClick={() => { openComment() }}>{t('markdownTurn.comment')}</button>
           </div>
         )}
         {commenting && (
@@ -466,7 +477,7 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
               <button type="button" className={css.selBtn} data-comment-send="" onClick={() => {
                 const ta = bodyRef.current?.querySelector('[data-comment-input]') as HTMLTextAreaElement | null
                 const text = ta?.value.trim() ?? ''
-                if (text !== '') setComments(cur => [...cur, { blockText: selBar?.text ?? '', comment: text }])
+                if (text !== '') setComments(cur => [...cur, { blockText: commentAnchorRef.current, comment: text }])
                 setCommenting(false)
               }}>{t('markdownTurn.commentSend')}</button>
             </div>

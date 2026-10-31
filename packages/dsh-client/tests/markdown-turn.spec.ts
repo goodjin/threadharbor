@@ -1018,6 +1018,57 @@ describe('MarkdownDocument 选中文本操作条', () => {
     expect(container.querySelector('[data-selection-bar]')).toBeNull()
     await act(async () => { root.unmount() })
   })
+
+  it('打开评论框后选区塌缩，评论仍带锚点发出（真实浏览器行为）', async () => {
+    const send = vi.fn(async () => {})
+    const face = readers({ readPage: vi.fn(async () => page('# 甲\n\n段落乙', 1, true)), sendToSession: send })
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+        readers: face,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+    const toggle = container.querySelector('button[aria-expanded]')
+    await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await Promise.resolve() })
+
+    const para = container.querySelector('[data-markdown-body] p') as HTMLElement
+    const range = document.createRange()
+    range.selectNodeContents(para.firstChild as Node)
+    const sel = window.getSelection()
+    sel?.removeAllRanges()
+    sel?.addRange(range)
+    await act(async () => { document.dispatchEvent(new Event('selectionchange')) })
+
+    const bar = container.querySelector('[data-selection-bar]') as HTMLElement
+    const commentBtn = bar.querySelector('[data-sel-action="comment"]') as HTMLElement
+    await act(async () => { commentBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const ta = container.querySelector('[data-comment-input]') as HTMLTextAreaElement
+    await act(async () => {
+      ta.value = '我的评论'
+      ta.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    // 真实浏览器：聚焦输入框令文档选区塌缩。
+    range.collapse(true)
+    await act(async () => { document.dispatchEvent(new Event('selectionchange')) })
+    expect(container.querySelector('[data-selection-bar]')).toBeNull()
+
+    const sendComment = container.querySelector('[data-comment-send]') as HTMLElement
+    await act(async () => { sendComment.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const commentsSend = container.querySelector('[data-comments-send]') as HTMLElement
+    await act(async () => { commentsSend.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(send).toHaveBeenCalledTimes(1)
+    const composed = send.mock.calls[0][1] as string
+    expect(composed).toContain('段落乙')
+    expect(composed).toContain('我的评论')
+    expect(composed).toContain('这是用户对此段话的评论')
+    await act(async () => { root.unmount() })
+  })
 })
 
 describe('MarkdownDocument 编辑与 compose box', () => {
