@@ -430,7 +430,7 @@ describe('MarkdownTurnTail', () => {
       container.querySelector('[data-open-path-more]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
     expect([...document.querySelectorAll('[role="menuitem"]')].map(node => node.textContent?.trim()))
-      .toEqual(['复制', '打开文件夹（默认）'])
+      .toEqual(['复制', '右侧打开', '浏览器打开', '打开文件夹（默认）'])
     await act(async () => { open?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
     expect(openFile).toHaveBeenCalledWith('sess', 'docs/a.md', { kind: 'reveal' })
@@ -467,10 +467,10 @@ describe('MarkdownTurnTail', () => {
       split.querySelector('[data-open-path-more]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
     const labels = [...document.querySelectorAll('[role="menuitem"]')].map(node => node.textContent?.trim())
-    expect(labels).toEqual(['复制', 'TextEdit', 'VS Code（默认）', '打开文件夹'])
+    expect(labels).toEqual(['复制', '右侧打开', '浏览器打开', 'TextEdit', 'VS Code（默认）', '打开文件夹'])
     expect(labels).not.toContain('显示文件位置')
     const rows = [...document.querySelectorAll('[role="menuitem"]')]
-    await act(async () => { rows[1]?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { rows[3]?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     expect(openFile).toHaveBeenCalledWith('sess', 'docs/a.md', { kind: 'application', id: 'notes' })
     await act(async () => {
       split.querySelector('[data-open-path-more]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
@@ -532,7 +532,7 @@ describe('MarkdownTurnTail', () => {
       split.querySelector('[data-open-path-more]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
     const labels = [...document.querySelectorAll('[role="menuitem"]')].map(node => node.textContent?.trim())
-    expect(labels).toEqual(['复制', '无法获取应用列表', '打开文件夹（默认）'])
+    expect(labels).toEqual(['复制', '右侧打开', '浏览器打开', '无法获取应用列表', '打开文件夹（默认）'])
     await act(async () => { root.unmount() })
   })
 

@@ -1,6 +1,7 @@
-import { createElement } from 'react'
+import { createElement, useCallback, useEffect, useState } from 'react'
 import type { ComponentType } from 'react'
 import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ConversationNodeDefinition, ConversationViewDefinition } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { SlotCore, StoredEntry } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-chat/client'
@@ -9,7 +10,97 @@ import { wrapChatView } from './acp-process-view.ts'
 import type { SegmentChatData } from './acp-process-view.ts'
 import type { ProcessSegment } from './acp-process-segments.ts'
 import { AnswerCard } from './answer-card.tsx'
+import { defaultLinkOpenMode, httpLinkHref, openInBrowser } from './link-open.ts'
 import styles from './acp-process.module.css'
+
+/**
+ * 文本块渲染结果：http(s) 链接 hover 时浮出「右侧打开 / 浏览器打开」两个按钮，
+ * 单击链接走默认打开方式（存 localStorage，见 link-open.ts）。
+ *
+ * 编译包 `MarkdownText` 把 http(s) 渲染成普通 `<a target="_blank">`，无法注入 React，
+ * 所以这里给容器叠 DOM 层：`mouseover` 识别指针下的链接并在其旁浮出工具条，`mouseout`
+ * 离开后隐藏；`onClick` 在默认=浏览器时拦截并 `window.open`，默认=右侧时不拦截、让宿主
+ * 右侧预览面板接管。
+ */
+function LinkTextBlock({ text, labels }: { readonly text: string; readonly labels: MarkdownLabels }) {
+  const [hovered, setHovered] = useState<{ url: string; top: number; left: number } | null>(null)
+
+  const hideTools = useCallback(() => setHovered(null), [])
+
+  const onOver = useCallback((event: React.MouseEvent) => {
+    const target = event.target as Element | null
+    const anchor = target === null ? null : target.closest('a')
+    if (anchor === null) return
+    const url = httpLinkHref(anchor.getAttribute('href'))
+    if (url === null) return
+    const rect = anchor.getBoundingClientRect()
+    setHovered({ url, top: rect.bottom + 4, left: rect.left })
+  }, [])
+
+  const onOut = useCallback((event: React.MouseEvent) => {
+    // 指针移到工具条自身时不隐藏（工具条是容器兄弟，在容器外）。
+    if ((event.relatedTarget as Element | null)?.closest?.('[data-link-tools]') !== null) return
+    const from = event.target as Element | null
+    const fromAnchor = from === null ? null : from.closest('a')
+    const toAnchor = (event.relatedTarget as Element | null)?.closest('a') ?? null
+    if (fromAnchor !== null && fromAnchor === toAnchor) return
+    hideTools()
+  }, [hideTools])
+
+  const onClick = useCallback((event: React.MouseEvent) => {
+    const target = event.target as Element | null
+    const anchor = target === null ? null : target.closest('a')
+    if (anchor === null) return
+    const url = httpLinkHref(anchor.getAttribute('href'))
+    if (url === null) return
+    if (defaultLinkOpenMode() !== 'browser') return
+    event.preventDefault()
+    openInBrowser(url)
+    hideTools()
+  }, [hideTools])
+
+  useEffect(() => {
+    if (hovered === null) return
+    const onScrollOrResize = () => hideTools()
+    window.addEventListener('scroll', onScrollOrResize, true)
+    window.addEventListener('resize', onScrollOrResize)
+    return () => {
+      window.removeEventListener('scroll', onScrollOrResize, true)
+      window.removeEventListener('resize', onScrollOrResize)
+    }
+  }, [hovered, hideTools])
+
+  return (
+    <div
+      data-link-text-block=""
+      onMouseOver={onOver}
+      onMouseOut={onOut}
+      onClick={onClick}
+    >
+      <MarkdownText text={text} streaming={false} labels={labels} />
+      {hovered !== null && (
+        <div className={styles.linkTools} data-link-tools={hovered.url} style={{ top: hovered.top, left: hovered.left }}>
+          <button
+            type="button"
+            className={styles.linkTool}
+            data-link-action="right"
+            onClick={(event) => { event.preventDefault(); event.stopPropagation(); hideTools() }}
+          >
+            右侧打开
+          </button>
+          <button
+            type="button"
+            className={styles.linkTool}
+            data-link-action="browser"
+            onClick={(event) => { event.preventDefault(); event.stopPropagation(); openInBrowser(hovered.url); hideTools() }}
+          >
+            浏览器打开
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
 
 /** The segment is one presentation unit; individual deltas never create separate rows. */
 export function AcpProcessBlock({ segment, t }: { readonly segment: ProcessSegment; readonly t: ChatNodeViewProps<'assistant-step'>['t'] }) {
@@ -21,7 +112,9 @@ export function AcpProcessBlock({ segment, t }: { readonly segment: ProcessSegme
   }
   return <div className={styles.segment} data-acp-process-segment={segment.callId}>
     {segment.blocks.map((block, index) => <div key={index} className={block.kind === 'reasoning' ? styles.reasoning : undefined}>
-      <MarkdownText text={block.text} streaming={false} labels={labels} />
+      {block.kind === 'text'
+        ? <LinkTextBlock text={block.text ?? ''} labels={labels} />
+        : <MarkdownText text={block.text} streaming={false} labels={labels} />}
     </div>)}
   </div>
 }

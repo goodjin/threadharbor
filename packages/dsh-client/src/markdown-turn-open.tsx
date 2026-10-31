@@ -22,6 +22,7 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { RuntimeT } from './locales.ts'
 import type { MarkdownFileApplication, MarkdownFileOpen, MarkdownTurnReaders } from './markdown-turn-sources.ts'
+import { readDefaultLinkOpenMode, writeDefaultLinkOpenMode, type LinkOpenMode } from './link-open.ts'
 import css from './markdown-turn.module.css'
 
 function ApplicationIcon({ source, size = 14 }: { source: string | null; size?: number }): ReactNode {
@@ -49,6 +50,7 @@ export function FileOpenSplit({ sessionId, path, readers, t }: {
   const [menuOpen, setMenuOpen] = useState(false)
   const [pending, setPending] = useState(false)
   const [toast, setToast] = useState<{ seq: number; text: string; ok: boolean } | null>(null)
+  const [linkOpenMode, setLinkOpenMode] = useState<LinkOpenMode>(() => readDefaultLinkOpenMode())
   const inFlight = useRef(false)
   const toastSeq = useRef(0)
   const alive = useRef(true)
@@ -158,6 +160,11 @@ export function FileOpenSplit({ sessionId, path, readers, t }: {
       onClose={() => { setMenuOpen(false) }}
       items={[
         { id: 'copy', icon: <IconCopyOutlineRegular />, label: t('markdownTurn.copy') },
+        { type: 'separator', id: 'link-mode-sep' },
+        { type: 'label', id: 'link-mode-label', text: t('markdownTurn.defaultOpenLink') },
+        { id: 'link-right', icon: <IconRightUpOutlineRegular />, label: t('markdownTurn.linkOpenRight') },
+        { id: 'link-browser', icon: <IconFolderOpenOutlineRegular />, label: t('markdownTurn.linkOpenBrowser') },
+        { type: 'separator', id: 'apps-sep' },
         ...applications.map(app => ({
           id: `app:${app.id}`,
           icon: <ApplicationIcon key={app.icon} source={app.icon} />,
@@ -167,6 +174,7 @@ export function FileOpenSplit({ sessionId, path, readers, t }: {
         })),
         ...(failed ? [{ id: 'unavailable', label: t('markdownTurn.openAppsError'), disabled: true }] : []),
       ]}
+      selectedId={linkOpenMode === 'browser' ? 'link-browser' : 'link-right'}
       footer={[{
         id: 'reveal',
         icon: <IconFolderOpenOutlineRegular />,
@@ -175,6 +183,8 @@ export function FileOpenSplit({ sessionId, path, readers, t }: {
       onSelect={(id) => {
         if (id === 'copy') copyPath()
         else if (id === 'reveal') act({ kind: 'reveal' })
+        else if (id === 'link-right') { writeDefaultLinkOpenMode('right'); setLinkOpenMode('right'); setMenuOpen(false) }
+        else if (id === 'link-browser') { writeDefaultLinkOpenMode('browser'); setLinkOpenMode('browser'); setMenuOpen(false) }
         else if (id.startsWith('app:')) act({ kind: 'application', id: id.slice(4) })
       }}
       anchor={(
