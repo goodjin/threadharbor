@@ -1019,6 +1019,41 @@ describe('MarkdownDocument 选中文本操作条', () => {
     await act(async () => { root.unmount() })
   })
 
+  it('点「添加到会话」只开 compose box、不开评论框，并收起操作条', async () => {
+    const send = vi.fn(async () => {})
+    const face = readers({ readPage: vi.fn(async () => page('# 甲\n\n段落乙', 1, true)), sendToSession: send })
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+        readers: face,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+    const toggle = container.querySelector('button[aria-expanded]')
+    await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await Promise.resolve() })
+
+    const para = container.querySelector('[data-markdown-body] p') as HTMLElement
+    const range = document.createRange()
+    range.selectNodeContents(para.firstChild as Node)
+    const sel = window.getSelection()
+    sel?.removeAllRanges()
+    sel?.addRange(range)
+    await act(async () => { document.dispatchEvent(new Event('selectionchange')) })
+
+    const bar = container.querySelector('[data-selection-bar]') as HTMLElement
+    const addBtn = bar.querySelector('[data-sel-action="add"]') as HTMLElement
+    await act(async () => { addBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(container.querySelector('[data-compose-send]')).not.toBeNull()
+    expect(container.querySelector('[data-comment-box]')).toBeNull()
+    expect(container.querySelector('[data-selection-bar]')).toBeNull()
+    await act(async () => { root.unmount() })
+  })
+
   it('打开评论框后选区塌缩，评论仍带锚点发出（真实浏览器行为）', async () => {
     const send = vi.fn(async () => {})
     const face = readers({ readPage: vi.fn(async () => page('# 甲\n\n段落乙', 1, true)), sendToSession: send })

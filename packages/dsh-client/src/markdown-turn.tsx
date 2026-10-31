@@ -465,7 +465,7 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
         </div>
         {selBar !== null && !commenting && (
           <div ref={selBarRef} className={css.selBar} data-selection-bar="" role="toolbar">
-            <button type="button" className={css.selBtn} data-sel-action="add" onClick={() => { setCommenting(true); openCompose() }}>{t('markdownTurn.sendToSession')}</button>
+            <button type="button" className={css.selBtn} data-sel-action="add" onClick={() => { setCommenting(false); setSelBar(null); openCompose() }}>{t('markdownTurn.sendToSession')}</button>
             <button type="button" className={css.selBtn} data-sel-action="direct" onClick={() => { sendText(selBar.text); setSelBar(null) }}>{t('markdownTurn.send')}</button>
             <button type="button" className={css.selBtn} data-sel-action="comment" onClick={() => { openComment() }}>{t('markdownTurn.comment')}</button>
           </div>
