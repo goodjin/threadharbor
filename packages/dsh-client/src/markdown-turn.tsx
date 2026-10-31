@@ -13,7 +13,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { CodeBlock, FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconCopyOutlineRegular, IconEditOutlineRegular, IconSendOutlineRegular, MarkdownText, classifyFileType, languageForPath } from '@deepseek-ai/dsh-client-ui-primitives'
+import { CodeBlock, FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconCopyOutlineRegular, IconEditOutlineRegular, IconSendOutlineRegular, IconWarningOutlineRegular, MarkdownText, Toast, classifyFileType, languageForPath } from '@deepseek-ai/dsh-client-ui-primitives'
 import { FileOpenSplit } from './markdown-turn-open.tsx'
 import type { MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
 import { fallbackT, NAMESPACE } from './locales.ts'
@@ -274,8 +274,17 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
   const [comments, setComments] = useState<readonly { blockText: string; comment: string }[]>([])
   const [composeOpen, setComposeOpen] = useState(false)
   const [editing, setEditing] = useState(false)
+  const [toast, setToast] = useState<{ seq: number; text: string; ok: boolean } | null>(null)
+  const toastSeq = useRef(0)
   const editRef = useRef<HTMLTextAreaElement>(null)
   const labels = useMemo(() => labelsFor(t), [t])
+  // 失败提示既走外部 onNotify（若接了宿主 toast），也在文档框内自消一条，确保发送/复制
+  // 失败在生产里不会静默无反馈。
+  const notify = (message: string, ok = false): void => {
+    toastSeq.current += 1
+    setToast({ seq: toastSeq.current, text: message, ok })
+    onNotify?.(message)
+  }
   const toggleOpen = (): void => {
     holdFileTop(barRef.current)
     setOpen(value => !value)
@@ -283,7 +292,7 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
   const sendText = (text: string): void => {
     if (text === '') return
     void readers.sendToSession(sessionId, text)
-      .catch(() => onNotify?.(t('markdownTurn.sendFailed')))
+      .catch(() => notify(t('markdownTurn.sendFailed')))
   }
   const openCompose = (): void => {
     setComposeOpen(true)
@@ -390,10 +399,10 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
         const action = button.getAttribute('data-line-action')
         if (action === 'copy') {
           button.setAttribute('data-copy-text', text)
-          void copyTextToClipboard(text, () => onNotify?.(t('markdownTurn.copyFailed')))
+          void copyTextToClipboard(text, () => notify(t('markdownTurn.copyFailed')))
         } else {
           void readers.sendToSession(sessionId, text)
-            .catch(() => onNotify?.(t('markdownTurn.sendFailed')))
+            .catch(() => notify(t('markdownTurn.sendFailed')))
         }
       }}
       onMouseOver={(event) => {
@@ -516,6 +525,12 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
     {open && <div className={css.foot}>
       <ExpandButton open={open} label={toggleLabel} onClick={toggleOpen} kind="foot" />
     </div>}
+    {toast !== null && <Toast
+      key={toast.seq}
+      text={toast.text}
+      icon={<IconWarningOutlineRegular />}
+      onDone={() => { setToast(null) }}
+    />}
   </section>
 }
 

@@ -1213,4 +1213,38 @@ describe('MarkdownDocument 编辑与 compose box', () => {
     expect(container.querySelector('[data-compose-box]')).toBeNull()
     await act(async () => { root.unmount() })
   })
+
+  it('发送失败时浮出可自消的失败提示', async () => {
+    const send = vi.fn(async () => { throw new Error('no prompt') })
+    const onNotify = vi.fn()
+    const face = readers({ readPage: vi.fn(async () => page('# 甲\n\n段落乙', 1, true)), sendToSession: send })
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+        readers: face,
+        onNotify,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+    const toggle = container.querySelector('button[aria-expanded]')
+    await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await Promise.resolve() })
+    const editBtn = container.querySelector('[data-edit-toggle]') as HTMLButtonElement
+    await act(async () => { editBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const ta = container.querySelector('[data-markdown-body] textarea') as HTMLTextAreaElement
+    await act(async () => {
+      ta.value = '要发的内容'
+      ta.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const sendBtn = container.querySelector('[data-edit-send]') as HTMLElement
+    await act(async () => { sendBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await Promise.resolve() })
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(onNotify).toHaveBeenCalledWith('发送失败，请重试')
+    await act(async () => { root.unmount() })
+  })
 })
