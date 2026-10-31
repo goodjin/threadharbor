@@ -255,13 +255,17 @@ async function copyTextToClipboard(text: string, onFail: () => void): Promise<vo
 export function composeWithComments(source: string, comments: readonly { blockText: string; comment: string }[]): string {
   const note = '> 这是用户对此段话的评论：'
   let out = source
+  // 记录上一次插入位置：同一段多条评论锚点相同，须排在前一条之后而非之前。
+  let lastInsertAt = -1
   for (const { blockText, comment } of comments) {
     if (blockText === '' || comment.trim() === '') continue
     const at = out.indexOf(blockText)
     if (at < 0) continue
-    const insertAt = at + blockText.length
+    let insertAt = at + blockText.length
+    if (insertAt <= lastInsertAt) insertAt = lastInsertAt
     // 紧接所评正文后插入「换行 + 引用标记 + 评论」；段间原有的空行分隔自然保留。
     out = `${out.slice(0, insertAt)}\n\n${note}\n${comment.trim()}${out.slice(insertAt)}`
+    lastInsertAt = insertAt + `\n\n${note}\n${comment.trim()}`.length
   }
   return out
 }

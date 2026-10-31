@@ -7,7 +7,7 @@
  * @vitest-environment jsdom
  */
 
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
@@ -86,6 +86,12 @@ async function openReady(container: HTMLElement): Promise<Element> {
   }
   throw new Error('open control did not settle')
 }
+
+// 每个用例把容器挂到 document.body；统一清理，避免容器与窗口选区跨用例泄漏。
+afterEach(() => {
+  document.body.innerHTML = ''
+  window.getSelection()?.removeAllRanges()
+})
 
 describe('markdownSources', () => {
   it('从产出和交付里挑文本，并记下改动序号', () => {
@@ -953,6 +959,17 @@ describe('composeWithComments', () => {
     ])
     expect(withoutFirst).toBe('段落甲\n\n段落乙\n\n> 这是用户对此段话的评论：\n乙的意见')
     expect(withoutFirst).not.toContain('甲的意见')
+  })
+
+  it('同一段多条评论按录入顺序排列，不逆序', () => {
+    const out = composeWithComments('段落甲', [
+      { blockText: '段落甲', comment: '第一条' },
+      { blockText: '段落甲', comment: '第二条' },
+    ])
+    const first = out.indexOf('第一条')
+    const second = out.indexOf('第二条')
+    expect(first).toBeGreaterThanOrEqual(0)
+    expect(second).toBeGreaterThan(first)
   })
 })
 
