@@ -247,6 +247,27 @@ describe('MarkdownTurnTail', () => {
     await act(async () => { root.unmount() })
   })
 
+  it('读取失败时显示主机返回的具体原因，便于对症重试', async () => {
+    const face = readers({
+      readPage: vi.fn(async () => { throw new Error('gateway/not-text: 含 NUL 字节') }),
+    })
+    const container = document.createElement('div')
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+        readers: face,
+      }))
+    })
+    const toggle = container.querySelector('button[aria-expanded]')
+    await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await Promise.resolve() })
+    expect(container.textContent).toContain('文档没有读出来')
+    expect(container.textContent).toContain('gateway/not-text: 含 NUL 字节')
+    await act(async () => { root.unmount() })
+  })
+
   it('路径文字在按钮外面，点路径不展开', async () => {
     const face = readers()
     const container = document.createElement('div')

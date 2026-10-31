@@ -156,7 +156,7 @@ function releaseHeldFileTop(bar: HTMLElement | null): void {
 
 type DocumentBody =
   | { readonly kind: 'loading' }
-  | { readonly kind: 'error' }
+  | { readonly kind: 'error'; readonly message?: string }
   | { readonly kind: 'ready'; readonly text: string; readonly truncated: boolean }
 
 function ExpandButton({ open, label, onClick, kind, caption }: {
@@ -391,8 +391,10 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
       MARKDOWN_READ_LINE_CAP,
     ).then(result => {
       if (!cancelled) setBody({ kind: 'ready', text: result.text, truncated: result.truncated })
-    }).catch(() => {
-      if (!cancelled && !controller.signal.aborted) setBody({ kind: 'error' })
+    }).catch((error: unknown) => {
+      if (cancelled || controller.signal.aborted) return
+      const message = error instanceof Error && error.message.length > 0 ? error.message : undefined
+      setBody(message === undefined ? { kind: 'error' } : { kind: 'error', message })
     })
     return () => {
       cancelled = true
@@ -474,6 +476,7 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
       {body.kind === 'loading' && <p className={css.status}>{t('markdownTurn.loading')}</p>}
       {body.kind === 'error' && <p className={css.status}>
         {t('markdownTurn.error')}
+        {body.message !== undefined && body.message.length > 0 && <span className={css.statusDetail}>：{body.message}</span>}
         <button type="button" className={css.retry} onClick={() => {
           holdFileTop(barRef.current)
           setAttempt(value => value + 1)
