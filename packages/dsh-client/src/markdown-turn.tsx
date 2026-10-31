@@ -11,7 +11,7 @@
  * 助手正文里的本地文件链接也列在这里，用同一套下拉打开。链接上的点击由会话打开右侧。
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { CodeBlock, FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconCopyOutlineRegular, IconEditOutlineRegular, IconSendOutlineRegular, IconWarningOutlineRegular, MarkdownText, Toast, classifyFileType, languageForPath } from '@deepseek-ai/dsh-client-ui-primitives'
 import { FileOpenSplit } from './markdown-turn-open.tsx'
@@ -253,6 +253,32 @@ export function composeWithComments(source: string, comments: readonly { blockTe
   return out
 }
 
+/**
+ * 把文档原文按评论锚点切成有序片段：每段后跟着挂在该处的评论。
+ * 评论锚点是它在原文里那段正文的纯文本（与 composeWithComments 同一套 indexOf 匹配），
+ * 据此定位插入点，使评论渲染在所评段之后，而非堆在文档底部。
+ * @returns 按原文顺序排列的 { text, comments } 片段；comments 为该片段正文之后的评论。
+ */
+export function segmentWithComments(source: string, comments: readonly { id: number; blockText: string; comment: string }[]): { text: string; comments: { id: number; comment: string }[] }[] {
+  const marks = comments
+    .filter(c => c.blockText !== '' && c.comment.trim() !== '')
+    .map(c => ({ offset: source.indexOf(c.blockText), len: c.blockText.length, id: c.id, comment: c.comment.trim() }))
+    .filter(m => m.offset >= 0)
+    .sort((a, b) => a.offset - b.offset)
+  const segments: { text: string; comments: { id: number; comment: string }[] }[] = []
+  let cursor = 0
+  let bucket: { id: number; comment: string }[] = []
+  for (const mark of marks){
+    if (mark.offset < cursor) continue // 与已处理锚点重叠，跳过
+    bucket.push({ id: mark.id, comment: mark.comment })
+    segments.push({ text: source.slice(cursor, mark.offset + mark.len), comments: bucket })
+    bucket = []
+    cursor = mark.offset + mark.len
+  }
+  segments.push({ text: source.slice(cursor), comments: bucket })
+  return segments
+}
+
 function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
   sessionId: string
   path: string
@@ -271,7 +297,8 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
   // 点「评论」那一刻快照所评块：此后聚焦输入框会塌缩文档选区，届时再读选区已拿不到锚点。
   const commentAnchorRef = useRef<string>('')
   const [commenting, setCommenting] = useState(false)
-  const [comments, setComments] = useState<readonly { blockText: string; comment: string }[]>([])
+  const [comments, setComments] = useState<readonly { id: number; blockText: string; comment: string }[]>([])
+  const commentIdRef = useRef(0)
   const [composeOpen, setComposeOpen] = useState(false)
   const [editing, setEditing] = useState(false)
   const [toast, setToast] = useState<{ seq: number; text: string; ok: boolean } | null>(null)
@@ -454,7 +481,20 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
             </div>
           )
           : isMarkdownPath(path)
-            ? <MarkdownText text={body.text} streaming={false} labels={labels} />
+            ? <div className={css.markdownBody} data-markdown-flow="">
+                {segmentWithComments(body.text, comments).map((seg, si) => (
+                  <Fragment key={si}>
+                    {seg.text !== '' && <MarkdownText text={seg.text} streaming={false} labels={labels} />}
+                    {seg.comments.map(cm => (
+                      <blockquote key={cm.id} className={css.comment} data-comment-flow="">
+                        <span className={css.commentMark}>{t('markdownTurn.commentedAs')}</span>
+                        <span className={css.commentText}>{cm.comment}</span>
+                        <button type="button" className={css.commentRemove} data-comment-remove="" aria-label="删除评论" onClick={() => setComments(cur => cur.filter(x => x.id !== cm.id))}>×</button>
+                      </blockquote>
+                    ))}
+                  </Fragment>
+                ))}
+              </div>
             : <CodeBlock
                 code={body.text}
                 lang={languageForPath(path)}
@@ -486,7 +526,7 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
               <button type="button" className={css.selBtn} data-comment-send="" onClick={() => {
                 const ta = bodyRef.current?.querySelector('[data-comment-input]') as HTMLTextAreaElement | null
                 const text = ta?.value.trim() ?? ''
-                if (text !== '') setComments(cur => [...cur, { blockText: commentAnchorRef.current, comment: text }])
+                if (text !== '') setComments(cur => [...cur, { id: commentIdRef.current++, blockText: commentAnchorRef.current, comment: text }])
                 setCommenting(false)
               }}>{t('markdownTurn.commentSend')}</button>
             </div>
@@ -494,13 +534,6 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
         )}
         {comments.length > 0 && (
           <div className={css.commentList} data-comments="">
-            {comments.map((c, i) => (
-              <blockquote key={i} className={css.comment} data-comment-for={c.blockText}>
-                <span className={css.commentMark}>{t('markdownTurn.commentedAs')}</span>
-                <span className={css.commentText}>{c.comment}</span>
-                <button type="button" className={css.commentRemove} data-comment-remove="" aria-label="删除评论" onClick={() => setComments(cur => cur.filter((_, j) => j !== i))}>×</button>
-              </blockquote>
-            ))}
             <button type="button" className={css.sendBtn} data-comments-send="" onClick={() => { sendText(composeWithComments(body.text, comments)); setComments([]) }}>
               <IconSendOutlineRegular size={15} /> {t('markdownTurn.send')}
             </button>

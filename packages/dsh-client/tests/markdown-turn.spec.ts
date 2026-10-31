@@ -32,6 +32,7 @@ const {
   MARKDOWN_TAIL_ORDER,
   MarkdownTurnTail,
   composeWithComments,
+  segmentWithComments,
   registerMarkdownTurn,
 } = await import('../src/markdown-turn.tsx')
 const { startMermaidDiagrams } = await import('../src/mermaid.ts')
@@ -955,6 +956,27 @@ describe('composeWithComments', () => {
   })
 })
 
+describe('segmentWithComments', () => {
+  it('按锚点把原文切段，评论挂在所在段之后', () => {
+    const source = '# 甲\n\n段落乙'
+    const segments = segmentWithComments(source, [
+      { id: 1, blockText: '甲', comment: '对甲的评论' },
+      { id: 2, blockText: '段落乙', comment: '对乙的评论' },
+    ])
+    expect(segments.map(s => s.text)).toEqual(['# 甲', '\n\n段落乙', ''])
+    expect(segments[0].comments).toEqual([{ id: 1, comment: '对甲的评论' }])
+    expect(segments[1].comments).toEqual([{ id: 2, comment: '对乙的评论' }])
+    expect(segments[2].comments).toEqual([])
+  })
+
+  it('锚点找不到的评论被跳过，不破坏分段', () => {
+    const segments = segmentWithComments('段落甲\n\n段落乙', [
+      { id: 1, blockText: '不存在的段', comment: '孤儿评论' },
+    ])
+    expect(segments).toEqual([{ text: '段落甲\n\n段落乙', comments: [] }])
+  })
+})
+
 describe('MarkdownDocument 选中文本操作条', () => {
   it('选中文本出现操作条，点直接发送以选区原文调用 sendToSession；点评论弹出输入框', async () => {
     const send = vi.fn(async () => {})
@@ -1245,6 +1267,66 @@ describe('MarkdownDocument 编辑与 compose box', () => {
     await act(async () => { await Promise.resolve() })
     expect(send).toHaveBeenCalledTimes(1)
     expect(onNotify).toHaveBeenCalledWith('发送失败，请重试')
+    await act(async () => { root.unmount() })
+  })
+})
+
+describe('MarkdownDocument 评论放置（I2）', () => {
+  it('每条评论渲染在所评段之后，而非全部堆在文档底部', async () => {
+    const send = vi.fn(async () => {})
+    const face = readers({ readPage: vi.fn(async () => page('# 甲\n\n段落乙', 1, true)), sendToSession: send })
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+        readers: face,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+    const toggle = container.querySelector('button[aria-expanded]')
+    await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await Promise.resolve() })
+
+    const body = container.querySelector('[data-markdown-body]') as HTMLElement
+    // 对第一段「甲」评论
+    const p1 = body.querySelector('h1, p') as HTMLElement
+    const r1 = document.createRange(); r1.selectNodeContents(p1.firstChild as Node)
+    const sel = window.getSelection(); sel?.removeAllRanges(); sel?.addRange(r1)
+    await act(async () => { document.dispatchEvent(new Event('selectionchange')) })
+    await act(async () => { (container.querySelector('[data-sel-action="comment"]') as HTMLElement).dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => {
+      const ta = container.querySelector('[data-comment-input]') as HTMLTextAreaElement
+      ta.value = '对甲的评论'; ta.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => { (container.querySelector('[data-comment-send]') as HTMLElement).dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+
+    // 对第二段「段落乙」评论：先塌缩选区清掉残留操作条，再重新选中第二段
+    sel?.removeAllRanges()
+    await act(async () => { document.dispatchEvent(new Event('selectionchange')) })
+    const p2 = body.querySelectorAll('p')[0] as HTMLElement
+    const r2 = document.createRange(); r2.selectNodeContents(p2.firstChild as Node)
+    sel?.addRange(r2)
+    await act(async () => { document.dispatchEvent(new Event('selectionchange')) })
+    await act(async () => { (container.querySelector('[data-sel-action="comment"]') as HTMLElement).dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => {
+      const ta = container.querySelector('[data-comment-input]') as HTMLTextAreaElement
+      ta.value = '对乙的评论'; ta.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => { (container.querySelector('[data-comment-send]') as HTMLElement).dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+
+    // DOM 顺序：甲 → 对甲的评论 → 段落乙 → 对乙的评论
+    const html = body.innerHTML
+    const idxJia = html.indexOf('甲')
+    const idxCommentJia = html.indexOf('对甲的评论')
+    const idxYi = html.indexOf('段落乙')
+    const idxCommentYi = html.indexOf('对乙的评论')
+    expect(idxJia).toBeGreaterThanOrEqual(0)
+    expect(idxCommentJia).toBeGreaterThan(idxJia)
+    expect(idxYi).toBeGreaterThan(idxCommentJia)
+    expect(idxCommentYi).toBeGreaterThan(idxYi)
     await act(async () => { root.unmount() })
   })
 })

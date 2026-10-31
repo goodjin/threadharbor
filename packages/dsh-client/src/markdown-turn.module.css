@@ -95,6 +95,11 @@
   padding: 12px;
 }
 
+/* 逐段渲染的正文 + 段间内联评论容器。 */
+.markdownBody > :where(h1, h2, h3, h4, h5, h6, p, li, blockquote, pre) {
+  margin: 0 0 8px;
+}
+
 /* 正文块 hover 高亮（只作用块本身，不波及链接等内联）。 */
 .body :where(h1, h2, h3, h4, h5, h6, p, li, blockquote):hover {
   background: rgb(0 0 0 / 4%);
@@ -142,10 +147,14 @@
 
 /* 选中文本操作条。 */
 .selBar {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  margin-top: 8px;
+  max-width: calc(100% - 16px);
   padding: 6px;
   border-radius: 8px;
   background: rgb(255 255 255 / 95%);
