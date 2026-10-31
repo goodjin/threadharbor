@@ -903,6 +903,34 @@ describe('MarkdownDocument 行内工具条', () => {
     expect(send).toHaveBeenCalledWith('sess', '段落乙')
     await act(async () => { root.unmount() })
   })
+
+  it('鼠标先经过工具条按钮再点发送，仍发出块原文（真实指针序列）', async () => {
+    const send = vi.fn(async () => {})
+    const face = readers({ readPage: vi.fn(async () => page('# 甲\n\n段落乙', 1, true)), sendToSession: send })
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+        readers: face,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+    const toggle = container.querySelector('button[aria-expanded]')
+    await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await Promise.resolve() })
+    const body = container.querySelector('[data-markdown-body]') as HTMLElement
+    // 真实指针：先悬停正文块，再移到工具条按钮上（触发对按钮的 mouseover），然后点。
+    await act(async () => { body.querySelector('p')?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    const sendBtn = body.querySelector('[data-line-action="send"]') as HTMLElement | null
+    expect(sendBtn).not.toBeNull()
+    await act(async () => { sendBtn.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    await act(async () => { sendBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(send).toHaveBeenCalledWith('sess', '段落乙')
+    await act(async () => { root.unmount() })
+  })
 })
 
 describe('composeWithComments', () => {

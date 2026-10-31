@@ -370,13 +370,13 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
       onClick={(event) => {
         const button = (event.target as HTMLElement).closest<HTMLElement>('[data-line-action]')
         if (button === null) return
+        event.preventDefault()
+        event.stopPropagation()
         const block = hoveredRef.current
         if (block === null) return
         const text = blockText(block)
         if (text === '') return
         const action = button.getAttribute('data-line-action')
-        event.preventDefault()
-        event.stopPropagation()
         if (action === 'copy') {
           button.setAttribute('data-copy-text', text)
           void copyTextToClipboard(text, () => onNotify?.(t('markdownTurn.copyFailed')))
@@ -386,6 +386,9 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
         }
       }}
       onMouseOver={(event) => {
+        // 指针从正文移到工具条上时也会触发 mouseover；工具条是正文块的兄弟节点，
+        // 在按钮/svg 上找不到块级祖先。此时保留最近一个正文块，否则点击前 hoveredRef 被清空。
+        if ((event.target as Element).closest('[data-line-tools]') !== null) return
         const block = markdownBlockFrom(event.target)
         hoveredRef.current = block
       }}
