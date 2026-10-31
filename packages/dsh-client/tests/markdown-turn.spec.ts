@@ -1041,6 +1041,42 @@ describe('MarkdownDocument 选中文本操作条', () => {
     await act(async () => { root.unmount() })
   })
 
+  it('选区落在内联评论上不弹操作条（非正文区）', async () => {
+    const face = readers({ readPage: vi.fn(async () => page('# 甲', 1, true)) })
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+        readers: face,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+    const toggle = container.querySelector('button[aria-expanded]')
+    await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await Promise.resolve() })
+
+    // 先对正文「甲」加一条评论，产生内联评论块。
+    const p = container.querySelector('[data-markdown-body] h1, [data-markdown-body] p') as HTMLElement
+    const r1 = document.createRange(); r1.selectNodeContents(p.firstChild as Node)
+    const sel = window.getSelection(); sel?.removeAllRanges(); sel?.addRange(r1)
+    await act(async () => { document.dispatchEvent(new Event('selectionchange')) })
+    await act(async () => { (container.querySelector('[data-sel-action="comment"]') as HTMLElement).dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { const ta = container.querySelector('[data-comment-input]') as HTMLTextAreaElement; ta.value = '评论文本'; ta.dispatchEvent(new Event('input', { bubbles: true })) })
+    await act(async () => { (container.querySelector('[data-comment-send]') as HTMLElement).dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const comment = container.querySelector('[data-comment-flow]') as HTMLElement
+    expect(comment).not.toBeNull()
+
+    // 选中评论内的文字：不应弹选区操作条。
+    const r2 = document.createRange(); r2.selectNodeContents(comment.firstChild as Node)
+    sel?.removeAllRanges(); sel?.addRange(r2)
+    await act(async () => { document.dispatchEvent(new Event('selectionchange')) })
+    expect(container.querySelector('[data-selection-bar]')).toBeNull()
+    await act(async () => { root.unmount() })
+  })
+
   it('点「添加到会话」只开 compose box、不开评论框，并收起操作条', async () => {
     const send = vi.fn(async () => {})
     const face = readers({ readPage: vi.fn(async () => page('# 甲\n\n段落乙', 1, true)), sendToSession: send })

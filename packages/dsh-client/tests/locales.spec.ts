@@ -74,6 +74,7 @@ const KEYS_USED_BY_COMPONENTS: readonly ClientLocaleKey[] = [
   'markdownTurn.commentPlaceholder',
   'markdownTurn.commentSend',
   'markdownTurn.commentedAs',
+  'markdownTurn.commentRemove',
   'markdownTurn.composePlaceholder',
   'markdownTurn.sendFailed',
   'markdownTurn.copyFailed',

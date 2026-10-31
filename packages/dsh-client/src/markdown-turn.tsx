@@ -223,6 +223,19 @@ function scrollComposerOutOfView(bar: HTMLElement | null): void {
   }
 }
 
+/** 把宿主底部输入框滚回视口（compose/评论发送后调用，与 scrollComposerOutOfView 对称）。 */
+function scrollComposerIntoView(bar: HTMLElement | null): void {
+  const scroller = conversationScroller(bar ?? document.body)
+  if (scroller === null) return
+  const composer = document.querySelector<HTMLElement>('[data-composer-seat], [data-conversation-region="composer"]')
+  if (composer === null) return
+  const scrollerRect = scroller.getBoundingClientRect()
+  const composerRect = composer.getBoundingClientRect()
+  if (composerRect.top < scrollerRect.top || composerRect.bottom > scrollerRect.bottom) {
+    scroller.scrollTop -= scrollerRect.bottom - composerRect.top + 8
+  }
+}
+
 /** 复制一段文本到剪贴板；失败时回调 onFail。 */
 async function copyTextToClipboard(text: string, onFail: () => void): Promise<void> {
   try {
@@ -342,6 +355,12 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
       const node = sel.anchorNode
       const body = bodyRef.current
       if (node === null || body === null || !body.contains(node)) { setSelBar(null); return }
+      // 只在真正落进正文块（.markdown 内）的选区才弹条，避开状态行、评论区、compose 区。
+      const flow = body.querySelector('[data-markdown-flow]')
+      const anchorEl = node instanceof Element ? node : node.parentElement
+      const inFlow = flow !== null && anchorEl !== null && flow.contains(anchorEl)
+      const inOverlay = anchorEl !== null && anchorEl.closest('[data-comment-flow],[data-comment-box],[data-compose-box]') !== null
+      if (!inFlow || inOverlay) { setSelBar(null); return }
       const text = sel.toString().trim()
       setSelBar(text === '' ? null : { text })
     }
@@ -489,7 +508,7 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
                       <blockquote key={cm.id} className={css.comment} data-comment-flow="">
                         <span className={css.commentMark}>{t('markdownTurn.commentedAs')}</span>
                         <span className={css.commentText}>{cm.comment}</span>
-                        <button type="button" className={css.commentRemove} data-comment-remove="" aria-label="删除评论" onClick={() => setComments(cur => cur.filter(x => x.id !== cm.id))}>×</button>
+                        <button type="button" className={css.commentRemove} data-comment-remove="" aria-label={t('markdownTurn.commentRemove')} onClick={() => setComments(cur => cur.filter(x => x.id !== cm.id))}>×</button>
                       </blockquote>
                     ))}
                   </Fragment>
@@ -547,6 +566,7 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
                 const ta = bodyRef.current?.querySelector('[data-compose-input]') as HTMLTextAreaElement | null
                 sendText(ta?.value ?? '')
                 setComposeOpen(false)
+                scrollComposerIntoView(barRef.current)
               }}>
                 <IconSendOutlineRegular size={15} /> {t('markdownTurn.send')}
               </button>

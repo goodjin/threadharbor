@@ -265,8 +265,8 @@
   padding: 4px 12px;
   border: none;
   border-radius: 6px;
-  background: rgb(0 0 0 / 85%);
-  color: #fff;
+  background: var(--dsw-alias-brand-primary);
+  color: var(--dsw-alias-label-on-accent);
   font: inherit;
   font-size: 12px;
   cursor: pointer;
