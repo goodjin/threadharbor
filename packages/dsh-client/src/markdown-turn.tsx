@@ -13,7 +13,7 @@
 
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { CodeBlock, FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconCopyOutlineRegular, IconEditOutlineRegular, IconSendOutlineRegular, IconWarningOutlineRegular, MarkdownText, Toast, classifyFileType, languageForPath } from '@deepseek-ai/dsh-client-ui-primitives'
+import { CodeBlock, FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconCloseOutlineRegular, IconCopyOutlineRegular, IconEditOutlineRegular, IconSendOutlineRegular, IconWarningOutlineRegular, MarkdownText, Toast, classifyFileType, languageForPath } from '@deepseek-ai/dsh-client-ui-primitives'
 import { FileOpenSplit } from './markdown-turn-open.tsx'
 import type { MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
 import { fallbackT, NAMESPACE } from './locales.ts'
@@ -416,18 +416,20 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
           event.preventDefault()
         }}
       >{path}</span>
-      {body.kind === 'ready' && (
-        <button
-          type="button"
-          className={css.iconButton}
-          data-edit-toggle=""
-          aria-label={t('markdownTurn.edit')}
-          title={t('markdownTurn.edit')}
-          onClick={() => { holdFileTop(barRef.current); setEditing(value => !value) }}
-        >
-          <IconEditOutlineRegular size={16} />
-        </button>
-      )}
+      <button
+        type="button"
+        className={css.iconButton}
+        data-edit-toggle=""
+        aria-label={t('markdownTurn.edit')}
+        title={t('markdownTurn.edit')}
+        onClick={() => {
+          holdFileTop(barRef.current)
+          if (!open) setOpen(true)
+          setEditing(value => !value)
+        }}
+      >
+        <IconEditOutlineRegular size={16} />
+      </button>
       <ExpandButton open={open} label={toggleLabel} onClick={toggleOpen} />
       <FileOpenSplit sessionId={sessionId} path={path} readers={readers} t={t} />
     </div>
@@ -492,6 +494,16 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
                 aria-label={t('markdownTurn.edit')}
               />
               <div className={css.editActions}>
+                <button
+                  type="button"
+                  className={css.editCancel}
+                  data-edit-cancel=""
+                  aria-label={t('markdownTurn.cancel')}
+                  title={t('markdownTurn.cancel')}
+                  onClick={() => setEditing(false)}
+                >
+                  <IconCloseOutlineRegular size={15} /> {t('markdownTurn.cancel')}
+                </button>
                 <button
                   type="button"
                   className={css.sendBtn}

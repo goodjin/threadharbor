@@ -273,7 +273,7 @@ describe('MarkdownTurnTail', () => {
     await act(async () => { pathText?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     expect(container.querySelector('[data-markdown-body]')).toBeNull()
     expect(face.readPage).not.toHaveBeenCalled()
-    const toggle = container.querySelector('button')
+    const toggle = container.querySelector('button[aria-expanded]')
     expect(toggle?.getAttribute('aria-expanded')).toBe('false')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     expect(container.querySelector('[data-markdown-body]')).not.toBeNull()
@@ -625,7 +625,7 @@ describe('MarkdownTurnTail', () => {
     await act(async () => { await Promise.resolve() })
     expect(container.querySelector('[data-file-icon="typescript"] svg')).not.toBeNull()
     expect(container.querySelector('[data-markdown-plain="src/a.ts"]')).toBeNull()
-    const toggle = container.querySelector('button')
+    const toggle = container.querySelector('button[aria-expanded]')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
     const block = container.querySelector('[data-markdown-body="src/a.ts"] .md-code-block')
@@ -664,7 +664,7 @@ describe('MarkdownTurnTail', () => {
           readers: face,
         }))
       })
-      const toggle = container.querySelector('button')
+      const toggle = container.querySelector('button[aria-expanded]')
       await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await Promise.resolve() })
       expect(container.querySelector('.md-code-block')).not.toBeNull()
@@ -1212,6 +1212,57 @@ describe('MarkdownDocument 编辑与 compose box', () => {
     const sendBtn = container.querySelector('[data-edit-send]')
     await act(async () => { sendBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     expect(send).toHaveBeenCalledWith('sess', '# 改过')
+    await act(async () => { root.unmount() })
+  })
+
+  it('编辑态有取消按钮，点取消退出编辑且不发送', async () => {
+    const send = vi.fn(async () => {})
+    const face = readers({ readPage: vi.fn(async () => page('# 原始', 1, true)), sendToSession: send })
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+        readers: face,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+    const toggle = container.querySelector('button[aria-expanded]')
+    await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await Promise.resolve() })
+    const editBtn = container.querySelector('[data-edit-toggle]') as HTMLButtonElement
+    await act(async () => { editBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const cancelBtn = container.querySelector('[data-edit-cancel]') as HTMLButtonElement
+    expect(cancelBtn).not.toBeNull()
+    await act(async () => { cancelBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(send).not.toHaveBeenCalled()
+    expect(container.querySelector('[data-markdown-body] textarea')).toBeNull()
+    await act(async () => { root.unmount() })
+  })
+
+  it('未展开时编辑按钮也在，点它展开并直接进入编辑态', async () => {
+    const face = readers({ readPage: vi.fn(async () => page('# 原始', 1, true)) })
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+        readers: face,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+    // 未展开：编辑按钮仍在
+    const editBtn = container.querySelector('[data-edit-toggle]') as HTMLButtonElement
+    expect(editBtn).not.toBeNull()
+    await act(async () => { editBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // 点编辑后展开并进入编辑态（出现文本域）
+    await act(async () => { await Promise.resolve() })
+    const ta = container.querySelector('[data-markdown-body] textarea') as HTMLTextAreaElement
+    expect(ta).not.toBeNull()
     await act(async () => { root.unmount() })
   })
 
