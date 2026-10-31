@@ -65,6 +65,7 @@ function readers(overrides?: Partial<{
   fileApplications: ReturnType<typeof vi.fn>
   openFile: ReturnType<typeof vi.fn>
   sendToSession: ReturnType<typeof vi.fn>
+  createSession: ReturnType<typeof vi.fn>
 }>) {
   return {
     readPage: overrides?.readPage ?? vi.fn(async () => page('# Hello', 1, true)),
@@ -74,6 +75,7 @@ function readers(overrides?: Partial<{
     fileApplications: overrides?.fileApplications ?? vi.fn(async () => []),
     openFile: overrides?.openFile ?? vi.fn(async () => {}),
     sendToSession: overrides?.sendToSession ?? vi.fn(async () => {}),
+    createSession: overrides?.createSession ?? vi.fn(async () => 'new-sess'),
   }
 }
 
@@ -1233,6 +1235,77 @@ describe('MarkdownDocument 编辑与 compose box', () => {
     const sendBtn = container.querySelector('[data-edit-send]')
     await act(async () => { sendBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     expect(send).toHaveBeenCalledWith('sess', '# 改过')
+    await act(async () => { root.unmount() })
+  })
+
+  it('编辑态点新建会话：建新会话并把路径描述+内容发到新会话，不跳转', async () => {
+    const send = vi.fn(async () => {})
+    const create = vi.fn(async () => 'new-sess')
+    const face = readers({ readPage: vi.fn(async () => page('# 原始', 1, true)), sendToSession: send, createSession: create })
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+        readers: face,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+    const toggle = container.querySelector('button[aria-expanded]')
+    await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await Promise.resolve() })
+    const editBtn = container.querySelector('[data-edit-toggle]') as HTMLButtonElement
+    await act(async () => { editBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const ta = container.querySelector('[data-markdown-body] textarea') as HTMLTextAreaElement
+    await act(async () => {
+      ta.value = '# 改过的内容'
+      ta.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const newBtn = container.querySelector('[data-edit-new-session]') as HTMLButtonElement
+    expect(newBtn).not.toBeNull()
+    await act(async () => { newBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await Promise.resolve() })
+    await act(async () => { await Promise.resolve() })
+    // 先建新会话，再把「路径描述 + 内容」发到新会话（不是当前会话）。
+    expect(create).toHaveBeenCalledOnce()
+    expect(send).toHaveBeenCalledOnce()
+    const [sentSessionId, sentText] = send.mock.calls[0]!
+    expect(sentSessionId).toBe('new-sess')
+    expect(sentSessionId).not.toBe('sess')
+    expect(sentText).toContain('docs/a.md')
+    expect(sentText).toContain('# 改过的内容')
+    // 编辑态退出。
+    expect(container.querySelector('[data-markdown-body] textarea')).toBeNull()
+    await act(async () => { root.unmount() })
+  })
+
+  it('新建会话失败时提示，不发送', async () => {
+    const send = vi.fn(async () => {})
+    const create = vi.fn(async () => { throw new Error('no') })
+    const face = readers({ readPage: vi.fn(async () => page('# 原始', 1, true)), sendToSession: send, createSession: create })
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root: Root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MarkdownTurnTail, {
+        sessionId: 'sess',
+        turn: deliverables({ produced: [{ path: 'docs/a.md' }] }),
+        readers: face,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+    const toggle = container.querySelector('button[aria-expanded]')
+    await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await Promise.resolve() })
+    const editBtn = container.querySelector('[data-edit-toggle]') as HTMLButtonElement
+    await act(async () => { editBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const newBtn = container.querySelector('[data-edit-new-session]') as HTMLButtonElement
+    await act(async () => { newBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await Promise.resolve() })
+    expect(send).not.toHaveBeenCalled()
+    expect(document.body.textContent).toContain('新建会话失败')
     await act(async () => { root.unmount() })
   })
 

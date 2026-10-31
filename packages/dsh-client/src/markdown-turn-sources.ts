@@ -47,6 +47,11 @@ export interface MarkdownTurnReaders {
   openFile(sessionId: string, path: string, action: MarkdownFileOpen): Promise<void>
   /** 把一段文本作为一条消息发给当前会话。失败时抛错，由按钮自己提示。 */
   sendToSession(sessionId: string, text: string): Promise<void>
+  /**
+   * 新建一个会话并返回其编号。不带 agentPreset，让主机用默认（客户端读不到
+   * 当前会话的预设，故走默认，与当前会话同模型这一步交给主机默认）。失败时抛错。
+   */
+  createSession(): Promise<string>
 }
 
 /** 一轮里已经能确定的文本路径，外加改动摘要的序号（有的话）。 */
@@ -599,6 +604,22 @@ export function createMarkdownTurnReaders(remote: () => unknown): MarkdownTurnRe
           : 'session.prompt failed'
         throw new Error(message)
       }
+    },
+    async createSession() {
+      const holder = remote()
+      const session = isRecord(holder) && isRecord(holder.session) ? holder.session : undefined
+      const create = session !== undefined && typeof session.create === 'function'
+        ? session.create
+        : undefined
+      if (create === undefined) throw new Error('session.create is missing')
+      const value: unknown = await create.call(session, {})
+      // 远端信封 {ok, value:{sessionId}} 或直接返回 sessionId，两者都接。
+      if (typeof value === 'string') return value
+      if (isRecord(value) && value['ok'] === true) {
+        const inner = value['value']
+        if (isRecord(inner) && typeof inner['sessionId'] === 'string') return inner['sessionId']
+      }
+      throw new Error('session.create returned no sessionId')
     },
   }
 }

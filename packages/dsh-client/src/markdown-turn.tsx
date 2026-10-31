@@ -13,7 +13,7 @@
 
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { CodeBlock, FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconCloseOutlineRegular, IconCopyOutlineRegular, IconEditOutlineRegular, IconSendOutlineRegular, IconWarningOutlineRegular, MarkdownText, Toast, classifyFileType, languageForPath } from '@deepseek-ai/dsh-client-ui-primitives'
+import { CodeBlock, FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconCloseOutlineRegular, IconCopyOutlineRegular, IconEditOutlineRegular, IconNewChatOutlineRegular, IconSendOutlineRegular, IconWarningOutlineRegular, MarkdownText, Toast, classifyFileType, languageForPath } from '@deepseek-ai/dsh-client-ui-primitives'
 import { FileOpenSplit } from './markdown-turn-open.tsx'
 import type { MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
 import { fallbackT, NAMESPACE } from './locales.ts'
@@ -338,6 +338,13 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
     void readers.sendToSession(sessionId, text)
       .catch(() => notify(t('markdownTurn.sendFailed')))
   }
+  const sendToNewSession = (text: string): void => {
+    if (text === '') return
+    const prompt = `${t('markdownTurn.newSessionPromptHeader', { path })}\n\n${text}`
+    void readers.createSession()
+      .then(newId => readers.sendToSession(newId, prompt))
+      .catch(() => notify(t('markdownTurn.newSessionFailed')))
+  }
   const openCompose = (): void => {
     setComposeOpen(true)
     scrollComposerOutOfView(barRef.current)
@@ -514,6 +521,16 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
                   onClick={() => { sendText(editRef.current?.value ?? ''); setEditing(false) }}
                 >
                   <IconSendOutlineRegular size={15} /> {t('markdownTurn.send')}
+                </button>
+                <button
+                  type="button"
+                  className={css.editCancel}
+                  data-edit-new-session=""
+                  aria-label={t('markdownTurn.newSession')}
+                  title={t('markdownTurn.newSession')}
+                  onClick={() => { sendToNewSession(editRef.current?.value ?? ''); setEditing(false) }}
+                >
+                  <IconNewChatOutlineRegular size={15} /> {t('markdownTurn.newSession')}
                 </button>
               </div>
             </div>
