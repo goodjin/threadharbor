@@ -92,6 +92,8 @@ zcode 与 minimaxi 这两组模型不是我们自己的实现，它们贴着两�
 | A11 | 组 id 从签名后的 `get_user_extra_info`（个人工作区 `workspace_type===0`）取 `op_group_id`；会员确认走 `get_membership_info`（`workspace_id` 用个人工作区的 id，不是组 id） | 同上 | 同上 | 拿不到组 id → 只显示订阅态、没有窗口 | 同上 |
 | A12 | `remains` 字段口径：`model_remains[]`，5 小时=`current_interval_*`、周=`current_weekly_*`，`status===3` 为不限；percent 口径是**剩余**（与 GLM 相反） | 同上 + 真机实测（2026-10-30，Max 档：5h 0%、周不限） | `packages/minimaxi-acp/src/quota.ts`（`projectQuota`） | 字段改名 → 窗口缺失 | 胶囊缺窗口或整行隐藏 |
 | A13 | 积分：会员应答里的 `op_credit_summary.total_remaining_amount` | 同上 | 同上（`creditOf`） | 字段改名 → 积分胶囊不出现 | 胶囊缺积分 |
+| A14 | Codex 额度：`~/.codex/auth.json` 的 ChatGPT OAuth 令牌 + `GET chatgpt.com/backend-api/codex/usage`（Bearer + `chatgpt-account-id`）；**必须走 node:https**（防护按 TLS 指纹拦 undici，2026-11-01 实测）；UA 只拼版本号 | 桌面 CLI `/status` 同源只读接口（真机实测） | `packages/dsh-preset-dispatch/src/usage-codex.ts` | 形状变 → 胶囊隐藏；防护收紧 → 403（日志留原因） | 胶囊不出现 |
+| A15 | Claude 额度：`claudeAiOauth.accessToken`（文件优先、macOS 退钥匙串，只读）+ `GET api.anthropic.com/api/oauth/usage`（`anthropic-beta: oauth-2025-04-20`）；**上游自带 429 冷却**（约 160 秒），宿主缓存 2 分钟 | 官方 `/usage` 同源只读接口（2026-11-01 核对） | `packages/dsh-preset-dispatch/src/usage-claude.ts` | 形状变 → 胶囊隐藏；429 → 该次失败下轮再试 | 胶囊不出现 |
 
 ### B. zcode（对齐型）
 
@@ -147,6 +149,36 @@ zcode 与 minimaxi 这两组模型不是我们自己的实现，它们贴着两�
 1. 浏览器侧只在**当前会话选的模型是 MiniMax** 时显示三枚（5 小时、周、积分），轮询节奏同上。
 2. 数据来自同源接口 `GET /threadharbor/minimax/quota`——宿主侧插件 `threadharbor-minimaxi-quota` 用本机登录令牌问一次：签名后的 `/matrix/` 查组与积分 + 开放平台的 `coding_plan/remains` 查两个窗口（依赖点 A9–A13），成功应答缓存 30 秒。
 3. 令牌不出宿主进程；未订阅、取不到窗口或积分时，缺哪枚藏哪枚，原因去重后记一条日志。
+
+### 5. Codex 与 Claude 的额度胶囊怎么走（2026-11-01 新增）
+
+四套口径一张表（GLM / MiniMax / Codex / Claude），浏览器侧每套一只轮询器、一条 dock：
+
+1. **Codex（ChatGPT 套餐）**：宿主读本机 `~/.codex/auth.json` 的 OAuth 令牌，问
+   `GET https://chatgpt.com/backend-api/codex/usage`（Bearer + `chatgpt-account-id`，
+   2026-11-01 真机实测）。primary/secondary 窗口按 `limit_window_seconds` 归一成
+   5小时/周两档；`credits.balance` 是按量积分。**必须走 node:https 而不是 fetch**：
+   chatgpt.com 的防护按 TLS 指纹选择性放行，同秒同令牌实测 fetch（undici）403、
+   经典 https 栈 200；UA 只拼版本号（`codex_cli_rs/<版本>`，裸 UA 与带无版本号
+   平台段都被拦过）。缓存 30 秒。
+2. **Claude（Anthropic 官方订阅）**：凭据 `claudeAiOauth.accessToken` 先读
+   `~/.claude/.credentials.json`、macOS 再退钥匙串「Claude Code-credentials」（只读，
+   经 `security` 命令）；问 `GET https://api.anthropic.com/api/oauth/usage`
+   （`anthropic-beta: oauth-2025-04-20`），`five_hour` / `seven_day` 的 utilization
+   是已用、resets_at 是 RFC3339。**上游接口自带 429 冷却（约 160 秒）**，宿主缓存
+   2 分钟。走中转站（`ANTHROPIC_BASE_URL` 指到别家）没登官方 OAuth 的机器上没有
+   凭据，胶囊安静地不出现——本机当前就是这种状态。
+3. **出现条件按目录里的 provider id 认**（`acp:acp-codex` / `acp:acp-claude`）：
+   Claude 的模型 id 是 default/opus 这类通用别名、Codex 是 gpt-*，按模型前缀认会
+   误伤别家，所以这两家不看模型名。
+
+### 6. 明确不做的三家（2026-11-01 核对）
+
+| Agent | 为什么不做 |
+| --- | --- |
+| Cursor | CLI（`cursor-agent`）里只有「被限流」的报错处理，没有查余量的接口；用量在官方 App/后台。 |
+| Grok | CLI 自带 `/usage` 但只是打开网页后台（console.x.ai）；api.x.ai 无配额/积分 REST 接口（实测 models 200、usage/credits/rate_limits 均 404），console 又在防护墙后。 |
+| Qoder | 有 `/api/v2/quota/usage` 接口，但凭据锁在自家 WASM 加密存储（`credential_storage_decrypt`）+ Electron Safe Storage 里，解密方案不公开；重实现等于盲拆它的加密。 |
 
 ---
 
@@ -280,6 +312,8 @@ npm run test
 | 2026-10-20 | 工具配对的重放修复真机通过：同一段漂移的历史，修复前被 MiniMax 拒（2013），修复后 200 并正常作答 |
 | 2026-10-30 | 网络层失败（代理断开、连接被拒、流到一半断）改为按 `TRANSPORT` 上报，宿主自动重试，文案带底层原因；单测覆盖，真机活测待补（需要一次真实的网络抖动才好复现） |
 | 2026-10-30 | MiniMax 额度+积分上线（依赖点 A9–A13）：真机验证宿主接口带真实登录返回完整数据（Max 档：5h 0%、周不限、积分 0，与手工探针一致）；GLM 胶囊在两次 dock 注册并存下照常渲染（5h 1% / 周 91%）、无控制台报错、无槽位错误。**待补**：会话切到 MiniMax 模型后的三枚胶囊截图（web 端模型选择器只列当前 agent 的模型，自动化没切过去；渲染逻辑已由单测覆盖） |
+| 2026-11-01 | Codex 额度胶囊上线（第四节 5）：真机验证宿主接口返回 Pro 档周窗 92%（与手工探针一致）；真机发现并解决 chatgpt.com 按 TLS 指纹拦 undici 的问题（改走 node:https，见第四节 5）。GLM 胶囊在**四条** dock 注册并存下照常渲染（5h 9% / 周 93%）、无控制台报错。 |
+| 2026-11-01 | Claude 额度胶囊实装但本机**无数据**（凭据空：这台机器的 Claude Code 走 `api.minimaxi.com` 中转，没登官方 OAuth）——宿主接口诚实回 ok:false，胶囊不出现；接口形状按官方 `/usage` 同源只读接口钉死并有单测，用户一旦登官方 OAuth 胶囊即出现。Cursor / Grok / Qoder 三家核对后明确不做（原因见第四节 6）。 |
 
 ---
 
