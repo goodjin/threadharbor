@@ -15,6 +15,8 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { CodeBlock, FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconCloseOutlineRegular, IconCopyOutlineRegular, IconEditOutlineRegular, IconNewChatOutlineRegular, IconSendOutlineRegular, IconWarningOutlineRegular, MarkdownText, Toast, classifyFileType, languageForPath } from '@deepseek-ai/dsh-client-ui-primitives'
 import { FileOpenSplit } from './markdown-turn-open.tsx'
+import { ActiveFileBar } from './markdown-turn-active-bar.tsx'
+import { setActiveFilePath } from './markdown-turn-active.ts'
 import type { MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
 import { fallbackT, NAMESPACE } from './locales.ts'
 import type { RuntimeT } from './locales.ts'
@@ -173,6 +175,7 @@ function ExpandButton({ open, label, onClick, kind, caption }: {
     aria-label={label}
     title={label}
     onClick={onClick}
+    {...(kind === undefined ? { 'data-expand-toggle': '' } : {})}
     {...(kind === 'more' ? { 'data-markdown-more': '' } : {})}
     {...(kind === 'foot' ? { 'data-path-foot': '' } : {})}
   >
@@ -331,6 +334,7 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
   }
   const toggleOpen = (): void => {
     holdFileTop(barRef.current)
+    if (!open) setActiveFilePath(path)
     setOpen(value => !value)
   }
   const sendText = (text: string): void => {
@@ -672,6 +676,7 @@ export function MarkdownTurnTail({ sessionId, turn, t, readers, onNotify }: Mark
     setListOpen(value => !value)
   }
   return <div ref={rootRef} className={css.root} data-markdown-turn="" {...(folded ? { 'data-markdown-folded': '' } : {})}>
+    {shown.length > 0 && <ActiveFileBar sessionId={id} paths={paths} readers={readers} t={translate} />}
     {shown.map(path => <MarkdownDocument key={path} sessionId={id} path={path} readers={readers} t={translate} {...(onNotify === undefined ? {} : { onNotify })} />)}
     {paths.length > FOLDED_FILE_COUNT && <div className={css.edge}>
       <ExpandButton open={listOpen} label={listLabel} caption={listCount} onClick={toggleList} kind="more" />

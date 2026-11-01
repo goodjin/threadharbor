@@ -35,6 +35,7 @@ const {
   segmentWithComments,
   registerMarkdownTurn,
 } = await import('../src/markdown-turn.tsx')
+const { resetActiveFilePath } = await import('../src/markdown-turn-active.ts')
 const { startMermaidDiagrams } = await import('../src/mermaid.ts')
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
@@ -93,6 +94,7 @@ async function openReady(container: HTMLElement): Promise<Element> {
 afterEach(() => {
   document.body.innerHTML = ''
   window.getSelection()?.removeAllRanges()
+  resetActiveFilePath()
 })
 
 describe('markdownSources', () => {
@@ -228,16 +230,16 @@ describe('MarkdownTurnTail', () => {
     expect(container.querySelector('[data-markdown-body]')).toBeNull()
     expect(container.textContent).not.toContain('正在读取文档')
     expect(face.readPage).not.toHaveBeenCalled()
-    expect(container.querySelector('button[aria-expanded]')?.getAttribute('aria-expanded')).toBe('false')
+    expect(container.querySelector('[data-expand-toggle]')?.getAttribute('aria-expanded')).toBe('false')
 
-    const toggle = container.querySelector('button[aria-expanded]')
+    const toggle = container.querySelector('[data-expand-toggle]')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     expect(container.textContent).toContain('正在读取文档')
     const body = container.querySelector('[data-markdown-body="docs/a.md"]')
     expect(body).not.toBeNull()
     expect((body as HTMLElement).style.maxHeight).toBe('100dvh')
     expect((body as HTMLElement).style.overflow).toBe('auto')
-    expect(container.querySelector('button[aria-expanded]')?.getAttribute('aria-expanded')).toBe('true')
+    expect(container.querySelector('[data-expand-toggle]')?.getAttribute('aria-expanded')).toBe('true')
 
     await act(async () => { resolvePage(page('# Hello', 1, true)) })
     expect(container.textContent).toContain('Hello')
@@ -245,7 +247,7 @@ describe('MarkdownTurnTail', () => {
 
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     expect(container.querySelector('[data-markdown-body]')).toBeNull()
-    expect(container.querySelector('button[aria-expanded]')?.getAttribute('aria-expanded')).toBe('false')
+    expect(container.querySelector('[data-expand-toggle]')?.getAttribute('aria-expanded')).toBe('false')
     await act(async () => { root.unmount() })
   })
 
@@ -262,7 +264,7 @@ describe('MarkdownTurnTail', () => {
         readers: face,
       }))
     })
-    const toggle = container.querySelector('button[aria-expanded]')
+    const toggle = container.querySelector('[data-expand-toggle]')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
     expect(container.textContent).toContain('文档没有读出来')
@@ -296,7 +298,7 @@ describe('MarkdownTurnTail', () => {
     await act(async () => { pathText?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     expect(container.querySelector('[data-markdown-body]')).toBeNull()
     expect(face.readPage).not.toHaveBeenCalled()
-    const toggle = container.querySelector('button[aria-expanded]')
+    const toggle = container.querySelector('[data-expand-toggle]')
     expect(toggle?.getAttribute('aria-expanded')).toBe('false')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     expect(container.querySelector('[data-markdown-body]')).not.toBeNull()
@@ -322,7 +324,7 @@ describe('MarkdownTurnTail', () => {
       }))
     })
     expect(container.querySelector('[data-path-bar]')?.hasAttribute('data-expanded')).toBe(false)
-    const toggle = container.querySelector('button[aria-expanded]')
+    const toggle = container.querySelector('[data-expand-toggle]')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
     expect(container.querySelector('[data-path-bar]')?.hasAttribute('data-expanded')).toBe(true)
@@ -382,7 +384,7 @@ describe('MarkdownTurnTail', () => {
       })
       const bar = container.querySelector('[data-path-bar]') as HTMLElement
       bar.getBoundingClientRect = () => ({ top: barTop }) as DOMRect
-      const toggle = container.querySelector('button[aria-expanded]')
+      const toggle = container.querySelector('[data-expand-toggle]')
       await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       scroller.scrollTop = 900
       expect(barTop).toBe(-160)
@@ -648,7 +650,7 @@ describe('MarkdownTurnTail', () => {
     await act(async () => { await Promise.resolve() })
     expect(container.querySelector('[data-file-icon="typescript"] svg')).not.toBeNull()
     expect(container.querySelector('[data-markdown-plain="src/a.ts"]')).toBeNull()
-    const toggle = container.querySelector('button[aria-expanded]')
+    const toggle = container.querySelector('[data-expand-toggle]')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
     const block = container.querySelector('[data-markdown-body="src/a.ts"] .md-code-block')
@@ -687,7 +689,7 @@ describe('MarkdownTurnTail', () => {
           readers: face,
         }))
       })
-      const toggle = container.querySelector('button[aria-expanded]')
+      const toggle = container.querySelector('[data-expand-toggle]')
       await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await Promise.resolve() })
       expect(container.querySelector('.md-code-block')).not.toBeNull()
@@ -731,7 +733,7 @@ describe('MarkdownTurnTail', () => {
     })
     await act(async () => { await Promise.resolve() })
     expect(container.textContent).not.toContain('文档没有读出来')
-    const toggle = container.querySelector('button')
+    const toggle = container.querySelector('[data-expand-toggle]')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
     expect(container.textContent).toContain('文档没有读出来')
@@ -767,6 +769,69 @@ describe('MarkdownTurnTail', () => {
     await act(async () => { reveal?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     expect(face.openFile).toHaveBeenCalledWith('sess', '/repo/b.py', { kind: 'reveal' })
     await act(async () => { root.unmount() })
+  })
+
+  describe('ActiveFileBar 顶部共享文件操作栏', () => {
+    it('有文件时出现在文件列表顶部，兜底指向第一个文件', async () => {
+      const face = readers()
+      const container = document.createElement('div')
+      const root: Root = createRoot(container)
+      await act(async () => {
+        root.render(createElement(MarkdownTurnTail, {
+          sessionId: 'sess',
+          turn: deliverables({ produced: [{ path: 'docs/a.md' }, { path: 'src/b.ts' }] }),
+          readers: face,
+        }))
+      })
+      const bar = container.querySelector('[data-active-file-bar]')
+      expect(bar).not.toBeNull()
+      // 还没有点开任何文件，兜底指向列表第一个。
+      expect(bar?.querySelector('[data-active-path]')?.getAttribute('data-active-path')).toBe('docs/a.md')
+      await act(async () => { root.unmount() })
+    })
+
+    it('没有文件时不渲染', async () => {
+      const face = readers()
+      const container = document.createElement('div')
+      const root: Root = createRoot(container)
+      await act(async () => {
+        root.render(createElement(MarkdownTurnTail, {
+          sessionId: 'sess',
+          turn: deliverables({ produced: [{ path: 'pic.png' }] }),
+          readers: face,
+        }))
+      })
+      expect(container.querySelector('[data-active-file-bar]')).toBeNull()
+      await act(async () => { root.unmount() })
+    })
+
+    it('点开某个文件后，顶部栏跟着换到该文件的打开方式', async () => {
+      const face = readers()
+      const container = document.createElement('div')
+      const root: Root = createRoot(container)
+      await act(async () => {
+        root.render(createElement(MarkdownTurnTail, {
+          sessionId: 'sess',
+          turn: deliverables({ produced: [{ path: 'docs/a.md' }, { path: 'src/b.ts' }] }),
+          readers: face,
+        }))
+      })
+      // 点开第二个文件。
+      const row = container.querySelector('[data-markdown-path="src/b.ts"]')
+      const toggle = row?.querySelector('[data-expand-toggle]')
+      await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await Promise.resolve() })
+
+      const bar = container.querySelector('[data-active-file-bar]')
+      expect(bar?.querySelector('[data-active-path]')?.getAttribute('data-active-path')).toBe('src/b.ts')
+      // 顶部栏的打开方式作用于当前文件（reveal 落到 src/b.ts）。
+      const split = bar?.querySelector('[data-open-path-state="ready"]')
+      expect(split).not.toBeNull()
+      const reveal = bar?.querySelector('[data-open-path-open]')
+      await act(async () => { reveal?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      expect(face.openFile).toHaveBeenCalledWith('sess', 'src/b.ts', { kind: 'reveal' })
+      await act(async () => { root.unmount() })
+    })
   })
 
 })
@@ -916,7 +981,7 @@ describe('MarkdownDocument 行内工具条', () => {
       }))
     })
     await act(async () => { await Promise.resolve() })
-    const toggle = container.querySelector('button[aria-expanded]')
+    const toggle = container.querySelector('[data-expand-toggle]')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
     const para = container.querySelector('[data-markdown-body] p')
@@ -948,7 +1013,7 @@ describe('MarkdownDocument 行内工具条', () => {
       }))
     })
     await act(async () => { await Promise.resolve() })
-    const toggle = container.querySelector('button[aria-expanded]')
+    const toggle = container.querySelector('[data-expand-toggle]')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
     const body = container.querySelector('[data-markdown-body]') as HTMLElement
@@ -1032,7 +1097,7 @@ describe('MarkdownDocument 选中文本操作条', () => {
       }))
     })
     await act(async () => { await Promise.resolve() })
-    const toggle = container.querySelector('button[aria-expanded]')
+    const toggle = container.querySelector('[data-expand-toggle]')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
 
@@ -1066,7 +1131,7 @@ describe('MarkdownDocument 选中文本操作条', () => {
       }))
     })
     await act(async () => { await Promise.resolve() })
-    const toggle = container.querySelector('button[aria-expanded]')
+    const toggle = container.querySelector('[data-expand-toggle]')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
     const para = container.querySelector('[data-markdown-body] p') as HTMLElement
@@ -1094,7 +1159,7 @@ describe('MarkdownDocument 选中文本操作条', () => {
       }))
     })
     await act(async () => { await Promise.resolve() })
-    const toggle = container.querySelector('button[aria-expanded]')
+    const toggle = container.querySelector('[data-expand-toggle]')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
 
@@ -1131,7 +1196,7 @@ describe('MarkdownDocument 选中文本操作条', () => {
       }))
     })
     await act(async () => { await Promise.resolve() })
-    const toggle = container.querySelector('button[aria-expanded]')
+    const toggle = container.querySelector('[data-expand-toggle]')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
 
@@ -1166,7 +1231,7 @@ describe('MarkdownDocument 选中文本操作条', () => {
       }))
     })
     await act(async () => { await Promise.resolve() })
-    const toggle = container.querySelector('button[aria-expanded]')
+    const toggle = container.querySelector('[data-expand-toggle]')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
 
@@ -1219,7 +1284,7 @@ describe('MarkdownDocument 编辑与 compose box', () => {
       }))
     })
     await act(async () => { await Promise.resolve() })
-    const toggle = container.querySelector('button[aria-expanded]')
+    const toggle = container.querySelector('[data-expand-toggle]')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
     const editBtn = container.querySelector('[data-edit-toggle]') as HTMLButtonElement
@@ -1253,7 +1318,7 @@ describe('MarkdownDocument 编辑与 compose box', () => {
       }))
     })
     await act(async () => { await Promise.resolve() })
-    const toggle = container.querySelector('button[aria-expanded]')
+    const toggle = container.querySelector('[data-expand-toggle]')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
     const editBtn = container.querySelector('[data-edit-toggle]') as HTMLButtonElement
@@ -1296,7 +1361,7 @@ describe('MarkdownDocument 编辑与 compose box', () => {
       }))
     })
     await act(async () => { await Promise.resolve() })
-    const toggle = container.querySelector('button[aria-expanded]')
+    const toggle = container.querySelector('[data-expand-toggle]')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
     const editBtn = container.querySelector('[data-edit-toggle]') as HTMLButtonElement
@@ -1323,7 +1388,7 @@ describe('MarkdownDocument 编辑与 compose box', () => {
       }))
     })
     await act(async () => { await Promise.resolve() })
-    const toggle = container.querySelector('button[aria-expanded]')
+    const toggle = container.querySelector('[data-expand-toggle]')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
     const editBtn = container.querySelector('[data-edit-toggle]') as HTMLButtonElement
@@ -1374,7 +1439,7 @@ describe('MarkdownDocument 编辑与 compose box', () => {
       }))
     })
     await act(async () => { await Promise.resolve() })
-    const toggle = container.querySelector('button[aria-expanded]')
+    const toggle = container.querySelector('[data-expand-toggle]')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
 
@@ -1409,7 +1474,7 @@ describe('MarkdownDocument 编辑与 compose box', () => {
       }))
     })
     await act(async () => { await Promise.resolve() })
-    const toggle = container.querySelector('button[aria-expanded]')
+    const toggle = container.querySelector('[data-expand-toggle]')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
     const para = container.querySelector('[data-markdown-body] p') as HTMLElement
@@ -1450,7 +1515,7 @@ describe('MarkdownDocument 编辑与 compose box', () => {
       }))
     })
     await act(async () => { await Promise.resolve() })
-    const toggle = container.querySelector('button[aria-expanded]')
+    const toggle = container.querySelector('[data-expand-toggle]')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
     const editBtn = container.querySelector('[data-edit-toggle]') as HTMLButtonElement
@@ -1484,7 +1549,7 @@ describe('MarkdownDocument 评论放置（I2）', () => {
       }))
     })
     await act(async () => { await Promise.resolve() })
-    const toggle = container.querySelector('button[aria-expanded]')
+    const toggle = container.querySelector('[data-expand-toggle]')
     await act(async () => { toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await Promise.resolve() })
 

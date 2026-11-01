@@ -400,6 +400,25 @@
   margin-right: 4px;
 }
 
+/* 文件列表顶部的共享文件操作栏：左显当前作用文件，右接打开方式分体按钮。
+   所有文件操作停在这一条，不必再去右侧预览。 */
+.activeBar {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  background: rgb(0 0 0 / 6%);
+  border-radius: 7px;
+}
+
+.activeBar .name {
+  flex: 1;
+}
+
+.activeBar .openSplit {
+  flex: none;
+  margin: 4px 4px 4px 0;
+}
+
 .openSplit {
   display: inline-flex;
   align-items: stretch;
