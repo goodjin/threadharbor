@@ -18,6 +18,7 @@
  */
 
 import { readFile } from 'node:fs/promises'
+import { request as httpsRequest } from 'node:https'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -217,29 +218,26 @@ export async function fetchCodexUsage(request: {
   fetchImpl?: typeof fetch
 }): Promise<CodexUsage | null> {
   const { credential } = request
-  const fetchImpl = request.fetchImpl ?? fetch
-  let response: Response
-  try {
-    response = await fetchImpl(USAGE_URL, {
+  const headers = {
+    accept: 'application/json',
+    authorization: `Bearer ${credential.accessToken}`,
+    'chatgpt-account-id': credential.accountId,
+    // 防护会拦「过于笼统」的 UA（实测裸 `codex_cli_rs` 回 403），带版本号才放行；
+    // 反而别拼平台段（实测 `(Mac OS; arm64)` 这种没版本号的平台段又被拦）。
+    'user-agent': `codex_cli_rs/${CODEX_CLI_UA_VERSION}`,
+    originator: 'codex_cli_rs',
+  }
+  // 走 node:https 而不是 fetch：chatgpt.com 的防护按 TLS 指纹拦 undici
+  // （2026-11-01 A/B 实测，同一秒同一令牌，fetch 403、经典 https 栈 200）。
+  const response = request.fetchImpl === undefined
+    ? await httpsGet(USAGE_URL, headers, request.signal)
+    : await request.fetchImpl(USAGE_URL, {
       method: 'GET',
-      headers: {
-        accept: 'application/json',
-        authorization: `Bearer ${credential.accessToken}`,
-        'chatgpt-account-id': credential.accountId,
-        // 防护会拦过于笼统的 UA（实测裸 `codex_cli_rs` 回 403），带上版本与平台。
-        // 防护会拦「过于笼统」的 UA（实测裸 `codex_cli_rs` 回 403），带版本号才放行；
-        // 反而别拼平台段（实测 `(Mac OS; arm64)` 这种没版本号的平台段又被拦）。
-        'user-agent': `codex_cli_rs/${CODEX_CLI_UA_VERSION}`,
-        originator: 'codex_cli_rs',
-      },
+      headers,
       ...(request.signal === undefined ? {} : { signal: request.signal }),
     })
-  } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') throw error
-    throw new Error(scrub(error instanceof Error ? error.message : String(error), credential.accessToken))
-  }
   if (!response.ok) {
-    const detail = scrub(await response.text().catch(() => ''), credential.accessToken).slice(0, 300)
+    const detail = scrub(await Promise.resolve(response.text()).catch(() => ''), credential.accessToken).slice(0, 300)
     throw new Error(`Codex usage request failed (${String(response.status)})${detail === '' ? '' : `: ${detail}`}`)
   }
   let body: unknown
@@ -249,6 +247,41 @@ export async function fetchCodexUsage(request: {
     throw new Error(scrub(`Codex usage answer was not JSON: ${error instanceof Error ? error.message : String(error)}`, credential.accessToken))
   }
   return parseUsage(body)
+}
+
+/** node:https 的最小 GET：与 fetch 同形的应答面（ok / status / json() / text()）。 */
+function httpsGet(url: string, headers: Record<string, string>, signal: AbortSignal | undefined): Promise<{ ok: boolean; status: number; json(): unknown; text(): string }> {
+  return new Promise((resolve, reject) => {
+    const req = httpsRequest(url, { method: 'GET', headers }, (res) => {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk: Buffer) => { chunks.push(chunk) })
+      res.on('end', () => {
+        const body = Buffer.concat(chunks).toString('utf8')
+        resolve({
+          ok: (res.statusCode ?? 500) >= 200 && (res.statusCode ?? 500) < 300,
+          status: res.statusCode ?? 0,
+          json() {
+            return JSON.parse(body)
+          },
+          text() {
+            return body
+          },
+        })
+      })
+    })
+    req.on('error', (error) => { reject(error) })
+    if (signal !== undefined) {
+      const abort = (): void => {
+        const aborted = new Error('The operation was aborted')
+        aborted.name = 'AbortError'
+        req.destroy(aborted)
+        reject(aborted)
+      }
+      if (signal.aborted) abort()
+      else signal.addEventListener('abort', abort, { once: true })
+    }
+    req.end()
+  })
 }
 
 /** 应答 → 窗口与积分；没有主窗口就算不认识，返回 null（胶囊整行隐藏）。 */
