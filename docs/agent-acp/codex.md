@@ -1,11 +1,11 @@
 # codex 的 ACP 对接
 
-> 核对时间：2026-10-09 首测；2026-09-14 补充 `initialize`、set_model/set_mode、终端子协议三项实测；2026-10-22 复测模型写入路径；2026-10-23 复测推理档位与 agent 自己的默认模型
+> 核对时间：2026-10-09 首测；2026-09-14 补充 `initialize`、set_model/set_mode、终端子协议三项实测；2026-10-22 复测模型写入路径；2026-10-23 复测推理档位与 agent 自己的默认模型；**2026-11-01 升级到 codex-acp 2.5.0（自带 codex CLI 0.165.0）并复测全部依赖点**（模型清单 46 个含 6.1、set_model、prompt 数组格式、工具输出改道 terminal_output_delta、initialize 形状变化）
 > 状态：**本项目已实现并通过实测**。实现见 `packages/dsh-acp-agent/src/dialects/codex.ts`，回归夹具见 `packages/dsh-acp-agent/tests/fixtures/captured-frames.json`。
 
 ## 一句话结论
 
-codex 是三者里最「不配合」的一个：它**根本不给工具名**，也**把工具输出放在一个别人都不用的字段里**。照着 grok 或 claude 写投影会静默出错——工具名变成一整条命令，工具输出全空。
+codex 是三者里最「不配合」的一个：它**根本不给工具名**，也**把工具输出放在一个别人都不用的字段里**（1.x 在 `rawOutput.formatted_output`，2.5.0 对 AIR 客户端只在 `_meta.terminal_output_delta` 增量里）。照着 grok 或 claude 写投影会静默出错——工具名变成一整条命令，工具输出全空。
 
 ## 怎么跑起来
 
@@ -26,7 +26,9 @@ stdio 子进程，命令 `codex-acp`（Node 包 `@agentclientprotocol/codex-acp`
   modes: { currentModeId, availableModes } }
 ```
 
-模型列表实测有 23 个，id 形如 `gpt-6-astra[high]`（基础模型 × 推理档位）。
+模型列表实测：1.10.0 报 23 个；**2.5.0 报 46 个**（2026-11-01），id 形如 `gpt-6.1-sol[high]`（基础模型 × 推理档位），基础模型八个：`gpt-6.1-sol` / `gpt-6.1-terra` / `gpt-6-astra` / `gpt-6-sol` / `gpt-6-luna` / `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna`。
+
+> **模型清单是编在 codex CLI 二进制里的，不是联网拉的**（2026-11-01 二进制核对：0.153.4 的 strings 里没有 6.1，0.165.0/0.166.0 里有 `gpt-6.1-sol` / `gpt-6.1-terra`）。所以「新模型不出现」先查本机 CLI 版本：codex-acp 解析 `@openai/codex` 的顺序是它自己的 node_modules，再往上走到 `~/.local/lib/node_modules/@openai/codex`（全局那份）。本机 2026-11-01 已把 `~/.local` 前缀升到 codex-acp 2.5.0 + 全局 codex CLI 0.166.0（注意当前终端 `npm prefix -g` 是另一个目录，装错前缀等于没升级）。
 
 ## 最容易踩的坑
 
@@ -52,18 +54,18 @@ codex 的模型请求走 chatgpt.com（登录也走它）。**网络走不通时
 
 `kind` 也要锁定：后续帧实测不带 `kind`，不锁定会被后面的帧冲掉。
 
-### 2. 工具输出不在 `content` 里
+### 2. 工具输出不在 `content` 里，且 2.5.0 换了通道（2026-11-01 实测）
 
-`tool_call_update` 帧**根本没有 `content` 字段**（实测键：`sessionUpdate, toolCallId, status, rawOutput, _meta`）。
+结果从不放在 `content`；放哪取决于适配器把你当哪类客户端：
 
-结果在：
-
-```
-rawOutput.formatted_output    // 输出文本
-rawOutput.exit_code           // 退出码
-```
+- **1.x（及 2.5.0 的非 AIR 客户端）**：完成帧的 `rawOutput.formatted_output` + `exit_code`。
+- **2.5.0 的 AIR 客户端**（DSH 握手声明了 `_meta.jetbrains.air`，为子代理帧）：完成帧**不再带 `rawOutput`**，结果在 `_meta.terminal_output_delta.data`（追加通道：未流式的命令整段一次性给，流式的分多帧给），旁边是 `_meta.terminal_exit`（退出码）。**且只有客户端自己在 `_meta` 里声明了 `terminal_output_delta: true` 才会给**——不声明就一个字节都拿不到，无任何报错（活测复现：升级当天 `ACP_LIVE_OK` 从投影里消失）。DSH 的修法：方言加 `terminalOutputDelta` 能力位，runner 握手按它声明，投影把增量累加、`rawOutput` 整段仍兼容。
 
 按 grok 的办法读 `content`，会得到**每一个 codex 工具调用都是空输出**，而且不报错。
+
+### 2b. `session/prompt` 只收数组格式的 prompt（2.5.0）
+
+2.5.0 把字符串 prompt 直接拒掉：`-32602 Invalid params … expected array, received string`。DSH 的 runner 一直发的是 `[{type:'text',text}, …图片]` 数组格式，不受影响；自己写探针时别用字符串。
 
 ### 3. token 数在 `session/prompt` 的响应里
 
@@ -90,7 +92,7 @@ rawOutput.exit_code           // 退出码
 - 同一个方法送组合 id `gpt-6-astra[low]` 会报 `-32602 Invalid params`。
 - `session/set_model { sessionId, modelId: 'gpt-6-astra[low]' }` 返回 `{}`，**组合 id 由它接收**。
 
-`session/new` 的 `models.availableModels` 有 23 个 id，形如 `gpt-6-astra[low]`（基础模型 × 推理档位）；DSH 的模型选择器就是按这份列表展示的。所以本项目的写入口是 `session/set_model`（`modelVia: 'set_model'`），而不是 prompt 参数，也不是 `set_config_option`——后者的选项里只有 `gpt-6-astra` 这类基础 id，送组合 id 会被拒。
+`session/new` 的 `models.availableModels`（2.5.0 为 46 个 id）形如 `gpt-6-astra[low]`（基础模型 × 推理档位）；DSH 的模型选择器就是按这份列表展示的。所以本项目的写入口是 `session/set_model`（`modelVia: 'set_model'`），而不是 prompt 参数，也不是 `set_config_option`——后者的选项里只有 `gpt-6-astra` 这类基础 id，送组合 id 会被拒。**2026-11-01 在 2.5.0 上复测：`set_model` 收 `gpt-6.1-sol[medium]` 返回 `{}`，写入路径不变。**
 
 **列表外与裸基础 id 的实测**（2026-10-22，codex-acp 1.10.0）：
 
@@ -117,7 +119,7 @@ rawOutput.exit_code           // 退出码
 
 ## 会话能力：五家里声明得最全
 
-codex 的 `initialize` 声明了 `sessionCapabilities` 的**全部七项**：`resume` / `list` / `close` / `delete` / `fork` / `subagents` / `additionalDirectories`。
+1.10.0 把七项能力放在 `initialize` 应答的**顶层** `sessionCapabilities`；**2.5.0 把它挪进了 `agentCapabilities.sessionCapabilities`**（顶层不再有，2026-11-01 实测）。本项目运行时不读这个字段（只在方言注释里记录），形状变化无影响——但接新版本时别按顶层找。新增了 `systemPrompt`，共八项：`resume` / `list` / `close` / `delete` / `fork` / `subagents` / `additionalDirectories` / `systemPrompt`。
 
 对本项目直接相关的：**`fork`**（分叉会话）和 **`list`/`resume`**（枚举与恢复）目前没接。
 
@@ -143,8 +145,8 @@ codex 的 `session/new` 里那五个 `configOptions`（含 `reasoning_effort`、
 
 ## 证据与未验证项
 
-**已验证**（`tests/live.spec.ts`）：建会话拿到非空模型列表、拿到回答、产生了工具调用、工具输出含探针串（即 `rawOutput.formatted_output` 这条路走通了）。
+**已验证**（`tests/live.spec.ts`）：建会话拿到非空模型列表、拿到回答、产生了工具调用、工具输出含探针串（1.x 走 `rawOutput.formatted_output`，2.5.0 走 `terminal_output_delta`，两条路都活测通过）。
 
-**本轮新增实测**：`initialize` 的完整能力声明（见上）、`session/set_mode` 的校验、**未观察到 `terminal/*` 调用**；2026-10-22 复测模型写入：prompt 的 `modelId` 被忽略，`set_config_option` 只收基础 id，`set_model` 收组合 id。
+**本轮新增实测**：`initialize` 的完整能力声明（见上）、`session/set_mode` 的校验、**未观察到 `terminal/*` 调用**；2026-10-22 复测模型写入：prompt 的 `modelId` 被忽略，`set_config_option` 只收基础 id，`set_model` 收组合 id；2026-11-01（2.5.0）：模型清单 46 个含 6.1、`set_model` 收 6.1 组合 id、prompt 必须数组格式、工具输出改道 `terminal_output_delta`（含「不声明就拿不到」的坑）、`sessionCapabilities` 挪进 `agentCapabilities`、子代理帧路径复测通过。
 
 **仍未验证**：`configOptions` 里的 `reasoning_effort` / `fast-mode` 能否设置；工具失败时的 `status` 取值。collab 模式的委派行为已随 `subagents` 接入验证了单层委派；多层委派（子代理再开子代理）未测。

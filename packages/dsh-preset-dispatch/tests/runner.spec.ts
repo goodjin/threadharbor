@@ -209,6 +209,37 @@ describe('AcpTurnRunner', () => {
     expect(air).toEqual({ version: 1, capabilities: ['nativeSubagentSessions', 'asyncTasks'] })
   })
 
+  it('codex declares terminal_output_delta, without which the AIR contract drops command output', async () => {
+    // Measured 2026-11-01 against codex-acp 2.5.0: a client that declares
+    // `_meta.jetbrains.air` (DSH does, for the subagent draft) is routed into
+    // the AIR tool-call contract, where the completed frame carries no
+    // `rawOutput` — the result is delivered as `_meta.terminal_output_delta`
+    // chunks, and only to clients that declared that key. Without the
+    // declaration every codex tool output arrives empty (live failure:
+    // `toolOutputs.join('')` lost ACP_LIVE_OK on the 2.5.0 handshake).
+    const client = fakeClient()
+    await new AcpTurnRunner(client, { cwd: '/tmp', dialect: codexDialect })
+      .run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
+
+    const init = client.calls.find(call => call.method === 'initialize')!
+    const capabilities = (init.params as { clientCapabilities: { _meta?: Record<string, unknown> } }).clientCapabilities
+    expect(capabilities._meta?.['terminal_output_delta']).toBe(true)
+  })
+
+  it('agents whose output path is untouched do not declare terminal_output_delta', async () => {
+    // The key is a codex-acp contract: declaring it to every agent would be an
+    // unmeasured handshake change. qoder keeps its own terminal channel and
+    // reads it without any declaration (measured 2026-10-20), so its
+    // handshake must stay exactly as it was.
+    const client = fakeClient()
+    await new AcpTurnRunner(client, { cwd: '/tmp', dialect: qoderDialect })
+      .run(DECISION, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: () => [], write: () => 1 })
+
+    const init = client.calls.find(call => call.method === 'initialize')!
+    const capabilities = (init.params as { clientCapabilities: { _meta?: Record<string, unknown> } }).clientCapabilities
+    expect(capabilities._meta?.['terminal_output_delta']).toBeUndefined()
+  })
+
   it('cursor reads the subagent capability under _meta, where its own check looks', async () => {
     // Measured 2026-10-21 against cursor 2026.10.01: `subagentsEnabled` is
     // `clientCapabilities.subagents || clientCapabilities._meta.subagents`,

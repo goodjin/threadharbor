@@ -10748,7 +10748,7 @@
     ]
   },
   "codex": {
-    "capturedAt": "2026-10-16T13:49:34.571Z",
+    "capturedAt": "2026-11-01T09:27:34.462Z",
     "frames": [
       {
         "jsonrpc": "2.0",
@@ -10768,7 +10768,7 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
+          "sessionId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
           "update": {
             "sessionUpdate": "available_commands_update",
             "availableCommands": [
@@ -10777,19 +10777,26 @@
                 "description": "Turn plan mode on.",
                 "input": null,
                 "_meta": {
-                  "commandAction": {
-                    "kind": "setConfigOption",
-                    "configId": "collaboration_mode",
-                    "value": "plan",
-                    "resetValue": "default",
-                    "presentation": "state"
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "commandAction": {
+                        "kind": "setConfigOption",
+                        "configId": "collaboration_mode",
+                        "value": "plan",
+                        "resetValue": "default",
+                        "presentation": "state"
+                      }
+                    }
                   }
                 }
               },
               {
                 "name": "mcp",
-                "description": "List configured Model Context Protocol (MCP) tools.",
-                "input": null
+                "description": "Show the status of the MCP servers, or reconnect them.",
+                "input": {
+                  "hint": "[reconnect]"
+                }
               },
               {
                 "name": "skills",
@@ -10834,9 +10841,14 @@
                   "hint": "[<objective>|clear|pause|resume]"
                 },
                 "_meta": {
-                  "commandAction": {
-                    "kind": "prefixPrompt",
-                    "presentation": "state"
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "commandAction": {
+                        "kind": "prefixPrompt",
+                        "presentation": "state"
+                      }
+                    }
                   }
                 }
               },
@@ -10853,399 +10865,1044 @@
                 "input": null
               },
               {
-                "name": "$alignment-work",
-                "description": "验证 PRD、架构、开发计划、features.json、测试与实现证据之间的一致性和双向追踪关系。用于架构或计划生成后的覆盖门禁、整文档交付前的完整性检查，或用户要求查找遗漏、冲突、越界和不可验证项时；不用于修改源文档或替用户决定范围。",
-                "input": null
+                "name": "$data-analytics:analyze-data-quality",
+                "description": "Investigate whether structured datasets and query results are trustworthy enough to use. Use for underlying data-quality risks such as freshness, grain, missingness, duplicates, broken joins, schema drift, and conflicting source results.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/data-analytics/1.1.0-exp-baseline/skills/analyze-data-quality/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$architecture-work",
-                "description": "基于已确认需求和现有代码库约束设计系统架构、模块边界、接口、数据、状态与风险控制。用于用户明确要求架构设计、系统设计、模块拆分、接口或数据规约，或端到端流程发现架构缺口时；不用于直接实现代码，也不把含糊需求强行设计为确定方案。",
-                "input": null
+                "name": "$data-analytics:answers-follow-up",
+                "description": "Use when one to three optional next tasks would help the user get started or continue from an answer, and the current host supports follow-up prompt buttons.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/data-analytics/1.1.0-exp-baseline/skills/answers-follow-up/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$auto-developer",
-                "description": "自动化开发编排 - 顶层流程编排器，协调整个开发流程：PRD生成 → 架构设计 → 开发计划 → 任务执行 → 测试审计。支持全自动交付。",
-                "input": null
+                "name": "$data-analytics:build-dashboard",
+                "description": "Build or update a source-backed interactive dashboard for monitoring, exploration, and operational decisions from connected data, uploaded spreadsheets, CSVs, or other structured sources.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/data-analytics/1.1.0-exp-baseline/skills/build-dashboard/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$bugfix",
-                "description": "当用户报告错误、操作失败、系统报错时自动触发，执行问题诊断和修复流程。包括收集错误信息、分析错误、定位问题代码、设计修复方案、执行修复和文档记录。",
-                "input": null
+                "name": "$data-analytics:build-report",
+                "description": "Build polished analytical reports for executive, product, business, or technical audiences. Use when the task needs a durable narrative answer supported by inspectable evidence.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/data-analytics/1.1.0-exp-baseline/skills/build-report/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$closure-work",
-                "description": "对已完成或中止的一轮工作进行复盘、文档同步和交付收尾。用于用户要求复盘、post-mortem、经验沉淀、变更归档、文档同步或编排流程进入关闭门禁时；仅在原任务已授权修改或用户明确要求完整闭环时写入项目文档。",
-                "input": null
+                "name": "$data-analytics:convert-to-doc",
+                "description": "Create a polished DOCX or Google Doc from an existing Data app.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/data-analytics/1.1.0-exp-baseline/skills/convert-to-doc/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$code-review-work",
-                "description": "对指定 diff、提交、分支或 Pull Request 执行只读代码审查，发现有证据的正确性、安全性、性能、兼容性和可维护性问题。用于用户明确要求 review、代码审查、检查变更风险，或实现和测试完成后的审查门禁；不用于修改代码或泛化静态分析整个仓库。",
-                "input": null
+                "name": "$data-analytics:convert-to-slides",
+                "description": "Create a polished PowerPoint or Google Slides deck from an existing Data app.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/data-analytics/1.1.0-exp-baseline/skills/convert-to-slides/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$development-plan-work",
-                "description": "将已确认的 PRD、技术规格或架构设计转化为可执行开发计划和结构化 features.json。用于用户明确要求制定实现计划、拆分开发任务、建立依赖关系或为端到端编排准备任务清单时；不用于直接实现代码或替用户补充未经确认的产品范围。",
-                "input": null
+                "name": "$data-analytics:customize-data-plugin",
+                "description": "Create, update, package, or share reusable Data working conventions and context skills for personal or team use. Use when the user explicitly requests an editable skill for preferred tools, report and dashboard style, or analysis practices.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/data-analytics/1.1.0-exp-baseline/skills/customize-data-plugin/SKILL.md"
+                    }
+                  }
+                }
+              },
+              {
+                "name": "$data-analytics:design-kpis",
+                "description": "Design KPI frameworks, metric definitions, targets, guardrails, and measurement plans for product or business decisions. Use when success metrics, drivers, guardrails, targets, or the measurement approach need to be defined or improved.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/data-analytics/1.1.0-exp-baseline/skills/design-kpis/SKILL.md"
+                    }
+                  }
+                }
+              },
+              {
+                "name": "$data-analytics:index",
+                "description": "Answer product and business questions with data and route data-related work to the right focused workflow. Use for requests involving data, metrics, trends, comparisons, drivers, KPIs, analysis, dashboards, reports, charts, tables, SQL, notebooks, spreadsheets, market sizing, data quality, reusable data context, data definitions, or working preferences, whether or not Data is at-mentioned. Dashboards can use uploaded spreadsheets, CSVs, or TSVs as source data without making the deliverable a spreadsheet. Do not use Data for general writing, editing, coding, or explanations that require none of these workflows.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/data-analytics/1.1.0-exp-baseline/skills/index/SKILL.md"
+                    }
+                  }
+                }
+              },
+              {
+                "name": "$data-analytics:jupyter-notebooks",
+                "description": "Create, edit, validate or export a SQL or Python notebook when the user requests notebook work. Ordinary analysis keeps inspectable queries and calculations without creating a companion notebook.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/data-analytics/1.1.0-exp-baseline/skills/jupyter-notebooks/SKILL.md"
+                    }
+                  }
+                }
+              },
+              {
+                "name": "$data-analytics:kpi-reporting",
+                "description": "Prepare KPI readouts, scorecards, WBR/MBR/QBR updates, and executive summaries from quantitative business or product metrics; use when the task is to report status, compare against targets, explain validated drivers, and state operating implications.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/data-analytics/1.1.0-exp-baseline/skills/kpi-reporting/SKILL.md"
+                    }
+                  }
+                }
+              },
+              {
+                "name": "$data-analytics:market-sizing",
+                "description": "Estimate market, segment, or opportunity size with transparent assumptions and uncertainty. Use for TAM/SAM/SOM, sizing scenarios, or comparing the scale of possible opportunities.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/data-analytics/1.1.0-exp-baseline/skills/market-sizing/SKILL.md"
+                    }
+                  }
+                }
+              },
+              {
+                "name": "$data-analytics:metric-diagnostics",
+                "description": "Diagnose why a metric changed or differs from expectation. Use when the task is to identify likely drivers of a metric movement, anomaly, gap, or discrepancy.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/data-analytics/1.1.0-exp-baseline/skills/metric-diagnostics/SKILL.md"
+                    }
+                  }
+                }
+              },
+              {
+                "name": "$data-analytics:onboarding",
+                "description": "Set up Data after installation or when the user asks to be onboarded, get started, or choose a first data task. Follow the main welcome, connection, and first-workflow path. For an introduction or tour of a named homepage demo, route to the Northstar Office dashboard/report, Aster Compute, or Stock watch reference. Resume requests interrupted by installation; concrete analysis does not require setup, and capability-only questions use the Data index.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/data-analytics/1.1.0-exp-baseline/skills/onboarding/SKILL.md"
+                    }
+                  }
+                }
+              },
+              {
+                "name": "$data-analytics:product-business-analysis",
+                "description": "Analyze product or business data to support a decision or recommendation. Use when a decision depends on metric-backed evidence, such as choosing a direction, prioritizing an opportunity, evaluating a change, segmenting users, sizing tradeoffs, or deciding what to do next.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/data-analytics/1.1.0-exp-baseline/skills/product-business-analysis/SKILL.md"
+                    }
+                  }
+                }
+              },
+              {
+                "name": "$data-analytics:publish-artifact-to-sites",
+                "description": "Publish an existing Data HTML report or dashboard to Sites when its selected app delivery policy calls for publication or the user explicitly requests it.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/data-analytics/1.1.0-exp-baseline/skills/publish-artifact-to-sites/SKILL.md"
+                    }
+                  }
+                }
+              },
+              {
+                "name": "$data-analytics:report-to-pdf",
+                "description": "Create a polished PDF from an existing Data dashboard or report.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/data-analytics/1.1.0-exp-baseline/skills/report-to-pdf/SKILL.md"
+                    }
+                  }
+                }
+              },
+              {
+                "name": "$data-analytics:schedule-refresh-jobs",
+                "description": "Create or update recurring cloud refresh jobs for an existing Data dashboard or report, including requests to keep it up to date.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/data-analytics/1.1.0-exp-baseline/skills/schedule-refresh-jobs/SKILL.md"
+                    }
+                  }
+                }
+              },
+              {
+                "name": "$data-analytics:share-artifact-summary",
+                "description": "Share or provide a concise Data dashboard, report, chart, or component summary.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/data-analytics/1.1.0-exp-baseline/skills/share-artifact-summary/SKILL.md"
+                    }
+                  }
+                }
+              },
+              {
+                "name": "$data-analytics:validate-data",
+                "description": "Validate analysis methodology, sources, calculations, visuals, and conclusions, including report and dashboard completeness, usability, and supported repairs.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/data-analytics/1.1.0-exp-baseline/skills/validate-data/SKILL.md"
+                    }
+                  }
+                }
+              },
+              {
+                "name": "$data-analytics:visualize-data",
+                "description": "Design, build, revise, and verify quantitative charts and figures while authoring reports, dashboards, notebooks, and other durable artifacts. Do not use for inline chat charts.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/data-analytics/1.1.0-exp-baseline/skills/visualize-data/SKILL.md"
+                    }
+                  }
+                }
+              },
+              {
+                "name": "$dingtalk-aicard",
+                "description": "Create, edit, and validate DingTalk AI Card (A2UI) JSON files offline. Use for cards built from requirements or images, structural protocol errors, and named component or function contract lookup through native DWS commands. Send a card to the current user only when a preview is requested.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.agents/skills/dingtalk-aicard/SKILL.md"
+                    }
+                  }
+                }
               },
               {
                 "name": "$dingtalk-aisearch",
-                "description": "AI搜问：人员语义搜索、跨源内容定位与行为回溯。Use when 按姓名/工号/部门/职责/上下级找人，或在目标对象未知时按主题、语义、来源或行为发现相关内容。搜索结果用于候选定位；命中后需要读取、修改或验证原对象时切换到对象所属产品。完整手机号精确反查走 dingtalk-contact。命令前缀：dws aisearch。",
-                "input": null
+                "description": "AI搜问：人员语义搜索、跨源主题检索与行为回溯。Use when 语义找人，或目标未知时按主题或行为发现内容。原生最近列表走所属产品；完整手机号精确反查走 dingtalk-contact。前缀：dws aisearch。",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.agents/skills/dingtalk-aisearch/SKILL.md"
+                    }
+                  }
+                }
               },
               {
                 "name": "$dingtalk-aitable",
-                "description": "钉钉 AI 表格（多维表）。Use when 用户说 AI表格/多维表/数据表/base/table/应用模式/App 页面/Widget/建表/查记录/写数据/字段/记录增删改查/记录评论/评论回复/SQL/PostgreSQL/SELECT/JOIN/跨表关联查询/筛选/排序/公式/模板搜索/批量导入CSV或JSON/导出/仪表盘/图表/上传附件到表格/按字段类型建表/数据源/创建数据源/更新数据源配置/触发数据源同步/按任务 ID 查询同步状态/获取数据源配置/列出数据源可用来源/获取数据源可同步字段/审批数据同步。不做电子表格单元格读写或单元格批注（走 dingtalk-misc）、文档编辑（走 dingtalk-doc）；听记待办入表先用 dingtalk-minutes 提取，再由本 skill 写入。命令前缀：dws aitable。",
-                "input": null
+                "description": "钉钉 AI 表格（多维表）业务操作。Use when 用户需要操作 AI 表格/多维表/Base/Table、应用模式/App 页面/Widget、建表、查写记录、字段、记录评论、评论回复、访问密钥（API Key）、SQL/PostgreSQL/SELECT/JOIN、筛选、排序、公式、模板、批量导入 CSV 或 JSON、导出、仪表盘、图表、上传附件、数据源配置与同步、按任务 ID 查询同步状态或审批数据同步。普通请求以完成明确的业务操作为主；当用户明确要求 CLI 契约评审、核对 aitable 合成 JSON 回执、dry-run、命令参数、Help/Schema 契约或恢复方案时，必须加载本 Skill。只评审 aitable 合成 JSON 回执也必须加载本 Skill；“不要执行线上业务”不等于免除本机离线契约核对，不能按通用 JSON 经验直接作答。这是本机 Help/Schema 契约核对，不是仓库源码审查，不从源码搜索开始；先加载正文确定入口与规则，不能仅凭摘要执行；以用户原文指定的核对入口为准，Skill 参数不得扩大范围。不做电子表格单元格读写或单元格批注（走 dingtalk-misc）、文档编辑（走 dingtalk-doc）；听记待办入表先用 dingtalk-minutes 提取，再由本 skill 写入。",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.agents/skills/dingtalk-aitable/SKILL.md"
+                    }
+                  }
+                }
               },
               {
                 "name": "$dingtalk-calendar",
                 "description": "钉钉日历与会议室。Use when 用户说 约会议/查日程/订会议室/查闲忙/加参会人/改期/取消会议/今天的日程/本周日程/共同空闲。不做视频会议发起/邀请入会/会中控制（走 dingtalk-misc）、AI 听记（走 dingtalk-minutes）、待办任务（走 dingtalk-todo）。命令前缀：dws calendar。",
-                "input": null
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.agents/skills/dingtalk-calendar/SKILL.md"
+                    }
+                  }
+                }
               },
               {
                 "name": "$dingtalk-chat",
-                "description": "钉钉群聊与消息。Use when 收发/搜索消息、建群、群治理、Bot/Webhook、文件，或仅限 IM 的消息谓词筛选。跨源主题/行为轨迹走 dingtalk-aisearch；DING/班级群走 dingtalk-misc；邮件走 dingtalk-mail。",
-                "input": null
+                "description": "钉钉群聊与消息。Use when 收发/搜索消息、建群、群治理、Bot/Webhook、文件、AI/A2UI 卡片流式，或仅限 IM 的消息谓词筛选。跨源主题/行为轨迹走 dingtalk-aisearch；DING/班级群走 dingtalk-misc；邮件走 dingtalk-mail。",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.agents/skills/dingtalk-chat/SKILL.md"
+                    }
+                  }
+                }
               },
               {
                 "name": "$dingtalk-contact",
                 "description": "钉钉通讯录精确查询。Use when 已有 userId 后查详情、部门、职位或邮箱，按完整手机号反查用户，或查询自己、部门成员及角色。姓名模糊搜索、工号、职责、上下级走 dingtalk-aisearch，拿到 userId 后用本 skill 补详情。命令前缀：dws contact。",
-                "input": null
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.agents/skills/dingtalk-contact/SKILL.md"
+                    }
+                  }
+                }
               },
               {
                 "name": "$dingtalk-doc",
-                "description": "钉钉在线文字文档（adoc）内容：查找、创建、读取编辑、块、评论、媒体/附件、白板卡片容器、导入导出、版本、模板、权限、分享及 Markdown/JSONML。不做白板图形/原生 .md/电子表格（dingtalk-misc）、文档空间与钉盘存储（dingtalk-drive）、知识库组织（dingtalk-wiki）、AI 表格（dingtalk-aitable）。命令前缀：dws doc。",
-                "input": null
+                "description": "钉钉在线文档（adoc）：查找、读写、块、评论、附件、导入导出、版本、模板、权限、分享、Markdown/JSONML；文档内白板卡片容器的插入、定位、删除。白板图形内容创建或修改走 dingtalk-misc。",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.agents/skills/dingtalk-doc/SKILL.md"
+                    }
+                  }
+                }
               },
               {
                 "name": "$dingtalk-drive",
-                "description": "钉钉文件管理（存储层，覆盖钉盘与文档空间）。Use when 用户说 钉盘/文档空间/我的文档中的普通文件或文件夹、查找/上传/下载/复制/移动/重命名/删除/回收站/权限/评论/元信息，或本地与钉盘文件夹比较、拉取、推送、双向同步；也承接在线文档节点的存储管理。文档正文编辑与导出走 dingtalk-doc；明确的知识库空间及空间内节点组织走 dingtalk-wiki。命令前缀：dws drive。",
-                "input": null
+                "description": "钉钉文件管理（存储层，覆盖钉盘与文档空间）。Use when 用户说 钉盘/文档空间/我的文档中的普通文件或文件夹、查找/最近访问或编辑文档列表/上传/下载/复制/移动/重命名/删除/回收站/权限/评论/元信息，或本地与钉盘文件夹比较、拉取、推送、双向同步；也承接在线文档节点的存储管理。文档正文编辑与导出走 dingtalk-doc；明确的知识库空间及空间内节点组织走 dingtalk-wiki。命令前缀：dws drive。",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.agents/skills/dingtalk-drive/SKILL.md"
+                    }
+                  }
+                }
               },
               {
                 "name": "$dingtalk-event",
-                "description": "钉钉个人 IM、OA 审批、VoIP 通话邀请、待办与互动卡片回调事件长连接监听。Use when 用户说监听消息/@我/某人/某群/全部消息、已读/撤回/reaction、群成员加入/群成员退出/群状态变化，监听审批任务创建/完成/转交、审批实例发起/抄送/终止/完成、VoIP 通话邀请、待办创建/更新/删除，或互动卡片回调。命令前缀：dws event。",
-                "input": null
+                "description": "钉钉个人 IM、OA 审批、VoIP 通话邀请、待办、互动卡片与好友事件长连接监听。Use when 用户说监听消息/@我/某人/某群/全部消息、已读/撤回/reaction、群成员加入/群成员退出，监听审批任务创建/完成/转交、审批实例发起/抄送/终止/完成、VoIP 通话邀请、待办创建/更新/删除、好友申请/好友添加成功，或互动卡片回调。命令前缀：dws event。",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.agents/skills/dingtalk-event/SKILL.md"
+                    }
+                  }
+                }
               },
               {
                 "name": "$dingtalk-mail",
                 "description": "钉钉邮箱读写、搜索、回复与转发。Use when 用户说发邮件/查邮件/回邮件/转发邮件/未读邮件/邮件搜索/邮箱附件。一句话发邮件时先用 dingtalk-contact 解析并确认收件人，再由本 skill 发送；不做钉钉消息（走 dingtalk-chat）、紧急通知（走 dingtalk-misc）。命令前缀：dws mail。",
-                "input": null
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.agents/skills/dingtalk-mail/SKILL.md"
+                    }
+                  }
+                }
               },
               {
                 "name": "$dingtalk-minutes",
-                "description": "钉钉 AI 听记。Use when 查询或修改听记摘要、完整逐字稿、关键词、标签、行动项、录音、上传、思维导图、发言人洞察、ASR 热词/识别词配置或分享权限。写文档走 dingtalk-doc；建待办走 dingtalk-todo；日程走 dingtalk-calendar。命令前缀：dws minutes。",
-                "input": null
+                "description": "钉钉 AI 听记。Use when 查询或修改听记摘要、完整逐字稿、关键词、标签、行动项、录音、上传、听记内置思维导图、发言人洞察、ASR 热词/识别词配置或分享权限。独立 .amind 脑图文件的创建和主题读写走 dingtalk-misc 的 mind reference；写文档走 dingtalk-doc；建待办走 dingtalk-todo；日程走 dingtalk-calendar。命令前缀：dws minutes。",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.agents/skills/dingtalk-minutes/SKILL.md"
+                    }
+                  }
+                }
               },
               {
                 "name": "$dingtalk-misc",
-                "description": "长尾产品集合技能，覆盖低频钉钉产品：OA审批查询与处理/法务智能合同/考勤/直播/DING紧急消息/开放平台应用与MCP开发/Agoal目标管理/日志日报周报/电子表格/开放平台文档搜索与OpenAPI逃生舱/独立及文档内嵌白板/钉钉招聘/DWS技能市场安装/组织大脑Hrbrain/原生Markdown/原生HTML/PAT行为授权/多组织profile。Use when 用户提到上述任一产品，尤其是 Agoal/目标管理/战略解码/经营合约及字段配置/计分卡/OKR/目标规则与周期/个人目标/目标模板/周月报规则提交统计/按时/迟交/未提交/跟催，或查询/创建合同台账、批量导入合同、按听记起草合同、发起合同审查、归档合同、管理合同项目/相对方/账款，或查待审批/同意拒绝转交撤销审批/打卡/排班/日报周报内容填报/独立白板带内容创建/白板节点读写/单元格读写/招聘职位/JD/创建职位/搜索安装技能/开发者后台应用/企业内部应用/查应用状态或能否删除/应用管理成员及角色汇总/应用版本历史/企业内部应用机器人配置、消息模式或在线状态/本机机器人连接器/Stream连接/MCP服务或工具/发布或调试MCP/获取或调用已发布MCP/把OpenAPI、Swagger、Postman、curl或HTTP接口做成MCP或给Agent使用/未封装OpenAPI/llms.txt/dws api/人才池/员工档案/职业历程/绩效/原生.md文件/Markdown版本比较/本地草稿diff/Markdown评论/原生.html文件/新建HTML页面/PAT授权/切换组织/跨组织/profile 等相关操作。周报/月报内容填报属于 report；规则级按时、迟交、未提交统计与人员跟催属于 Agoal；带审批人、抄送人或审批流的日报、周报、简报提交属于 OA 审批。未来审批任务或实例变化的实时监听不属于本 skill，应使用 dingtalk-event。命中后由本 skill 的「产品索引表」定位具体子产品和命令前缀，再按对应子产品说明执行。",
-                "input": null
+                "description": "独立脑图的带内容创建与主题读写使用 dws mind；空白脑图走 wiki，听记内置思维导图走 minutes。 钉钉独立白板（白板文件）的创建、绘图、保存和修改；文档内嵌白板仅在已有承载文档 nodeId 和 partId 时提供图形内容读写（dws whiteboard）。两类目标相互独立，不互相推断或切换；文档内白板卡片容器不属于本 skill。长尾产品集合技能，覆盖低频钉钉产品：OA审批查询与处理/法务智能合同/考勤/直播/DING紧急消息/开放平台应用与MCP开发/Agoal目标管理/日志日报周报/电子表格/开放平台文档搜索与OpenAPI逃生舱/DWS技能市场安装/组织大脑Hrbrain/原生Markdown/原生HTML/PAT行为授权/多组织profile。Use when 用户提到上述任一产品，尤其是 Agoal/目标管理/战略解码/经营合约及字段配置/计分卡/OKR/目标规则与周期/个人目标/目标模板/周月报规则提交统计/按时/迟交/未提交/跟催，或查询/创建合同台账、批量导入合同、按听记起草合同、归档合同、管理合同项目/相对方/账款，或查待审批/同意拒绝转交撤销审批/打卡/排班/日报周报内容填报/独立白板带内容创建/独立白板节点读写/已有 nodeId 和 partId 的文档内嵌白板图形内容读写/单元格读写/搜索安装技能/开发者后台应用/企业内部应用/查应用状态或能否删除/应用管理成员及角色汇总/应用版本历史/企业内部应用机器人配置、消息模式或在线状态/本机机器人连接器/Stream连接/MCP服务或工具/发布或调试MCP/搜索MCP市场/获取或调用已发布MCP/把OpenAPI、Swagger、Postman、curl或HTTP接口做成MCP或给Agent使用/未封装OpenAPI/llms.txt/dws api/人才池/员工档案/职业历程/绩效/原生.md文件/Markdown版本比较/本地草稿diff/Markdown评论/原生.html文件/新建HTML页面/PAT授权/切换组织/跨组织/profile 等相关操作。周报/月报内容填报属于 report；规则级按时、迟交、未提交统计与人员跟催属于 Agoal；带审批人、抄送人或审批流的日报、周报、简报提交属于 OA 审批。未来审批任务或实例变化的实时监听不属于本 skill，应使用 dingtalk-event。命中后由本 skill 的「产品索引表」定位具体子产品和命令前缀，再按对应子产品说明执行。",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.agents/skills/dingtalk-misc/SKILL.md"
+                    }
+                  }
+                }
               },
               {
                 "name": "$dingtalk-shared",
                 "description": "钉钉(DingTalk) MultiSkill 的轻量共享入口。Use when 用户泛称 DWS/钉钉操作但未明确产品、请求跨产品编排、需要 URL 类型预检或产品边界消歧。清晰的单产品操作优先使用对应 dingtalk-* 子 skill；本 skill 只提供全局执行契约和按需 reference 导航，不承载产品命令全集。",
-                "input": null
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.agents/skills/dingtalk-shared/SKILL.md"
+                    }
+                  }
+                }
+              },
+              {
+                "name": "$dingtalk-tag",
+                "description": "钉钉数字员工的自然语言创建、查询、修改、发布、删除、能力资源、执行状态、本地 Profile 落盘与 DSH 接入。Use when 用户说创建或管理数字员工、改人设/岗位/响应模式、发布或询问下线能力、查执行状态或 trace、管理数字员工 Skill/MCP、把已有数字员工转换为本地 Profile，或接入本地 DSH。命令前缀：dws dingtalk-tag。",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.agents/skills/dingtalk-tag/SKILL.md"
+                    }
+                  }
+                }
               },
               {
                 "name": "$dingtalk-todo",
                 "description": "钉钉待办 / TODO。Use when 用户说 创建待办/TODO/任务提醒/指派任务/标记完成/查待办/紧急待办/循环待办/批量建待办/逾期待办。不做日报周报（走 dingtalk-misc）、审批（走 dingtalk-misc）、日程（走 dingtalk-calendar）。命令前缀：dws todo。",
-                "input": null
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.agents/skills/dingtalk-todo/SKILL.md"
+                    }
+                  }
+                }
               },
               {
                 "name": "$dingtalk-wiki",
                 "description": "钉钉知识库与空间管理。Use when 用户明确说 知识库/wiki/创建、查找或列出知识库/命名的团队知识空间/个人知识库/知识库成员/库内节点创建、列表、搜索、复制、移动、删除或知识库动态。仅说“文档空间/我的文档”不触发：普通存储管理与全局文件搜索走 dingtalk-drive；节点正文读写走 dingtalk-doc。命令前缀：dws wiki。",
-                "input": null
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.agents/skills/dingtalk-wiki/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$doc-organizer",
-                "description": "文档整理工具。用于整理笔记项目中的 Markdown 文档。当用户说\"整理文档\"、\"整理笔记\"、\"organize docs\"、\"整理一下文档\"时触发。执行文档分类、移动、合并、清洗、重命名、标记等操作，确保100%文档都被整理且放在合适目录。",
-                "input": null
+                "name": "$instabox",
+                "description": "Use when the user wants a cloud Linux box (instabox sandbox) from the terminal with the `instabox` CLI — create one, SSH in, run a command in it, read its files, set its idle auto-pause, or delete it, to run a repo's tests in CI (GitHub Actions: a box per job, or a self-hosted runner), or to report a problem with instabox itself (`instabox feedback`). For saving or restoring a box's disks, see instabox-snapshots.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.agents/skills/instabox/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$execution-planner",
-                "description": "Design a decision-complete execution plan with clear scope, sequencing, dependencies, acceptance criteria, and explicit exclusions. Use when implementation should start from a solid blueprint instead of on-the-fly decisions. Triggers: 'plan this', 'break this down', 'make a work plan', 'how should we approach this'.",
-                "input": null
+                "name": "$instabox-basic-setup",
+                "description": "Use when the user wants their instabox setup to use local tokens, git config or editor config — \"put my tokens / dotfiles / git config into instabox\", \"set up my box like my laptop\", \"move my setup to instabox\". Produces a names-only scan and a reviewable plan, saves known API tokens as org Secrets for their service's HTTPS API hosts, selects them on named sandboxes, and copies approved ordinary config files directly to named running sandboxes. It does not put files in the Secret store. Moves no code; for a repo, use instabox-move-repo.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.agents/skills/instabox-basic-setup/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$inspiration-capture",
-                "description": "灵感记录与发散工具。当用户说\"记录一个点子\"、\"这是个好想法\"、\"想到一个点子\"、\"想到一件事\"、\"有个灵感\"、\"记录灵感\"、\"记个想法\"等表达有灵感要记录时触发。当用户说\"查询灵感\"、\"列出灵感\"、\"查看灵感\"、\"我的灵感\"、\"灵感列表\"时触发查询功能。支持按时间、关键字、分类查询。",
-                "input": null
+                "name": "$instabox-move-repo",
+                "description": "Use when the user wants to move the repo they are working in onto instabox — \"move this repo to instabox\", \"migrate this repo to a box\", \"continue this work in the cloud\", \"move my project to a box\". Copies the current git repo and all its worktrees exactly (uncommitted, untracked, stashed and unpushed work; no build output or dependencies), moves its Claude Code / Codex conversations so they resume on the box, then installs the project's dependencies there.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.agents/skills/instabox-move-repo/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$jira-assistant",
-                "description": "Use when user needs to create, search, update, delete JIRA issues or comments, manage subscriptions, look up JIRA users, or perform any JIRA operation via the jira-cli tool.",
-                "input": null
+                "name": "$instabox-snapshots",
+                "description": "Use when the user wants to save an instabox box's state and load it later — \"save a snapshot\", \"checkpoint this box\", \"restore/load from a snapshot\", \"start a new box from my setup\", \"clone this box\". Covers instabox snapshot save/ls/files/rm, create --snapshot and fork.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.agents/skills/instabox-snapshots/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-approval",
-                "description": "飞书审批：查询和处理审批待办/已办/实例，搜索可发起审批定义、查看定义详情并发起原生审批实例。当用户要处理审批任务、查看审批实例、搜索或发起审批时使用。审批待办不是飞书任务；非审批类待办走 lark-task。不负责创建审批定义；三方审批定义不走原生提单。",
-                "input": null
+                "name": "$office-collaboration",
+                "description": "操作飞书/Lark 和钉钉/DingTalk 时使用，包括消息、文档、云盘、知识库、日历会议、待办、表格、审批、邮箱、人员查询、事件监听和登录权限；按平台与任务读取参考文档。",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.agents/skills/office-collaboration/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-apps",
-                "description": "妙搭（Spark/Miaoda）应用开发与托管：应用创建、本地全栈开发、云端生成迭代、创意设计（UI mockup / 可交互原型 / 线框图 / 落地页 / 仪表盘 / 幻灯片 deck / 视觉探索）、AI相关能力和飞书平台能力或者其他外部能力集成、日志/Trace/监控指标/PV/UV 查询、环境变量管理、应用协作者与协作权限设置、应用角色与成员管理、自动化触发器（定时/记录变更/Webhook/飞书审批）。当用户要开发/新建一个系统·工具·平台·应用，或要本地开发 / 云端开发 / 修改 / 部署 / 发布 / 上线 / 拿可分享链接，或用 HTML 做页面·网站·部署到妙搭，或要设计 / design / mockup / prototype / wireframe / 做 PPT / deck / 视觉探索，或提到妙搭/Spark/Miaoda（应用运行时域名形如 *.aiforce.cloud）、应用数据库、应用文件存储、开放 API Key、可见范围、应用协作者/开发权限、应用角色/角色成员、线上日志、接口请求量、错误量、延迟、访问量、环境变量、给妙搭应用配自动化任务/定时触发/审批通过后自动触发时使用。不负责普通云盘文件上传（lark-drive）、飞书文档编辑（lark-doc）、原生幻灯片创建（lark-slides）。",
-                "input": null
+                "name": "$openai-developers:agents",
+                "description": "Build agent apps with the Agents API or Agents SDK. Use when adding tools, sessions, sandboxes, handoffs, guardrails, evals, or deployment.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-developers/1.3.13/skills/agents/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-attendance",
-                "description": "飞书考勤打卡：查询自己的考勤打卡记录",
-                "input": null
+                "name": "$openai-developers:devday-guide",
+                "description": "Help with OpenAI DevDay attendance, onsite logistics, session schedules, personal plans, livestreams, recordings, and DevDay Exchanges. Use for DevDay-specific questions, not general OpenAI API or app development.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-developers/1.3.13/skills/devday-guide/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-base",
-                "description": "飞书多维表格（Base）操作：建表、字段、记录、视图、统计、公式/lookup、表单、仪表盘、应用模式（BaseApp/AppMode 页面与组件）、Workspace 目录、workflow、角色权限、模板中心（多维表格模板分类/列表/搜索）；遇到 Base/多维表格/bitable、BaseApp/AppMode、/base/ 或 /app/ 链接时使用。BaseApp 不走 lark-apps；文件导入/导出转 lark-drive，认证/授权转 lark-shared。",
-                "input": null
+                "name": "$openai-developers:openai-api-troubleshooting",
+                "description": "Use when an OpenAI API request fails and Codex needs to classify the likely cause, explain the next step, and route to the right follow-up. Covers common runtime failures such as blocked outbound network access, invalid credentials, exhausted API quota or credits, rate limits, and model, project, or organization access issues; delegate key provisioning to openai-platform-api-key and current documentation lookups to openai-docs.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-developers/1.3.13/skills/openai-api-troubleshooting/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-calendar",
-                "description": "飞书日历：管理日历日程和会议室。查看/搜索日程、创建/更新日程、管理参会人、查询忙闲和推荐时段、预定会议室。当用户需要查看日程安排、创建/修改会议、查询/预定会议室时使用。不负责：查询过去的视频会议记录（走 lark-meeting）、待办任务（走 lark-task）。",
-                "input": null
+                "name": "$openai-developers:openai-computer-use",
+                "description": "Build or debug an application that uses OpenAI SDK computer or browser tools to operate a user-provided environment.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-developers/1.3.13/skills/openai-computer-use/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-contact",
-                "description": "飞书 / Lark 通讯录:按姓名 / 邮箱解析成 open_id,或按 open_id 反查姓名 / 部门 / 邮箱 / 联系方式 / 个人状态 / 签名,以及按关键词搜索当前用户可见的机器人 / 智能体(agent)。当用户提到一个名字要下一步发消息 / 排日程,或拿到 open_id 想查具体信息时使用。不负责部门树遍历、按部门列员工、组织架构图,这类需求走原生 OpenAPI。",
-                "input": null
+                "name": "$openai-developers:openai-platform-api-key",
+                "description": "Use when Codex is asked to build, run, test, debug, or configure an OpenAI-backed or provider-unspecified AI app, UI, script, CLI, generator, or tool, especially requests phrased only as \"using AI\" or generators driven by forms/user input; also use for OPENAI_API_KEY or sk-proj setup. Treat this as the credential gate: inspect safely, ask reuse-vs-new before API work, and never expose plaintext.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-developers/1.3.13/skills/openai-platform-api-key/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-doc",
-                "description": "飞书云文档（Docx / Wiki）内容操作：读取、创建、编辑文档，插入或下载图片附件，以及操作思维笔记。用户提供文档 URL/token（包括 doubao.com 的 /docx/、/wiki/）时使用；按 URL 路径/token 而非域名路由。文档内嵌资源按读取参考中的统一规则分流。独立评论操作走 lark-drive；随正文读取评论使用 docs +fetch。表格或 Base 内部数据操作不在本 skill。",
-                "input": null
+                "name": "$openai-developers:setup",
+                "description": "Use during OpenAI Developers post-install onboarding to set up API access, check for optional API credits, and verify a first Responses API request.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-developers/1.3.13/skills/setup/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-drive",
-                "description": "飞书云空间（云盘/云存储）：管理 Drive 文件和文件夹，包含上传/下载、创建文件夹、复制/移动/删除、查看元数据、查询权限设置、评论/权限/订阅、标题、版本、飞书文档密级标签（secure labels）和本地文件导入。用户需要整理云盘目录、处理云空间资源 URL/token、判断链接类型/真实 token/标题，或导入 Word/Markdown/Excel/CSV/PPTX/.base 为 docx/sheet/bitable/slides 时使用；doubao.com 云空间 URL/token 也按资源路径和 token 路由，不回退 WebFetch。不负责：文档内容编辑（走 lark-doc）、表格/Base 表内数据操作（走 lark-sheets/lark-base）、知识空间节点/成员管理（走 lark-wiki）、原生 Markdown 文件读写/patch/diff（走 lark-markdown）。",
-                "input": null
+                "name": "$openai-templates:artifact-template-analytics-dashboard",
+                "description": "Create a spreadsheet using the Analytics Dashboard template and its retained reference file. Use when the user selects or names Analytics Dashboard. Monitor acquisition, engagement, retention, revenue, and conversion funnel KPIs with charts.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-templates/0.1.1/skills/artifact-template-analytics-dashboard/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-event",
-                "description": "Lark/Feishu real-time event listening / subscribing / consuming: stream events as NDJSON via `lark-cli event consume <EventKey>` (covers IM messages/reactions/chat changes, Approval status changes, Task updates, VC meeting started/joined/ended, Minutes generated, Whiteboard updated, etc.). Use for Lark bots, real-time message processing, long-running subscribers, streaming webhook/push handlers. Supports `--max-events` / `--timeout` bounded runs and a stderr ready-marker contract — designed for AI agents running as subprocesses.",
-                "input": null
+                "name": "$openai-templates:artifact-template-business-review",
+                "description": "Create a presentation using the Business Review template and its retained reference file. Use when the user selects or names Business Review. Review business performance, KPIs, segment results, strategic priorities, decisions, and outlook.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-templates/0.1.1/skills/artifact-template-business-review/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-im",
-                "description": "飞书即时通讯：收发消息和管理群聊。发送和回复消息、搜索聊天记录、管理群聊成员、上传下载图片和文件、管理表情回复、发送应用内/短信/电话加急、发送和处理交互卡片（Interactive Card）、监听卡片按钮回调（card.action.trigger）。当用户需要发消息、查看或搜索聊天记录、下载聊天中的文件、查看群成员、搜索群、创建群聊或话题群、管理标记数据、管理 Feed 置顶（添加/移除/查询置顶会话）、管理标签数据、处理卡片回调时使用。",
-                "input": null
+                "name": "$openai-templates:artifact-template-design-report",
+                "description": "Create a document using the Design Report template and its retained reference file. Use when the user selects or names Design Report. Produce design reports with an executive summary, key findings, implications, recommendations, and appendix.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-templates/0.1.1/skills/artifact-template-design-report/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-mail",
-                "description": "飞书邮箱：Use when user mentions 起草邮件、写邮件、草稿、发送/回复/转发邮件、查阅邮件、看邮件、搜索邮件、邮件文件夹、邮件标签、邮件联系人、监听新邮件、邮件收信规则等；use for mail/email intent only. Do not use for docs/sheets/calendar/auth setup/pure contact lookup/IM chat tasks.",
-                "input": null
+                "name": "$openai-templates:artifact-template-experiment-analysis",
+                "description": "Create a document using the Experiment Analysis template and its retained reference file. Use when the user selects or names Experiment Analysis. Analyze experiments with hypotheses, methodology, results, interpretation, limitations, and next steps.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-templates/0.1.1/skills/artifact-template-experiment-analysis/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-markdown",
-                "description": "飞书 Markdown：查看、创建、上传、编辑和比较飞书中的原生 Markdown 文件。当用户要操作飞书 Markdown 文件，或比较其远端版本及本地草稿时使用。纯本地 Markdown 文件操作不触发本 skill。不负责将 Markdown 导入为飞书在线文档，也不负责文件搜索、权限、评论、移动、删除等云空间管理操作。",
-                "input": null
+                "name": "$openai-templates:artifact-template-financial-budget",
+                "description": "Create a spreadsheet using the Financial Budget template and its retained reference file. Use when the user selects or names Financial Budget. Model actuals, budget and scenario forecasts, variances, cash runway, and departmental plans.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-templates/0.1.1/skills/artifact-template-financial-budget/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-meeting",
-                "description": "飞书视频会议：查询会议记录与会议产物(纪要/逐字稿/妙记)、妙记搜索/上传/下载/编辑、机器人参与会议；查询进行中的会议、实时会议内容(发言/聊天/共享文档)问答(会上/会里)、发送会中聊天/表情；基于 meeting_id、meeting_no、event_id、note_id、minute_token、vc-node-id 或妙记 URL 查询相关信息。预约会议、忙闲和会议室管理走 lark-calendar。",
-                "input": null
+                "name": "$openai-templates:artifact-template-investment-committee-memo",
+                "description": "Create a document using the Investment Committee Memo template and its retained reference file. Use when the user selects or names Investment Committee Memo. Prepare investment committee memos with the thesis, transaction details, financial analysis, risks, and recommendation.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-templates/0.1.1/skills/artifact-template-investment-committee-memo/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-minutes",
-                "description": "仅当用户或上游配置显式指定 lark-minutes 时使用，相关请求统一交由 lark-meeting 技能处理。",
-                "input": null
+                "name": "$openai-templates:artifact-template-legal-memorandum",
+                "description": "Create a document using the Legal Memorandum template and its retained reference file. Use when the user selects or names Legal Memorandum. Draft legal memoranda with the issue, brief answer, relevant facts, analysis, and conclusion.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-templates/0.1.1/skills/artifact-template-legal-memorandum/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-note",
-                "description": "仅当用户或上游配置显式指定 lark-note 时使用，相关请求统一交由 lark-meeting 技能处理。",
-                "input": null
+                "name": "$openai-templates:artifact-template-market-trends-report",
+                "description": "Create a presentation using the Market Trends Report template and its retained reference file. Use when the user selects or names Market Trends Report. Communicate market or industry trends, supporting evidence, implications, and recommended responses.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-templates/0.1.1/skills/artifact-template-market-trends-report/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-okr",
-                "description": "飞书 OKR：管理目标与关键结果。查看和编辑 OKR 周期、目标、关键结果、对齐关系、量化指标和进展记录。当用户需要查看或创建 OKR、管理目标和关键结果、查看对齐关系时使用。不负责：待办任务管理（lark-task）、日程/会议安排（lark-calendar）、绩效评估",
-                "input": null
+                "name": "$openai-templates:artifact-template-minimal-letterhead",
+                "description": "Create a document using the Minimal Letterhead template and its retained reference file. Use when the user selects or names Minimal Letterhead. Write professional business letters with sender, recipient, message, and signature fields in a minimal letterhead layout.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-templates/0.1.1/skills/artifact-template-minimal-letterhead/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-openapi-explorer",
-                "description": "飞书/Lark 原生 OpenAPI 探索：从官方文档库中挖掘未经 CLI 封装的原生 OpenAPI 接口。当用户的需求无法被现有 lark-* skill 或 lark-cli 已注册命令满足，需要查找并调用原生飞书 OpenAPI 时使用。",
-                "input": null
+                "name": "$openai-templates:artifact-template-operating-calendar",
+                "description": "Create a spreadsheet using the Operating Calendar template and its retained reference file. Use when the user selects or names Operating Calendar. Plan annual and monthly operating milestones, campaigns, launches, deadlines, and recurring events.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-templates/0.1.1/skills/artifact-template-operating-calendar/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-shared",
-                "description": "Use for lark-cli setup/auth tasks: auth login/status/logout, user vs bot identity, business-domain permissions (--domain, including all/docs/drive), missing scopes, revoking authorization, or handling _notice JSON.",
-                "input": null
+                "name": "$openai-templates:artifact-template-operating-review",
+                "description": "Create a presentation using the Operating Review template and its retained reference file. Use when the user selects or names Operating Review. Run weekly operating reviews with scorecards, functional updates, risks, decisions, and action items.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-templates/0.1.1/skills/artifact-template-operating-review/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-sheets",
-                "description": "飞书电子表格：创建和操作电子表格。支持工作表与行列结构（增删/合并/尺寸/隐藏/冻结/分组）、单元格读写（值/公式/样式/批注/单元格图片）、区域复制移动排序填充、查找替换、批量更新，图表、透视表、条件格式、筛选器与筛选视图、下拉列表、迷你图、浮动图片等对象的创建与维护，以及公式校验、历史版本回滚、本地 Excel/CSV 与飞书表格的导入导出。当用户需要创建或编辑表格、统计汇总与可视化、表格美化、公式计算（含 Excel 公式迁移）、金融/财务建模（DCF、三张表、预算、Sensitivity 等）时使用。多维表格（Base/bitable）请改用 lark-base；若用户是想按名称或关键词搜索云空间（云盘/云存储）里的表格文件，请改用 lark-drive 的 drive +search 先定位资源。当用户给出 doubao.com 的 /sheets/ URL/token 时，也应直接使用本 skill，不要因为域名不是飞书而回退到 WebFetch；路由依据是 URL 路径模式和 token，而不是域名。",
-                "input": null
+                "name": "$openai-templates:artifact-template-project-kickoff",
+                "description": "Create a presentation using the Project Kickoff template and its retained reference file. Use when the user selects or names Project Kickoff. Align teams on project goals, scope, roles, milestones, risks, and the working model.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-templates/0.1.1/skills/artifact-template-project-kickoff/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-skill-maker",
-                "description": "创建 lark-cli 的自定义 Skill。当用户需要把飞书 API 操作封装成可复用的 Skill（包装原子 API 或编排多步流程）时使用。",
-                "input": null
+                "name": "$openai-templates:artifact-template-project-tracker",
+                "description": "Create a spreadsheet using the Project Tracker template and its retained reference file. Use when the user selects or names Project Tracker. Manage workstreams, tasks, owners, status, priority, dates, launch pulse, and a Gantt schedule.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-templates/0.1.1/skills/artifact-template-project-tracker/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-slides",
-                "description": "飞书幻灯片：创建和编辑幻灯片。创建演示文稿、读取幻灯片内容、管理幻灯片页面（创建、删除、读取、局部替换）。当用户需要创建或编辑幻灯片、读取或修改单个页面时使用。当用户给出 doubao.com 的 /slides/ URL/token 时，也应直接使用本 skill，不要因为域名不是飞书而回退到 WebFetch；路由依据是 URL 路径模式和 token，而不是域名。不负责：云文档内容编辑（走 lark-doc）、云文档里的独立画板对象（走 lark-whiteboard）、上传或下载普通文件（走 lark-drive）。",
-                "input": null
+                "name": "$openai-templates:artifact-template-sales-pipeline",
+                "description": "Create a spreadsheet using the Sales Pipeline template and its retained reference file. Use when the user selects or names Sales Pipeline. Track opportunities, stages, owners, deal sizes, probabilities, forecasts, next steps, and risks.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-templates/0.1.1/skills/artifact-template-sales-pipeline/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-task",
-                "description": "飞书任务：管理任务、清单和任务智能体。创建待办任务、查看和更新任务状态、拆分子任务、组织任务清单、分配协作成员、上传任务附件、注册或注销任务智能体、更新任务智能体的主页数据、写入智能体任务记录。当用户需要创建待办事项、查看任务列表、跟踪任务进度、管理项目清单或给他人分配任务、为任务上传附件文件、注册注销任务智能体、更新智能体主页数据、写入任务记录时使用。",
-                "input": null
+                "name": "$openai-templates:artifact-template-simple-dark-mode",
+                "description": "Create a presentation using the Simple Dark Mode template and its retained reference file. Use when the user selects or names Simple Dark Mode. Create clean dark-mode presentations with bold typography, simple sections, charts, and imagery.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-templates/0.1.1/skills/artifact-template-simple-dark-mode/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-vc",
-                "description": "仅当用户或上游配置显式指定 lark-vc 时使用，相关请求统一交由 lark-meeting 技能处理。",
-                "input": null
+                "name": "$openai-templates:artifact-template-simple-light-mode",
+                "description": "Create a presentation using the Simple Light Mode template and its retained reference file. Use when the user selects or names Simple Light Mode. Create clean light-mode presentations with spacious typography, simple sections, charts, and imagery.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-templates/0.1.1/skills/artifact-template-simple-light-mode/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-vc-agent",
-                "description": "仅当用户或上游配置显式指定 lark-vc-agent 时使用，相关请求统一交由 lark-meeting 技能处理。",
-                "input": null
+                "name": "$openai-templates:artifact-template-strategy-memorandum",
+                "description": "Create a document using the Strategy Memorandum template and its retained reference file. Use when the user selects or names Strategy Memorandum. Present strategic context, choices, rationale, risks, milestones, and a clear recommendation.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-templates/0.1.1/skills/artifact-template-strategy-memorandum/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-whiteboard",
-                "description": "飞书画板：查询和编辑飞书云文档中的画板。支持导出画板为预览图片、导出原始节点结构、使用多种格式更新画板内容。 当用户需要查看画板内容、导出画板图片、编辑画板时使用此 skill。不负责：飞书云文档内容编辑（lark-doc）、文档内嵌电子表格/Base（lark-sheets / lark-base）。",
-                "input": null
+                "name": "$openai-templates:artifact-template-system-design",
+                "description": "Create a document using the System Design template and its retained reference file. Use when the user selects or names System Design. Document system architecture, requirements, components, data flows, APIs, tradeoffs, and operational considerations.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-templates/0.1.1/skills/artifact-template-system-design/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-wiki",
-                "description": "飞书知识库：管理知识空间、空间成员和文档节点。创建和查询知识空间、查看和管理空间成员、管理节点层级结构、在知识库中组织文档和快捷方式。当用户需要在知识库中查找或创建文档、浏览知识空间结构、查看或管理空间成员、移动或复制节点时使用。当用户给出 doubao.com 的 /wiki/ URL/token 时，也应直接使用本 skill，不要因为域名不是飞书而回退到 WebFetch；路由依据是 URL 路径模式和 token，而不是域名。不负责：上传文件到知识库节点下（走 lark-drive）、编辑文档/表格/Base 内容（走 lark-doc / lark-sheets / lark-base）。",
-                "input": null
+                "name": "$openai-templates:artifact-template-team-alignment",
+                "description": "Create a presentation using the Team Alignment template and its retained reference file. Use when the user selects or names Team Alignment. Facilitate team offsites and planning with context, goals, priorities, decisions, and action items.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-templates/0.1.1/skills/artifact-template-team-alignment/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-workflow-meeting-summary",
-                "description": "会议纪要整理工作流：汇总指定时间范围内的会议纪要并生成结构化报告。当用户需要整理会议纪要、生成会议周报、回顾一段时间内的会议内容时使用。",
-                "input": null
+                "name": "$openai-templates:artifact-template-three-statement-forecast",
+                "description": "Create a spreadsheet using the Three-Statement Forecast template and its retained reference file. Use when the user selects or names Three-Statement Forecast. Build an integrated income statement, balance sheet, and cash flow forecast with assumptions, checks, and an executive summary.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/openai-templates/0.1.1/skills/artifact-template-three-statement-forecast/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$lark-workflow-standup-report",
-                "description": "日程待办摘要：编排 calendar +agenda 和 task +get-my-tasks，生成指定日期的日程与未完成任务摘要。适用于了解今天/明天/本周的安排。",
-                "input": null
+                "name": "$pages:maintain-space",
+                "description": "Reconcile new evidence into existing ChatGPT Pages or a Space when the user requests upkeep. For a direct text correction, use write-page. Do not use for ordinary chat drafts, writing, or advice, or treat a selected Page as a request to save. Schedule future upkeep only when requested.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/pages/0.1.26/skills/maintain-space/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$ljg",
-                "description": "LJ-G 认知工具集路由层。根据用户输入或参数路由到具体技能：铸卡片(ljg-card)、读论文(ljg-paper)、解词(ljg-word)、论文流(ljg-paper-flow)、词卡(word-flow)、伴读(ljg-read)、旅行(ljg-travel)、白话(ljg-plain)、解剖(ljg-learn)、追本(ljg-think)、写作(ljg-writes)、高桥流(ljg-present)、降秩(ljg-rank)、投资(ljg-invest)、关系(ljg-relationship)、圆桌(ljg-roundtable)、技能地图(ljg-skill-map)、论文溯源(ljg-paper-river)。使用方式：(1) /ljg card (2) 直接说触发词如'铸'、'论文流'",
-                "input": null
+                "name": "$pages:manage-schedules",
+                "description": "Review a ChatGPT Space page and its schedules, recommend useful recurring work, and create, update, or remove scheduled automations.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/pages/0.1.26/skills/manage-schedules/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$mem9-recall",
-                "description": "Search shared memories from past sessions. Use when the user's question could benefit from historical context, past decisions, project knowledge, or team expertise.",
-                "input": null
+                "name": "$pages:organize-space",
+                "description": "Organize existing ChatGPT Pages and Space structure when the user requests changes to that structure. Do not use for ordinary chat drafts or advice; a selected Page alone does not authorize reorganization. A narrow text edit does not need this workflow.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/pages/0.1.26/skills/organize-space/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$mem9-setup",
-                "description": "Setup Mem9 persistent memory. Triggers: set up mem9, install mem9, configure memory, enable memory.",
-                "input": null
+                "name": "$pages:write-page",
+                "description": "Create or edit requested Page/Space content, or use for prose you have already decided to save as a standalone Markdown file, only if the user did not explicitly request a Markdown file. Honor established formats, destinations, and repository documentation. A selected Page alone does not authorize a write.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/pages/0.1.26/skills/write-page/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$mem9-store",
-                "description": "Save important information to shared memory. Use when the user asks you to remember, note down, or save something for future sessions.",
-                "input": null
+                "name": "$sites:sites",
+                "description": "Use Sites when the user wants a website built for them (including a landing page, portfolio, dashboard, portal, tracker, hub, game, event registration, or tool), requests changes to a website already built with Sites, wants to publish a website with Sites, or wants to manage Sites hosting.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/sites/1.1.2/skills/sites/SKILL.md"
+                    }
+                  }
+                }
               },
               {
-                "name": "$note-taker",
-                "description": "智能笔记提取工具。从文章、技术博客、分享内容中提取有价值的精华知识，生成结构化笔记。支持直接粘贴文章内容或提供URL自动抓取。只记精华、创新点、独特发现，抛弃常识性内容。触发场景：(1) 用户说\"学习一下这个\"、\"记个笔记\"、\"提取笔记\"、\"做个笔记\"、\"记录一下\" (2) 用户发送一篇文章内容并要求提取/学习/记录 (3) 用户发送一个URL要求阅读并记笔记 (4) 用户说\"读一下这篇文章\"、\"看看这个文章\"并期望记录。不触发：用户只是问问题、闲聊、写文章（写文章用 writer 技能）",
-                "input": null
-              },
-              {
-                "name": "$orchestrate-end-to-end-work",
-                "description": "编排跨研究、需求、架构、计划、实现、测试、审查和收尾的多阶段工作。用于用户要求整体推进复杂任务、实现完整 PRD 或规格、协调多个独立工作流、恢复已有 mission，或需要持续推进至质量门禁通过时；不用于可以直接完成的单一小任务。",
-                "input": null
-              },
-              {
-                "name": "$pdf-ocr",
-                "description": "PDF文字识别转换工具 - 将影印版PDF（扫描件/图片PDF）通过OCR技术转换为可搜索的文字版PDF，支持标题层级分析和精美排版。",
-                "input": null
-              },
-              {
-                "name": "$ppt-creator",
-                "description": "Generate single-file HTML presentations using Reveal.js. Use when the user needs to create, modify, or design a PPT/presentation/slide deck, whether for business pitches, data reports, product launches, education training, academic research, event planning, or any other scenario. Triggered by requests like \"make a PPT\", \"create a presentation\", \"设计一个幻灯片\", \"帮我做个路演PPT\", \"做季度复盘报告\", or any slide-related content generation task.",
-                "input": null
-              },
-              {
-                "name": "$prd-builder-work",
-                "description": "通过需求澄清、范围界定和验收建模创建或修订结构化 PRD。用于用户明确要求生成 PRD、整理产品需求、定义新产品或功能规格、补齐用户旅程与验收标准时；竞品对标仅在用户提供或同意研究参考产品时使用，不用于直接实现或自动扩大产品范围。",
-                "input": null
-              },
-              {
-                "name": "$project-analyzer",
-                "description": "项目分析与 AI 上下文文档生成技能。深入分析项目结构、代码、技术栈、接口、依赖、代码约定与隐性约束，优先生成帮助后续 AI 快速理解项目的 README、架构、分层、模块与 API 文档。触发场景：(1) 用户说\"分析项目\"、\"分析代码结构\" (2) 用户说\"生成文档\"、\"生成项目文档\" (3) 用户说\"生成 README\"、\"更新 README\"、\"补充 README\" (4) 新项目创建或现有项目缺少文档时。",
-                "input": null
-              },
-              {
-                "name": "$research-work",
-                "description": "调查代码库、官方文档或其他可信来源，并返回可定位、可引用、区分事实与推断的发现。用于用户要求先研究、查找实现位置、解释现状、核对外部文档，或计划和决策存在事实缺口时；不用于在未授权时直接实施修复。",
-                "input": null
-              },
-              {
-                "name": "$review-npm-publish-readiness",
-                "description": "Nuclear-grade 16-agent pre-publish release gate. Runs /get-unpublished-changes to detect all changes since last npm release, spawns up to 10 ultrabrain agents for deep per-change analysis, invokes /review-work (5 agents) for holistic review, and 1 oracle for overall release synthesis. Use before EVERY npm publish. Triggers: 'pre-publish review', 'review before publish', 'release review', 'pre-release review', 'ready to publish?', 'can I publish?', 'pre-publish', 'safe to publish', 'publishing review', 'pre-publish check'.",
-                "input": null
-              },
-              {
-                "name": "$skill-creator",
-                "description": "Guide for creating effective skills. This skill should be used when users want to create a new skill (or update an existing skill) that extends Claude's capabilities with specialized knowledge, workflows, or tool integrations.",
-                "input": null
-              },
-              {
-                "name": "$stock-company-analyzer",
-                "description": "对上市公司进行深度价值投资分析。当用户提到一家公司并希望进行投资分析、公司研究、基本面分析时触发。 触发词包括：\"分析一下这家公司\"、\"帮我看看XX值不值得投\"、\"研究一下XX\"、\"XX这家公司怎么样\"、 \"帮我做个公司分析\"、\"基本面分析\"、\"商业模式分析\"、\"护城河分析\"、\"竞争力分析\"等。 只要用户提到一家上市公司并表达想了解其投资价值的意图，就应该使用本技能。",
-                "input": null
-              },
-              {
-                "name": "$swiftui-performance-audit",
-                "description": "Audit and improve SwiftUI runtime performance from code review and architecture. Use for requests to diagnose slow rendering, janky scrolling, high CPU/memory usage, excessive view updates, or layout thrash in SwiftUI apps, and to provide guidance for user-run Instruments profiling when code review alone is insufficient.",
-                "input": null
+                "name": "$sites:sites-remix",
+                "description": "Remix a Site built with the Sites plugin into a new Site. Use when the user has identified the source Site and asks to remix it.",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/plugins/cache/openai-curated-remote/sites/1.1.2/skills/sites-remix/SKILL.md"
+                    }
+                  }
+                }
               },
               {
                 "name": "$tabbit",
                 "description": "Use for browser navigation, inspection, interaction, and visual verification through Tabbit's installed CLI.",
-                "input": null
-              },
-              {
-                "name": "$task-executor-work",
-                "description": "实现或修复一个边界明确、可独立验证的原子开发任务。用于用户明确要求立即实现、修复或执行现有计划中的单个 feature，也可在用户明确授权后采用分支、worktree、提交或 PR 交付模式；不用于多阶段编排、代码审查或未经授权的发布与合并。",
-                "input": null
-              },
-              {
-                "name": "$technical-review-work",
-                "description": "评审架构、技术方案、重构方向或高风险实现选择，基于约束和证据给出 go/no-go 判断。用于用户要求比较方案、检查边界、评估风险、审阅技术计划或在实施前确认方向时；不用于生成完整开发计划、代码审查或直接实施。",
-                "input": null
-              },
-              {
-                "name": "$test-audit-work",
-                "description": "设计、生成、执行或审计与当前变更相关的测试，并区分产品缺陷、测试缺陷、环境故障和 flaky test。用于用户要求测试策略、补测试、TDD、运行测试、覆盖率分析或质量门禁时；根据请求选择单一模式，不默认修改业务代码或编排状态。",
-                "input": null
-              },
-              {
-                "name": "$triage-github-issues-and-prs",
-                "description": "Read-only GitHub triage for issues AND PRs. 1 item = 1 background general-purpose subagent. Analyzes all open items and writes evidence-backed reports to /tmp/{datetime}/. Every claim requires a GitHub permalink as proof. NEVER takes any action on GitHub - no comments, no merges, no closes, no labels. Reports only. Triggers: 'triage', 'triage issues', 'triage PRs', 'github triage'.",
-                "input": null
-              },
-              {
-                "name": "$余华",
-                "description": "以作家余华的身份进行写作、修改文章、回答问题和讨论写作技巧。触发场景包括：用户说\"使用余华\"、\"用余华的视角\"、\"让余华看看\"、\"余华来修改\"、\"余华来写作\"、\"余华来回答\"、\"余华来讨论\"、\"以余华的身份\"、\"请余华\"、\"叫余华\"、\"余华风格\"、\"余华式\"、\"余华怎么看\"、\"余华会怎么写\"、\"余华来评判\"、\"余华来点评\"等。能力范围：写作（散文、小说片段、评论）、修改（润色文章，指出语言/结构/节奏问题）、评判（点评作品优缺点）、讨论（回答写作问题，分享写作理念）。",
-                "input": null
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/Library/Application Support/Tabbit/LocalAgent/skills/tabbit/SKILL.md"
+                    }
+                  }
+                }
               },
               {
                 "name": "$imagegen",
                 "description": "Generate or edit raster images when the task benefits from AI-created bitmap visuals such as photos, illustrations, textures, sprites, mockups, or transparent-background cutouts. Use when Codex should create a brand-new image, transform an existing image, or derive visual variants from references, and the output should be a bitmap asset rather than repo-native code or vector. Do not use when the task is better handled by editing existing SVG/vector/code-native assets, extending an established icon or logo system, or building the visual directly in HTML/CSS/canvas.",
-                "input": null
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/skills/.system/imagegen/SKILL.md"
+                    }
+                  }
+                }
               },
               {
                 "name": "$openai-docs",
                 "description": "Codex models/pricing, scheduled tasks, skills, settings, setup, troubleshooting, and self-knowledge; OpenAI APIs and ChatGPT Work. 'You'/'this app' means Codex only.",
-                "input": null
-              },
-              {
-                "name": "$plugin-creator",
-                "description": "Create and scaffold plugin directories for Codex with a required `.codex-plugin/plugin.json`, optional plugin folders/files, valid manifest defaults, and personal-marketplace entries by default. Use when Codex needs to create a new personal plugin, add optional plugin structure, generate or update marketplace entries for plugin ordering and availability metadata, or update an existing local plugin during development with the CLI-driven cachebuster and reinstall flow.",
-                "input": null
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/skills/.system/openai-docs/SKILL.md"
+                    }
+                  }
+                }
               },
               {
                 "name": "$review-agent",
                 "description": "Perform a read-only, defect-first review of a specified code change and return every actionable finding. Use when another agent delegates review of uncommitted changes, a base-branch diff, a commit, or custom review instructions.",
-                "input": null
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/skills/.system/review-agent/SKILL.md"
+                    }
+                  }
+                }
+              },
+              {
+                "name": "$skill-creator",
+                "description": "Create or update a skill",
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/skills/.system/skill-creator/SKILL.md"
+                    }
+                  }
+                }
               },
               {
                 "name": "$skill-installer",
                 "description": "Install curated skills from openai/skills or other repos",
-                "input": null
+                "input": null,
+                "_meta": {
+                  "jetbrains": {
+                    "air": {
+                      "version": 1,
+                      "skillPath": "/Users/good/.codex/skills/.system/skill-installer/SKILL.md"
+                    }
+                  }
+                }
               }
             ]
           }
@@ -11255,7 +11912,7 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
+          "sessionId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
           "update": {
             "sessionUpdate": "session_info_update",
             "_meta": {
@@ -11273,17 +11930,20 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
+          "sessionId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
           "update": {
             "sessionUpdate": "agent_message_chunk",
-            "messageId": "msg_0336ff927bb569ca016ad22b658ac88191bf5762c9004dd742",
+            "messageId": "msg_076f4f4680482273016ae705fff4d081919a1e929112de1d18",
             "content": {
               "type": "text",
               "text": "I"
             },
             "_meta": {
-              "codex": {
-                "phase": "commentary"
+              "jetbrains": {
+                "air": {
+                  "version": 1,
+                  "phase": "commentary"
+                }
               }
             }
           }
@@ -11293,17 +11953,20 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
+          "sessionId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
           "update": {
             "sessionUpdate": "agent_message_chunk",
-            "messageId": "msg_0336ff927bb569ca016ad22b658ac88191bf5762c9004dd742",
+            "messageId": "msg_076f4f4680482273016ae705fff4d081919a1e929112de1d18",
             "content": {
               "type": "text",
               "text": "’ll"
             },
             "_meta": {
-              "codex": {
-                "phase": "commentary"
+              "jetbrains": {
+                "air": {
+                  "version": 1,
+                  "phase": "commentary"
+                }
               }
             }
           }
@@ -11313,17 +11976,20 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
+          "sessionId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
           "update": {
             "sessionUpdate": "agent_message_chunk",
-            "messageId": "msg_0336ff927bb569ca016ad22b658ac88191bf5762c9004dd742",
+            "messageId": "msg_076f4f4680482273016ae705fff4d081919a1e929112de1d18",
             "content": {
               "type": "text",
               "text": " delegate"
             },
             "_meta": {
-              "codex": {
-                "phase": "commentary"
+              "jetbrains": {
+                "air": {
+                  "version": 1,
+                  "phase": "commentary"
+                }
               }
             }
           }
@@ -11333,17 +11999,20 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
+          "sessionId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
           "update": {
             "sessionUpdate": "agent_message_chunk",
-            "messageId": "msg_0336ff927bb569ca016ad22b658ac88191bf5762c9004dd742",
+            "messageId": "msg_076f4f4680482273016ae705fff4d081919a1e929112de1d18",
             "content": {
               "type": "text",
               "text": " the"
             },
             "_meta": {
-              "codex": {
-                "phase": "commentary"
+              "jetbrains": {
+                "air": {
+                  "version": 1,
+                  "phase": "commentary"
+                }
               }
             }
           }
@@ -11353,17 +12022,20 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
+          "sessionId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
           "update": {
             "sessionUpdate": "agent_message_chunk",
-            "messageId": "msg_0336ff927bb569ca016ad22b658ac88191bf5762c9004dd742",
+            "messageId": "msg_076f4f4680482273016ae705fff4d081919a1e929112de1d18",
             "content": {
               "type": "text",
               "text": " calculation"
             },
             "_meta": {
-              "codex": {
-                "phase": "commentary"
+              "jetbrains": {
+                "air": {
+                  "version": 1,
+                  "phase": "commentary"
+                }
               }
             }
           }
@@ -11373,17 +12045,20 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
+          "sessionId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
           "update": {
             "sessionUpdate": "agent_message_chunk",
-            "messageId": "msg_0336ff927bb569ca016ad22b658ac88191bf5762c9004dd742",
+            "messageId": "msg_076f4f4680482273016ae705fff4d081919a1e929112de1d18",
             "content": {
               "type": "text",
               "text": " and"
             },
             "_meta": {
-              "codex": {
-                "phase": "commentary"
+              "jetbrains": {
+                "air": {
+                  "version": 1,
+                  "phase": "commentary"
+                }
               }
             }
           }
@@ -11393,17 +12068,20 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
+          "sessionId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
           "update": {
             "sessionUpdate": "agent_message_chunk",
-            "messageId": "msg_0336ff927bb569ca016ad22b658ac88191bf5762c9004dd742",
+            "messageId": "msg_076f4f4680482273016ae705fff4d081919a1e929112de1d18",
             "content": {
               "type": "text",
               "text": " wait"
             },
             "_meta": {
-              "codex": {
-                "phase": "commentary"
+              "jetbrains": {
+                "air": {
+                  "version": 1,
+                  "phase": "commentary"
+                }
               }
             }
           }
@@ -11413,17 +12091,20 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
+          "sessionId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
           "update": {
             "sessionUpdate": "agent_message_chunk",
-            "messageId": "msg_0336ff927bb569ca016ad22b658ac88191bf5762c9004dd742",
+            "messageId": "msg_076f4f4680482273016ae705fff4d081919a1e929112de1d18",
             "content": {
               "type": "text",
               "text": " for"
             },
             "_meta": {
-              "codex": {
-                "phase": "commentary"
+              "jetbrains": {
+                "air": {
+                  "version": 1,
+                  "phase": "commentary"
+                }
               }
             }
           }
@@ -11433,17 +12114,20 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
+          "sessionId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
           "update": {
             "sessionUpdate": "agent_message_chunk",
-            "messageId": "msg_0336ff927bb569ca016ad22b658ac88191bf5762c9004dd742",
+            "messageId": "msg_076f4f4680482273016ae705fff4d081919a1e929112de1d18",
             "content": {
               "type": "text",
               "text": " the"
             },
             "_meta": {
-              "codex": {
-                "phase": "commentary"
+              "jetbrains": {
+                "air": {
+                  "version": 1,
+                  "phase": "commentary"
+                }
               }
             }
           }
@@ -11453,17 +12137,20 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
+          "sessionId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
           "update": {
             "sessionUpdate": "agent_message_chunk",
-            "messageId": "msg_0336ff927bb569ca016ad22b658ac88191bf5762c9004dd742",
+            "messageId": "msg_076f4f4680482273016ae705fff4d081919a1e929112de1d18",
             "content": {
               "type": "text",
-              "text": " answer"
+              "text": " result"
             },
             "_meta": {
-              "codex": {
-                "phase": "commentary"
+              "jetbrains": {
+                "air": {
+                  "version": 1,
+                  "phase": "commentary"
+                }
               }
             }
           }
@@ -11473,17 +12160,20 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
+          "sessionId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
           "update": {
             "sessionUpdate": "agent_message_chunk",
-            "messageId": "msg_0336ff927bb569ca016ad22b658ac88191bf5762c9004dd742",
+            "messageId": "msg_076f4f4680482273016ae705fff4d081919a1e929112de1d18",
             "content": {
               "type": "text",
-              "text": ".\n"
+              "text": "."
             },
             "_meta": {
-              "codex": {
-                "phase": "commentary"
+              "jetbrains": {
+                "air": {
+                  "version": 1,
+                  "phase": "commentary"
+                }
               }
             }
           }
@@ -11493,10 +12183,10 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
+          "sessionId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
           "update": {
             "sessionUpdate": "subagent_spawned",
-            "subagentSessionId": "01a144f9-8914-7063-be53-36ca2cb7b275",
+            "subagentSessionId": "01a1966f-7305-7720-89a7-0e4c3c1e4fb5",
             "name": "Calculate",
             "task": "Delegated task for Calculate",
             "capabilities": {}
@@ -11507,10 +12197,37 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
+          "sessionId": "01a1966f-7305-7720-89a7-0e4c3c1e4fb5",
+          "update": {
+            "sessionUpdate": "config_option_update",
+            "configOptions": [
+              {
+                "id": "model",
+                "name": "Model",
+                "description": "Model Codex uses for the subagent",
+                "category": "model",
+                "type": "select",
+                "currentValue": "gpt-6.1-sol",
+                "options": [
+                  {
+                    "value": "gpt-6.1-sol",
+                    "name": "6.1 Sol",
+                    "description": "Latest workhorse model for coding and everyday work."
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+          "sessionId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
           "update": {
             "sessionUpdate": "usage_update",
-            "used": 20520,
+            "used": 19593,
             "size": 258400
           }
         }
@@ -11519,7 +12236,24 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-8914-7063-be53-36ca2cb7b275",
+          "sessionId": "01a1966f-7305-7720-89a7-0e4c3c1e4fb5",
+          "update": {
+            "sessionUpdate": "session_info_update",
+            "_meta": {
+              "codex": {
+                "threadStatus": {
+                  "type": "idle"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+          "sessionId": "01a1966f-7305-7720-89a7-0e4c3c1e4fb5",
           "update": {
             "sessionUpdate": "session_info_update",
             "_meta": {
@@ -11537,28 +12271,41 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
+          "sessionId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
           "update": {
             "sessionUpdate": "tool_call",
-            "toolCallId": "call_13514762dc164e1491a9a6f3cfc5d3ca",
+            "toolCallId": "call_12a6423e378947538d4d58050d458b46",
             "kind": "other",
             "title": "wait",
             "status": "in_progress",
             "rawInput": {
               "prompt": null,
-              "senderThreadId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
+              "senderThreadId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
               "receiverThreadIds": [],
               "agentsStates": {},
               "model": null,
-              "reasoningEffort": null,
-              "status": "inProgress"
+              "reasoningEffort": null
+            }
+          }
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+          "sessionId": "01a1966f-7305-7720-89a7-0e4c3c1e4fb5",
+          "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "messageId": "msg_047126b92a3d43cc016ae706046be881918271664a8df5f900",
+            "content": {
+              "type": "text",
+              "text": "42"
             },
             "_meta": {
-              "codex": {
-                "collaboration": {
-                  "tool": "wait",
-                  "senderThreadId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
-                  "receiverThreadIds": []
+              "jetbrains": {
+                "air": {
+                  "version": 1,
+                  "phase": "final_answer"
                 }
               }
             }
@@ -11569,30 +12316,10 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-8914-7063-be53-36ca2cb7b275",
-          "update": {
-            "sessionUpdate": "agent_message_chunk",
-            "messageId": "msg_049a2de5a44974b7016ad22b6b450c81918f55c74bf268c586",
-            "content": {
-              "type": "text",
-              "text": "42"
-            },
-            "_meta": {
-              "codex": {
-                "phase": "final_answer"
-              }
-            }
-          }
-        }
-      },
-      {
-        "jsonrpc": "2.0",
-        "method": "session/update",
-        "params": {
-          "sessionId": "01a144f9-8914-7063-be53-36ca2cb7b275",
+          "sessionId": "01a1966f-7305-7720-89a7-0e4c3c1e4fb5",
           "update": {
             "sessionUpdate": "usage_update",
-            "used": 20345,
+            "used": 19309,
             "size": 258400
           }
         }
@@ -11601,7 +12328,7 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-8914-7063-be53-36ca2cb7b275",
+          "sessionId": "01a1966f-7305-7720-89a7-0e4c3c1e4fb5",
           "update": {
             "sessionUpdate": "session_info_update",
             "_meta": {
@@ -11618,10 +12345,10 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
+          "sessionId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
           "update": {
             "sessionUpdate": "subagent_state_update",
-            "subagentSessionId": "01a144f9-8914-7063-be53-36ca2cb7b275",
+            "subagentSessionId": "01a1966f-7305-7720-89a7-0e4c3c1e4fb5",
             "state": "completed"
           }
         }
@@ -11630,27 +12357,43 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
+          "sessionId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
           "update": {
             "sessionUpdate": "tool_call_update",
-            "toolCallId": "call_13514762dc164e1491a9a6f3cfc5d3ca",
-            "title": "wait",
-            "status": "completed",
-            "rawInput": {
-              "prompt": null,
-              "senderThreadId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
-              "receiverThreadIds": [],
-              "agentsStates": {},
-              "model": null,
-              "reasoningEffort": null,
-              "status": "completed"
+            "toolCallId": "call_12a6423e378947538d4d58050d458b46",
+            "status": "completed"
+          }
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+          "sessionId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
+          "update": {
+            "sessionUpdate": "usage_update",
+            "used": 19635,
+            "size": 258400
+          }
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+          "sessionId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
+          "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "messageId": "msg_076f4f4680482273016ae706066994819195e017b9375a81af",
+            "content": {
+              "type": "text",
+              "text": "42"
             },
             "_meta": {
-              "codex": {
-                "collaboration": {
-                  "tool": "wait",
-                  "senderThreadId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
-                  "receiverThreadIds": []
+              "jetbrains": {
+                "air": {
+                  "version": 1,
+                  "phase": "final_answer"
                 }
               }
             }
@@ -11661,10 +12404,10 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
+          "sessionId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
           "update": {
             "sessionUpdate": "usage_update",
-            "used": 20562,
+            "used": 19700,
             "size": 258400
           }
         }
@@ -11673,39 +12416,7 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
-          "update": {
-            "sessionUpdate": "agent_message_chunk",
-            "messageId": "msg_0336ff927bb569ca016ad22b6e78fc8191b99e125b0d47f33a",
-            "content": {
-              "type": "text",
-              "text": "42"
-            },
-            "_meta": {
-              "codex": {
-                "phase": "final_answer"
-              }
-            }
-          }
-        }
-      },
-      {
-        "jsonrpc": "2.0",
-        "method": "session/update",
-        "params": {
-          "sessionId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
-          "update": {
-            "sessionUpdate": "usage_update",
-            "used": 20627,
-            "size": 258400
-          }
-        }
-      },
-      {
-        "jsonrpc": "2.0",
-        "method": "session/update",
-        "params": {
-          "sessionId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
+          "sessionId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
           "update": {
             "sessionUpdate": "session_info_update",
             "_meta": {
@@ -11722,7 +12433,7 @@
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
-          "sessionId": "01a144f9-6e73-7c92-ba7d-f2abf83f8167",
+          "sessionId": "01a1966f-5dcc-7982-b4e5-817dff81fda0",
           "update": {
             "sessionUpdate": "session_info_update",
             "title": "Delegate a tiny job to a subagent using your spawn/collab tool: have it compute 6*7 and report just the answer. Wait for the subagent to finish, then reply with its answer."

@@ -97,6 +97,14 @@ export type TurnUsage = {
  *                        from `clientCapabilities._meta.subagents`, not from
  *                        the draft's top-level field (cursor, measured
  *                        2026-10-21). The runner then sends both spellings.
+ *   terminalOutputDelta  the agent serves a client that declared
+ *                        `_meta.jetbrains.air` its command output only as
+ *                        `_meta.terminal_output_delta` chunks, and only when
+ *                        the client declared that key too (codex-acp 2.5.0,
+ *                        measured 2026-11-01: without the declaration every
+ *                        tool output arrives empty — the AIR contract carries
+ *                        no `rawOutput` fallback). The runner then declares
+ *                        it in the handshake.
  *   nativeSubagentFrames the agent reports a delegation BOTH as an ordinary
  *                        tool call and as native subagent frames; the frames
  *                        are the run's lifecycle, the tool call only its
@@ -114,6 +122,7 @@ export type AcpCapabilities = {
   readonly supportsSessionResume?: boolean | undefined
   readonly supportsSessionLoad?: boolean | undefined
   readonly metaSubagents?: boolean | undefined
+  readonly terminalOutputDelta?: boolean | undefined
   readonly nativeSubagentFrames?: boolean | undefined
 }
 

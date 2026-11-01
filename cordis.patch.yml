@@ -102,79 +102,149 @@
               # 不写 cwd。写了也会被忽略。
               # 外部会话只用这条 DSH 会话自己的工作区；没有工作区就不开工。
               # mode 留空 = 该构建的默认 agent（"Approve for me"）。
-              # 清单 = 2026-10-10 真机探针（对该命令做一次真实
+              # 清单 = 2026-11-01 真机探针（对该命令做一次真实
               # initialize + session/new）读到的 models.availableModels，
-              # 一字不差。
+              # 一字不差。codex-acp 2.5.0（自带 codex CLI 0.165.0）：
+              # 46 个组合 id，含 6.1 系列；首报落地后选择器以运行时报告为准。
               models:
-                - id: gpt-6-astra[low]
-                  name: GPT-6-Astra (low)
-                  description: Frontier intelligence for the most demanding work. Fast responses with lighter reasoning
-                - id: gpt-6-astra[medium]
-                  name: GPT-6-Astra (medium)
-                  description: Frontier intelligence for the most demanding work. Balances speed and reasoning depth for everyday tasks
-                - id: gpt-6-astra[high]
-                  name: GPT-6-Astra (high)
-                  description: Frontier intelligence for the most demanding work. Greater reasoning depth for complex problems
-                - id: gpt-6-astra[xhigh]
-                  name: GPT-6-Astra (xhigh)
-                  description: Frontier intelligence for the most demanding work. Extra high reasoning depth for complex problems
-                - id: gpt-6-astra[max]
-                  name: GPT-6-Astra (max)
-                  description: Frontier intelligence for the most demanding work. Maximum reasoning depth for the hardest problems
-                - id: gpt-6-astra[ultra]
-                  name: GPT-6-Astra (ultra)
-                  description: Frontier intelligence for the most demanding work. Maximum reasoning with automatic task delegation
-                - id: gpt-5.6-sol[low]
-                  name: GPT-5.6-Sol (low)
-                  description: Older generation workhorse model. Fast responses with lighter reasoning
-                - id: gpt-5.6-sol[medium]
-                  name: GPT-5.6-Sol (medium)
-                  description: Older generation workhorse model. Balances speed and reasoning depth for everyday tasks
-                - id: gpt-5.6-sol[high]
-                  name: GPT-5.6-Sol (high)
-                  description: Older generation workhorse model. Greater reasoning depth for complex problems
-                - id: gpt-5.6-sol[xhigh]
-                  name: GPT-5.6-Sol (xhigh)
-                  description: Older generation workhorse model. Extra high reasoning depth for complex problems
-                - id: gpt-5.6-sol[max]
-                  name: GPT-5.6-Sol (max)
-                  description: Older generation workhorse model. Maximum reasoning depth for the hardest problems
-                - id: gpt-5.6-sol[ultra]
-                  name: GPT-5.6-Sol (ultra)
-                  description: Older generation workhorse model. Maximum reasoning with automatic task delegation
-                - id: gpt-5.6-terra[low]
-                  name: GPT-5.6-Terra (low)
-                  description: Older balanced model for straightforward work. Fast responses with lighter reasoning
-                - id: gpt-5.6-terra[medium]
-                  name: GPT-5.6-Terra (medium)
-                  description: Older balanced model for straightforward work. Balances speed and reasoning depth for everyday tasks
-                - id: gpt-5.6-terra[high]
-                  name: GPT-5.6-Terra (high)
-                  description: Older balanced model for straightforward work. Greater reasoning depth for complex problems
-                - id: gpt-5.6-terra[xhigh]
-                  name: GPT-5.6-Terra (xhigh)
-                  description: Older balanced model for straightforward work. Extra high reasoning depth for complex problems
-                - id: gpt-5.6-terra[max]
-                  name: GPT-5.6-Terra (max)
-                  description: Older balanced model for straightforward work. Maximum reasoning depth for the hardest problems
-                - id: gpt-5.6-terra[ultra]
-                  name: GPT-5.6-Terra (ultra)
-                  description: Older balanced model for straightforward work. Maximum reasoning with automatic task delegation
-                - id: gpt-5.6-luna[low]
-                  name: GPT-5.6-Luna (low)
-                  description: Older fast and efficient model. Fast responses with lighter reasoning
-                - id: gpt-5.6-luna[medium]
-                  name: GPT-5.6-Luna (medium)
-                  description: Older fast and efficient model. Balances speed and reasoning depth for everyday tasks
-                - id: gpt-5.6-luna[high]
-                  name: GPT-5.6-Luna (high)
-                  description: Older fast and efficient model. Greater reasoning depth for complex problems
-                - id: gpt-5.6-luna[xhigh]
-                  name: GPT-5.6-Luna (xhigh)
-                  description: Older fast and efficient model. Extra high reasoning depth for complex problems
-                - id: gpt-5.6-luna[max]
-                  name: GPT-5.6-Luna (max)
-                  description: Older fast and efficient model. Maximum reasoning depth for the hardest problems
+                - id: "gpt-6.1-sol[low]"
+                  name: "6.1 Sol (low)"
+                  description: "Latest workhorse model for coding and everyday work. Fast responses with lighter reasoning"
+                - id: "gpt-6.1-sol[medium]"
+                  name: "6.1 Sol (medium)"
+                  description: "Latest workhorse model for coding and everyday work. Balances speed and reasoning depth for everyday tasks"
+                - id: "gpt-6.1-sol[high]"
+                  name: "6.1 Sol (high)"
+                  description: "Latest workhorse model for coding and everyday work. Greater reasoning depth for complex problems"
+                - id: "gpt-6.1-sol[xhigh]"
+                  name: "6.1 Sol (xhigh)"
+                  description: "Latest workhorse model for coding and everyday work. Extra high reasoning depth for complex problems"
+                - id: "gpt-6.1-sol[max]"
+                  name: "6.1 Sol (max)"
+                  description: "Latest workhorse model for coding and everyday work. Maximum reasoning depth for the hardest problems"
+                - id: "gpt-6.1-sol[ultra]"
+                  name: "6.1 Sol (ultra)"
+                  description: "Latest workhorse model for coding and everyday work. Maximum reasoning with automatic task delegation"
+                - id: "gpt-6-astra[low]"
+                  name: "6 Astra (low)"
+                  description: "Frontier intelligence for the most demanding work. Fast responses with lighter reasoning"
+                - id: "gpt-6-astra[medium]"
+                  name: "6 Astra (medium)"
+                  description: "Frontier intelligence for the most demanding work. Balances speed and reasoning depth for everyday tasks"
+                - id: "gpt-6-astra[high]"
+                  name: "6 Astra (high)"
+                  description: "Frontier intelligence for the most demanding work. Greater reasoning depth for complex problems"
+                - id: "gpt-6-astra[xhigh]"
+                  name: "6 Astra (xhigh)"
+                  description: "Frontier intelligence for the most demanding work. Extra high reasoning depth for complex problems"
+                - id: "gpt-6-astra[max]"
+                  name: "6 Astra (max)"
+                  description: "Frontier intelligence for the most demanding work. Maximum reasoning depth for the hardest problems"
+                - id: "gpt-6-astra[ultra]"
+                  name: "6 Astra (ultra)"
+                  description: "Frontier intelligence for the most demanding work. Maximum reasoning with automatic task delegation"
+                - id: "gpt-6.1-terra[low]"
+                  name: "6.1 Terra (low)"
+                  description: "GPT-6.1 Terra Codex model. Fast responses with lighter reasoning"
+                - id: "gpt-6.1-terra[medium]"
+                  name: "6.1 Terra (medium)"
+                  description: "GPT-6.1 Terra Codex model. Balances speed and reasoning depth for everyday tasks"
+                - id: "gpt-6.1-terra[high]"
+                  name: "6.1 Terra (high)"
+                  description: "GPT-6.1 Terra Codex model. Greater reasoning depth for complex problems"
+                - id: "gpt-6.1-terra[xhigh]"
+                  name: "6.1 Terra (xhigh)"
+                  description: "GPT-6.1 Terra Codex model. Extra high reasoning depth for complex problems"
+                - id: "gpt-6.1-terra[max]"
+                  name: "6.1 Terra (max)"
+                  description: "GPT-6.1 Terra Codex model. Maximum reasoning depth for the hardest problems"
+                - id: "gpt-6.1-terra[ultra]"
+                  name: "6.1 Terra (ultra)"
+                  description: "GPT-6.1 Terra Codex model. Maximum reasoning with automatic task delegation"
+                - id: "gpt-6-sol[low]"
+                  name: "6 Sol (low)"
+                  description: "Previous generation workhorse model. Fast responses with lighter reasoning"
+                - id: "gpt-6-sol[medium]"
+                  name: "6 Sol (medium)"
+                  description: "Previous generation workhorse model. Balances speed and reasoning depth for everyday tasks"
+                - id: "gpt-6-sol[high]"
+                  name: "6 Sol (high)"
+                  description: "Previous generation workhorse model. Greater reasoning depth for complex problems"
+                - id: "gpt-6-sol[xhigh]"
+                  name: "6 Sol (xhigh)"
+                  description: "Previous generation workhorse model. Extra high reasoning depth for complex problems"
+                - id: "gpt-6-sol[max]"
+                  name: "6 Sol (max)"
+                  description: "Previous generation workhorse model. Maximum reasoning depth for the hardest problems"
+                - id: "gpt-6-sol[ultra]"
+                  name: "6 Sol (ultra)"
+                  description: "Previous generation workhorse model. Maximum reasoning with automatic task delegation"
+                - id: "gpt-6-luna[low]"
+                  name: "6 Luna (low)"
+                  description: "Fast and affordable model for easier tasks. Fast responses with lighter reasoning"
+                - id: "gpt-6-luna[medium]"
+                  name: "6 Luna (medium)"
+                  description: "Fast and affordable model for easier tasks. Balances speed and reasoning depth for everyday tasks"
+                - id: "gpt-6-luna[high]"
+                  name: "6 Luna (high)"
+                  description: "Fast and affordable model for easier tasks. Greater reasoning depth for complex problems"
+                - id: "gpt-6-luna[xhigh]"
+                  name: "6 Luna (xhigh)"
+                  description: "Fast and affordable model for easier tasks. Extra high reasoning depth for complex problems"
+                - id: "gpt-6-luna[max]"
+                  name: "6 Luna (max)"
+                  description: "Fast and affordable model for easier tasks. Maximum reasoning depth for the hardest problems"
+                - id: "gpt-5.6-sol[low]"
+                  name: "5.6 Sol (low)"
+                  description: "Older generation workhorse model. Fast responses with lighter reasoning"
+                - id: "gpt-5.6-sol[medium]"
+                  name: "5.6 Sol (medium)"
+                  description: "Older generation workhorse model. Balances speed and reasoning depth for everyday tasks"
+                - id: "gpt-5.6-sol[high]"
+                  name: "5.6 Sol (high)"
+                  description: "Older generation workhorse model. Greater reasoning depth for complex problems"
+                - id: "gpt-5.6-sol[xhigh]"
+                  name: "5.6 Sol (xhigh)"
+                  description: "Older generation workhorse model. Extra high reasoning depth for complex problems"
+                - id: "gpt-5.6-sol[max]"
+                  name: "5.6 Sol (max)"
+                  description: "Older generation workhorse model. Maximum reasoning depth for the hardest problems"
+                - id: "gpt-5.6-sol[ultra]"
+                  name: "5.6 Sol (ultra)"
+                  description: "Older generation workhorse model. Maximum reasoning with automatic task delegation"
+                - id: "gpt-5.6-terra[low]"
+                  name: "5.6 Terra (low)"
+                  description: "Older balanced model for straightforward work. Fast responses with lighter reasoning"
+                - id: "gpt-5.6-terra[medium]"
+                  name: "5.6 Terra (medium)"
+                  description: "Older balanced model for straightforward work. Balances speed and reasoning depth for everyday tasks"
+                - id: "gpt-5.6-terra[high]"
+                  name: "5.6 Terra (high)"
+                  description: "Older balanced model for straightforward work. Greater reasoning depth for complex problems"
+                - id: "gpt-5.6-terra[xhigh]"
+                  name: "5.6 Terra (xhigh)"
+                  description: "Older balanced model for straightforward work. Extra high reasoning depth for complex problems"
+                - id: "gpt-5.6-terra[max]"
+                  name: "5.6 Terra (max)"
+                  description: "Older balanced model for straightforward work. Maximum reasoning depth for the hardest problems"
+                - id: "gpt-5.6-terra[ultra]"
+                  name: "5.6 Terra (ultra)"
+                  description: "Older balanced model for straightforward work. Maximum reasoning with automatic task delegation"
+                - id: "gpt-5.6-luna[low]"
+                  name: "5.6 Luna (low)"
+                  description: "Older fast and efficient model. Fast responses with lighter reasoning"
+                - id: "gpt-5.6-luna[medium]"
+                  name: "5.6 Luna (medium)"
+                  description: "Older fast and efficient model. Balances speed and reasoning depth for everyday tasks"
+                - id: "gpt-5.6-luna[high]"
+                  name: "5.6 Luna (high)"
+                  description: "Older fast and efficient model. Greater reasoning depth for complex problems"
+                - id: "gpt-5.6-luna[xhigh]"
+                  name: "5.6 Luna (xhigh)"
+                  description: "Older fast and efficient model. Extra high reasoning depth for complex problems"
+                - id: "gpt-5.6-luna[max]"
+                  name: "5.6 Luna (max)"
+                  description: "Older fast and efficient model. Maximum reasoning depth for the hardest problems"
     - id: acp-claude
       name: '@deepseek-ai/dsh-agent-preset'
       config:

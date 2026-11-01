@@ -2185,6 +2185,14 @@ export class AcpTurnRunner {
         subagents: {},
         _meta: {
           ...(capabilities?.metaSubagents === true ? { subagents: {} } : {}),
+          // codex-acp 2.5.0 routes a client that declared `jetbrains.air`
+          // into the AIR tool-call contract, where command output arrives
+          // only as `terminal_output_delta` chunks and only for clients that
+          // declared this key (measured 2026-11-01: without it every codex
+          // tool output is empty). Other agents ignore the unknown key, but
+          // the flag stays per-dialect so each declaration stays a measured
+          // fact about that agent.
+          ...(capabilities?.terminalOutputDelta === true ? { terminal_output_delta: true } : {}),
           jetbrains: { air: { version: 1, capabilities: ['nativeSubagentSessions', 'asyncTasks'] } },
         },
       },
