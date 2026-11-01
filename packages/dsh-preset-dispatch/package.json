@@ -18,6 +18,10 @@
       "types": "./src/zcode-quota.ts",
       "default": "./src/zcode-quota.ts"
     },
+    "./minimaxi-quota": {
+      "types": "./src/minimaxi-quota.ts",
+      "default": "./src/minimaxi-quota.ts"
+    },
     "./mermaid-asset": {
       "types": "./src/mermaid-asset.ts",
       "default": "./src/mermaid-asset.ts"

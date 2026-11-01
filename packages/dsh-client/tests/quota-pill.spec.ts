@@ -17,6 +17,8 @@ vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
 }))
 
 const {
+  MINIMAX_QUOTA_PILL_SPEC,
+  MINIMAX_QUOTA_ROUTE_PATH,
   QUOTA_DOCK_ID,
   QUOTA_DOCK_ORDER,
   QUOTA_ROUTE_PATH,
@@ -43,12 +45,15 @@ const WINDOWS = {
 /** 一份「当前选中的是 GLM」的目录快照。 */
 const GLM_DIRECTORY = { current: { provider: 'acp:acp-zcode', model: 'GLM-5.3' }, groups: [] }
 const OTHER_DIRECTORY = { current: { provider: 'deepseek', model: 'deepseek-chat' }, groups: [] }
+/** 一份「当前选中的是 MiniMax」的目录快照。 */
+const MINIMAX_DIRECTORY = { current: { provider: 'acp:acp-minimaxi', model: 'MiniMax-M3' }, groups: [] }
 
 /** 用给定模型与配额渲染胶囊行，返回 HTML。 */
-function html(options: { directory?: unknown; quota?: unknown } = {}): string {
+function html(options: { directory?: unknown; quota?: unknown; spec?: unknown } = {}): string {
   return renderToString(createElement(QuotaPillRow, {
     useModelDirectory: () => options.directory as never,
     useQuota: () => options.quota as never,
+    ...(options.spec === undefined ? {} : { spec: options.spec as never }),
     t: zhT,
   }))
 }
@@ -140,6 +145,19 @@ describe('routeQuotaFetcher（路由取数器）', () => {
     expect(deadAnswer.ok).toBe(false)
     if (!deadAnswer.ok) expect(deadAnswer.error).toContain('socket gone')
   })
+
+  it('MiniMax 那条打 minimaxi 路由，GLM 那条打 zcode 路由', async () => {
+    const paths: string[] = []
+    const fetcher = routeQuotaFetcher(vi.fn(async (input: RequestInfo | URL) => {
+      paths.push(String(input))
+      return new Response(JSON.stringify({ ok: true, quota: WINDOWS }), { status: 200 })
+    }) as unknown as typeof fetch, MINIMAX_QUOTA_ROUTE_PATH)
+    await fetcher()
+    await routeQuotaFetcher(vi.fn(async () => new Response(JSON.stringify({ ok: true, quota: WINDOWS }), { status: 200 })) as unknown as typeof fetch)()
+    expect(paths).toEqual([MINIMAX_QUOTA_ROUTE_PATH])
+    expect(MINIMAX_QUOTA_ROUTE_PATH).toBe('/threadharbor/minimax/quota')
+    expect(QUOTA_ROUTE_PATH).toBe('/threadharbor/zcode/quota')
+  })
 })
 
 describe('QuotaPillRow（胶囊渲染）', () => {
@@ -219,6 +237,73 @@ describe('QuotaPillRow（胶囊渲染）', () => {
     expect(warm).toContain('data-tone="warn"')
     const cool = html({ directory: GLM_DIRECTORY, quota: WINDOWS })
     expect(cool).not.toContain('data-tone=')
+  })
+})
+
+describe('QuotaPillRow（MiniMax 口径）', () => {
+  const MM_WINDOWS = {
+    subscribed: true,
+    level: 'Max',
+    credit: { remaining: 0 },
+    fiveHour: { kind: 'five-hour', percent: 13, unlimited: false, resetAt: Date.UTC(2026, 9, 16, 6, 30) },
+    weekly: { kind: 'weekly', percent: 100, unlimited: true },
+  }
+
+  it('MiniMax 会话渲染 5h/周/积分三枚，文案是「剩余」', () => {
+    const markup = html({ directory: MINIMAX_DIRECTORY, quota: MM_WINDOWS, spec: MINIMAX_QUOTA_PILL_SPEC })
+    expect(markup).toContain('data-minimaxi-quota')
+    expect(markup).toContain('5小时')
+    expect(markup).toContain('13%')
+    expect(markup).toContain('不限')
+    expect(markup).toContain('积分')
+    expect(markup).toContain('剩余 13%')
+    expect(markup).toContain('剩余积分：0')
+  })
+
+  it('剩余越少越红：剩余 ≤20 标 danger、≤50 标 warn', () => {
+    const danger = html({
+      directory: MINIMAX_DIRECTORY,
+      quota: { fiveHour: { kind: 'five-hour', percent: 12, unlimited: false } },
+      spec: MINIMAX_QUOTA_PILL_SPEC,
+    })
+    expect(danger).toContain('data-tone="danger"')
+    const warn = html({
+      directory: MINIMAX_DIRECTORY,
+      quota: { weekly: { kind: 'weekly', percent: 40, unlimited: false } },
+      spec: MINIMAX_QUOTA_PILL_SPEC,
+    })
+    expect(warn).toContain('data-tone="warn"')
+    const ok = html({
+      directory: MINIMAX_DIRECTORY,
+      quota: { fiveHour: { kind: 'five-hour', percent: 70, unlimited: false } },
+      spec: MINIMAX_QUOTA_PILL_SPEC,
+    })
+    expect(ok).not.toContain('data-tone=')
+  })
+
+  it('GLM 目录不渲染 MiniMax 胶囊，反之亦然（spec 决定前缀）', () => {
+    expect(html({ directory: GLM_DIRECTORY, quota: MM_WINDOWS, spec: MINIMAX_QUOTA_PILL_SPEC })).toBe('')
+    expect(html({ directory: MINIMAX_DIRECTORY, quota: WINDOWS })).toBe('')
+  })
+
+  it('hooks 仍无条件调用：MiniMax spec 下切到 MiniMax 也不多出一个钩子', () => {
+    const calls: string[] = []
+    const useModelDirectory = (selector: (value: unknown) => unknown): unknown => {
+      calls.push('directory')
+      return selector(OTHER_DIRECTORY)
+    }
+    const useQuota = (selector: (value: unknown) => unknown): unknown => {
+      calls.push('quota')
+      return selector(MM_WINDOWS)
+    }
+    const markup = renderToString(createElement(QuotaPillRow, {
+      useModelDirectory: useModelDirectory as never,
+      useQuota: useQuota as never,
+      spec: MINIMAX_QUOTA_PILL_SPEC,
+      t: zhT,
+    }))
+    expect(markup).toBe('')
+    expect(calls).toEqual(['directory', 'quota'])
   })
 })
 
