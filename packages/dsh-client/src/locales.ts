@@ -425,6 +425,15 @@ export const zh = {
   'quota.minimaxi.unlimitedTitle': 'MiniMax 套餐窗口：不限',
   'quota.minimaxi.credit': '积分',
   'quota.minimaxi.creditTitle': 'MiniMax 套餐剩余积分：{remaining}',
+  // Codex（ChatGPT 套餐）：窗口时长按套餐而异（5 小时或一周），标题统一口径。
+  'quota.codex.window.title': 'Codex 套餐窗口：已用 {percent}%',
+  'quota.codex.credit': '积分',
+  'quota.codex.creditTitle': 'Codex 按量积分余额：{remaining}',
+  // Claude（Anthropic 官方订阅）：5 小时 + 7 天两档，utilization 是已用。
+  'quota.claude.fiveHour.title': 'Claude 套餐 5 小时窗口：已用 {percent}%',
+  'quota.claude.weekly.title': 'Claude 套餐 7 天窗口：已用 {percent}%',
+  'quota.claude.credit': '按量',
+  'quota.claude.creditTitle': 'Claude 按量已用：{used} / {limit}',
   'recovery.interrupted.note': '本轮被中断，{steps} 项过程内容已折叠',
   'recovery.interrupted.expand': '展开本轮过程',
   /** 会话区里的 Markdown 阅读区：一屏高，可收起。 */
@@ -946,6 +955,15 @@ export const en = {
   'quota.minimaxi.unlimitedTitle': 'MiniMax plan window: unlimited',
   'quota.minimaxi.credit': 'credits',
   'quota.minimaxi.creditTitle': 'MiniMax plan credits remaining: {remaining}',
+  // Codex (ChatGPT plan): window length varies by plan (5h or weekly).
+  'quota.codex.window.title': 'Codex plan window: {percent}% used',
+  'quota.codex.credit': 'credits',
+  'quota.codex.creditTitle': 'Codex credit balance: {remaining}',
+  // Claude (Anthropic subscription): 5-hour + 7-day windows, utilization is used.
+  'quota.claude.fiveHour.title': 'Claude plan five-hour window: {percent}% used',
+  'quota.claude.weekly.title': 'Claude plan 7-day window: {percent}% used',
+  'quota.claude.credit': 'extra',
+  'quota.claude.creditTitle': 'Claude extra usage: {used} / {limit}',
   'recovery.interrupted.note': 'This turn was interrupted; {steps} process items are folded',
   'recovery.interrupted.expand': 'Show this turn’s process',
   'markdownTurn.loading': 'Reading the document…',

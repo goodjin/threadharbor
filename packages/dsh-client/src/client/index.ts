@@ -59,7 +59,7 @@ import { registerRemoteConversation } from '../remote-conversation.tsx'
 import { sharedRemoteConversation } from '../remote-conversation-store.ts'
 import { registerModelLabel } from '../model-label.tsx'
 import { registerSessionIdBar } from '../session-id-bar.ts'
-import { createQuotaPoller, MINIMAX_QUOTA_PILL_SPEC, MINIMAX_QUOTA_ROUTE_PATH, registerQuotaDockPills, routeQuotaFetcher } from '../quota-pill.ts'
+import { createQuotaPoller, QUOTA_PILL_SPECS, registerQuotaDockPills, routeQuotaFetcher } from '../quota-pill.ts'
 import { registerInterruptedTurnRecovery } from '../interrupted-turn-recovery.ts'
 import { createMarkdownTurnReaders } from '../markdown-turn-sources.ts'
 import { registerMarkdownTurn } from '../markdown-turn.tsx'
@@ -551,53 +551,39 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
     'threadharbor: markdown turn',
   )
 
-  // GLM 套餐配额胶囊：输入框下方 dock 里、token 用量同一排。配额是账号级
-  // 数字，轮询器全浏览器一份（5 分钟一拍，回到页面再补一拍）；数据走宿主侧
-  // 的 /threadharbor/zcode/quota（密钥不出宿主进程）。只在当前会话选的模型
-  // 是 GLM 时渲染；取不到配额整行不渲染，原因去重后留一条日志。
-  const quotaPoller = createQuotaPoller({
-    fetchQuota: routeQuotaFetcher(),
-    report: message => { log.warn(message) },
+  // 套餐配额胶囊：输入框下方 dock 里、token 用量同一排。配额是账号级数字，
+  // 轮询器每口径全浏览器一份（5 分钟一拍，回到页面再补一拍）；数据各自走宿主
+  // 侧的同源路由（凭据/令牌不出宿主进程）。只在当前会话选了对应那组模型/agent
+  // 时渲染；取不到配额整行不渲染，原因去重后留一条日志。
+  // 四套口径一张表：GLM、MiniMax、Codex、Claude——路由、出现条件、文案各归各。
+  const quotaPollers = QUOTA_PILL_SPECS.map((spec) => {
+    const poller = createQuotaPoller({
+      fetchQuota: routeQuotaFetcher(fetch, spec.routePath),
+      report: message => { log.warn(message) },
+    })
+    poller.start()
+    ctx.effect(() => () => { poller.dispose() }, `threadharbor: ${spec.dockId} poller`)
+    const refreshQuotaOnVisible = (): void => {
+      if (document.visibilityState === 'visible') void poller.refresh()
+    }
+    window.addEventListener('visibilitychange', refreshQuotaOnVisible)
+    ctx.effect(
+      () => () => { window.removeEventListener('visibilitychange', refreshQuotaOnVisible) },
+      `threadharbor: ${spec.dockId} visibility refresh`,
+    )
+    return { spec, poller }
   })
-  quotaPoller.start()
-  ctx.effect(() => () => { quotaPoller.dispose() }, 'threadharbor: zcode quota poller')
-  const refreshQuotaOnVisible = (): void => {
-    if (document.visibilityState === 'visible') void quotaPoller.refresh()
-  }
-  window.addEventListener('visibilitychange', refreshQuotaOnVisible)
-  ctx.effect(
-    () => () => { window.removeEventListener('visibilitychange', refreshQuotaOnVisible) },
-    'threadharbor: zcode quota visibility refresh',
-  )
-  // MiniMax Token Plan 配额胶囊：同一面、同一骨架，只是模型前缀换成 MiniMax-、
-  // 多一枚积分胶囊、percent 是「剩余」。轮询器与 dock 条目各自一份，互不相干。
-  const minimaxiQuotaPoller = createQuotaPoller({
-    fetchQuota: routeQuotaFetcher(fetch, MINIMAX_QUOTA_ROUTE_PATH),
-    report: message => { log.warn(message) },
-  })
-  minimaxiQuotaPoller.start()
-  ctx.effect(() => () => { minimaxiQuotaPoller.dispose() }, 'threadharbor: minimaxi quota poller')
-  const refreshMiniMaxQuotaOnVisible = (): void => {
-    if (document.visibilityState === 'visible') void minimaxiQuotaPoller.refresh()
-  }
-  window.addEventListener('visibilitychange', refreshMiniMaxQuotaOnVisible)
-  ctx.effect(
-    () => () => { window.removeEventListener('visibilitychange', refreshMiniMaxQuotaOnVisible) },
-    'threadharbor: minimaxi quota visibility refresh',
-  )
   // 服务经 inject 绑，不经一次性 ctx.get：模型目录服务随连接重建被替换，
   // 一次性拿到的引用随后就是死的——它一被调用就抛「inactive context」，崩的是
   // 座位条目（2026-10-20 桌面版：输入框下面的 dock 崩了）。inject 会在服务被
   // 替换时重跑回调，胶囊因此始终绑着当下那一个。
   const bindQuotaPills = (modelDirectories: unknown, sessions: unknown): void => {
-    ctx.effect(() => registerQuotaDockPills(seatHost, quotaPoller, {
-      modelDirectories: modelDirectories as never,
-      sessions: sessions as never,
-    }), 'threadharbor: zcode quota pills')
-    ctx.effect(() => registerQuotaDockPills(seatHost, minimaxiQuotaPoller, {
-      modelDirectories: modelDirectories as never,
-      sessions: sessions as never,
-    }, MINIMAX_QUOTA_PILL_SPEC), 'threadharbor: minimaxi quota pills')
+    for (const { spec, poller } of quotaPollers) {
+      ctx.effect(() => registerQuotaDockPills(seatHost, poller, {
+        modelDirectories: modelDirectories as never,
+        sessions: sessions as never,
+      }, spec), `threadharbor: ${spec.dockId} pills`)
+    }
   }
   const quotaInjector = ctx.inject
   if (typeof quotaInjector === 'function') {

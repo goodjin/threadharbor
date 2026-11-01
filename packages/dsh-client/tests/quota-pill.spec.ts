@@ -17,6 +17,8 @@ vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
 }))
 
 const {
+  CLAUDE_QUOTA_PILL_SPEC,
+  CODEX_QUOTA_PILL_SPEC,
   MINIMAX_QUOTA_PILL_SPEC,
   MINIMAX_QUOTA_ROUTE_PATH,
   QUOTA_DOCK_ID,
@@ -47,6 +49,9 @@ const GLM_DIRECTORY = { current: { provider: 'acp:acp-zcode', model: 'GLM-5.3' }
 const OTHER_DIRECTORY = { current: { provider: 'deepseek', model: 'deepseek-chat' }, groups: [] }
 /** 一份「当前选中的是 MiniMax」的目录快照。 */
 const MINIMAX_DIRECTORY = { current: { provider: 'acp:acp-minimaxi', model: 'MiniMax-M3' }, groups: [] }
+/** Codex / Claude 的目录快照：这两家按 provider id 认，不看模型 id。 */
+const CODEX_DIRECTORY = { current: { provider: 'acp:acp-codex', model: 'gpt-6-astra[medium]' }, groups: [] }
+const CLAUDE_DIRECTORY = { current: { provider: 'acp:acp-claude', model: 'default' }, groups: [] }
 
 /** 用给定模型与配额渲染胶囊行，返回 HTML。 */
 function html(options: { directory?: unknown; quota?: unknown; spec?: unknown } = {}): string {
@@ -300,6 +305,70 @@ describe('QuotaPillRow（MiniMax 口径）', () => {
       useModelDirectory: useModelDirectory as never,
       useQuota: useQuota as never,
       spec: MINIMAX_QUOTA_PILL_SPEC,
+      t: zhT,
+    }))
+    expect(markup).toBe('')
+    expect(calls).toEqual(['directory', 'quota'])
+  })
+})
+
+describe('QuotaPillRow（Codex / Claude 口径）', () => {
+  it('Codex：按 provider id 认，主窗按窗口时长取标签，积分给余额', () => {
+    const markup = html({
+      directory: CODEX_DIRECTORY,
+      quota: {
+        level: 'pro',
+        weekly: { kind: 'weekly', percent: 91, windowSeconds: 604_800 },
+        credit: { remaining: 12.5 },
+      },
+      spec: CODEX_QUOTA_PILL_SPEC,
+    })
+    expect(markup).toContain('data-codex-quota')
+    expect(markup).toContain('周 91%')
+    expect(markup).toContain('积分')
+    expect(markup).toContain('12.5')
+    expect(markup).toContain('已用 91%')
+  })
+
+  it('Codex：同模型 id 换个 provider 就不渲染（不按前缀误伤别家）', () => {
+    expect(html({
+      directory: OTHER_DIRECTORY,
+      quota: { weekly: { kind: 'weekly', percent: 91, windowSeconds: 604_800 } },
+      spec: CODEX_QUOTA_PILL_SPEC,
+    })).toBe('')
+  })
+
+  it('Claude：两档窗口 + 按量积分（已用/上限）', () => {
+    const markup = html({
+      directory: CLAUDE_DIRECTORY,
+      quota: {
+        fiveHour: { kind: 'five-hour', percent: 83 },
+        weekly: { kind: 'weekly', percent: 14 },
+        credit: { used: 4.5, limit: 100 },
+      },
+      spec: CLAUDE_QUOTA_PILL_SPEC,
+    })
+    expect(markup).toContain('data-claude-quota')
+    expect(markup).toContain('5小时 83%')
+    expect(markup).toContain('周 14%')
+    expect(markup).toContain('按量')
+    expect(markup).toContain('4.5 / 100')
+  })
+
+  it('Claude：provider 不同则不渲染；hooks 仍无条件调用', () => {
+    const calls: string[] = []
+    const useModelDirectory = (selector: (value: unknown) => unknown): unknown => {
+      calls.push('directory')
+      return selector(GLM_DIRECTORY)
+    }
+    const useQuota = (selector: (value: unknown) => unknown): unknown => {
+      calls.push('quota')
+      return selector({ fiveHour: { kind: 'five-hour', percent: 1 } })
+    }
+    const markup = renderToString(createElement(QuotaPillRow, {
+      useModelDirectory: useModelDirectory as never,
+      useQuota: useQuota as never,
+      spec: CLAUDE_QUOTA_PILL_SPEC,
       t: zhT,
     }))
     expect(markup).toBe('')

@@ -22,6 +22,14 @@
       "types": "./src/minimaxi-quota.ts",
       "default": "./src/minimaxi-quota.ts"
     },
+    "./claude-quota": {
+      "types": "./src/usage-claude.ts",
+      "default": "./src/usage-claude.ts"
+    },
+    "./codex-quota": {
+      "types": "./src/usage-codex.ts",
+      "default": "./src/usage-codex.ts"
+    },
     "./mermaid-asset": {
       "types": "./src/mermaid-asset.ts",
       "default": "./src/mermaid-asset.ts"
