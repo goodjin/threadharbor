@@ -57,6 +57,11 @@
     # 配额胶囊从这里读（密钥不出宿主进程，成功应答带 30 秒缓存）。
     - id: threadharbor-zcode-quota
       name: '@threadharbor/dsh-preset-dispatch/zcode-quota'
+    # MiniMax Token Plan 限额+积分接口：宿主用本机 MiniMax 登录令牌（签名查组与
+    # 积分 + 开放平台查两个窗口）问一次，把 5 小时/周/积分发回；与 GLM 那条同面，
+    # 浏览器侧给 MiniMax 模型画配额胶囊时读它（令牌不出宿主进程，30 秒缓存）。
+    - id: threadharbor-minimaxi-quota
+      name: '@threadharbor/dsh-preset-dispatch/minimaxi-quota'
     # Mermaid 运行时的同源静态路由：会话区里的 ```mermaid 代码块在第一次出现时
     # 才注入 <script> 加载这个文件（客户端包不内联 3.5 MB 的 mermaid）；资产
     # 来自本包的 mermaid 依赖，与页面同一登录准入，缓存走 ETag/304。

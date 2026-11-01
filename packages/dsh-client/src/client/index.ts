@@ -59,7 +59,7 @@ import { registerRemoteConversation } from '../remote-conversation.tsx'
 import { sharedRemoteConversation } from '../remote-conversation-store.ts'
 import { registerModelLabel } from '../model-label.tsx'
 import { registerSessionIdBar } from '../session-id-bar.ts'
-import { createQuotaPoller, registerQuotaDockPills, routeQuotaFetcher } from '../quota-pill.ts'
+import { createQuotaPoller, MINIMAX_QUOTA_PILL_SPEC, MINIMAX_QUOTA_ROUTE_PATH, registerQuotaDockPills, routeQuotaFetcher } from '../quota-pill.ts'
 import { registerInterruptedTurnRecovery } from '../interrupted-turn-recovery.ts'
 import { createMarkdownTurnReaders } from '../markdown-turn-sources.ts'
 import { registerMarkdownTurn } from '../markdown-turn.tsx'
@@ -569,6 +569,22 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
     () => () => { window.removeEventListener('visibilitychange', refreshQuotaOnVisible) },
     'threadharbor: zcode quota visibility refresh',
   )
+  // MiniMax Token Plan 配额胶囊：同一面、同一骨架，只是模型前缀换成 MiniMax-、
+  // 多一枚积分胶囊、percent 是「剩余」。轮询器与 dock 条目各自一份，互不相干。
+  const minimaxiQuotaPoller = createQuotaPoller({
+    fetchQuota: routeQuotaFetcher(fetch, MINIMAX_QUOTA_ROUTE_PATH),
+    report: message => { log.warn(message) },
+  })
+  minimaxiQuotaPoller.start()
+  ctx.effect(() => () => { minimaxiQuotaPoller.dispose() }, 'threadharbor: minimaxi quota poller')
+  const refreshMiniMaxQuotaOnVisible = (): void => {
+    if (document.visibilityState === 'visible') void minimaxiQuotaPoller.refresh()
+  }
+  window.addEventListener('visibilitychange', refreshMiniMaxQuotaOnVisible)
+  ctx.effect(
+    () => () => { window.removeEventListener('visibilitychange', refreshMiniMaxQuotaOnVisible) },
+    'threadharbor: minimaxi quota visibility refresh',
+  )
   // 服务经 inject 绑，不经一次性 ctx.get：模型目录服务随连接重建被替换，
   // 一次性拿到的引用随后就是死的——它一被调用就抛「inactive context」，崩的是
   // 座位条目（2026-10-20 桌面版：输入框下面的 dock 崩了）。inject 会在服务被
@@ -578,6 +594,10 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
       modelDirectories: modelDirectories as never,
       sessions: sessions as never,
     }), 'threadharbor: zcode quota pills')
+    ctx.effect(() => registerQuotaDockPills(seatHost, minimaxiQuotaPoller, {
+      modelDirectories: modelDirectories as never,
+      sessions: sessions as never,
+    }, MINIMAX_QUOTA_PILL_SPEC), 'threadharbor: minimaxi quota pills')
   }
   const quotaInjector = ctx.inject
   if (typeof quotaInjector === 'function') {

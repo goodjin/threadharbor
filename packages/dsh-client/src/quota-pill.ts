@@ -24,6 +24,9 @@ import type { RuntimeT } from './locales.ts'
 /** 与宿主侧 zcode-quota 路由登记的同一路径。 */
 export const QUOTA_ROUTE_PATH = '/threadharbor/zcode/quota'
 
+/** MiniMax 那侧宿主路由的同一路径（见 dsh-preset-dispatch/minimaxi-quota）。 */
+export const MINIMAX_QUOTA_ROUTE_PATH = '/threadharbor/minimax/quota'
+
 /** dock 里的条目 id 与顺序：排在官方 stats（order 0）之后。 */
 export const QUOTA_DOCK_ID = 'threadharbor-zcode-quota'
 export const QUOTA_DOCK_ORDER = 10
@@ -31,12 +34,54 @@ export const QUOTA_DOCK_ORDER = 10
 /** zcode 那组模型在目录里的 id 前缀；选了它才轮到配额胶囊出场。 */
 const GLM_MODEL_PREFIX = 'GLM-'
 
-/** One consumed window as the host route forwards it. */
+/**
+ * 一套胶囊的取值口径。GLM 与 MiniMax 同源同骨架，只有三处不同：模型前缀、
+ * 是否画积分、以及 percent 是「已用」还是「剩余」（决定变色方向与文案）。spec
+ * 把这三处收成一个可传的值，dock 注册按它各挂一条，GLM 那条是缺省值。
+ */
+export interface QuotaPillSpec {
+  /** 取值口径来源：决定 percent 语义、变色方向与文案。 */
+  readonly provider: 'zcode' | 'minimaxi'
+  /** 当前会话模型 id 以此前缀开头才渲染。 */
+  readonly prefix: string
+  /** 是否渲染积分胶囊（MiniMax 有，GLM 无）。 */
+  readonly showCredit: boolean
+  /** dock 条目 id 与顺序。 */
+  readonly dockId: string
+  readonly dockOrder: number
+}
+
+/** GLM 那套：缺省口径，dock 注册不传 spec 时就是它。 */
+export const GLM_QUOTA_PILL_SPEC: QuotaPillSpec = {
+  provider: 'zcode',
+  prefix: GLM_MODEL_PREFIX,
+  showCredit: false,
+  dockId: QUOTA_DOCK_ID,
+  dockOrder: QUOTA_DOCK_ORDER,
+}
+
+/** MiniMax 那套：前缀 MiniMax-、多一枚积分胶囊。 */
+export const MINIMAX_QUOTA_PILL_SPEC: QuotaPillSpec = {
+  provider: 'minimaxi',
+  prefix: 'MiniMax-',
+  showCredit: true,
+  dockId: 'threadharbor-minimaxi-quota',
+  dockOrder: 11,
+}
+
+/**
+ * One consumed window as the host route forwards it. GLM carries used/total;
+ * MiniMax carries a remaining percent and an `unlimited` flag — those fields
+ * are optional so one shape serves both.
+ */
 export interface QuotaWindow {
   readonly kind: 'five-hour' | 'weekly'
-  readonly used: number
-  readonly total: number
-  readonly percent: number
+  readonly used?: number
+  readonly total?: number
+  /** zcode: percent used; minimaxi: percent remaining. */
+  readonly percent?: number
+  /** minimaxi only: the window is unlimited (`status === 3`). */
+  readonly unlimited?: boolean
   readonly resetAt?: number
 }
 
@@ -45,6 +90,8 @@ export interface QuotaWindows {
   readonly level?: string
   readonly fiveHour?: QuotaWindow
   readonly weekly?: QuotaWindow
+  /** minimaxi only: the Token Plan credit balance. */
+  readonly credit?: { readonly remaining: number }
 }
 
 /** The route's whole answer body. */
@@ -149,12 +196,13 @@ export function createQuotaPoller(deps: {
  * 同源取一次宿主路由，折成 QuotaAnswer；任何故障（非 JSON、坏状态码、网络
  * 拒绝）都折成 ok:false 的原因，绝不抛出——轮询器的 catch 只是最后一道网。
  * @param fetchImpl - 取数实现；缺省全局 fetch，测试注入假件。
+ * @param routePath - 宿主路由路径；缺省 GLM 那条，MiniMax 传 MINIMAX_QUOTA_ROUTE_PATH。
  * @returns 取数函数。
  */
-export function routeQuotaFetcher(fetchImpl: typeof fetch = fetch): () => Promise<QuotaAnswer> {
+export function routeQuotaFetcher(fetchImpl: typeof fetch = fetch, routePath: string = QUOTA_ROUTE_PATH): () => Promise<QuotaAnswer> {
   return async () => {
     try {
-      const response = await fetchImpl(QUOTA_ROUTE_PATH, { headers: { accept: 'application/json' } })
+      const response = await fetchImpl(routePath, { headers: { accept: 'application/json' } })
       let body: unknown
       try {
         body = await response.json()
@@ -185,28 +233,31 @@ type SnapshotHook<T> = <S>(selector: (value: T | undefined) => S) => S
 /**
  * Render the quota pills for the composer dock.
  * @param props - the two reactive seats (framework-bound selector hooks in
- * production, plain functions in tests), the subagent visibility flag, and the
- * locale seat.
- * @returns two pills, or null whenever the row should not appear.
+ * production, plain functions in tests), the subagent visibility flag, the
+ * locale seat, and the provider spec (defaults to GLM).
+ * @returns the pills, or null whenever the row should not appear.
  */
-export function QuotaPillRow({ useQuota, useModelDirectory, visible = true, t = fallbackT }: {
+export function QuotaPillRow({ useQuota, useModelDirectory, visible = true, t = fallbackT, spec = GLM_QUOTA_PILL_SPEC }: {
   useQuota?: SnapshotHook<QuotaWindows>
   useModelDirectory?: SnapshotHook<QuotaDirectorySnapshot>
   visible?: boolean
   t?: RuntimeT
+  spec?: QuotaPillSpec
 }): ReactNode {
-  // 钩子必须每次渲染都按同一顺序调用：同一挂载实例会经历模型从非 GLM 切到
-  // GLM，条件调用让 hook 数 1→2，React #310 会把整个 dock 条目收成空块。
+  // 钩子必须每次渲染都按同一顺序调用：同一挂载实例会经历模型从非本组切到本组，
+  // 条件调用让 hook 数 1→2，React #310 会把整个 dock 条目收成空块。
   // （2026-10-30 真机：会话里切 ZCode 后胶囊消失。）
   const model = useModelDirectory?.((value) => value)?.current?.model
   const quota = useQuota?.((value) => value)
   if (visible === false) return null
-  if (model === undefined || !model.startsWith(GLM_MODEL_PREFIX)) return null
+  if (model === undefined || !model.startsWith(spec.prefix)) return null
   if (quota === undefined) return null
   const windows = [quota.fiveHour, quota.weekly].filter((window): window is QuotaWindow => window !== undefined)
-  if (windows.length === 0) return null
+  const credit = spec.showCredit ? quota.credit : undefined
+  if (windows.length === 0 && credit === undefined) return null
   return createElement('div', {
-    'data-zcode-quota': true,
+    'data-quota-pills': true,
+    [`data-${spec.provider}-quota`]: true,
     style: {
       display: 'flex',
       justifyContent: 'center',
@@ -214,23 +265,49 @@ export function QuotaPillRow({ useQuota, useModelDirectory, visible = true, t = 
       fontSize: 'calc(var(--dsh-content-font-size-secondary, 13px) - 1px)',
       color: 'var(--dsw-alias-label-tertiary)',
     },
-  }, ...windows.map(window => pillOf(window, t)))
+  },
+    formatResetLine(quota.fiveHour?.resetAt, t) !== null && createElement('div', {
+      key: 'reset',
+      style: { textAlign: 'center', opacity: 0.8, marginBottom: '2px' },
+    }, formatResetLine(quota.fiveHour?.resetAt, t)),
+    ...windows.map(window => pillOf(window, t, spec)),
+    ...(credit === undefined ? [] : [creditPillOf(credit, t)]),
+  )
 }
 
-/** One pill: icon + 「5小时 1%」，悬停给已用/总量与重置时刻，按用量变色。 */
-function pillOf(window: QuotaWindow, t: RuntimeT): ReactNode {
+/** 重置时刻那行：只在 5 小时窗口带 resetAt 时出现（周窗口重置在几天外，写时刻会误导）。 */
+function formatResetLine(resetAt: number | undefined, t: RuntimeT): string | null {
+  return resetAt === undefined ? null : t('quota.resetAt', { reset: formatReset(resetAt) })
+}
+
+/** One pill: icon + 「5小时 1%」，悬停给详情与重置时刻，按用量变色。 */
+function pillOf(window: QuotaWindow, t: RuntimeT, spec: QuotaPillSpec): ReactNode {
   const fiveHour = window.kind === 'five-hour'
-  const tone = window.percent >= 80 ? 'danger' : window.percent >= 50 ? 'warn' : undefined
+  const unlimited = window.unlimited === true
+  const percent = window.percent ?? 0
+  // zcode 的 percent 是「已用」：越高越红。minimaxi 的是「剩余」：越低越红。
+  const tone = unlimited
+    ? undefined
+    : spec.provider === 'minimaxi'
+      ? (percent <= 20 ? 'danger' : percent <= 50 ? 'warn' : undefined)
+      : (percent >= 80 ? 'danger' : percent >= 50 ? 'warn' : undefined)
   const color = tone === 'danger'
     ? 'var(--dsw-static-red-500)'
     : tone === 'warn'
       ? 'var(--dsw-alias-state-warn-label)'
       : undefined
   const reset = window.resetAt === undefined ? '' : t('quota.resetAt', { reset: formatReset(window.resetAt) })
-  const title = t(fiveHour ? 'quota.fiveHour.title' : 'quota.weekly.title', {
-    used: String(window.used),
-    total: String(window.total),
-  }) + reset
+  const title = unlimited
+    ? t('quota.minimaxi.unlimitedTitle') + reset
+    : spec.provider === 'minimaxi'
+      ? t(fiveHour ? 'quota.minimaxi.fiveHour.title' : 'quota.minimaxi.weekly.title', { percent: String(Math.round(percent)) }) + reset
+      : t(fiveHour ? 'quota.fiveHour.title' : 'quota.weekly.title', {
+        used: String(window.used ?? 0),
+        total: String(window.total ?? 0),
+      }) + reset
+  const label = unlimited
+    ? t('quota.minimaxi.unlimited')
+    : t(fiveHour ? 'quota.fiveHour.label' : 'quota.weekly.label', { percent: String(Math.round(percent)) })
   return createElement('span', {
     key: window.kind,
     title,
@@ -247,9 +324,27 @@ function pillOf(window: QuotaWindow, t: RuntimeT): ReactNode {
     },
   },
     createElement(fiveHour ? IconGaugeOutlineRegular : IconDatabaseOutlineRegular),
-    createElement('span', null, t(fiveHour ? 'quota.fiveHour.label' : 'quota.weekly.label', {
-      percent: String(Math.round(window.percent)),
-    })))
+    createElement('span', null, label))
+}
+
+/** MiniMax 专属：积分胶囊，给出剩余积分。 */
+function creditPillOf(credit: { readonly remaining: number }, t: RuntimeT): ReactNode {
+  const title = t('quota.minimaxi.creditTitle', { remaining: String(credit.remaining) })
+  return createElement('span', {
+    key: 'credit',
+    title,
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: '6px',
+      padding: '1px 8px',
+      borderRadius: '999px',
+      fontVariantNumeric: 'tabular-nums',
+      whiteSpace: 'nowrap',
+    },
+  },
+    createElement(IconGaugeOutlineRegular),
+    createElement('span', null, t('quota.minimaxi.credit'), ' ', createElement('span', null, String(credit.remaining))))
 }
 
 /** The dock slot face this registration needs; structural, like every slot host here. */
@@ -301,18 +396,20 @@ function directoryStoreOf(
  * @param slots - the slot host (`ctx.slots`).
  * @param poller - the shared quota poller (created once in apply).
  * @param services - the host services, when present.
+ * @param spec - 取值口径；缺省 GLM。MiniMax 传 MINIMAX_QUOTA_PILL_SPEC。
  * @returns the disposer of the registration.
  */
 export function registerQuotaDockPills(
   slots: DockSlotHost,
   poller: QuotaPoller,
   services: Partial<QuotaPillServices>,
+  spec: QuotaPillSpec = GLM_QUOTA_PILL_SPEC,
 ): () => void {
   return slots.inject('conversation.composer.dock', () => slots.register(
     {
       name: 'conversation.composer.dock',
-      id: QUOTA_DOCK_ID,
-      order: QUOTA_DOCK_ORDER,
+      id: spec.dockId,
+      order: spec.dockOrder,
       locale: NAMESPACE,
       inject: (sessionId: string) => {
         // 服务可能已经没了（连接重建后旧实例被处置）：一调就抛「inactive
@@ -340,6 +437,7 @@ export function registerQuotaDockPills(
       ...(props.useZcodeDirectory === undefined ? {} : { useModelDirectory: props.useZcodeDirectory }),
       ...(props.visible === undefined ? {} : { visible: props.visible }),
       ...(props.t === undefined ? {} : { t: props.t }),
+      spec,
     }),
   )) as () => void
 }

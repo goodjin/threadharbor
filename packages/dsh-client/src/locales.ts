@@ -418,6 +418,13 @@ export const zh = {
   'quota.fiveHour.title': 'GLM 套餐 5 小时窗口：已用 {used} / {total}',
   'quota.weekly.title': 'GLM 套餐周窗口：已用 {used} / {total}',
   'quota.resetAt': '，{reset} 重置',
+  // MiniMax Token Plan 的 percent 是「剩余」，文案与变色方向都不同。
+  'quota.minimaxi.fiveHour.title': 'MiniMax 套餐 5 小时窗口：剩余 {percent}%',
+  'quota.minimaxi.weekly.title': 'MiniMax 套餐周窗口：剩余 {percent}%',
+  'quota.minimaxi.unlimited': '不限',
+  'quota.minimaxi.unlimitedTitle': 'MiniMax 套餐窗口：不限',
+  'quota.minimaxi.credit': '积分',
+  'quota.minimaxi.creditTitle': 'MiniMax 套餐剩余积分：{remaining}',
   'recovery.interrupted.note': '本轮被中断，{steps} 项过程内容已折叠',
   'recovery.interrupted.expand': '展开本轮过程',
   /** 会话区里的 Markdown 阅读区：一屏高，可收起。 */
@@ -932,6 +939,13 @@ export const en = {
   'quota.fiveHour.title': 'GLM plan five-hour window: {used} / {total} used',
   'quota.weekly.title': 'GLM plan weekly window: {used} / {total} used',
   'quota.resetAt': ', resets {reset}',
+  // MiniMax Token Plan reports remaining percent; wording and tone differ.
+  'quota.minimaxi.fiveHour.title': 'MiniMax plan five-hour window: {percent}% left',
+  'quota.minimaxi.weekly.title': 'MiniMax plan weekly window: {percent}% left',
+  'quota.minimaxi.unlimited': 'unlimited',
+  'quota.minimaxi.unlimitedTitle': 'MiniMax plan window: unlimited',
+  'quota.minimaxi.credit': 'credits',
+  'quota.minimaxi.creditTitle': 'MiniMax plan credits remaining: {remaining}',
   'recovery.interrupted.note': 'This turn was interrupted; {steps} process items are folded',
   'recovery.interrupted.expand': 'Show this turn’s process',
   'markdownTurn.loading': 'Reading the document…',
