@@ -72,21 +72,28 @@ const kindOf = (frame: AcpFrame): string => {
 }
 
 describe('AcpSegmenter', () => {
-  it('codex 真实帧：文本×11 → 子代理 → 工具 → 文本 → 状态 → 收尾 → 文本，只在收尾后的文本帧闭合一次', () => {
+  it('codex 真实帧：文本 → 子代理 → 工具（含批次中段文本）→ 状态 → 收尾 → 文本，只在收尾后的文本帧闭合一次', () => {
+    // 2026-11-01 按 codex-acp 2.5.0 重录：帧配比变了（批次中段多出一段
+    // agent_message_chunk、若干 session_info_update/config_option_update 杂讯），
+    // 但分段行为不变——唯一闭合仍落在工具收尾后的第一段文本上。
     const frames = subagentCaptured['codex']!.frames
     const flags = observeAll(codexDialect, frames)
 
     // The single close lands on the first text chunk AFTER the tool batch
-    // settled (frame 22) — not on the completion frame, not earlier.
-    expect(closeIndexes(flags)).toEqual([24])
-    expect(kindOf(frames[24]!)).toBe('agent_message_chunk')
+    // settled (frame 24) — not on the completion frame, not earlier.
+    expect(closeIndexes(flags)).toEqual([26])
+    expect(kindOf(frames[26]!)).toBe('agent_message_chunk')
     // The completion frame itself does not close; the segment waits for text.
-    expect(flags[22]).toBe(false)
+    expect(flags[24]).toBe(false)
+    // A text chunk MID-batch (2.5.0 sends one while the tool runs) must not
+    // close either: only text after the whole batch settles closes.
+    expect(kindOf(frames[20]!)).toBe('agent_message_chunk')
+    expect(flags[20]).toBe(false)
     // Subagent lifecycle frames neither close nor disturb the tool batch.
     expect(kindOf(frames[14]!)).toBe('subagent_spawned')
     expect(flags[14]).toBe(false)
-    expect(kindOf(frames[21]!)).toBe('subagent_state_update')
-    expect(flags[21]).toBe(false)
+    expect(kindOf(frames[23]!)).toBe('subagent_state_update')
+    expect(flags[23]).toBe(false)
   })
 
   it('codex-failed / claude-failed 真实帧：多工具回合也只在收尾后的文本处闭合一次', () => {
