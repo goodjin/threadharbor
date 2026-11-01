@@ -87,6 +87,11 @@ zcode 与 minimaxi 这两组模型不是我们自己的实现，它们贴着两�
 | A6 | 区域判定：凭据目录里的 `cn` / `en` 决定网关 | `oauth-core/src/namespace.ts` | `packages/minimaxi-acp/src/credential.ts`（`detectNamespace`） | 国内号配国际网关 → 稳定 401 | 401 且换网关就好 |
 | A7 | 模型目录：模型 id、上下文/输出上限、思考能力（能否关思考）、档位表 | `packages/config/src/minimax-model-catalog.ts` | `vendor/mcode-runtime/model-catalog.ts` | 模型 id 变了 → 模型发不出去；`thinking_config.mode` 变了 → 关思考行为变了 | 模型 id 报无效；关思考报 2013 |
 | A8 | anthropic 消息协议本身（`thinking`/`output_config.effort`、思考签名、工具块） | anthropic 兼容接口 | `packages/minimaxi-acp/src/anthropic.ts`、`sse.ts`；重放时的工具配对在 `packages/dsh-preset-dispatch/src/tool-pairing.ts` | 协议字段改名 → 请求被拒 | 网关返回参数错误 |
+| A9 | 开放平台地址表（额度用：cn `www.minimaxi.com` / en `platform.minimax.io`） | 桌面版 `MemoryQuotaTransport`（`OPEN_PLATFORM_ORIGINS`，2026-10-30 实测） | `vendor/mcode-runtime/endpoints.ts` 的 `OPEN_PLATFORM_BASE_URLS` | 额度接口 404 | 胶囊不出现，宿主日志记原因 |
+| A10 | `/matrix/` 与 `/v1/api/user/info` 的请求签名：`x-signature`=md5(秒级时间戳+固定密钥+请求体)、`yy`=md5(编码路径+请求体或`{}`+md5(毫秒时间戳)+密钥盐)；密钥与盐**写死在桌面版里** | 桌面版 `MemoryQuotaTransport`（2026-10-30 实测并真机验证） | `packages/minimaxi-acp/src/quota.ts` | 换密钥 → 签名被拒 → 额度胶囊消失 | 同上（官方桌面版也会一起断） |
+| A11 | 组 id 从签名后的 `get_user_extra_info`（个人工作区 `workspace_type===0`）取 `op_group_id`；会员确认走 `get_membership_info`（`workspace_id` 用个人工作区的 id，不是组 id） | 同上 | 同上 | 拿不到组 id → 只显示订阅态、没有窗口 | 同上 |
+| A12 | `remains` 字段口径：`model_remains[]`，5 小时=`current_interval_*`、周=`current_weekly_*`，`status===3` 为不限；percent 口径是**剩余**（与 GLM 相反） | 同上 + 真机实测（2026-10-30，Max 档：5h 0%、周不限） | `packages/minimaxi-acp/src/quota.ts`（`projectQuota`） | 字段改名 → 窗口缺失 | 胶囊缺窗口或整行隐藏 |
+| A13 | 积分：会员应答里的 `op_credit_summary.total_remaining_amount` | 同上 | 同上（`creditOf`） | 字段改名 → 积分胶囊不出现 | 胶囊缺积分 |
 
 ### B. zcode（对齐型）
 
@@ -134,6 +139,14 @@ zcode 与 minimaxi 这两组模型不是我们自己的实现，它们贴着两�
 1. 浏览器侧只在**当前会话选的模型是 GLM** 时才显示两枚胶囊（5 小时、周），5 分钟一拍轮询，回到页面补一拍。
 2. 胶囊数据来自同源接口 `GET /threadharbor/zcode/quota`——宿主侧插件 `threadharbor-zcode-quota` 用**本机解出来的密钥**问一次 Coding Plan 的额度接口，成功应答缓存 30 秒。
 3. 密钥不出宿主进程；取不到就把整行藏掉，原因去重后记一条日志。
+
+### 4. MiniMax 额度+积分胶囊怎么走（2026-10-30 新增）
+
+与 GLM 同一面、同骨架，只是模型前缀换成 `MiniMax-`、多一枚积分胶囊、percent 口径是**剩余**：
+
+1. 浏览器侧只在**当前会话选的模型是 MiniMax** 时显示三枚（5 小时、周、积分），轮询节奏同上。
+2. 数据来自同源接口 `GET /threadharbor/minimax/quota`——宿主侧插件 `threadharbor-minimaxi-quota` 用本机登录令牌问一次：签名后的 `/matrix/` 查组与积分 + 开放平台的 `coding_plan/remains` 查两个窗口（依赖点 A9–A13），成功应答缓存 30 秒。
+3. 令牌不出宿主进程；未订阅、取不到窗口或积分时，缺哪枚藏哪枚，原因去重后记一条日志。
 
 ---
 
@@ -251,7 +264,7 @@ npm run test
 | 包 | 覆盖什么 |
 | --- | --- |
 | `packages/zcode-acp/tests/` | 请求体构造与推理档映射、思考签名回放、地址拼接、额度解析、网络失败按 `TRANSPORT` 上报并保留底层原因 |
-| `packages/minimaxi-acp/tests/` | 凭据定位与区域判定、过期后经官方端点刷新、刷新结果留在同一个文件、请求地址与鉴权头、思考开关与档位、签名回放、失败信息里令牌被抹掉、网络失败按 `TRANSPORT` 上报并保留底层原因 |
+| `packages/minimaxi-acp/tests/` | 凭据定位与区域判定、过期后经官方端点刷新、刷新结果留在同一个文件、请求地址与鉴权头、思考开关与档位、签名回放、失败信息里令牌被抹掉、网络失败按 `TRANSPORT` 上报并保留底层原因、额度与积分的签名调用/窗口解析/令牌脱敏 |
 
 真机活测（会驱动真实模型，一轮几十秒；需要本机已登录 ZCode 桌面版与 MiniMax Code）：
 
@@ -266,6 +279,7 @@ npm run test
 | 2026-10-20 | MiniMax 国内站真机跑通：过期 154 小时的登录刷新成功；两轮含工具调用的多轮成立（签名原样回传被接受）；M3 关思考直连正常 |
 | 2026-10-20 | 工具配对的重放修复真机通过：同一段漂移的历史，修复前被 MiniMax 拒（2013），修复后 200 并正常作答 |
 | 2026-10-30 | 网络层失败（代理断开、连接被拒、流到一半断）改为按 `TRANSPORT` 上报，宿主自动重试，文案带底层原因；单测覆盖，真机活测待补（需要一次真实的网络抖动才好复现） |
+| 2026-10-30 | MiniMax 额度+积分上线（依赖点 A9–A13）：真机验证宿主接口带真实登录返回完整数据（Max 档：5h 0%、周不限、积分 0，与手工探针一致）；GLM 胶囊在两次 dock 注册并存下照常渲染（5h 1% / 周 91%）、无控制台报错、无槽位错误。**待补**：会话切到 MiniMax 模型后的三枚胶囊截图（web 端模型选择器只列当前 agent 的模型，自动化没切过去；渲染逻辑已由单测覆盖） |
 
 ---
 

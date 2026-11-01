@@ -10,12 +10,13 @@
 | 路径 | `packages/config/src/model-catalog.ts`、`packages/config/src/config.ts` |
 | 搬运日期 | 2026-10-20 |
 | 上游提交 | 核对时 main 分支 tree SHA `c21e88ef88b1688546fdd579614a54c04626e67b` |
+| 另一来源 | 桌面版 `MiniMax Code.app`（2026-10-30 对着已安装的 app.asar 抄 `OPEN_PLATFORM_BASE_URLS`：额度接口在开放平台上，开源仓库里没有这张表） |
 
 ## 相对上游改了什么
 
 | 文件 | 改动 |
 |---|---|
-| `endpoints.ts` | 只抄 `PRESET_BASE_URLS` 与 `LEGACY_MANAGED_PRESET_BASE_URLS`。其余环境在上游开源树里是 `.example.invalid` 占位，没有真值可抄。 |
+| `endpoints.ts` | 只抄 `PRESET_BASE_URLS` 与 `LEGACY_MANAGED_PRESET_BASE_URLS`。其余环境在上游开源树里是 `.example.invalid` 占位，没有真值可抄。**2026-10-30 追加 `OPEN_PLATFORM_BASE_URLS`**（cn `www.minimaxi.com` / en `platform.minimax.io` 等八条）：额度胶囊要读开放平台的 `coding_plan/remains`，这张表来自桌面版 `MemoryQuotaTransport` 的 `OPEN_PLATFORM_ORIGINS`，staging/test/dev 各档照抄桌面版真值。 |
 | `model-catalog.ts` | 数值一字未改。唯一改动是把上游从 93 KB 的 `config.ts` 引来的 `ModelConfig` / `ModelCapabilitiesConfig` 两个类型就地声明，并删掉本插件用不到的文件上传能力字段的引用。文件内的 models.dev 出处说明见 `NOTICE.md`。 |
 
 ## 稳定性

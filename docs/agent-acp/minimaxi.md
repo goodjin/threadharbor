@@ -41,6 +41,25 @@ preset 里默认只挂两个：**M3.1 Flash** 与 **MiniMax M3**。这是官方 
 
 模型目录本身是从官方搬来的（上游派生自 models.dev，MIT，出处见 [NOTICE](../../packages/minimaxi-acp/src/vendor/mcode-runtime/NOTICE.md)），所以官方加模型时我们跟进一次即可，不用自己维护一份清单。
 
+## 额度与积分（核对时间 2026-10-30）
+
+输入框下方的配额胶囊给 MiniMax 模型画三枚：**5 小时、周、积分**。数字是账号级的
+Token Plan 额度，跟官方桌面版用量视图同源。来源拆在两个面上：
+
+| 要什么 | 从哪来 | 鉴权 |
+| --- | --- | --- |
+| 组 id、是否订阅、积分 | 托管网关 `agent.minimax.cn` 的 `/matrix/` 与 `/v1/api/user/info` | 登录令牌 + **md5 请求签名** |
+| 5 小时/周窗口 | 开放平台 `www.minimaxi.com` 的 `/v1/api/openplatform/coding_plan/remains` | 登录令牌 + `X-Group-Id`，**不签名** |
+
+签名是桌面版自带的方案：`x-signature` 是「秒级时间戳 + 固定密钥 + 请求体」的 md5，
+`yy` 再叠加「路径 + 密钥盐」。**密钥是桌面版里写死的**，官方换密钥我们这边就断——
+但同样会断掉官方桌面版自己，所以真断了先看桌面版还能不能用（参见 upstream-sync
+的「已知偏差」）。5 小时/周窗口里 `status === 3` 表示不限量；percent 口径是**剩余**
+（与 GLM 的「已用」相反），所以胶囊是剩余越少越红。
+
+令牌照旧不出宿主进程：宿主侧 `/threadharbor/minimax/quota`（preset-dispatch 包）
+问一次上游、带 30 秒缓存，浏览器只画数字。
+
 ## 稳定性
 
 托管网关地址 `agent.minimax.cn/mavis/api/v1/llm/v1` 是 MiniMax 的**产品内部路由，官方文档一个字都没承诺过**，随时可能改。我们把它抄过来是为了跟官方保持一致，不是因为它稳。真出问题时先查官方是否已经改了——`src/vendor/mcode-runtime/PROVENANCE.md` 记着同步自哪个提交。
@@ -65,7 +84,7 @@ preset 里默认只挂两个：**M3.1 Flash** 与 **MiniMax M3**。这是官方 
 
 ## 验收
 
-`packages/minimaxi-acp/tests/` 覆盖：凭据定位与区域判定、过期后经官方端点刷新、刷新结果留在同一个文件里、请求地址与鉴权头、思考开关与档位、签名回放、流式帧到块的投影、失败信息里令牌被抹掉。工具配对的重放由 `packages/dsh-preset-dispatch/tests/tool-pairing.spec.ts` 覆盖。
+`packages/minimaxi-acp/tests/` 覆盖：凭据定位与区域判定、过期后经官方端点刷新、刷新结果留在同一个文件里、请求地址与鉴权头、思考开关与档位、签名回放、流式帧到块的投影、失败信息里令牌被抹掉、额度与积分的签名调用/窗口解析/令牌脱敏（`tests/quota.spec.ts`）。宿主路由的准入/缓存/折错由 `packages/dsh-preset-dispatch/tests/minimaxi-quota.spec.ts` 覆盖；胶囊渲染（GLM 两枚不动、MiniMax 三枚、剩余口径变色、前缀互斥）由 `packages/dsh-client/tests/quota-pill.spec.ts` 覆盖。工具配对的重放由 `packages/dsh-preset-dispatch/tests/tool-pairing.spec.ts` 覆盖。
 
 真机已跑通（2026-10-20，国内站 `cn`/`prod`，`MiniMax-M3.1-Flash`）：
 
