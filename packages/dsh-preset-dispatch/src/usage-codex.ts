@@ -39,8 +39,9 @@ const USAGE_URL = 'https://chatgpt.com/backend-api/codex/usage'
 
 /**
  * UA 里的版本号：chatgpt.com 的防护拦「过于笼统」的客户端（2026-11-01 实测，
- * 裸 `codex_cli_rs` 回 403，带版本号才放行）。跟随本机 CLI 的版本只是为了让
- * 请求长得像它自己发的；上游改防护时这里要跟着调。
+ * 裸 `codex_cli_rs` 回 403，带版本号才放行；而 `(Mac OS; arm64)` 这种没版本
+ * 号的平台段又被拦，所以只拼版本）。跟随本机 CLI 的版本只是为了让请求长得
+ * 像它自己发的；上游改防护时这里要跟着调。
  */
 const CODEX_CLI_UA_VERSION = '0.148.0'
 
@@ -226,7 +227,9 @@ export async function fetchCodexUsage(request: {
         authorization: `Bearer ${credential.accessToken}`,
         'chatgpt-account-id': credential.accountId,
         // 防护会拦过于笼统的 UA（实测裸 `codex_cli_rs` 回 403），带上版本与平台。
-        'user-agent': `codex_cli_rs/${CODEX_CLI_UA_VERSION} (${process.platform === 'darwin' ? 'Mac OS' : process.platform}; ${process.arch}) terminal`,
+        // 防护会拦「过于笼统」的 UA（实测裸 `codex_cli_rs` 回 403），带版本号才放行；
+        // 反而别拼平台段（实测 `(Mac OS; arm64)` 这种没版本号的平台段又被拦）。
+        'user-agent': `codex_cli_rs/${CODEX_CLI_UA_VERSION}`,
         originator: 'codex_cli_rs',
       },
       ...(request.signal === undefined ? {} : { signal: request.signal }),
