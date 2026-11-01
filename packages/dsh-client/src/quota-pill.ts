@@ -27,6 +27,12 @@ export const QUOTA_ROUTE_PATH = '/threadharbor/zcode/quota'
 /** MiniMax 那侧宿主路由的同一路径（见 dsh-preset-dispatch/minimaxi-quota）。 */
 export const MINIMAX_QUOTA_ROUTE_PATH = '/threadharbor/minimax/quota'
 
+/** Codex（ChatGPT 套餐）宿主路由（见 dsh-preset-dispatch/codex-quota）。 */
+export const CODEX_QUOTA_ROUTE_PATH = '/threadharbor/codex/quota'
+
+/** Claude（Anthropic 官方订阅）宿主路由（见 dsh-preset-dispatch/claude-quota）。 */
+export const CLAUDE_QUOTA_ROUTE_PATH = '/threadharbor/claude/quota'
+
 /** dock 里的条目 id 与顺序：排在官方 stats（order 0）之后。 */
 export const QUOTA_DOCK_ID = 'threadharbor-zcode-quota'
 export const QUOTA_DOCK_ORDER = 10
@@ -35,17 +41,22 @@ export const QUOTA_DOCK_ORDER = 10
 const GLM_MODEL_PREFIX = 'GLM-'
 
 /**
- * 一套胶囊的取值口径。GLM 与 MiniMax 同源同骨架，只有三处不同：模型前缀、
- * 是否画积分、以及 percent 是「已用」还是「剩余」（决定变色方向与文案）。spec
- * 把这三处收成一个可传的值，dock 注册按它各挂一条，GLM 那条是缺省值。
+ * 一套胶囊的取值口径。各家同源同骨架，差别只有四处：选谁才出现（模型前缀或
+ * 目录里的 provider id）、percent 是「已用」还是「剩余」（决定变色方向与文案）、
+ * 有没有积分胶囊、以及宿主路由与文案命名空间。spec 把这些收成一个值，dock 按
+ * 它各挂一条，GLM 那条是缺省值。
  */
 export interface QuotaPillSpec {
-  /** 取值口径来源：决定 percent 语义、变色方向与文案。 */
-  readonly provider: 'zcode' | 'minimaxi'
-  /** 当前会话模型 id 以此前缀开头才渲染。 */
-  readonly prefix: string
-  /** 是否渲染积分胶囊（MiniMax 有，GLM 无）。 */
+  /** 取值口径来源：决定文案命名空间与变色方向。 */
+  readonly provider: 'zcode' | 'minimaxi' | 'claude' | 'codex'
+  /** 当前会话目录里的 provider id（如 `acp:acp-claude`）与此相等才渲染。 */
+  readonly providerId?: string
+  /** 模型 id 前缀匹配；providerId 已给时可以不填（Claude 的模型 id 是通用别名）。 */
+  readonly prefix?: string
+  /** 是否渲染积分胶囊（MiniMax/Codex/Claude 有，GLM 无）。 */
   readonly showCredit: boolean
+  /** 宿主路由路径。 */
+  readonly routePath: string
   /** dock 条目 id 与顺序。 */
   readonly dockId: string
   readonly dockOrder: number
@@ -56,32 +67,64 @@ export const GLM_QUOTA_PILL_SPEC: QuotaPillSpec = {
   provider: 'zcode',
   prefix: GLM_MODEL_PREFIX,
   showCredit: false,
+  routePath: QUOTA_ROUTE_PATH,
   dockId: QUOTA_DOCK_ID,
   dockOrder: QUOTA_DOCK_ORDER,
 }
 
-/** MiniMax 那套：前缀 MiniMax-、多一枚积分胶囊。 */
+/** MiniMax 那套：前缀 MiniMax-、多一枚积分胶囊、percent 是「剩余」。 */
 export const MINIMAX_QUOTA_PILL_SPEC: QuotaPillSpec = {
   provider: 'minimaxi',
   prefix: 'MiniMax-',
   showCredit: true,
+  routePath: MINIMAX_QUOTA_ROUTE_PATH,
   dockId: 'threadharbor-minimaxi-quota',
   dockOrder: 11,
 }
 
+/** Codex 那套：按目录里的 provider id 认（gpt-* 这类 id 太通用，不按前缀）。 */
+export const CODEX_QUOTA_PILL_SPEC: QuotaPillSpec = {
+  provider: 'codex',
+  providerId: 'acp:acp-codex',
+  showCredit: true,
+  routePath: CODEX_QUOTA_ROUTE_PATH,
+  dockId: 'threadharbor-codex-quota',
+  dockOrder: 12,
+}
+
+/** Claude 那套：同按 provider id 认（模型 id 是 default/opus 这类通用别名）。 */
+export const CLAUDE_QUOTA_PILL_SPEC: QuotaPillSpec = {
+  provider: 'claude',
+  providerId: 'acp:acp-claude',
+  showCredit: true,
+  routePath: CLAUDE_QUOTA_ROUTE_PATH,
+  dockId: 'threadharbor-claude-quota',
+  dockOrder: 13,
+}
+
+/** 全部口径：apply 按这张表各建一只轮询器、各挂一条 dock。 */
+export const QUOTA_PILL_SPECS: readonly QuotaPillSpec[] = [
+  GLM_QUOTA_PILL_SPEC,
+  MINIMAX_QUOTA_PILL_SPEC,
+  CODEX_QUOTA_PILL_SPEC,
+  CLAUDE_QUOTA_PILL_SPEC,
+]
+
 /**
  * One consumed window as the host route forwards it. GLM carries used/total;
- * MiniMax carries a remaining percent and an `unlimited` flag — those fields
- * are optional so one shape serves both.
+ * MiniMax a remaining percent + unlimited; Codex a used percent + window
+ * length（决定标签叫「5小时」还是「周」）——optional fields so one shape serves all.
  */
 export interface QuotaWindow {
   readonly kind: 'five-hour' | 'weekly'
   readonly used?: number
   readonly total?: number
-  /** zcode: percent used; minimaxi: percent remaining. */
+  /** zcode/claude/codex: percent used; minimaxi: percent remaining. */
   readonly percent?: number
   /** minimaxi only: the window is unlimited (`status === 3`). */
   readonly unlimited?: boolean
+  /** codex only: the window's length in seconds（≥3 天按「周」标）。 */
+  readonly windowSeconds?: number
   readonly resetAt?: number
 }
 
@@ -90,8 +133,8 @@ export interface QuotaWindows {
   readonly level?: string
   readonly fiveHour?: QuotaWindow
   readonly weekly?: QuotaWindow
-  /** minimaxi only: the Token Plan credit balance. */
-  readonly credit?: { readonly remaining: number }
+  /** 有积分套餐才带：MiniMax/Codex 是余额，Claude 是按量已用与上限。 */
+  readonly credit?: { readonly remaining?: number; readonly used?: number; readonly limit?: number }
 }
 
 /** The route's whole answer body. */
@@ -247,10 +290,18 @@ export function QuotaPillRow({ useQuota, useModelDirectory, visible = true, t = 
   // 钩子必须每次渲染都按同一顺序调用：同一挂载实例会经历模型从非本组切到本组，
   // 条件调用让 hook 数 1→2，React #310 会把整个 dock 条目收成空块。
   // （2026-10-30 真机：会话里切 ZCode 后胶囊消失。）
-  const model = useModelDirectory?.((value) => value)?.current?.model
+  const directory = useModelDirectory?.((value) => value)
+  const model = directory?.current?.model
+  const providerId = directory?.current?.provider
   const quota = useQuota?.((value) => value)
   if (visible === false) return null
-  if (model === undefined || !model.startsWith(spec.prefix)) return null
+  // 认谁：优先按目录里的 provider id（preset id，如 acp:acp-claude——Claude 的
+  // 模型 id 是 default/opus 这类通用别名，按前缀认会误伤别家）；没给 providerId
+  // 的口径（GLM/MiniMax）按模型 id 前缀认。
+  const mine = spec.providerId !== undefined
+    ? providerId === spec.providerId
+    : model !== undefined && model.startsWith(spec.prefix ?? '')
+  if (!mine) return null
   if (quota === undefined) return null
   const windows = [quota.fiveHour, quota.weekly].filter((window): window is QuotaWindow => window !== undefined)
   const credit = spec.showCredit ? quota.credit : undefined
@@ -271,7 +322,7 @@ export function QuotaPillRow({ useQuota, useModelDirectory, visible = true, t = 
       style: { textAlign: 'center', opacity: 0.8, marginBottom: '2px' },
     }, formatResetLine(quota.fiveHour?.resetAt, t)),
     ...windows.map(window => pillOf(window, t, spec)),
-    ...(credit === undefined ? [] : [creditPillOf(credit, t)]),
+    ...(credit === undefined ? [] : [creditPillOf(credit, t, spec)]),
   )
 }
 
@@ -280,12 +331,27 @@ function formatResetLine(resetAt: number | undefined, t: RuntimeT): string | nul
   return resetAt === undefined ? null : t('quota.resetAt', { reset: formatReset(resetAt) })
 }
 
+/** 文案命名空间：各家窗口标题各有一套（percent 口径在标题里写明）。 */
+function titleKey(provider: QuotaPillSpec['provider'], fiveHour: boolean):
+  | 'quota.fiveHour.title'
+  | 'quota.weekly.title'
+  | 'quota.minimaxi.fiveHour.title'
+  | 'quota.minimaxi.weekly.title'
+  | 'quota.claude.fiveHour.title'
+  | 'quota.claude.weekly.title'
+  | 'quota.codex.window.title' {
+  if (provider === 'minimaxi') return fiveHour ? 'quota.minimaxi.fiveHour.title' : 'quota.minimaxi.weekly.title'
+  if (provider === 'claude') return fiveHour ? 'quota.claude.fiveHour.title' : 'quota.claude.weekly.title'
+  if (provider === 'codex') return 'quota.codex.window.title'
+  return fiveHour ? 'quota.fiveHour.title' : 'quota.weekly.title'
+}
+
 /** One pill: icon + 「5小时 1%」，悬停给详情与重置时刻，按用量变色。 */
 function pillOf(window: QuotaWindow, t: RuntimeT, spec: QuotaPillSpec): ReactNode {
   const fiveHour = window.kind === 'five-hour'
   const unlimited = window.unlimited === true
   const percent = window.percent ?? 0
-  // zcode 的 percent 是「已用」：越高越红。minimaxi 的是「剩余」：越低越红。
+  // zcode/claude/codex 的 percent 是「已用」：越高越红。minimaxi 的是「剩余」：越低越红。
   const tone = unlimited
     ? undefined
     : spec.provider === 'minimaxi'
@@ -299,12 +365,13 @@ function pillOf(window: QuotaWindow, t: RuntimeT, spec: QuotaPillSpec): ReactNod
   const reset = window.resetAt === undefined ? '' : t('quota.resetAt', { reset: formatReset(window.resetAt) })
   const title = unlimited
     ? t('quota.minimaxi.unlimitedTitle') + reset
-    : spec.provider === 'minimaxi'
-      ? t(fiveHour ? 'quota.minimaxi.fiveHour.title' : 'quota.minimaxi.weekly.title', { percent: String(Math.round(percent)) }) + reset
-      : t(fiveHour ? 'quota.fiveHour.title' : 'quota.weekly.title', {
+    : spec.provider === 'zcode'
+      // GLM 的标题带已用/总量；其余家只有百分比口径。
+      ? t(titleKey(spec.provider, fiveHour), {
         used: String(window.used ?? 0),
         total: String(window.total ?? 0),
       }) + reset
+      : t(titleKey(spec.provider, fiveHour), { percent: String(Math.round(percent)) }) + reset
   const label = unlimited
     ? t('quota.minimaxi.unlimited')
     : t(fiveHour ? 'quota.fiveHour.label' : 'quota.weekly.label', { percent: String(Math.round(percent)) })
@@ -327,9 +394,27 @@ function pillOf(window: QuotaWindow, t: RuntimeT, spec: QuotaPillSpec): ReactNod
     createElement('span', null, label))
 }
 
-/** MiniMax 专属：积分胶囊，给出剩余积分。 */
-function creditPillOf(credit: { readonly remaining: number }, t: RuntimeT): ReactNode {
-  const title = t('quota.minimaxi.creditTitle', { remaining: String(credit.remaining) })
+/**
+ * 积分胶囊：MiniMax/Codex 是余额（「积分 0」），Claude 是按量已用
+ * （「按量 4.5 / 100」）。文案命名空间跟 provider 走。
+ */
+function creditKeys(provider: QuotaPillSpec['provider']): {
+  credit: 'quota.minimaxi.credit' | 'quota.codex.credit' | 'quota.claude.credit'
+  title: 'quota.minimaxi.creditTitle' | 'quota.codex.creditTitle' | 'quota.claude.creditTitle'
+} {
+  if (provider === 'claude') return { credit: 'quota.claude.credit', title: 'quota.claude.creditTitle' }
+  if (provider === 'codex') return { credit: 'quota.codex.credit', title: 'quota.codex.creditTitle' }
+  return { credit: 'quota.minimaxi.credit', title: 'quota.minimaxi.creditTitle' }
+}
+
+function creditPillOf(credit: { readonly remaining?: number; readonly used?: number; readonly limit?: number }, t: RuntimeT, spec: QuotaPillSpec): ReactNode {
+  const keys = creditKeys(spec.provider)
+  const detail = credit.remaining !== undefined
+    ? String(credit.remaining)
+    : `${credit.used ?? 0}${credit.limit === undefined ? '' : ` / ${credit.limit}`}`
+  const title = spec.provider === 'claude'
+    ? t('quota.claude.creditTitle', { used: String(credit.used ?? 0), limit: String(credit.limit ?? '') })
+    : t(keys.title, { remaining: String(credit.remaining ?? '') })
   return createElement('span', {
     key: 'credit',
     title,
@@ -344,7 +429,7 @@ function creditPillOf(credit: { readonly remaining: number }, t: RuntimeT): Reac
     },
   },
     createElement(IconGaugeOutlineRegular),
-    createElement('span', null, t('quota.minimaxi.credit'), ' ', createElement('span', null, String(credit.remaining))))
+    createElement('span', null, t(keys.credit), ' ', createElement('span', null, detail)))
 }
 
 /** The dock slot face this registration needs; structural, like every slot host here. */

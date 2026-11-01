@@ -62,6 +62,16 @@
     # 浏览器侧给 MiniMax 模型画配额胶囊时读它（令牌不出宿主进程，30 秒缓存）。
     - id: threadharbor-minimaxi-quota
       name: '@threadharbor/dsh-preset-dispatch/minimaxi-quota'
+    # Codex（ChatGPT 套餐）额度接口：宿主读本机 ~/.codex 登录令牌问一次官方
+    # usage 只读接口，把主/次窗口（时长决定标签）与按量积分发回；没登录就
+    # 不出数据，浏览器侧按 acp:acp-codex 画胶囊（令牌不出宿主，30 秒缓存）。
+    - id: threadharbor-codex-quota
+      name: '@threadharbor/dsh-preset-dispatch/codex-quota'
+    # Claude（Anthropic 官方订阅）额度接口：宿主读本机官方 OAuth 令牌（文件或
+    # 钥匙串）问一次 oauth usage，把 5 小时/7 天两档发回；走中转站没登官方的
+    # 机器上没有凭据，胶囊安静地不出现（上游接口自带 429 冷却，缓存 2 分钟）。
+    - id: threadharbor-claude-quota
+      name: '@threadharbor/dsh-preset-dispatch/claude-quota'
     # Mermaid 运行时的同源静态路由：会话区里的 ```mermaid 代码块在第一次出现时
     # 才注入 <script> 加载这个文件（客户端包不内联 3.5 MB 的 mermaid）；资产
     # 来自本包的 mermaid 依赖，与页面同一登录准入，缓存走 ETag/304。
