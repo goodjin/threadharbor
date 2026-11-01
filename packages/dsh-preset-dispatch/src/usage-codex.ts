@@ -37,6 +37,13 @@ export const USAGE_UPSTREAM_TIMEOUT_MS = 15_000
 
 const USAGE_URL = 'https://chatgpt.com/backend-api/codex/usage'
 
+/**
+ * UA 里的版本号：chatgpt.com 的防护拦「过于笼统」的客户端（2026-11-01 实测，
+ * 裸 `codex_cli_rs` 回 403，带版本号才放行）。跟随本机 CLI 的版本只是为了让
+ * 请求长得像它自己发的；上游改防护时这里要跟着调。
+ */
+const CODEX_CLI_UA_VERSION = '0.148.0'
+
 /** 一档已消耗的窗口；`windowSeconds` 决定客户端叫它「5小时」还是「周」。 */
 export type CodexUsageWindow = {
   readonly kind: 'five-hour' | 'weekly'
@@ -218,7 +225,8 @@ export async function fetchCodexUsage(request: {
         accept: 'application/json',
         authorization: `Bearer ${credential.accessToken}`,
         'chatgpt-account-id': credential.accountId,
-        'user-agent': 'codex_cli_rs',
+        // 防护会拦过于笼统的 UA（实测裸 `codex_cli_rs` 回 403），带上版本与平台。
+        'user-agent': `codex_cli_rs/${CODEX_CLI_UA_VERSION} (${process.platform === 'darwin' ? 'Mac OS' : process.platform}; ${process.arch}) terminal`,
         originator: 'codex_cli_rs',
       },
       ...(request.signal === undefined ? {} : { signal: request.signal }),
