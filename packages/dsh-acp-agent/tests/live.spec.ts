@@ -227,7 +227,13 @@ async function openLiveAgentOver(
       fs: { readTextFile: true, writeTextFile: true },
       terminal: true,
       subagents: {},
-      _meta: { jetbrains: { air: { version: 1, capabilities: ['nativeSubagentSessions', 'asyncTasks'] } } },
+      _meta: {
+        ...(dialect.capabilities.metaSubagents === true ? { subagents: {} } : {}),
+        // Mirrors the runner: codex-acp 2.5.0's AIR tool-call contract serves
+        // command output only to clients that declared this key (2026-11-01).
+        ...(dialect.capabilities.terminalOutputDelta === true ? { terminal_output_delta: true } : {}),
+        jetbrains: { air: { version: 1, capabilities: ['nativeSubagentSessions', 'asyncTasks'] } },
+      },
     },
   }))
   client.notify('initialized', {})
@@ -526,8 +532,9 @@ describe.skipIf(!LIVE)('live ACP agents through the shared layer', () => {
     expect(result.session.models.length).toBeGreaterThan(0)
     expect(result.answer.length).toBeGreaterThan(0)
     expect(result.toolNames.length).toBeGreaterThan(0)
-    // codex puts results in rawOutput.formatted_output; reading `content` finds
-    // nothing and silently drops every tool output.
+    // codex never puts results in `content`: 1.x carried them in
+    // rawOutput.formatted_output, 2.5.0's AIR contract in terminal_output_delta
+    // chunks — reading `content` alone silently drops every tool output.
     expect(result.toolOutputs.join('')).toContain('ACP_LIVE_OK')
   }, 240_000)
 

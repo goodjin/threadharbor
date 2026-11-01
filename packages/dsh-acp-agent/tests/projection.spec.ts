@@ -43,6 +43,17 @@ describe('projectTurn with the codex dialect', () => {
     const message = (result.payload as { message: { content: { text: string }[] } }).message
     expect(message.content.map(part => part.text).join('')).toContain('total 544')
   })
+
+  it('reads the 2.5 tool result from _meta.terminal_output_delta when rawOutput is gone', () => {
+    // codex-acp 2.5.0, for a client that declared `_meta.jetbrains.air`
+    // (live capture 2026-11-01): the completed frame has no rawOutput — the
+    // result rides the terminal_output_delta channel or it is lost.
+    const frames = captured['codex']!['toolV25'] as AcpFrame[]
+    const events = projectTurn(frames, { turn: 1, dialect: codexDialect })
+    const result = events.find(event => event.type === 'tool/result')!
+    const message = (result.payload as { message: { content: { text: string }[] } }).message
+    expect(message.content.map(part => part.text).join('')).toBe('ACP_LIVE_OK\n')
+  })
 })
 
 describe('projecting an ACP plan into the host todo card', () => {

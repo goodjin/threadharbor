@@ -24,6 +24,10 @@ describe('capabilities', () => {
   it('codex: 认图片、工具帧两段', () => {
     expect(codexDialect.capabilities.acceptsImageContent).toBe(true)
     expect(codexDialect.capabilities.toolFrameShape).toBe('two_frame')
+    // 2026-11-01 实测（codex-acp 2.5.0）：握手声明 _meta.jetbrains.air 的客户端
+    // 走 AIR 工具契约，完成帧不再带 rawOutput；不声明 terminal_output_delta
+    // 就一个字节的命令输出都拿不到。
+    expect(codexDialect.capabilities.terminalOutputDelta).toBe(true)
   })
 
   it('grok: 认图片、工具帧两段、命令经工具帧、可重连会话', () => {

@@ -11,9 +11,13 @@
  *     grok's projection does — would put a whole shell command where a tool
  *     name belongs.
  *   - **Tool output is not in `content`.** The `tool_call_update` has no
- *     `content` field at all; the result lives at `rawOutput.formatted_output`
- *     alongside `exit_code`. Reading `content` the way grok's projection does
- *     silently yields empty output for every codex tool call.
+ *     `content` result; where the text lives depends on the adapter's
+ *     contract (2026-11-01, codex-acp 1.10.0 and 2.5.0): the whole result at
+ *     `rawOutput.formatted_output` (1.x, and 2.5.0 for non-AIR clients), or
+ *     `_meta.terminal_output_delta` appends (2.5.0's AIR contract, which DSH
+ *     opts into — see `terminalOutputDelta` below). Reading `content` the way
+ *     grok's projection does silently yields empty output for every codex
+ *     tool call.
  *
  * `session/new` returns `models.availableModels` like grok, with a
  * `currentModelId` and ids that bundle the effort level (`gpt-6-astra[high]`).
@@ -67,6 +71,14 @@ export const codexDialect: AcpDialect = {
     toolNameMap: {
       execute: 'bash',
     },
+    // 2026-11-01, codex-acp 2.5.0: a client that declared `_meta.jetbrains.air`
+    // (DSH does, for the subagent draft) is served the AIR tool-call contract,
+    // where the completed frame carries no `rawOutput` — the result rides the
+    // `terminal_output_delta` append channel, and only when the client
+    // declared that key in its own `_meta`. Without the declaration every
+    // command output arrives empty (live failure: ACP_LIVE_OK vanished from
+    // the projected tool outputs on the 2.5.0 handshake).
+    terminalOutputDelta: true,
   },
 
   // 模型偶尔在 rawInput 里声明 timeoutMs（约 6% 的 bash，如 worktree 构建
@@ -83,19 +95,20 @@ export const codexDialect: AcpDialect = {
     const name = carried?.name
       || (typeof update['kind'] === 'string' ? update['kind'] : undefined)
       || (typeof update['title'] === 'string' ? update['title'] : 'tool')
-    const output = outputFrom(update)
+    const { output, outputStreaming } = outputFrom(update, carried)
     return {
       callId: toolCallId,
       name,
       arguments: update['rawInput'] ?? carried?.arguments ?? {},
       title: typeof update['title'] === 'string' ? update['title'] : carried?.title,
       status: typeof update['status'] === 'string' ? update['status'] : carried?.status,
-      output: output.length > 0 ? output : (carried?.output ?? ''),
+      output,
+      outputStreaming,
     } satisfies ToolCall
   },
 
   toolOutput(update) {
-    return outputFrom(update)
+    return outputFrom(update).output
   },
 
   readModels(reply) {
@@ -125,8 +138,35 @@ export const codexDialect: AcpDialect = {
   },
 }
 
-/** Codex puts the result at `rawOutput.formatted_output`, never in `content`. */
-function outputFrom(update: Record<string, unknown>): string {
+/**
+ * Where one frame's command output lives, folded with what earlier frames of
+ * the same call carried.
+ *
+ * Two carriers, one per contract, never both useful at once:
+ *
+ *   - `rawOutput.formatted_output` — the whole result, once, at completion
+ *     (codex-acp 1.x; 2.5.0 still sends it to non-AIR clients). Replaces any
+ *     chunks folded before it and ends the accumulation.
+ *   - `_meta.terminal_output_delta.data` — an append channel. 2.5.0's AIR
+ *     tool-call contract (which DSH's `_meta.jetbrains.air` handshake opts
+ *     into, for subagent frames) carries no `rawOutput` at all: an unstreamed
+ *     command sends its whole output as the single delta on the completed
+ *     frame, a streamed one sends interim appends and the completed frame
+ *     carries only the exit (measured 2026-11-01, codex-acp 2.5.0).
+ *
+ * Returns the resolved output and whether it is still streaming, so the next
+ * delta appends rather than replaces.
+ */
+function outputFrom(update: Record<string, unknown>, carried?: ToolCall): { output: string; outputStreaming: boolean } {
   const raw = record(update['rawOutput'])
-  return typeof raw['formatted_output'] === 'string' ? raw['formatted_output'] : ''
+  if (typeof raw['formatted_output'] === 'string') {
+    return { output: raw['formatted_output'], outputStreaming: false }
+  }
+  const delta = record(record(update['_meta'])['terminal_output_delta'])
+  const data = typeof delta['data'] === 'string' ? delta['data'] : ''
+  if (data !== '') {
+    const base = carried?.outputStreaming === true ? (carried?.output ?? '') : ''
+    return { output: `${base}${data}`, outputStreaming: true }
+  }
+  return { output: carried?.output ?? '', outputStreaming: carried?.outputStreaming ?? false }
 }

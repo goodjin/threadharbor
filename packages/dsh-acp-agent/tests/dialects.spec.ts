@@ -177,6 +177,63 @@ describe('separating conversation content from chatter', () => {
   })
 })
 
+describe('codex 2.5 tool output rides the terminal_output_delta channel', () => {
+  const updateOf = (frame: AcpFrame) => (frame.params as { update: Record<string, unknown> }).update
+  // Live capture 2026-11-01 against codex-acp 2.5.0: for a client that
+  // declared `_meta.jetbrains.air` (which DSH does, for the subagent draft),
+  // the completed frame no longer carries `rawOutput` at all — the whole
+  // result sits in `_meta.terminal_output_delta.data` next to `terminal_exit`.
+  const v25 = captured['codex']!['toolV25'] as AcpFrame[]
+
+  it('reads the completed frame result from _meta.terminal_output_delta.data', () => {
+    const opening = codexDialect.foldTool(undefined, updateOf(v25[0]!))
+    expect(opening.output).toBe('')
+    const done = codexDialect.foldTool(opening, updateOf(v25[1]!))
+    expect(done.output).toBe('ACP_LIVE_OK\n')
+    expect(done.status).toBe('completed')
+  })
+
+  it('appends streamed terminal_output_delta chunks onto the carried output', () => {
+    // The adapter's documented contract is appends ("a client that declares
+    // terminal_output_delta gets appends for every command", codex-acp 2.5.0
+    // source): each interim frame is the next chunk, not the whole output.
+    // Frame sequence synthesized from that contract over the captured shapes.
+    const streamed = captured['codex']!['toolV25Streamed'] as AcpFrame[]
+    const afterFirst = codexDialect.foldTool(undefined, updateOf(streamed[0]!))
+    const mid = codexDialect.foldTool(afterFirst, updateOf(streamed[1]!))
+    expect(mid.output).toBe('ACP_LIVE_')
+    const more = codexDialect.foldTool(mid, updateOf(streamed[2]!))
+    expect(more.output).toBe('ACP_LIVE_OK\n')
+    const done = codexDialect.foldTool(more, updateOf(streamed[3]!))
+    // The completed frame carries only the exit; the accumulated text stays.
+    expect(done.output).toBe('ACP_LIVE_OK\n')
+    expect(done.status).toBe('completed')
+  })
+
+  it('still reads the legacy rawOutput.formatted_output result, which replaces chunks', () => {
+    // 1.x frames (captured 2026-10-09, the `tool` fixture) put the whole
+    // result in `rawOutput.formatted_output`. A whole rawOutput result ends
+    // the accumulation instead of appending to it, so a build that still
+    // sends the legacy field cannot duplicate its output.
+    const legacy = captured['codex']!['tool'] as AcpFrame[]
+    const opening = codexDialect.foldTool(undefined, updateOf(legacy[0]!))
+    const withChunk = codexDialect.foldTool(opening, {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: opening.callId,
+      _meta: { terminal_output_delta: { data: 'partial…', terminal_id: opening.callId } },
+    })
+    expect(withChunk.output).toBe('partial…')
+    const done = codexDialect.foldTool(withChunk, updateOf(legacy[1]!))
+    expect(done.output).toContain('total 544')
+    expect(done.output).not.toContain('partial…')
+  })
+
+  it('reports one frame\u2019s own delta text from toolOutput', () => {
+    expect(codexDialect.toolOutput(updateOf(v25[1]!))).toBe('ACP_LIVE_OK\n')
+    expect(codexDialect.toolOutput(updateOf(v25[0]!))).toBe('')
+  })
+})
+
 describe('reading the turn usage off the session/prompt reply', () => {
   const codexReply = (captured['codex']!['promptReply'] as readonly unknown[])[0]
   const claudeReply = (captured['claude']!['promptReply'] as readonly unknown[])[0]
