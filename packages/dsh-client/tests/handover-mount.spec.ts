@@ -131,6 +131,8 @@ describe('客户端入口在完整槽位下的 apply', () => {
       slots: slotHost(core, registrations),
     }
     expect(() => { apply(ctx as never) }).not.toThrow()
+    // 右侧栏覆盖布局随入口的 effect 装上：apply 即注入样式（jsdom 下真实可见）。
+    expect(document.getElementById('th-rightbar-overlay-style')).not.toBeNull()
     expect(registry.registered.map(kind => (kind as { kind: string }).kind)).toContain('agent-switch-handover')
     expect(registry.registered.map(kind => (kind as { kind: string }).kind)).toContain('threadharbor-lost-input-state')
     expect(registry.registered.map(kind => (kind as { kind: string }).kind)).toContain('threadharbor-lost-input')

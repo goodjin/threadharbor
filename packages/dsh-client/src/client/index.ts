@@ -68,6 +68,7 @@ import type { TailscalePeer } from '@threadharbor/dsh-host-federation'
 import { startHostStore } from '../host-store.ts'
 import type { HostStoreChannel, HostStoreDeps, StoreOp } from '../host-store.ts'
 import { startMobileLayout } from '../mobile-layout.ts'
+import { startRightbarOverlay } from '../rightbar-overlay.ts'
 import { startMermaidDiagrams } from '../mermaid.ts'
 import { startRollUpSection } from '../rollup-section.ts'
 import { buildHostSessions, readSessionSources } from '../session-source.ts'
@@ -410,6 +411,9 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // 手机窄屏：侧栏展开时改浮层 + 遮罩（DSH 默认会把它挤进主列），点遮罩
   // 或侧栏导航后自动收起；桌面宽度下这段样式与监听都不生效。
   ctx.effect(() => startMobileLayout({ log: message => { log.warn(message) } }).dispose, 'threadharbor: mobile layout')
+  // 桌面宽度的右侧栏（终端/文件/预览/浏览器）改覆盖式：展开时不再推挤
+  // 会话区，面板直接叠在上面；收起与全屏不受影响，手机窄屏交给上面那段。
+  ctx.effect(() => startRightbarOverlay({ log: message => { log.warn(message) } }).dispose, 'threadharbor: rightbar overlay')
   // 会话区 Markdown 里的 ```mermaid 代码块：宿主提供运行时（按需加载），这里
   // 认块、画图、给「图表 / 源码」开关；助手回复与 .md 阅读卡片一并覆盖。
   ctx.effect(
