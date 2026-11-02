@@ -77,6 +77,10 @@
     # 来自本包的 mermaid 依赖，与页面同一登录准入，缓存走 ETag/304。
     - id: threadharbor-mermaid-asset
       name: '@threadharbor/dsh-preset-dispatch/mermaid-asset'
+    # /commit-merge-push：跑 typecheck → test → build 门禁，提交当前分支，
+    # 合到 main 并推送。worktree 分支合完主分支和分支都推；已经在 main 上只推 main。
+    - id: threadharbor-commit-merge-push
+      name: '@threadharbor/dsh-command-commit-merge-push'
     - id: acp-codex
       name: '@deepseek-ai/dsh-agent-preset'
       config:
