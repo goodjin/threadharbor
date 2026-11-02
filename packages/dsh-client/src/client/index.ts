@@ -365,6 +365,27 @@ export function apply(ctx: ClientContext): void {
   applyToClientPanel(ctx)
 }
 
+/**
+ * Run one registration, isolating its failure from the rest of apply.
+ *
+ * A registration that throws (a slot nobody declared, a service that arrived
+ * shaped differently than expected, a stripped harness) must not take the
+ * whole plugin down with it: the other surfaces mount, and this one says in
+ * the log what it could not do. `ctx.effect` already isolates the
+ * effect-wrapped registrations; these are the ones called directly.
+ */
+function safeRegister(
+  label: string,
+  fn: () => void,
+  log: (message: string) => void,
+): void {
+  try {
+    fn()
+  } catch (error: unknown) {
+    log(`threadharbor: ${label} unavailable — ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
 /** The same wiring, typed by the narrow face the panel actually uses. */
 function applyToClientPanel(ctx: ClientPanelContext): void {
   const log = ctx.logger('threadharbor-client')
@@ -456,7 +477,7 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
     () => hostStore.subscribe(() => { acpVisibility.refresh() }),
     'threadharbor: acp visibility re-read on host storage change',
   )
-  mountAcpVisibilityFilter(ctx, acpVisibility, message => { log.warn(message) })
+  safeRegister('acp visibility filter', () => mountAcpVisibilityFilter(ctx, acpVisibility, message => { log.warn(message) }), message => log.warn(message))
 
   const openGateway = (): GatewayOpening => openSessionGateway(ctx)
   // A mount-time read, purely for the self-report: what the host provides may
@@ -480,7 +501,7 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
       return () => { window.removeEventListener('storage', handler) }
     },
   }
-  registerPanelSlots(ctx.slots, face, () => t('panel.label'))
+  safeRegister('panel slots', () => registerPanelSlots(ctx.slots, face, () => t('panel.label')), message => log.warn(message))
 
   // 第二个设置栏目：提供方与模型的屏蔽。它读原始目录（不是被过滤后的
   // 目录），否则被屏蔽的行就没法在这里重新出现、取消屏蔽；也正因官方
@@ -493,18 +514,18 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
       subscribe: hostStore.subscribe,
     },
   }
-  registerAcpVisibilitySection(
+  safeRegister('acp visibility section', () => registerAcpVisibilitySection(
     ctx.slots as unknown as AcpVisibilitySlotHost,
     acpFace,
     () => t('acpVisibility.label'),
-  )
+  ), message => log.warn(message))
 
   // The shadow tree is opt-in now: by default nothing registers for
   // sidebar.workspaces, so DSH's native browsing area keeps the slot and all
   // of its own abilities (new project, unarchive, hover cards, shortcuts).
   // Only `threadharbor.sidebarTree` = `on` brings the old shadowing tree back,
   // as an experiment with the native list standing by.
-  maybeRegisterSidebarTree(ctx.slots, ctx, registry)
+  safeRegister('sidebar tree', () => maybeRegisterSidebarTree(ctx.slots, ctx, registry), message => log.warn(message))
 
   // The hosts surface reaches the main column through the sidebar's panel row
   // (registered in registerPanelSlots): the row is a button the sidebar owns,
@@ -537,7 +558,7 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   ctx.effect(() => registerModelLabel(seatHost), 'threadharbor: composer model label')
 
   // 会话头工具行：会话编号 + 复制按钮（会话作用域槽位，inject 首参即编号）。
-  registerSessionIdBar(seatHost)
+  safeRegister('session id bar', () => registerSessionIdBar(seatHost), message => log.warn(message))
 
   // 「被打断且无正文」轮次的找回入口（2026-10-16 治本）：挂在轮次结尾的
   // turnTail 列表座位（折叠范围之外），命中盲区条件时给一个展开过程按钮，
@@ -601,39 +622,44 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // 「手机访问地址」存进同一份机器文档：宿主铸配对网址时优先读它。没有
   // 设置通道时不给这条编辑区——存了也落不到机器上，宁可不说。
   const pairingChannel = hostStoreDepsResult.channel
-  const pairing = startPairingSurface({
-    slots: ctx.slots,
-    label: () => t('pairing.label'),
-    ...(pairingChannel === undefined
-      ? {}
-      : {
-          accessOrigin: {
-            async load() {
-              const doc = await pairingChannel.loadDocument()
-              return doc?.[HOST_ACCESS_ORIGIN_KEY]
+  let pairing: ReturnType<typeof startPairingSurface> | undefined
+  safeRegister('pairing surface', () => {
+    pairing = startPairingSurface({
+      slots: ctx.slots,
+      label: () => t('pairing.label'),
+      ...(pairingChannel === undefined
+        ? {}
+        : {
+            accessOrigin: {
+              async load() {
+                const doc = await pairingChannel.loadDocument()
+                return doc?.[HOST_ACCESS_ORIGIN_KEY]
+              },
+              async save(value: string | undefined) {
+                const doc = await pairingChannel.loadDocument()
+                const existing = doc?.[HOST_ACCESS_ORIGIN_KEY]
+                // 值没变就不写：设置服务的 unset 打在不存在的数据上会报错，
+                // 而用户这次什么也没改。
+                if (value === undefined) {
+                  if (existing === undefined) return
+                  await pairingChannel.mutateDocument([{ kind: 'unset', key: HOST_ACCESS_ORIGIN_KEY }])
+                } else {
+                  if (existing === value) return
+                  await pairingChannel.mutateDocument([{ kind: 'set', key: HOST_ACCESS_ORIGIN_KEY, value }])
+                }
+                // 宿主铸配对网址、以及把 self 推给对端时都读这份文档：立刻
+                // 重报一次，新地址不必等下一轮慢轮询。
+                hostStore.refresh()
+                announcer.announce()
+              },
             },
-            async save(value: string | undefined) {
-              const doc = await pairingChannel.loadDocument()
-              const existing = doc?.[HOST_ACCESS_ORIGIN_KEY]
-              // 值没变就不写：设置服务的 unset 打在不存在的数据上会报错，
-              // 而用户这次什么也没改。
-              if (value === undefined) {
-                if (existing === undefined) return
-                await pairingChannel.mutateDocument([{ kind: 'unset', key: HOST_ACCESS_ORIGIN_KEY }])
-              } else {
-                if (existing === value) return
-                await pairingChannel.mutateDocument([{ kind: 'set', key: HOST_ACCESS_ORIGIN_KEY, value }])
-              }
-              // 宿主铸配对网址、以及把 self 推给对端时都读这份文档：立刻
-              // 重报一次，新地址不必等下一轮慢轮询。
-              hostStore.refresh()
-              announcer.announce()
-            },
-          },
-        }),
-    log: message => { log.warn(message) },
-  })
-  ctx.effect(() => () => { pairing.dispose() }, 'threadharbor: pairing surface')
+          }),
+      log: message => { log.warn(message) },
+    })
+  }, message => log.warn(message))
+  if (pairing !== undefined) {
+    ctx.effect(() => () => { pairing?.dispose() }, 'threadharbor: pairing surface')
+  }
 
   // A switched-away turn ends by naming the session that took over. This is
   // what turns that ending into the on-page behavior the user asked for: a
@@ -641,20 +667,20 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // conversation into the new session. The progress surface rides along: the
   // switch replaces the whole conversation panel, so it says so and loads the
   // new session's first page before the notice jumps.
-  registerAgentSwitchHandoverSurface(
+  safeRegister('agent switch handover', () => registerAgentSwitchHandoverSurface(
     ctx,
     startSwitchProgressSurface({
       ctx,
       store: createSwitchProgressStore(),
       slots: ctx.slots,
     }),
-  )
+  ), message => log.warn(message))
 
   // 失败回合的恢复行：回合在 claim 之后、user/message 落盘之前失败时，请求
   // 只留在 inbox splice 事件里。沿 DSH 自己的会话事件回放折叠出这个组合，在
   // 那条错误旁把原文留下，给复制与直接重发（服务缺席时只复制）。
-  registerLostInputSurface(ctx)
-  registerAcpProcessSurface(ctx)
+  safeRegister('lost input surface', () => registerLostInputSurface(ctx), message => log.warn(message))
+  safeRegister('acp process surface', () => registerAcpProcessSurface(ctx), message => log.warn(message))
 
   // Self-report at mount. This panel is easy to mistake for a plugin that
   // never loaded; these lines are how anyone can tell the difference.
