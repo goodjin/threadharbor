@@ -97,6 +97,8 @@
   background: var(--dsw-alias-interactive-bg-hover, rgba(127 127 127 / 0.12));
 }
 
+/* 发送：与文件阅读区 .sendBtn 一致——常态浅底，hover 才转品牌色 + 反色字，
+   避免常态用品牌色把整块涂黑。 */
 .answerEditSend {
   display: inline-flex;
   align-items: center;
@@ -104,11 +106,16 @@
   padding: 4px 12px;
   border: 1px solid transparent;
   border-radius: var(--dsw-radius-sm, 6px);
-  background: var(--dsw-alias-brand-primary, rgba(127 127 127 / 0.18));
-  color: var(--dsw-alias-label-on-accent, inherit);
+  background: var(--dsw-alias-interactive-bg-hover, rgb(0 0 0 / 6%));
+  color: inherit;
   font: inherit;
   font-size: 12px;
   cursor: pointer;
+}
+
+.answerEditSend:hover {
+  background: var(--dsw-alias-brand-primary, rgb(0 0 0 / 10%));
+  color: var(--dsw-alias-label-on-accent, inherit);
 }
 
 /* http 链接 hover 工具条：浮在链接下方，两个打开方式按钮。 */

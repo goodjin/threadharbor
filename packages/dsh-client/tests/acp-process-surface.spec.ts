@@ -13,6 +13,8 @@ function fixture() {
   const view = { target: 'chat', create }
   const unregister = vi.fn()
   let dispose: () => void = () => {}
+  // 宿主 locale 服务：bind(NAMESPACE) 给一个恒等 t，让结果卡文案断言可预测。
+  const localeFace = { bind: () => (key: string) => key }
   const ctx = {
     slots: {
       entries: () => entries,
@@ -23,7 +25,9 @@ function fixture() {
         return () => { entries.splice(entries.indexOf(entry), 1); for (const fn of slotListeners) fn() }
       },
     },
-    get: () => ({ views: { entries: () => [view], subscribe: () => () => {} }, events: { register: () => unregister } }),
+    get: (name: string) => name === 'locale'
+      ? localeFace
+      : { views: { entries: () => [view], subscribe: () => () => {} }, events: { register: () => unregister } },
     effect: (effect: () => () => void) => { dispose = effect() },
   }
   return { ctx, native, view, create, entries, unregister, dispose: () => dispose() }
@@ -98,15 +102,29 @@ describe('ACP process surface', () => {
   it('renders the answer card header with the thinking icon and a copy button, no label', () => {
     const f = fixture(); registerAcpProcessSurface(f.ctx)
     const renderer = f.entries.at(-1)!.component as any
-    const t = (key: string) => ({ 'answerCard.copy': '复制结果' })[key] ?? key
     const html = renderToStaticMarkup(createElement(renderer, {
       node: { data: { step: 3, blocks: [{ kind: 'text', text: 'The final answer' }] } },
-      t, turnProcess: { spec: { answerStep: 3 } },
+      t: (key: string) => key, turnProcess: { spec: { answerStep: 3 } },
     }))
     // Just the thinking icon and the copy button in its initial state — no text label.
+    // 文案走 dsh-client locale（此 fixture 绑定恒等 t），故 aria-label 是原 key。
     expect(html).toContain('data-action="copy-answer"')
-    expect(html).toContain('aria-label="复制结果"')
+    expect(html).toContain('aria-label="answerCard.copy"')
     expect(html).not.toContain('data-copied="true"')
+    f.dispose()
+  })
+  it('labels the card through the dsh-client locale, not the chat node t', () => {
+    // chat 节点的 t 不认 answerCard.*：若结果卡错用它，文案会带上 CHAT: 前缀。
+    // 这里让 props.t 返回带前缀的串、locale 面（恒等）返回原 key，断言卡片用的是后者。
+    const f = fixture(); registerAcpProcessSurface(f.ctx)
+    const renderer = f.entries.at(-1)!.component as any
+    const html = renderToStaticMarkup(createElement(renderer, {
+      node: { data: { step: 4, blocks: [{ kind: 'text', text: 'Final' }] } },
+      t: (key: string) => `CHAT:${key}`,
+      turnProcess: { spec: { answerStep: 4 } },
+    }))
+    expect(html).toContain('aria-label="answerCard.copy"')
+    expect(html).not.toContain('CHAT:')
     f.dispose()
   })
 })
