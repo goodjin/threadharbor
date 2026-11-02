@@ -18,7 +18,6 @@ describe('remote Web bundle', () => {
     // and configureProfile mirrors this same scoped set into the profile —
     // an undeclared package loads nowhere and the pruning deletes its link.
     expect(manifest.dependencies).toEqual({
-      '@threadharbor/dsh-command-commit-merge-push': 'workspace:^',
       '@threadharbor/dsh-host-federation': 'workspace:^',
     })
 
