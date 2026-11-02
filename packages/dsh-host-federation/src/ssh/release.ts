@@ -47,7 +47,7 @@ function findWorkspaceRoot(): string {
     if (existsSync(candidate)) {
       try {
         const parsed = JSON.parse(readFileSync(candidate, 'utf8')) as { name?: string }
-        if (parsed.name === 'threadharbor' || parsed.name === '@threadharbor/dsh-host-federation') {
+        if (parsed.name === '@goodjin2/dsh-threadharbor' || parsed.name === '@goodjin2/dsh-host-federation') {
           return realpathSync(current)
         }
       } catch {

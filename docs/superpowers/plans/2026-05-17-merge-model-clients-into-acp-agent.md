@@ -149,7 +149,7 @@ git commit -m "refactor: move minimaxi-acp source into dsh-acp-agent/src/minimax
 - Modify: `packages/dsh-acp-agent/src/index.ts`
 
 **Interfaces:**
-- Produces: The following additional named exports from `@threadharbor/dsh-acp-agent`:
+- Produces: The following additional named exports from `@goodjin2/dsh-acp-agent`:
   - From zcode: `decryptCredential`, `deriveKey`, `loadApiKey`, `BIGMODEL_CODING_PLAN_BASE`, `ZAI_CODING_PLAN_BASE`, `buildAnthropicBody`, `messagesUrl`, `reasoningFields`, `AnthropicBody`, `PromptInput`, `PromptTool`, `streamGlm`, `scrub`, `GlmRequest`, `fetchCodingPlanQuota`, `parseQuotaLimits`, `quotaUrl`, `GlmCodingPlanQuota`, `GlmQuotaRequest`, `GlmQuotaWindow`, `GlmBlock`, `GlmFinish`, `GlmStreamChunk`, `GlmUsage`
   - From minimaxi: `detectNamespace`, `resolveCredential`, `resolveDataDir`, `messagesUrl` (DISAMBIGUATION — see below), `CredentialOverrides`, `DataDirOptions`, `MiniMaxCredential`, `AuthBuildEnv`, `AuthRegion`, `buildAnthropicBody` (DISAMBIGUATION — see below), `defaultMaxTokens`, `reasoningFields` (DISAMBIGUATION — see below), `AnthropicBody` (DISAMBIGUATION — see below), `Effort`, `PromptInput` (DISAMBIGUATION — see below), `PromptTool` (DISAMBIGUATION — see below), `streamMiniMax`, `MiniMaxRequest`, `fetchMiniMaxQuota`, `MiniMaxCodingPlanQuota`, `MiniMaxCredit`, `MiniMaxQuotaRequest`, `MiniMaxQuotaWindow`, `canDisableThinking`, `MINIMAX_MODELS`, `MiniMaxBlock`, `MiniMaxFinish`, `MiniMaxStreamChunk`, `MiniMaxUsage`
 
@@ -285,7 +285,7 @@ git commit -m "feat: re-export zcode and minimaxi from dsh-acp-agent barrel"
 - Modify: `packages/dsh-preset-dispatch/tests/tool-pairing.spec.ts`
 
 **Interfaces:**
-- Consumes: All zcode/minimaxi symbols from `@threadharbor/dsh-acp-agent` (Task 3 exports)
+- Consumes: All zcode/minimaxi symbols from `@goodjin2/dsh-acp-agent` (Task 3 exports)
 - Produces: No new public API; internal import paths change only.
 
 - [ ] **Step 1: Update zcode-model.ts imports**
@@ -297,8 +297,8 @@ import type { GlmStreamChunk } from '@threadharbor/zcode-acp'
 ```
 to:
 ```ts
-import { streamGlm } from '@threadharbor/dsh-acp-agent'
-import type { GlmStreamChunk } from '@threadharbor/dsh-acp-agent'
+import { streamGlm } from '@goodjin2/dsh-acp-agent'
+import type { GlmStreamChunk } from '@goodjin2/dsh-acp-agent'
 ```
 
 - [ ] **Step 2: Update minimaxi-model.ts imports**
@@ -310,8 +310,8 @@ import type { MiniMaxStreamChunk } from '@threadharbor/minimaxi-acp'
 ```
 to:
 ```ts
-import { streamMiniMax } from '@threadharbor/dsh-acp-agent'
-import type { MiniMaxStreamChunk } from '@threadharbor/dsh-acp-agent'
+import { streamMiniMax } from '@goodjin2/dsh-acp-agent'
+import type { MiniMaxStreamChunk } from '@goodjin2/dsh-acp-agent'
 ```
 
 - [ ] **Step 3: Update model-plugins.ts imports**
@@ -323,8 +323,8 @@ import type { GlmStreamChunk } from '@threadharbor/zcode-acp'
 ```
 to:
 ```ts
-import type { MiniMaxStreamChunk } from '@threadharbor/dsh-acp-agent'
-import type { GlmStreamChunk } from '@threadharbor/dsh-acp-agent'
+import type { MiniMaxStreamChunk } from '@goodjin2/dsh-acp-agent'
+import type { GlmStreamChunk } from '@goodjin2/dsh-acp-agent'
 ```
 
 - [ ] **Step 4: Update catalog.ts imports**
@@ -335,7 +335,7 @@ import type { GlmStreamChunk } from '@threadharbor/zcode-acp'
 ```
 to:
 ```ts
-import type { GlmStreamChunk } from '@threadharbor/dsh-acp-agent'
+import type { GlmStreamChunk } from '@goodjin2/dsh-acp-agent'
 ```
 
 - [ ] **Step 5: Update zcode-quota.ts imports**
@@ -347,8 +347,8 @@ import type { GlmCodingPlanQuota } from '@threadharbor/zcode-acp'
 ```
 to:
 ```ts
-import { fetchCodingPlanQuota } from '@threadharbor/dsh-acp-agent'
-import type { GlmCodingPlanQuota } from '@threadharbor/dsh-acp-agent'
+import { fetchCodingPlanQuota } from '@goodjin2/dsh-acp-agent'
+import type { GlmCodingPlanQuota } from '@goodjin2/dsh-acp-agent'
 ```
 
 - [ ] **Step 6: Update minimaxi-quota.ts imports**
@@ -360,8 +360,8 @@ import type { MiniMaxCodingPlanQuota } from '@threadharbor/minimaxi-acp'
 ```
 to:
 ```ts
-import { fetchMiniMaxQuota } from '@threadharbor/dsh-acp-agent'
-import type { MiniMaxCodingPlanQuota } from '@threadharbor/dsh-acp-agent'
+import { fetchMiniMaxQuota } from '@goodjin2/dsh-acp-agent'
+import type { MiniMaxCodingPlanQuota } from '@goodjin2/dsh-acp-agent'
 ```
 
 - [ ] **Step 7: Update test mock imports**
@@ -378,7 +378,7 @@ vi.mock('@threadharbor/zcode-acp', () => ({
 ```
 to:
 ```ts
-vi.mock('@threadharbor/dsh-acp-agent', () => ({
+vi.mock('@goodjin2/dsh-acp-agent', () => ({
   streamMiniMax: (request: Sent) => { ... },
   streamGlm: (request: Sent) => { ... },
 }))
@@ -390,7 +390,7 @@ import type { GlmCodingPlanQuota } from '@threadharbor/zcode-acp'
 ```
 to:
 ```ts
-import type { GlmCodingPlanQuota } from '@threadharbor/dsh-acp-agent'
+import type { GlmCodingPlanQuota } from '@goodjin2/dsh-acp-agent'
 ```
 
 In `packages/dsh-preset-dispatch/tests/minimaxi-quota.spec.ts`, change:
@@ -399,7 +399,7 @@ import type { MiniMaxCodingPlanQuota } from '@threadharbor/minimaxi-acp'
 ```
 to:
 ```ts
-import type { MiniMaxCodingPlanQuota } from '@threadharbor/dsh-acp-agent'
+import type { MiniMaxCodingPlanQuota } from '@goodjin2/dsh-acp-agent'
 ```
 
 In `packages/dsh-preset-dispatch/tests/tool-pairing.spec.ts`, change:
@@ -408,14 +408,14 @@ import { buildAnthropicBody } from '@threadharbor/minimaxi-acp'
 ```
 to:
 ```ts
-import { miniMaxBuildAnthropicBody as buildAnthropicBody } from '@threadharbor/dsh-acp-agent'
+import { miniMaxBuildAnthropicBody as buildAnthropicBody } from '@goodjin2/dsh-acp-agent'
 ```
 
 - [ ] **Step 8: Update package.json dependencies**
 
 In `packages/dsh-preset-dispatch/package.json`:
 - Remove: `"@threadharbor/zcode-acp": "workspace:^"` and `"@threadharbor/minimaxi-acp": "workspace:^"` from `dependencies`
-- Ensure `"@threadharbor/dsh-acp-agent": "workspace:^"` is present in `dependencies` (it already is)
+- Ensure `"@goodjin2/dsh-acp-agent": "workspace:^"` is present in `dependencies` (it already is)
 
 - [ ] **Step 9: Run typecheck for dsh-preset-dispatch**
 

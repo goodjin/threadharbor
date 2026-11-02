@@ -170,7 +170,7 @@ Expected: FAIL（模块不存在）。
 
 - [x] **Step 3: 实现骨架**
 
-`src/index.ts` 照 `packages/dsh-mobile-entry/src/index.ts` 的四件套写：`export const name = 'threadharbor-mobile-relay'`、`export const inject = ['webServer', 'connection']`、`export const Config: Schema`、`export function apply(ctx, config?)`。本任务只注册两条路由：静态壳（复用 `registerMobileRoutes`，但传入 `mobileDir` 指向依赖包的 `mobile/` 目录、模式 `hub`，见 Task 9）与 `/threadharbor/relay/hosts` 的占位（返回 `{hosts: []}`，Task 7 填实）。依赖声明：`@deepseek-ai/schemastery`、`@threadharbor/dsh-mobile-entry`、`@threadharbor/dsh-host-federation`（`workspace:^`）。
+`src/index.ts` 照 `packages/dsh-mobile-entry/src/index.ts` 的四件套写：`export const name = 'threadharbor-mobile-relay'`、`export const inject = ['webServer', 'connection']`、`export const Config: Schema`、`export function apply(ctx, config?)`。本任务只注册两条路由：静态壳（复用 `registerMobileRoutes`，但传入 `mobileDir` 指向依赖包的 `mobile/` 目录、模式 `hub`，见 Task 9）与 `/threadharbor/relay/hosts` 的占位（返回 `{hosts: []}`，Task 7 填实）。依赖声明：`@deepseek-ai/schemastery`、`@threadharbor/dsh-mobile-entry`、`@goodjin2/dsh-host-federation`（`workspace:^`）。
 
 - [x] **Step 4: 跑用例确认通过**
 

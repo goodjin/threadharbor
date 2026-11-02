@@ -6,7 +6,7 @@ const root = fileURLToPath(new URL('.', import.meta.url))
 export default defineConfig({
   resolve: {
     alias: {
-      '@threadharbor/dsh-acp-agent': `${root}packages/dsh-acp-agent/src/index.ts`,
+      '@goodjin2/dsh-acp-agent': `${root}packages/dsh-acp-agent/src/index.ts`,
     },
   },
   test: {

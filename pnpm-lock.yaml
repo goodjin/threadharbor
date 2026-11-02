@@ -8,7 +8,7 @@ importers:
 
   .:
     dependencies:
-      '@threadharbor/dsh-host-federation':
+      '@goodjin2/dsh-host-federation':
         specifier: workspace:^
         version: link:packages/dsh-host-federation
     devDependencies:

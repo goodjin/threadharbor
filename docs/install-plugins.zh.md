@@ -27,7 +27,7 @@ DSH 的 agent preset 本身**就是一个组合**（一组插件行）：
   再选会抛 `agent-preset/locked`（同文件 `:347-362`）。
 
 所以外部 agent 的行为**必须由组合里的某一行提供**，这就是
-`@threadharbor/dsh-acp-agent` 的入口。
+`@goodjin2/dsh-acp-agent` 的入口。
 
 **作用域就是过滤器**：一行只能看见和它一起挂载的会话。别的 preset 上的会话根本
 不会出现在它面前，因此原生会话的行为**不会被碰到，也不需要事后撤销**。
@@ -49,7 +49,7 @@ DSH 的 agent preset 本身**就是一个组合**（一组插件行）：
         order: 10
         plugins:
           - id: acp-grok-binding
-            name: '@threadharbor/dsh-acp-agent'
+            name: '@goodjin2/dsh-acp-agent'
             config:
               presetId: acp-grok   # 必填：这行得知道自己是哪个 preset 的
               agent: grok
@@ -69,7 +69,7 @@ DSH 的 agent preset 本身**就是一个组合**（一组插件行）：
         order: 20
         plugins:
           - id: acp-codex-binding
-            name: '@threadharbor/dsh-acp-agent'
+            name: '@goodjin2/dsh-acp-agent'
             config:
               presetId: acp-codex   # 必填，三家一样
               agent: codex
@@ -86,7 +86,7 @@ DSH 的 agent preset 本身**就是一个组合**（一组插件行）：
         order: 30
         plugins:
           - id: acp-claude-binding
-            name: '@threadharbor/dsh-acp-agent'
+            name: '@goodjin2/dsh-acp-agent'
             config:
               presetId: acp-claude  # 必填，三家一样
               agent: claude
@@ -102,7 +102,7 @@ DSH 的 agent preset 本身**就是一个组合**（一组插件行）：
         order: 50
         plugins:
           - id: acp-qoder-binding
-            name: '@threadharbor/dsh-acp-agent'
+            name: '@goodjin2/dsh-acp-agent'
             config:
               presetId: acp-qoder
               agent: qoder
@@ -143,7 +143,7 @@ preset 行可以再写四个毫秒数的看护参数，管的是「外部 agent 
 模型列表已经是完整的切换入口（空会话选 `acp:` 模型会原地切到对应 preset，
 已开场的会话走交接），preset 选择器里的同名条目就是重复的门。DSH 没有
 「注册但不上名册」的开关，所以补丁里加了一行 `threadharbor-roster-filter`
-（`@threadharbor/dsh-acp-agent/roster-filter`）：在名册的**客户端出口**
+（`@goodjin2/dsh-acp-agent/roster-filter`）：在名册的**客户端出口**
 `remoteExportList` 上包一层。要藏的 preset 不写进过滤器的名单，而是在该
 preset 的 binding 上打 `hideFromRoster: true`；过滤器只认这个标记。新增
 agent 只要打同样的标记。网关是调用时在实例上按名字取方法的
@@ -190,7 +190,7 @@ agent 只要打同样的标记。网关是调用时在实例上按名字取方�
 
 **〇、每个 profile 都要跑一遍统一的插件软链同步（2026-10-20）。**
 宿主组合层认的是 bundle 链接（`node_modules/threadharbor -> 仓库`），但客户端包
-（`@threadharbor/dsh-client` 等）的解析还需要 profile 级的一组软链。这组链以前靠
+（`@goodjin2/dsh-client` 等）的解析还需要 profile 级的一组软链。这组链以前靠
 各 profile 手工 `ln -s`，结果是 web 装过、桌面没装——桌面页面上 threadharbor 的
 客户端整个缺席（输入框模型入口只剩官方的裸模型名），而宿主侧照常挂载，**完全不报
 错**。现在统一走一条幂等流程，来源是仓库自己的工作区
@@ -404,7 +404,7 @@ dsh --profile web --patch ./my-presets.yml --port 3941 --no-open
 之前这一节写的是「装上了，但还没看见」：面板长什么样一次都没见过，原因是手头的
 浏览器实例每个标签页一导航就自己关掉。今天换了一条路，看见并确认了：
 
-- 启动清单（`window.__DSH_BOOT__`）里出现 `@threadharbor/dsh-client` 行，
+- 启动清单（`window.__DSH_BOOT__`）里出现 `@goodjin2/dsh-client` 行，
   宿主按 rev 供应它的 `client.js`（HTTP 200，内含面板与槽位注册）；
 - 真实 Chromium（playwright-core 驱动的无头实例）加载页面后，侧边栏文本里出现
   「插件 / 各主机 / 工作区」，面板渲染无脚本报错。

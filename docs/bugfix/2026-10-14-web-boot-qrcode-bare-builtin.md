@@ -4,7 +4,7 @@
 
 合并手机配对功能后，打开 `http://127.0.0.1:3081` 报：
 
-> Failed to load plugins · @threadharbor/dsh-client
+> Failed to load plugins · @goodjin2/dsh-client
 > web boot: 1 entry did not activate
 > import failed: client-modules: require("fs") missed the module table
 

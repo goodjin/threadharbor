@@ -17,7 +17,7 @@
 - **主机密钥 fail-closed 不放松。** 指纹不匹配仍然读不到对方；不为「自动读取」放宽。
 - **远端 DSH 始终绑 `127.0.0.1`。** `packages/dsh-host-federation/tests/ssh-manager.spec.ts` 断言安装脚本含 `bind_host="127.0.0.1"` 且**不含** `tailscale ip`——本计划的任何脚本改动都不得破坏这两条。
 - **不新增常驻服务、不新增鉴权体系。** 新动作一律走现有 `/api/threadharbor.host-ssh.*` POST 路由与现有 session cookie。
-- **跨包无需先构建。** `@threadharbor/dsh-host-federation` 的 `exports` 直指 `./src/index.ts`，改完源码直接跑测试即可。
+- **跨包无需先构建。** `@goodjin2/dsh-host-federation` 的 `exports` 直指 `./src/index.ts`，改完源码直接跑测试即可。
 - **命令。** 单文件：`pnpm vitest run <path>`；全量：`pnpm test`；类型：`pnpm typecheck`。
 
 ## Review Focus
@@ -76,7 +76,7 @@
   export type HostFacts = {
     readonly self: boolean
     readonly readable: boolean
-    readonly deployment: RemoteDeployment   // 来自 '@threadharbor/dsh-host-federation'，本任务先就地声明，Task 2 改为转出
+    readonly deployment: RemoteDeployment   // 来自 '@goodjin2/dsh-host-federation'，本任务先就地声明，Task 2 改为转出
     readonly liveness: RemoteLiveness
     readonly reach: HostReach
     readonly reported: boolean
@@ -176,7 +176,7 @@ git commit -m "feat(client): 主机状态推导纯函数（事实 → 状态词 
   // hostRegistry(storage, now) 返回值新增：
   recordRemote(hostId: string, report: RemoteReport): boolean
   ```
-- Task 1 之后要做：`packages/dsh-client/src/host-state.ts` 的 `HostDeployment` / `HostLiveness` 改为从 `@threadharbor/dsh-host-federation` 转出同名别名，删掉本地的联合类型声明。
+- Task 1 之后要做：`packages/dsh-client/src/host-state.ts` 的 `HostDeployment` / `HostLiveness` 改为从 `@goodjin2/dsh-host-federation` 转出同名别名，删掉本地的联合类型声明。
 
 - [ ] **Step 1: 写失败的测试**
 

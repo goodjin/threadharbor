@@ -163,7 +163,7 @@ export function createCandidate({ version, root, artifactSource, skipCheck = fal
     if (artifactSource !== undefined) {
       cpSync(resolve(artifactSource), staging, { recursive: true, verbatimSymlinks: true })
     } else {
-      runChecked('pnpm', ['--filter', 'threadharbor', 'deploy', '--legacy', '--prod', staging])
+      runChecked('pnpm', ['--filter', '@goodjin2/dsh-threadharbor', 'deploy', '--legacy', '--prod', staging])
     }
     detachHardlinks(staging)
     const source = gitMetadata()
@@ -292,13 +292,13 @@ function configureProfile(home, target) {
   if (!existsSync(packagePath)) fail(`DSH web profile is missing: ${packagePath}`)
   const pkg = JSON.parse(readFileSync(packagePath, 'utf8'))
   pkg.dependencies ??= {}
-  pkg.dependencies.threadharbor = `link:${target}`
+  pkg.dependencies['@goodjin2/dsh-threadharbor'] = `link:${target}`
   writeFileSync(packagePath, `${JSON.stringify(pkg, null, 2)}\n`)
   const modules = join(profile, 'node_modules')
   mkdirSync(modules, { recursive: true })
-  replaceDirSymlink(join(modules, 'threadharbor'), target)
-  const releasedScoped = join(target, 'node_modules', '@threadharbor')
-  const profileScoped = join(modules, '@threadharbor')
+  replaceDirSymlink(join(modules, '@goodjin2', 'dsh-threadharbor'), target)
+  const releasedScoped = join(target, 'node_modules', '@goodjin2')
+  const profileScoped = join(modules, '@goodjin2')
   if (!existsSync(releasedScoped)) return
   mkdirSync(profileScoped, { recursive: true })
   const released = new Set(readdirSync(releasedScoped))

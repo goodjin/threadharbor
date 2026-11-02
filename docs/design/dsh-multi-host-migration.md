@@ -1224,7 +1224,7 @@ hostd 时代的「远程主机」假设——而那正是阶段 6 要拿掉的�
 
 按 §「现成的缝」的 `isLoopback ? 'host' : 'memory'` 决策落地。主机登记簿与本机默认身份
 不再存浏览器 localStorage，改走本机设置通道（`ctx.remote.settings` 的
-`threadharbor-host-store` 命名空间，宿主组合条目 `@threadharbor/dsh-host-federation/host-store`
+`threadharbor-host-store` 命名空间，宿主组合条目 `@goodjin2/dsh-host-federation/host-store`
 的 volatile 配置段）；单标签页身份覆盖（sessionStorage）保持原样不动。
 
 已真机验证（playwright-core + 独立 Chromium，DSH_HOME=/tmp/dsh-verify，端口 3081）：
@@ -1278,7 +1278,7 @@ hostd 时代的「远程主机」假设——而那正是阶段 6 要拿掉的�
   误登记随之删除（不再留豁免口子）。真·遗留 `service.ts` 仍登记，清掉条件不变。
 - **删除无用依赖**：`packages/dsh-client/package.json` 声明了
   `@threadharbor/dsh-preset-dispatch`，但 client 源码只 import
-  `@threadharbor/dsh-host-federation`，preset-dispatch 由宿主侧组合条目加载，
+  `@goodjin2/dsh-host-federation`，preset-dispatch 由宿主侧组合条目加载，
   与 client 包无关。已删除，lockfile 同步更新（只动这一条 importer 边）。
 - **清理 `undefined/`**：仓库根曾有 `undefined/threadharbor/known_hosts`（空文件，
   gitignored、未被 git 跟踪，mtime 9 月 1 日，早于 hostd 移除）。全仓检索确认

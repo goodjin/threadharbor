@@ -9,7 +9,7 @@
 启动 DSH Web 后，Harness 报错：
 
 ```text
-failed to import loader entry ... (@threadharbor/dsh-client): client-modules: require("@threadharbor/protocol") missed the module table
+failed to import loader entry ... (@goodjin2/dsh-client): client-modules: require("@threadharbor/protocol") missed the module table
 ```
 
 ## 根因分析
@@ -42,7 +42,7 @@ failed to import loader entry ... (@threadharbor/dsh-client): client-modules: re
 4. ✅ `npm run typecheck`
 5. ✅ `npm test`
 6. ✅ 启动 DSH Web：`dsh --profile web --patch /private/tmp/threadharbor-web-local.patch.yml --no-open --port 0`
-7. ✅ 请求实际服务出的插件产物：`/plugins/@threadharbor/dsh-client/client.js`，确认不包含 `@threadharbor/protocol`
+7. ✅ 请求实际服务出的插件产物：`/plugins/@goodjin2/dsh-client/client.js`，确认不包含 `@threadharbor/protocol`
 
 ## 设计建议
 

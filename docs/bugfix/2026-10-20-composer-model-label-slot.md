@@ -8,7 +8,7 @@ web 实例上同一个模型是带 agent 名的。用户反馈：桌面版重启
 ## 现场证据
 
 - **不是「客户端缺席」事故**（2026-10-20 早些时候那次）：桌面版页面里的插件清单含
-  `@threadharbor/dsh-client/client.js`，渲染进程的编译缓存里也有它的记录——我们
+  `@goodjin2/dsh-client/client.js`，渲染进程的编译缓存里也有它的记录——我们
   的客户端包确实加载了。
 - 两边是同一个 DSH 版本（0.2.1-rc.2），客户端注入的依赖都在；退路开关
   `threadharbor.modelSeat=off` 没被打开（localStorage 里只有 `threadharbor.tree.*`）。

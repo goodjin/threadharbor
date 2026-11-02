@@ -16,7 +16,7 @@
 #
 # The federation UI (host panel, cross-machine sidebar, pairing, SSH deploy
 # surfaces) moved to its own repo: github.com/goodjin/dsh-client
-# (@threadharbor/dsh-client). Its bundle row lives in that repo's
+# (@goodjin2/dsh-client). Its bundle row lives in that repo's
 # cordis.patch.yml; profiles install both checkouts to get the full
 # multi-host experience.
 
@@ -25,58 +25,58 @@
     # profile 文档（设置跟机器走，不跟浏览器走）。浏览器侧的入口在
     # dsh-client 的 host-store.ts，写的是同一个 id 的命名空间。
     - id: threadharbor-host-store
-      name: '@threadharbor/dsh-host-federation/host-store'
+      name: '@goodjin2/dsh-host-federation/host-store'
     # 主机侧的 Tailscale 桥：在提供页面的这台机器上跑 `tailscale status
     # --json`，把 peer 清单写进 threadharbor-host-store 的 data 字典
     # （dsh.tailscale.peers），浏览器侧的「从 Tailscale 选」读同一个键。
     # 面板自己没有执行主机命令的通道，所以这半边桥必须在这里。没有自己的
     # volatile 字段，就不会多出一个设置页；刷新走 data.dsh.tailscale.refresh。
     - id: threadharbor-tailscale
-      name: '@threadharbor/dsh-host-federation/tailscale'
+      name: '@goodjin2/dsh-host-federation/tailscale'
     - id: threadharbor-ssh-deploy
-      name: '@threadharbor/dsh-host-federation/ssh-deploy'
+      name: '@goodjin2/dsh-host-federation/ssh-deploy'
     # 同源网关：浏览器仍调 DSH 自己的接口，只是路径挂在本机
     # /threadharbor/gateway/<主机标识>/ 下面，由这台机器转到登记簿里的地址。
     # 登录 cookie 留在这台机器上，不写进浏览器，也不接收浏览器传来的任意网址。
     - id: threadharbor-host-gateway
-      name: '@threadharbor/dsh-host-federation/host-gateway'
+      name: '@goodjin2/dsh-host-federation/host-gateway'
     # 主机互通：浏览器报到自己的身份，宿主铸出带令牌的入口，再把「自己 +
     # 登记簿」推给每一台已知主机；对端只补缺失、不改本机已登记的地址与
     # SSH 事实。手机配对接口也在这里（完整 DSH 界面，不是中转页）。
     - id: threadharbor-federation-sync
-      name: '@threadharbor/dsh-host-federation/federation-sync'
-    # 手机中转已独立出仓：github.com/goodjin/dsh-mobile-relay（@goodjin/dsh-mobile-relay），
+      name: '@goodjin2/dsh-host-federation/federation-sync'
+    # 手机中转已独立出仓：github.com/goodjin/dsh-mobile-relay（@goodjin2/dsh-mobile-relay），
     # 由需要中转的 profile 单独安装挂载，不再随本仓库分发。
     # 名册过滤器不点名。每个要藏起的 preset 在自己的 binding 上打
     # hideFromRoster: true；过滤器只认这个标记（以及行上的同名字段）。
     # 新增 agent 只要打标记，不必改过滤器配置。内部 list() 仍不过滤。
     - id: threadharbor-roster-filter
-      name: '@goodjin/dsh-acp-agent/roster-filter'
+      name: '@goodjin2/dsh-acp-agent/roster-filter'
     # GLM 套餐限额接口：宿主解密本机 ZCode 登录密钥后问一次 Coding Plan 的
     # monitor 地址，把 5 小时/周两个窗口的数字发回；浏览器侧输入框下方的
     # 配额胶囊从这里读（密钥不出宿主进程，成功应答带 30 秒缓存）。
     - id: threadharbor-zcode-quota
-      name: '@goodjin/dsh-acp-agent/zcode-quota'
+      name: '@goodjin2/dsh-acp-agent/zcode-quota'
     # MiniMax Token Plan 限额+积分接口：宿主用本机 MiniMax 登录令牌（签名查组与
     # 积分 + 开放平台查两个窗口）问一次，把 5 小时/周/积分发回；与 GLM 那条同面，
     # 浏览器侧给 MiniMax 模型画配额胶囊时读它（令牌不出宿主进程，30 秒缓存）。
     - id: threadharbor-minimaxi-quota
-      name: '@goodjin/dsh-acp-agent/minimaxi-quota'
+      name: '@goodjin2/dsh-acp-agent/minimaxi-quota'
     # Codex（ChatGPT 套餐）额度接口：宿主读本机 ~/.codex 登录令牌问一次官方
     # usage 只读接口，把主/次窗口（时长决定标签）与按量积分发回；没登录就
     # 不出数据，浏览器侧按 acp:acp-codex 画胶囊（令牌不出宿主，30 秒缓存）。
     - id: threadharbor-codex-quota
-      name: '@goodjin/dsh-acp-agent/codex-quota'
+      name: '@goodjin2/dsh-acp-agent/codex-quota'
     # Claude（Anthropic 官方订阅）额度接口：宿主读本机官方 OAuth 令牌（文件或
     # 钥匙串）问一次 oauth usage，把 5 小时/7 天两档发回；走中转站没登官方的
     # 机器上没有凭据，胶囊安静地不出现（上游接口自带 429 冷却，缓存 2 分钟）。
     - id: threadharbor-claude-quota
-      name: '@goodjin/dsh-acp-agent/claude-quota'
+      name: '@goodjin2/dsh-acp-agent/claude-quota'
     # Mermaid 运行时的同源静态路由：会话区里的 ```mermaid 代码块在第一次出现时
     # 才注入 <script> 加载这个文件（客户端包不内联 3.5 MB 的 mermaid）；资产
     # 来自本包的 mermaid 依赖，与页面同一登录准入，缓存走 ETag/304。
     - id: threadharbor-mermaid-asset
-      name: '@goodjin/dsh-acp-agent/mermaid-asset'
+      name: '@goodjin2/dsh-acp-agent/mermaid-asset'
     # /commit-merge-push 已独立出仓（goodjin/dsh-command-commit-merge-push），
     # 由 profile 单独安装挂载，本仓库不再分发。
     - id: acp-codex
@@ -87,7 +87,7 @@
         order: 20
         plugins:
           - id: acp-codex-binding
-            name: '@goodjin/dsh-acp-agent'
+            name: '@goodjin2/dsh-acp-agent'
             config:
               presetId: acp-codex
               agent: codex
@@ -255,7 +255,7 @@
         order: 30
         plugins:
           - id: acp-claude-binding
-            name: '@goodjin/dsh-acp-agent'
+            name: '@goodjin2/dsh-acp-agent'
             config:
               presetId: acp-claude
               agent: claude
@@ -290,7 +290,7 @@
         order: 25
         plugins:
           - id: acp-grok-binding
-            name: '@goodjin/dsh-acp-agent'
+            name: '@goodjin2/dsh-acp-agent'
             config:
               presetId: acp-grok
               agent: grok
@@ -333,7 +333,7 @@
         order: 35
         plugins:
           - id: acp-cursor-binding
-            name: '@goodjin/dsh-acp-agent'
+            name: '@goodjin2/dsh-acp-agent'
             config:
               presetId: acp-cursor
               agent: cursor
@@ -362,7 +362,7 @@
         order: 40
         plugins:
           - id: acp-zcode-binding
-            name: '@goodjin/dsh-acp-agent'
+            name: '@goodjin2/dsh-acp-agent'
             config:
               presetId: acp-zcode
               agent: zcode
@@ -391,7 +391,7 @@
         order: 45
         plugins:
           - id: acp-minimax-binding
-            name: '@goodjin/dsh-acp-agent'
+            name: '@goodjin2/dsh-acp-agent'
             config:
               presetId: acp-minimax
               agent: minimaxi
@@ -422,7 +422,7 @@
         order: 50
         plugins:
           - id: acp-qoder-binding
-            name: '@goodjin/dsh-acp-agent'
+            name: '@goodjin2/dsh-acp-agent'
             config:
               presetId: acp-qoder
               agent: qoder

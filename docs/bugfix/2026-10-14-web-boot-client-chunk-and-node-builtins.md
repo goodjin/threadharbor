@@ -44,7 +44,7 @@
 3. ✅ 全仓 `pnpm typecheck` + `pnpm test`（800 通过）+ `pnpm run build`。
 4. ✅ 3081 重启后 boot 日志 0 条 "did not activate"，五家 agent 行挂载，
    `[threadharbor] ssh-deploy routes registered` 首次出现。
-5. ✅ 从运行中的服务器取回实际下发的 `@threadharbor/dsh-client` 产物：单文件、
+5. ✅ 从运行中的服务器取回实际下发的 `@goodjin2/dsh-client` 产物：单文件、
    无分块引用、无 node 内置，与本地构建逐字节一致（仅服务器剥掉的 sourcemap 行）。
 
 ## 相关测试

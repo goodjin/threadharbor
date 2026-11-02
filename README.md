@@ -50,14 +50,14 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 agent 接进 
 
 以下每条都以当前代码为准（核对时间 2026-10-16；「真机可达」按 `tests/wiring.spec.ts` 从宿主加载入口做的传递可达性检查口径）：
 
-- 五个 agent（grok、codex、claude code、cursor、qoder）走同一套通用 ACP 接入层（[goodjin/dsh-acp-agent](https://github.com/goodjin/dsh-acp-agent)，`@goodjin/dsh-acp-agent`，2026-11-02 起独立出仓）：stdio 与 WebSocket 两种传输、各家的帧方言、帧到 DSH 会话事件的投影、终端与文件两个子协议的应答。zcode 不走这条路：它在模型列表里单独成一组 GLM，用本机 ZCode 的登录密钥直连 Coding Plan，文字和工具调用交回 DSH 自己的循环。它的 5 小时/周套餐限额也带到了界面上（核对时间 2026-10-16）：GLM 会话的输入框下方、token 用量同一排有两枚胶囊，显示已用百分比，悬停看已用/总量和重置时刻，详见 [docs/agent-acp/zcode.md](docs/agent-acp/zcode.md)。 minimaxi 是同一条路的第二个模型插件：模型列表里单独一组 MiniMax，用本机 MiniMax Code 的登录凭据直连托管网关，凭据的读取与刷新采用官方那套实现，与桌面版共用同一个文件和同一把锁（核对时间 2026-10-20，国内站真机已跑通含工具调用的多轮），详见 [docs/agent-acp/minimaxi.md](docs/agent-acp/minimaxi.md)。
+- 五个 agent（grok、codex、claude code、cursor、qoder）走同一套通用 ACP 接入层（[goodjin/dsh-acp-agent](https://github.com/goodjin/dsh-acp-agent)，`@goodjin2/dsh-acp-agent`，2026-11-02 起独立出仓）：stdio 与 WebSocket 两种传输、各家的帧方言、帧到 DSH 会话事件的投影、终端与文件两个子协议的应答。zcode 不走这条路：它在模型列表里单独成一组 GLM，用本机 ZCode 的登录密钥直连 Coding Plan，文字和工具调用交回 DSH 自己的循环。它的 5 小时/周套餐限额也带到了界面上（核对时间 2026-10-16）：GLM 会话的输入框下方、token 用量同一排有两枚胶囊，显示已用百分比，悬停看已用/总量和重置时刻，详见 [docs/agent-acp/zcode.md](docs/agent-acp/zcode.md)。 minimaxi 是同一条路的第二个模型插件：模型列表里单独一组 MiniMax，用本机 MiniMax Code 的登录凭据直连托管网关，凭据的读取与刷新采用官方那套实现，与桌面版共用同一个文件和同一把锁（核对时间 2026-10-20，国内站真机已跑通含工具调用的多轮），详见 [docs/agent-acp/minimaxi.md](docs/agent-acp/minimaxi.md)。
 - 权限请求桥接到 DSH 审批服务：请求在回合内发起，应答是回带同一 id 的 JSON-RPC 响应帧；宿主没有审批服务时一律拒绝并在启动自报里写明 `approvals=refuse-all`。
 - 流式：回合进行中经 `agent/assistant-stream` 通道增量下发，回合结束后落一条内嵌压缩流的持久 `assistant/message`；两段靠同一 attemptId 对上。
 - 断连与进程退出会判明并结束回合，不再无限等待；会话按会话 id 隔离外部对话，一个会话一个外部会话。
 - 中途切换 agent（判定 / 历史交接 / 执行三段）：已经在说话的会话锁死了预设，只能在目标预设上新建会话继续。切换时整段对话既作为上下文交给新 agent，也原样回填到新会话自己的记录上——打开新会话看到的还是刚才那段对话，只是底下接上了新的内容；旧会话留下一条交接提示并自动跳过去。轮次历史的可读性同理有兜底：「被打断且全程没有正文」的轮次（长工具轮次遇重启的常态）会在轮次结尾出现一条找回入口，一键展开全部过程内容（核对时间 2026-10-16）。
 - 切换过程看得见：面板整个换掉，所以切换一开始就在窗口顶部挂一条进度（准备 → 读新会话的历史 → 就绪），同时先把新会话的首屏读出来，读完才跳过去，跳过去时内容已经在屏幕上。首屏读不出来或迟迟不来都不卡住跳转，最多等 4 秒。历史长不长都只取首屏（DSH 自带的分页，约 50 条消息起），更早的用「加载更早」按页取。
 - 主机侧的 agent 探测（发一条真实小任务看是否回应）与重启已实现，但目前没有界面入口。
-- 云主机中转通道（核对时间 2026-10-16，2026-11-02 起独立出仓）：[goodjin/dsh-mobile-relay](https://github.com/goodjin/dsh-mobile-relay)（`@goodjin/dsh-mobile-relay`）让手机只经公网 HTTPS 连一台云主机、不装 Tailscale，即可切换多台机器——数据面是 SSH 本地隧道，tailnet 只做在线发现。手机页（原 mobile-entry）随中转一并出仓。需要中转的 profile 单独安装挂载，本仓库不再分发。
+- 云主机中转通道（核对时间 2026-10-16，2026-11-02 起独立出仓）：[goodjin/dsh-mobile-relay](https://github.com/goodjin/dsh-mobile-relay)（`@goodjin2/dsh-mobile-relay`）让手机只经公网 HTTPS 连一台云主机、不装 Tailscale，即可切换多台机器——数据面是 SSH 本地隧道，tailnet 只做在线发现。手机页（原 mobile-entry）随中转一并出仓。需要中转的 profile 单独安装挂载，本仓库不再分发。
 - 手机直连（核对时间 2026-10-22）：手机装 Tailscale，扫桌面端「手机配对」面板的二维码，打开的是该机的**完整 DSH 界面**（配对网址由 `/threadharbor/federation/pair-url` 生成，带进程令牌）。面板里的「手机访问地址」保存这台机器的对外源（`dsh.host.accessOrigin`），保存即生效；地址是 loopback 时面板会提示手机进不来。手机宽度下侧栏变抽屉、主机列表隐去 IP 列；从主机面板或远端页顶部的切换器可整页切到其余已登记主机。主机之间由 `threadharbor-federation-sync` 互推「自己 + 登记簿」与令牌入口，对端只补缺失、不改本机事实。可达性由 `tailscale serve --bg` 提供，dsh 启动须带 `--trusted-host`；`scripts/mobile-setup.sh <dsh端口>` 一键完成发布并打印步骤，详见 [docs/mobile-client.zh.md](docs/mobile-client.zh.md)。云主机中转那条精简手机页通道见上一条。
 - 同一窗口管理多台主机（核对时间 2026-10-18）：左侧树列出本机和其他已登记主机的项目与会话。点其他主机，主区通过本机网关打开那台机器自己的 DSH 界面，浏览器调的还是那套接口，只是地址换成了登记簿里的那台；审批、流式、模型选择和上传都在这个界面里。会话仍跑在那台主机上。登录 cookie 留在本机网关，不写进浏览器。
 - 原生 dsh preset 的行为不受影响：组合行只认得自己 presetId 下的会话，其余一律不接管。
@@ -71,23 +71,23 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 agent 接进 
 
 `cordis.patch.yml` 是安装到 DSH Web profile 的标准 bundle patch。它插入下面这些条目，装载器按行 id 导入对应模块并执行其 `apply`（`host-store` 是纯声明式的一行，只提供一个 volatile 设置字段）。
 
-浏览器侧的联邦界面（主机面板、跨机侧栏、「各主机」设置、手机配对二维码、SSH 部署界面）已独立出仓：[goodjin/dsh-client](https://github.com/goodjin/dsh-client)（`@threadharbor/dsh-client`），bundle 组合行在那个仓库的 `cordis.patch.yml` 里；agent 相关界面（配额胶囊、模型入口、屏蔽栏、切换反馈）在 [goodjin/dsh-acp-agent](https://github.com/goodjin/dsh-acp-agent)。本仓库的 patch 只保留宿主侧插件行。
+浏览器侧的联邦界面（主机面板、跨机侧栏、「各主机」设置、手机配对二维码、SSH 部署界面）已独立出仓：[goodjin/dsh-client](https://github.com/goodjin/dsh-client)（`@goodjin2/dsh-client`），bundle 组合行在那个仓库的 `cordis.patch.yml` 里；agent 相关界面（配额胶囊、模型入口、屏蔽栏、切换反馈）在 [goodjin/dsh-acp-agent](https://github.com/goodjin/dsh-acp-agent)。本仓库的 patch 只保留宿主侧插件行。
 
 ### 运行时插件
 
 | 插件 | 组合行 id | 用途 |
 | --- | --- | --- |
-| `@threadharbor/dsh-host-federation/host-store` | `threadharbor-host-store` | 宿主侧设置槽：把主机登记簿、本机默认身份、提供方/模型屏蔽等选择存进这台机器的 profile 文档（浏览器经 `remote.settings` 读写），换浏览器或清缓存都不会丢。 |
-| `@threadharbor/dsh-host-federation/tailscale` | `threadharbor-tailscale` | 在提供页面的机器上运行 `tailscale status --json`，把 peer 清单写进 host-store 的 `data` 字典，供「从 Tailscale 选主机」使用。 |
-| `@threadharbor/dsh-host-federation/ssh-deploy` | `threadharbor-ssh-deploy` | 主机侧 SSH 部署与远端操作接口：检查连通性、安装/启动远端 DSH、读取远端会话和执行运维操作。 |
-| `@threadharbor/dsh-host-federation/host-gateway` | `threadharbor-host-gateway` | 同源反向代理：浏览器把普通 DSH 请求发到本机 `/threadharbor/gateway/<主机标识>/`，由它转到登记主机自己的 DSH；登录 cookie 留在网关，不进浏览器。 |
-| `@goodjin/dsh-acp-agent/roster-filter` | `threadharbor-roster-filter` | 把标了 `hideFromRoster: true` 的 ACP preset 从新建会话/预设选择器中隐藏；注册本身保留，所以模型列表切换和会话接管仍可用。内部 `list()` 不过滤。 |
-| `@goodjin/dsh-acp-agent/zcode-quota` | `threadharbor-zcode-quota` | 宿主侧读取本机 ZCode 登录凭据并查询 Coding Plan 的 5 小时/周限额，供输入框下方的 GLM 配额胶囊显示；密钥不出宿主进程。 |
-| `@goodjin/dsh-acp-agent/mermaid-asset` | `threadharbor-mermaid-asset` | 本机 `/threadharbor/mermaid.js`：按需提供给会话区 Mermaid 代码块（mermaid fence）渲染的运行时（来自本包依赖，客户端包不内联 3.5 MB；同一登录准入，ETag/304 缓存）。 |
+| `@goodjin2/dsh-host-federation/host-store` | `threadharbor-host-store` | 宿主侧设置槽：把主机登记簿、本机默认身份、提供方/模型屏蔽等选择存进这台机器的 profile 文档（浏览器经 `remote.settings` 读写），换浏览器或清缓存都不会丢。 |
+| `@goodjin2/dsh-host-federation/tailscale` | `threadharbor-tailscale` | 在提供页面的机器上运行 `tailscale status --json`，把 peer 清单写进 host-store 的 `data` 字典，供「从 Tailscale 选主机」使用。 |
+| `@goodjin2/dsh-host-federation/ssh-deploy` | `threadharbor-ssh-deploy` | 主机侧 SSH 部署与远端操作接口：检查连通性、安装/启动远端 DSH、读取远端会话和执行运维操作。 |
+| `@goodjin2/dsh-host-federation/host-gateway` | `threadharbor-host-gateway` | 同源反向代理：浏览器把普通 DSH 请求发到本机 `/threadharbor/gateway/<主机标识>/`，由它转到登记主机自己的 DSH；登录 cookie 留在网关，不进浏览器。 |
+| `@goodjin2/dsh-acp-agent/roster-filter` | `threadharbor-roster-filter` | 把标了 `hideFromRoster: true` 的 ACP preset 从新建会话/预设选择器中隐藏；注册本身保留，所以模型列表切换和会话接管仍可用。内部 `list()` 不过滤。 |
+| `@goodjin2/dsh-acp-agent/zcode-quota` | `threadharbor-zcode-quota` | 宿主侧读取本机 ZCode 登录凭据并查询 Coding Plan 的 5 小时/周限额，供输入框下方的 GLM 配额胶囊显示；密钥不出宿主进程。 |
+| `@goodjin2/dsh-acp-agent/mermaid-asset` | `threadharbor-mermaid-asset` | 本机 `/threadharbor/mermaid.js`：按需提供给会话区 Mermaid 代码块（mermaid fence）渲染的运行时（来自本包依赖，客户端包不内联 3.5 MB；同一登录准入，ETag/304 缓存）。 |
 
 ### Agent preset 行
 
-七个 agent 不是七个 ThreadHarbor 插件包，而是七条 DSH 的 `@deepseek-ai/dsh-agent-preset` 组合行；每条内嵌同一个 `@goodjin/dsh-acp-agent`（binding），只是配置不同。dispatch 负责把外部 agent 的回合、流式输出、审批/提问、模型目录、会话交接与写回接进 DSH 原生会话。
+七个 agent 不是七个 ThreadHarbor 插件包，而是七条 DSH 的 `@deepseek-ai/dsh-agent-preset` 组合行；每条内嵌同一个 `@goodjin2/dsh-acp-agent`（binding），只是配置不同。dispatch 负责把外部 agent 的回合、流式输出、审批/提问、模型目录、会话交接与写回接进 DSH 原生会话。
 
 | preset / 组合行 | 名称 | 接入方式与用途 |
 | --- | --- | --- |
@@ -103,7 +103,7 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 agent 接进 
 
 这些包没有独立的组合行，被上面的插件 import：
 
-- `@threadharbor/dsh-host-federation`（主入口） — 主机身份、登记簿、跨标签页通道、分组视图与网关路径等共享库；上面挂载的是它的 `host-store` / `tailscale` / `ssh-deploy` / `host-gateway` 子路径入口。
+- `@goodjin2/dsh-host-federation`（主入口） — 主机身份、登记簿、跨标签页通道、分组视图与网关路径等共享库；上面挂载的是它的 `host-store` / `tailscale` / `ssh-deploy` / `host-gateway` 子路径入口。
 
 ## 安装到 DeepSeek Harness
 
@@ -129,9 +129,9 @@ dsh --profile web
 
 源码链接安装依赖这个 checkout 及其 `node_modules` 和 `lib`，不要在卸载前移动或删除目录。`npm run reference:checkout` 只创建被忽略的 `reference/deepseek-harness/`，用于开发时核对公开 API；运行和打包均不需要该参考目录。
 
-装好后 agent 不会自动出现：每个 agent 需要在 profile 组合里加一条 preset 行（`@deepseek-ai/dsh-agent-preset` 内嵌 `@goodjin/dsh-acp-agent`），写明 `presetId`、`agent` 与连接方式。配置支持可选的 `args`；省略时按 `agent` 补上它说 ACP 所必需的默认参数（cursor 是 `acp --trust`，qoder 是 `--acp`），显式写了则完全以配置为准。qoder 子进程还会剥掉 IDE 注入的 SDK 入口环境变量（`QODER_*`、`CLAUDE*`、`VSCODE_*` 等），否则从 Qoder IDE 终端启动时会直接退出。
+装好后 agent 不会自动出现：每个 agent 需要在 profile 组合里加一条 preset 行（`@deepseek-ai/dsh-agent-preset` 内嵌 `@goodjin2/dsh-acp-agent`），写明 `presetId`、`agent` 与连接方式。配置支持可选的 `args`；省略时按 `agent` 补上它说 ACP 所必需的默认参数（cursor 是 `acp --trust`，qoder 是 `--acp`），显式写了则完全以配置为准。qoder 子进程还会剥掉 IDE 注入的 SDK 入口环境变量（`QODER_*`、`CLAUDE*`、`VSCODE_*` 等），否则从 Qoder IDE 终端启动时会直接退出。
 
-`@goodjin/dsh-acp-agent` 不在本仓库的软链范围内，profile 需单独引用它的 checkout：在 profile 的 `package.json` 依赖里加 `"@goodjin/dsh-acp-agent": "link:~/github/dsh-plugins/dsh-acp-agent"` 再 `pnpm install`（bundle 组合里 `@goodjin/...` 的行都指向它）。
+`@goodjin2/dsh-acp-agent` 不在本仓库的软链范围内，profile 需单独引用它的 checkout：在 profile 的 `package.json` 依赖里加 `"@goodjin2/dsh-acp-agent": "link:~/github/dsh-plugins/dsh-acp-agent"` 再 `pnpm install`（bundle 组合里 `@goodjin/...` 的行都指向它）。
 
 preset 行注册后，agent 的模型会进全局模型目录，从模型列表即可切换；binding 上的 `hideFromRoster: true` 让 `threadharbor-roster-filter` 按标记把这些 preset 从选择器名册里隐藏（切换机制依赖注册本身，不能直接删行），细节见 [docs/install-plugins.zh.md](docs/install-plugins.zh.md)。
 

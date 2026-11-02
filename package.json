@@ -1,5 +1,5 @@
 {
-  "name": "threadharbor",
+  "name": "@goodjin2/dsh-threadharbor",
   "version": "0.1.0",
   "description": "Persistent remote coding-agent sessions in DeepSeek Harness Web",
   "repository": {
@@ -44,7 +44,7 @@
     }
   },
   "dependencies": {
-    "@threadharbor/dsh-host-federation": "workspace:^"
+    "@goodjin2/dsh-host-federation": "workspace:^"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1"

@@ -9,7 +9,7 @@
 
 ```text
 Failed to load plugins
-failed to import loader entry ... (@threadharbor/dsh-client): client-modules: require("@threadharbor/protocol") missed the module table — not a platform seed word, not a materialized module, and no registered package factory (a build-time externals drift, or a dynamic dependency that did not arrive)
+failed to import loader entry ... (@goodjin2/dsh-client): client-modules: require("@threadharbor/protocol") missed the module table — not a platform seed word, not a materialized module, and no registered package factory (a build-time externals drift, or a dynamic dependency that did not arrive)
 ```
 
 WebSocket 协议改造后重新打包即复现。同一错误曾在 `docs/bugfix/2026-08-29-dsh-client-protocol-external.md` 记录过，但当时的 tsdown 配置修复没有落到仓库里的 `packages/dsh-client/tsdown.config.ts`。
@@ -37,7 +37,7 @@ WebSocket 协议改造后重新打包即复现。同一错误曾在 `docs/bugfix
 1. ✅ `npm run build`（含 `scripts/verify-build.mjs`）
 2. ✅ 本地 `packages/dsh-client/lib/client.js` 不含 `@threadharbor/protocol`，仍含 `/remote-agent/ws` 和 `/remote-agent/control`
 3. ✅ `npx vitest run packages/dsh-client/tests/client-artifact.spec.ts`
-4. ✅ 3080/3081 实际服务的 `/plugins/@threadharbor/dsh-client/client.js` 与本地产物 SHA256 一致，且不含 `@threadharbor/protocol`
+4. ✅ 3080/3081 实际服务的 `/plugins/@goodjin2/dsh-client/client.js` 与本地产物 SHA256 一致，且不含 `@threadharbor/protocol`
 5. ⚠️ 完整 `npx vitest run` 中 `packages/hostd/tests/hostd-integration.spec.ts` 仍因 unix socket `EINVAL` 失败，与本次 client 打包无关
 6. ⚠️ Tabbit 在 `domcontentloaded` 时关闭 `http://127.0.0.1:3080/` 标签，未能在浏览器里点选页面；插件加载路径已用线上产物和 factory 测试替代验证
 

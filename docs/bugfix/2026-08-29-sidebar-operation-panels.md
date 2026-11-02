@@ -51,7 +51,7 @@
 1. ✅ `npm test -- packages/dsh-client/tests/store.client.spec.ts packages/dsh-client/tests/client-artifact.spec.ts`
 2. ✅ `npm run check`
 3. ✅ 重启 DSH Web
-4. ✅ 请求实际服务出的 `/plugins/@threadharbor/dsh-client/client.js`
+4. ✅ 请求实际服务出的 `/plugins/@goodjin2/dsh-client/client.js`
 5. ✅ 确认产物包含：
    - `添加主机`
    - `添加项目`

@@ -37,7 +37,7 @@ const ROOTS: string[] = []
  * The composition file the profile loads.
  *
  * A plugin the host mounts this way is a root the static import walk below
- * cannot see: the composition row names a package by its `@threadharbor/...`
+ * cannot see: the composition row names a package by its `@goodjin2/...`
  * specifier, not by a relative import, so reachability from `ROOTS` alone
  * misses it. The host-store half of the federation package is the case that
  * motivated this — it is loaded only through `cordis.patch.yml`.
@@ -47,16 +47,17 @@ const COMPOSITION = 'cordis.patch.yml'
 /**
  * Package specifiers named as composition entries.
  *
- * Pulled from the `name:` fields of the composition file. Only `@threadharbor/`
- * specifiers resolve to a package in this repo; everything else (DSH's own
+ * Pulled from the `name:` fields of the composition file. Only `@goodjin2/`
+ * specifiers for packages in this repo resolve to a package here; everything
+ * else (this repo's external `@goodjin2/dsh-acp-agent`, DSH's own
  * `@deepseek-ai/...` presets) is out of scope. Nested rows are captured too —
- * the ACP preset bindings point at `@threadharbor/dsh-preset-dispatch`.
+ * the ACP preset bindings point at `@goodjin2/dsh-acp-agent`.
  */
 function compositionSpecifiers(): string[] {
   if (!existsSync(COMPOSITION)) return []
   const text = readFileSync(COMPOSITION, 'utf8')
   const specs = new Set<string>()
-  for (const match of text.matchAll(/name:\s*['"](@threadharbor\/[^'"]+)['"]/g)) {
+  for (const match of text.matchAll(/name:\s*['"](@goodjin2\/[^'"]+)['"]/g)) {
     specs.add(match[1] as string)
   }
   return [...specs]
@@ -102,9 +103,9 @@ function resolveSpecifier(pkg: string, spec: string, fromDir: string): string | 
       : [`${base}.ts`, `${base}.tsx`, join(base, 'index.ts')]
     return candidates.find(existsSync) ?? null
   }
-  if (!spec.startsWith('@threadharbor/')) return null
+  if (!spec.startsWith('@goodjin2/')) return null
   const [scope, name, sub] = spec.split('/')
-  if (scope !== '@threadharbor' || !PACKAGES.includes(name as never)) return null
+  if (scope !== '@goodjin2' || !PACKAGES.includes(name as never)) return null
   const exports = packageExports(name)
   const entry = (sub === undefined ? exports['.'] : exports[`./${sub}`]) as
     | string | { default?: string } | undefined
@@ -122,7 +123,7 @@ function reachableFromHost(): Set<string> {
   // see a half that no in-repo module imports — the federation package's
   // host-store entry is loaded only through cordis.patch.yml.
   for (const spec of compositionSpecifiers()) {
-    const target = resolveSpecifier('@threadharbor/threadharbor', spec, '.')
+    const target = resolveSpecifier('@goodjin2/dsh-threadharbor', spec, '.')
     if (target !== null) queue.push(target)
   }
   const imports = /(?:from|import)\s*\(?\s*['"]([^'"]+)['"]/g

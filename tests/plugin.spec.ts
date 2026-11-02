@@ -13,12 +13,12 @@ describe('remote Web bundle', () => {
       dsh?: { bundle?: { patch?: string } }
     }
     expect(manifest.dsh?.bundle?.patch).toBe('./cordis.patch.yml')
-    // Every @threadharbor package the composition names must be declared here:
+    // Every @goodjin2 package the composition names must be declared here:
     // a linked install resolves the patch's rows through these dependencies,
     // and configureProfile mirrors this same scoped set into the profile —
     // an undeclared package loads nowhere and the pruning deletes its link.
     expect(manifest.dependencies).toEqual({
-      '@threadharbor/dsh-host-federation': 'workspace:^',
+      '@goodjin2/dsh-host-federation': 'workspace:^',
     })
 
     // The stock sidebar stays enabled. It used to be disabled, because the

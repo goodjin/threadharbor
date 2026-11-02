@@ -26,7 +26,7 @@
 2. ✅ `npx vitest run packages/dsh-client packages/dsh-gateway/tests packages/protocol`
 3. ✅ `npm run build`，`client.js` 约 109kB，不含 `@threadharbor/protocol`
 4. ✅ 产物包含：`设置`、`添加项目`、`关闭重命名会话`、`重新部署 hostd`、`后台操作`、`点安装、登录或配置`、`/remote-agent/ws`
-5. ✅ 3080/3081 正在服务的 `/plugins/@threadharbor/dsh-client/client.js` 与本地产物 SHA256 一致
+5. ✅ 3080/3081 正在服务的 `/plugins/@goodjin2/dsh-client/client.js` 与本地产物 SHA256 一致
 6. ⚠️ 浏览器需强制刷新。gateway 进程仍是旧内存镜像时，需要重启 3080/3081 才能让 `operation.start` / `host.update` 等主区操作生效
 
 ## 相关测试

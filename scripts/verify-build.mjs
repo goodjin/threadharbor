@@ -19,9 +19,9 @@ import { readFileSync } from 'node:fs'
  * the patch file is the source of truth for what a host actually mounts.
  */
 const patch = readFileSync('cordis.patch.yml', 'utf8')
-const names = [...new Set([...patch.matchAll(/name:\s*'(@threadharbor\/[^']+)'/g)].map(m => m[1]))]
+const names = [...new Set([...patch.matchAll(/name:\s*'(@goodjin2\/dsh-host-federation\/[^']+)'/g)].map(m => m[1]))]
 if (names.length === 0) {
-  throw new Error('no @threadharbor plugin names found in cordis.patch.yml — the host-entry import check has nothing to check')
+  throw new Error('no @goodjin2/dsh-host-federation plugin names found in cordis.patch.yml — the host-entry import check has nothing to check')
 }
 for (const name of names) {
   try {

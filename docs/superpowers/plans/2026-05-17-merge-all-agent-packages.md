@@ -17,7 +17,7 @@
 - `@deepseek-ai/schemastery` dependency moves to `dsh-acp-agent` (it was already a dependency of `dsh-preset-dispatch`).
 - `proper-lockfile` dependency (used by minimaxi) moves to `dsh-acp-agent`.
 - `mermaid` dependency (used by mermaid-asset) moves to `dsh-acp-agent`.
-- The DSH bundle entry (`cordis.patch.yml`) references `@threadharbor/dsh-preset-dispatch` for 7 agent presets and several plugin rows. All these references must be updated to `@threadharbor/dsh-acp-agent`.
+- The DSH bundle entry (`cordis.patch.yml`) references `@threadharbor/dsh-preset-dispatch` for 7 agent presets and several plugin rows. All these references must be updated to `@goodjin2/dsh-acp-agent`.
 
 ## Review Focus
 
@@ -146,7 +146,7 @@ git commit -m "refactor: move minimaxi-acp source into dsh-acp-agent/src/minimax
 - Create: `packages/dsh-acp-agent/tests/merged-exports.spec.ts`
 
 **Interfaces:**
-- Produces: Additional named exports from `@threadharbor/dsh-acp-agent`:
+- Produces: Additional named exports from `@goodjin2/dsh-acp-agent`:
   - From zcode (un-prefixed): `decryptCredential`, `deriveKey`, `loadApiKey`, `BIGMODEL_CODING_PLAN_BASE`, `ZAI_CODING_PLAN_BASE`, `buildAnthropicBody`, `messagesUrl`, `reasoningFields`, `AnthropicBody`, `PromptInput`, `PromptTool`, `streamGlm`, `scrub`, `GlmRequest`, `fetchCodingPlanQuota`, `parseQuotaLimits`, `quotaUrl`, `GlmCodingPlanQuota`, `GlmQuotaRequest`, `GlmQuotaWindow`, `GlmBlock`, `GlmFinish`, `GlmStreamChunk`, `GlmUsage`
   - From minimaxi (MiniMax-prefixed for collisions): `miniMaxBuildAnthropicBody`, `miniMaxReasoningFields`, `miniMaxMessagesUrl`, `MiniMaxAnthropicBody`, `MiniMaxPromptInput`, `miniMaxPromptTool`
   - From minimaxi (un-prefixed, no collision): `detectNamespace`, `resolveCredential`, `resolveDataDir`, `CredentialOverrides`, `DataDirOptions`, `MiniMaxCredential`, `AuthBuildEnv`, `AuthRegion`, `defaultMaxTokens`, `Effort`, `streamMiniMax`, `MiniMaxRequest`, `fetchMiniMaxQuota`, `MiniMaxCodingPlanQuota`, `MiniMaxCredit`, `MiniMaxQuotaRequest`, `MiniMaxQuotaWindow`, `MiniMaxBlock`, `MiniMaxFinish`, `MiniMaxStreamChunk`, `MiniMaxUsage`, `canDisableThinking`, `MINIMAX_MODELS`
@@ -309,7 +309,7 @@ git commit -m "feat: re-export zcode and minimaxi from dsh-acp-agent barrel"
 - Modify: `packages/dsh-acp-agent/package.json` — add `@deepseek-ai/schemastery` and `mermaid` dependencies
 - Modify: `packages/dsh-acp-agent/tsconfig.json` — no change needed (already `src/**/*.ts`)
 
-**Important: Import path rewrites.** Every file that imported from `@threadharbor/dsh-acp-agent` (the old pure library) must now use relative imports (`./client.ts`, `./transport.ts`, etc.) since the code is in the same package. Every file that imported from `@threadharbor/zcode-acp` or `@threadharbor/minimaxi-acp` must now import from `./zcode/index.ts` or `./minimaxi/index.ts` (or the barrel `../index.ts`).
+**Important: Import path rewrites.** Every file that imported from `@goodjin2/dsh-acp-agent` (the old pure library) must now use relative imports (`./client.ts`, `./transport.ts`, etc.) since the code is in the same package. Every file that imported from `@threadharbor/zcode-acp` or `@threadharbor/minimaxi-acp` must now import from `./zcode/index.ts` or `./minimaxi/index.ts` (or the barrel `../index.ts`).
 
 - [ ] **Step 1: Copy all source files from dsh-preset-dispatch/src/ to dsh-acp-agent/src/**
 
@@ -320,10 +320,10 @@ Copy every `.ts` file (except `index.ts` and `entry.ts`) from `packages/dsh-pres
 For each moved file, apply these import rewrites:
 - `@threadharbor/zcode-acp` → `./zcode/index.ts` (or `../zcode/index.ts` if in a subdirectory)
 - `@threadharbor/minimaxi-acp` → `./minimaxi/index.ts` (or `../minimaxi/index.ts`)
-- `@threadharbor/dsh-acp-agent` (for the old pure library imports) → relative paths within the same package:
-  - `from '@threadharbor/dsh-acp-agent'` → `from './index.ts'` (or `from '../index.ts'`)
-  - `from '@threadharbor/dsh-acp-agent/client'` → `from './client.ts'`
-  - `from '@threadharbor/dsh-acp-agent/transport'` → `from './transport.ts'`
+- `@goodjin2/dsh-acp-agent` (for the old pure library imports) → relative paths within the same package:
+  - `from '@goodjin2/dsh-acp-agent'` → `from './index.ts'` (or `from '../index.ts'`)
+  - `from '@goodjin2/dsh-acp-agent/client'` → `from './client.ts'`
+  - `from '@goodjin2/dsh-acp-agent/transport'` → `from './transport.ts'`
   - etc. — check each specific import and rewrite to the relative path
 
   **Note:** The existing `dsh-acp-agent/src/index.ts` barrel exports are still valid for external consumers. Internal cross-references between the moved files and the original ACP library files should use relative paths.
@@ -371,7 +371,7 @@ git commit -m "refactor: merge dsh-preset-dispatch runtime code into dsh-acp-age
 - Create: `packages/dsh-acp-agent/src/plugin-exports.ts` — re-export subpath entry points (roster-filter, zcode-quota, etc.)
 
 **Interfaces:**
-- Produces: `@threadharbor/dsh-acp-agent` becomes a DSH-loadable plugin with:
+- Produces: `@goodjin2/dsh-acp-agent` becomes a DSH-loadable plugin with:
   - Root entry: `name = 'threadharbor-acp'`, `Config` schema, `apply(ctx, config)` — from `entry.ts`
   - Subpath exports: `./roster-filter`, `./zcode-quota`, `./minimaxi-quota`, `./codex-quota`, `./claude-quota`, `./mermaid-asset`
   - `dsh.bundle.patch` field pointing to the patch file (or remove it if the patch stays at root)
@@ -421,22 +421,22 @@ git commit -m "feat: configure dsh-acp-agent as DSH-loadable plugin with subpath
 ### Task 6: Update cordis.patch.yml and root package.json
 
 **Files:**
-- Modify: `cordis.patch.yml` — replace all `@threadharbor/dsh-preset-dispatch` references with `@threadharbor/dsh-acp-agent`
+- Modify: `cordis.patch.yml` — replace all `@threadharbor/dsh-preset-dispatch` references with `@goodjin2/dsh-acp-agent`
 - Modify: `package.json` (root) — update dependencies
 
 **Interfaces:**
-- Consumes: `@threadharbor/dsh-acp-agent` with all subpath exports (Task 5)
+- Consumes: `@goodjin2/dsh-acp-agent` with all subpath exports (Task 5)
 
 - [ ] **Step 1: Update cordis.patch.yml**
 
 Replace every occurrence of:
-- `'@threadharbor/dsh-preset-dispatch'` → `'@threadharbor/dsh-acp-agent'`
-- `'@threadharbor/dsh-preset-dispatch/roster-filter'` → `'@threadharbor/dsh-acp-agent/roster-filter'`
-- `'@threadharbor/dsh-preset-dispatch/zcode-quota'` → `'@threadharbor/dsh-acp-agent/zcode-quota'`
-- `'@threadharbor/dsh-preset-dispatch/minimaxi-quota'` → `'@threadharbor/dsh-acp-agent/minimaxi-quota'`
-- `'@threadharbor/dsh-preset-dispatch/codex-quota'` → `'@threadharbor/dsh-acp-agent/codex-quota'`
-- `'@threadharbor/dsh-preset-dispatch/claude-quota'` → `'@threadharbor/dsh-acp-agent/claude-quota'`
-- `'@threadharbor/dsh-preset-dispatch/mermaid-asset'` → `'@threadharbor/dsh-acp-agent/mermaid-asset'`
+- `'@threadharbor/dsh-preset-dispatch'` → `'@goodjin2/dsh-acp-agent'`
+- `'@threadharbor/dsh-preset-dispatch/roster-filter'` → `'@goodjin2/dsh-acp-agent/roster-filter'`
+- `'@threadharbor/dsh-preset-dispatch/zcode-quota'` → `'@goodjin2/dsh-acp-agent/zcode-quota'`
+- `'@threadharbor/dsh-preset-dispatch/minimaxi-quota'` → `'@goodjin2/dsh-acp-agent/minimaxi-quota'`
+- `'@threadharbor/dsh-preset-dispatch/codex-quota'` → `'@goodjin2/dsh-acp-agent/codex-quota'`
+- `'@threadharbor/dsh-preset-dispatch/claude-quota'` → `'@goodjin2/dsh-acp-agent/claude-quota'`
+- `'@threadharbor/dsh-preset-dispatch/mermaid-asset'` → `'@goodjin2/dsh-acp-agent/mermaid-asset'`
 
 - [ ] **Step 2: Update root package.json**
 
@@ -446,9 +446,9 @@ In `package.json`, change:
 ```
 to:
 ```json
-"@threadharbor/dsh-acp-agent": "workspace:^"
+"@goodjin2/dsh-acp-agent": "workspace:^"
 ```
-Remove `"@threadharbor/dsh-client"`, `"@threadharbor/dsh-host-federation"`, `"@threadharbor/dsh-mobile-entry"`, `"@threadharbor/dsh-mobile-relay"` from dependencies (they will be handled in a later task; keep them for now to avoid breaking the build).
+Remove `"@goodjin2/dsh-client"`, `"@goodjin2/dsh-host-federation"`, `"@threadharbor/dsh-mobile-entry"`, `"@threadharbor/dsh-mobile-relay"` from dependencies (they will be handled in a later task; keep them for now to avoid breaking the build).
 
 Actually, keep all existing dependencies for now. Only change the `dsh-preset-dispatch` → `dsh-acp-agent` swap.
 
@@ -496,7 +496,7 @@ Remove these lines from `paths`:
 "@threadharbor/zcode-acp": ["packages/zcode-acp/src/index.ts"],
 "@threadharbor/minimaxi-acp": ["packages/minimaxi-acp/src/index.ts"]
 ```
-Keep `@threadharbor/dsh-acp-agent` path (it now points to the merged package).
+Keep `@goodjin2/dsh-acp-agent` path (it now points to the merged package).
 
 - [ ] **Step 4: Update root tsconfig.json references**
 
