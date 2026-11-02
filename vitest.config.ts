@@ -6,7 +6,6 @@ const root = fileURLToPath(new URL('.', import.meta.url))
 export default defineConfig({
   resolve: {
     alias: {
-      '@threadharbor/dsh-client': `${root}packages/dsh-client/src/index.ts`,
       '@threadharbor/dsh-acp-agent': `${root}packages/dsh-acp-agent/src/index.ts`,
     },
   },
@@ -16,17 +15,9 @@ export default defineConfig({
     server: { deps: { inline: [/@deepseek-ai\/dsh-client-ui-primitives/] } },
     include: ['packages/*/tests/**/*.spec.ts', 'tests/**/*.spec.ts'],
     // Node everywhere except the one file that needs a browser-like `window`:
-    // the panel mount test touches window/sessionStorage/localStorage and the
-    // heartbeat timers. The panel's own rendering asserts through
-    // renderToString, which needs no DOM.
+    // the federation roll-up mount test touches window/storage.
     environment: 'node',
     environmentMatchGlobs: [
-      ['packages/dsh-client/tests/panel-mount.spec.ts', 'jsdom'],
-      ['packages/dsh-client/tests/link-open.spec.ts', 'jsdom'],
-      ['packages/dsh-client/tests/link-open-menu.spec.ts', 'jsdom'],
-      ['packages/dsh-client/tests/zprobe.spec.ts', 'jsdom'],
-      ['packages/dsh-client/tests/rollup-section.spec.ts', 'jsdom'],
-      ['packages/dsh-client/tests/surface.spec.ts', 'jsdom'],
       ['packages/dsh-host-federation/tests/rollup-mount.spec.ts', 'jsdom'],
       // 手机页挂接层 bootApp 跑真 DOM（jsdom）：入口探测、页签、横幅、表单。
       ['packages/dsh-mobile-entry/tests/app.spec.ts', 'jsdom'],

@@ -18,7 +18,6 @@ describe('remote Web bundle', () => {
     // and configureProfile mirrors this same scoped set into the profile —
     // an undeclared package loads nowhere and the pruning deletes its link.
     expect(manifest.dependencies).toEqual({
-      '@threadharbor/dsh-client': 'workspace:^',
       '@threadharbor/dsh-command-commit-merge-push': 'workspace:^',
       '@threadharbor/dsh-host-federation': 'workspace:^',
     })
@@ -35,7 +34,8 @@ describe('remote Web bundle', () => {
     for (const runtimeOwner of ['agent-loop', 'workspace', 'cordis-host-runner']) {
       expect(patch).not.toContain(`- id: ${runtimeOwner}\n  disabled: true`)
     }
-    expect(patch).toContain("- id: threadharbor-client\n      name: '@threadharbor/dsh-client'")
+    // 联邦 UI（threadharbor-client 行）已独立出仓（goodjin/dsh-client）。
+    expect(patch).not.toContain('threadharbor-client')
     expect(patch).toContain("threadharbor-ssh-deploy")
     expect(patch).toContain("threadharbor-host-gateway")
     // 手机中转已独立出仓（goodjin/dsh-mobile-relay），不再随本仓库分发。

@@ -5,8 +5,8 @@
     "outDir": "lib/types",
     "tsBuildInfoFile": "lib/types/tsconfig.tsbuildinfo"
   },
-  "include": ["src"],
-  "references": [
-    { "path": "packages/dsh-client" }
-  ]
+  "include": [
+    "src"
+  ],
+  "references": []
 }

@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, statSync, utimesSync } from 'node:fs'
 import { build, type UserConfig } from 'tsdown'
-import client from '../packages/dsh-client/tsdown.config.ts'
 import plugin from '../tsdown.plugin.config.ts'
 
 /**
@@ -19,9 +18,6 @@ import plugin from '../tsdown.plugin.config.ts'
  * which is the one time that cost is real.
  */
 const PACKAGED_OUTPUTS = [
-  'packages/dsh-client/lib/client.js',
-  'packages/dsh-client/lib/client.js.map',
-  'packages/dsh-client/lib/index.js',
   'lib/index.js',
 ] as const
 
@@ -48,7 +44,6 @@ function restoreUnchangedTimestamps(before: ReadonlyMap<string, Stamp>): void {
 }
 
 const builds: readonly [string, UserConfig | readonly UserConfig[]][] = [
-  ['packages/dsh-client', client],
   ['.', plugin],
 ]
 

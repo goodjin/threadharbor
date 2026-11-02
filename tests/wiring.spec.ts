@@ -19,7 +19,7 @@ import { describe, expect, it } from 'vitest'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
-const PACKAGES = ['dsh-client', 'dsh-host-federation'] as const
+const PACKAGES = ['dsh-host-federation'] as const
 
 /**
  * What the host actually loads.
@@ -28,12 +28,10 @@ const PACKAGES = ['dsh-client', 'dsh-host-federation'] as const
  * one. Anything not downstream of these does not run because someone opened the
  * product — it runs only because a test imported it.
  */
-// dsh-acp-agent 已独立出仓（goodjin/dsh-acp-agent）：它的入口可达性由那个
-// 仓库自己的门禁看管，本仓库的静态扫描不再覆盖它。
-const ROOTS = [
-  'packages/dsh-client/src/index.ts',
-  'packages/dsh-client/src/client/index.ts',
-]
+// dsh-acp-agent 与联邦 UI（dsh-client）已独立出仓：它们的入口可达性由各自
+// 仓库的门禁看管，本仓库的静态扫描不再覆盖它们。本仓库挂载的宿主侧插件
+// 走 COMPOSITION（见下），因此 ROOTS 为空。
+const ROOTS: string[] = []
 
 /**
  * The composition file the profile loads.
@@ -71,6 +69,15 @@ function compositionSpecifiers(): string[] {
  * just the bug it is meant to describe, given a longer life.
  */
 const KNOWN_UNWIRED: Readonly<Record<string, string>> = {
+  // 这四个模块是浏览器侧库：真正的消费者是联邦 UI 的 bundle
+  // （github.com/goodjin/dsh-client，2026-11-02 独立出仓），宿主侧的
+  // 五个挂载入口都不引它们。包根 index.ts 保留 re-export 供那边内联。
+  // 清除条件：goodjin/dsh-client 不再引用对应导出时，把模块与 re-export
+  // 一起删掉。
+  'packages/dsh-host-federation/src/channel.ts': '仅由独立出仓的 goodjin/dsh-client bundle 消费',
+  'packages/dsh-host-federation/src/rollup-view.ts': '仅由独立出仓的 goodjin/dsh-client bundle 消费',
+  'packages/dsh-host-federation/src/settings.ts': '仅由独立出仓的 goodjin/dsh-client bundle 消费',
+  'packages/dsh-host-federation/src/workspace-map.ts': '仅由独立出仓的 goodjin/dsh-client bundle 消费',
 }
 
 function packageExports(pkg: string): Record<string, unknown> {

@@ -53,8 +53,6 @@ const TSC = join(ROOT, 'node_modules/.bin/tsc')
 
 /** The compiled entries the packaging takes as its input. */
 const PACKAGED_ENTRIES = [
-  'packages/dsh-client/lib/types/index.js',
-  'packages/dsh-client/lib/types/client/index.js',
 ]
 
 const problems = []

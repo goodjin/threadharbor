@@ -71,11 +71,12 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 agent 接进 
 
 `cordis.patch.yml` 是安装到 DSH Web profile 的标准 bundle patch。它插入下面这些条目，装载器按行 id 导入对应模块并执行其 `apply`（`host-store` 是纯声明式的一行，只提供一个 volatile 设置字段）。
 
+浏览器侧的联邦界面（主机面板、跨机侧栏、「各主机」设置、手机配对二维码、SSH 部署界面）已独立出仓：[goodjin/dsh-client](https://github.com/goodjin/dsh-client)（`@threadharbor/dsh-client`），bundle 组合行在那个仓库的 `cordis.patch.yml` 里；agent 相关界面（配额胶囊、模型入口、屏蔽栏、切换反馈）在 [goodjin/dsh-acp-agent](https://github.com/goodjin/dsh-acp-agent)。本仓库的 patch 只保留宿主侧插件行。
+
 ### 运行时插件
 
 | 插件 | 组合行 id | 用途 |
 | --- | --- | --- |
-| `@threadharbor/dsh-client` | `threadharbor-client` | 浏览器侧的全部 ThreadHarbor 界面：左侧多主机树与主机切换、设置里的「各主机」、手机配对二维码、输入框模型入口（外部 agent 前缀）、GLM 配额胶囊、被打断轮次的找回入口，以及设置里的「提供方与模型」屏蔽栏（只过滤模型选择器，可整体或逐模型屏蔽任何提供方——ACP agent 与内置 provider 都算；官方「模型」设置页照旧列出全部，密钥不受影响，随时可恢复）。 |
 | `@threadharbor/dsh-host-federation/host-store` | `threadharbor-host-store` | 宿主侧设置槽：把主机登记簿、本机默认身份、提供方/模型屏蔽等选择存进这台机器的 profile 文档（浏览器经 `remote.settings` 读写），换浏览器或清缓存都不会丢。 |
 | `@threadharbor/dsh-host-federation/tailscale` | `threadharbor-tailscale` | 在提供页面的机器上运行 `tailscale status --json`，把 peer 清单写进 host-store 的 `data` 字典，供「从 Tailscale 选主机」使用。 |
 | `@threadharbor/dsh-host-federation/ssh-deploy` | `threadharbor-ssh-deploy` | 主机侧 SSH 部署与远端操作接口：检查连通性、安装/启动远端 DSH、读取远端会话和执行运维操作。 |
@@ -148,7 +149,7 @@ cd ~/github/dsh-plugins/dsh-acp-agent && THREADHARBOR_LIVE_ACP=1 npx vitest run 
 
 ```text
 ~/github/dsh-plugins/dsh-acp-agent  ACP 接入层 + 模型客户端 + preset 框架（独立仓库，含浏览器侧 UI 与配额胶囊）
-packages/dsh-client/           浏览器插件：左侧主机树、主机切换、「各主机」设置、手机配对二维码、模型入口与「提供方与模型」屏蔽等界面
+~/github/dsh-plugins/dsh-client  浏览器联邦界面（独立仓库）：主机面板、跨机侧栏、「各主机」设置、手机配对、SSH 部署界面
 packages/dsh-host-federation/  跨主机汇总的库与宿主插件：主机身份、设置存储、Tailscale 桥、SSH 部署、同源网关
 tests/wiring.spec.ts           「代码对」与「代码跑得到」分开检查；到不了的模块登记在 KNOWN_UNWIRED
 cordis.patch.yml               安装到 DSH Web profile 的标准 bundle patch（浏览器插件、宿主插件与 agent preset 行）

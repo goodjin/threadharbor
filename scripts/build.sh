@@ -7,4 +7,3 @@ node_modules/.bin/tsc -b tsconfig.json
 # src it was compiled from. No-op when lib/ is freshly built by tsc above.
 node scripts/check-freshness.mjs
 node --import tsx/esm scripts/build.ts
-node scripts/verify-build.mjs
