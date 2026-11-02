@@ -11,6 +11,9 @@ importers:
       '@threadharbor/dsh-client':
         specifier: workspace:^
         version: link:packages/dsh-client
+      '@threadharbor/dsh-command-commit-merge-push':
+        specifier: workspace:^
+        version: link:packages/dsh-command-commit-merge-push
       '@threadharbor/dsh-host-federation':
         specifier: workspace:^
         version: link:packages/dsh-host-federation
@@ -186,6 +189,15 @@ importers:
       zustand:
         specifier: ^5.0.15
         version: 5.0.15(@types/react@18.3.31)(immer@11.1.21)(react@18.3.1)
+
+  packages/dsh-command-commit-merge-push:
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.13.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/debug@4.1.13)(@types/node@24.13.3)(jiti@2.7.0)(jsdom@30.1.2)(lightningcss@1.33.0)(tsx@4.23.12)(yaml@2.9.1)
 
   packages/dsh-host-federation:
     dependencies:
