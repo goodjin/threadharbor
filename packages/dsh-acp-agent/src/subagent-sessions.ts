@@ -1,0 +1,342 @@
+/**
+ * 外部 agent 的子代理 → DSH 子会话（只展示，不执行）。
+ *
+ * 外部 agent 派出的子代理运行在它自己的进程里；我们只在线上收到它的出生帧、
+ * 正文/思考增量与终态帧。这里把收到的这些投影成一个真实 DSH 子会话：
+ * 带父会话血缘、登记进父会话的后代目录、内容经实时流与持久消息展示。
+ *
+ * 两条语义边界是刻意的：
+ * - **等真实终态**：只有终态帧才结束子会话；父回合先结束时它保持开放（用户
+ *   选择的行为），不伪造结束。
+ * - **无能力包零写入**：宿主没有组合子代理能力包时，不建会话、不写目录事件
+ *   （未知事件会让会话日志加载不了）。
+ */
+
+import { randomUUID } from 'node:crypto'
+import type { AcpDialect, AcpFrame, RawOutputBlock, ToolCall } from './index.ts'
+import {
+  RawOutputAggregator, assistantMessageEvent, mapToolName, projectToolCallAnnouncementCall, toolCallAnnouncementEvent, toolCallEvent, toolResultMessageEvent, userMessageEvent,
+} from './index.ts'
+import type { GuardedAppend } from './session-lifecycle.ts'
+import { withLifecycleGuard } from './session-lifecycle.ts'
+import { AcpAssistantStream } from './stream.ts'
+
+/** 子会话 id 前缀：与 DSH 自身 minted 的会话 id 区分开，且来源一眼可见。 */
+const CHILD_PREFIX = 'acp-sub-'
+
+/** 目录事件的模式：一次性子代理（不可续聊）。 */
+const CATALOG_MODE = 'one-shot'
+
+/** 目录事件格式版本（与宿主 subagent 包的当前版本一致）。 */
+const CATALOG_VERSION = 0
+
+/** 子代理消息的模型来源：它没有 DSH 模型，这个标识表明来源。 */
+const PROVIDER = 'acp-subagent'
+
+/** 子会话里的单回合计号。 */
+const TURN = 1
+const STEP = 1
+
+/** Minimal host handle for one shadow child session. */
+export type ChildSessionLike = {
+  readonly id: string
+  readonly header?: { readonly createdAt?: number }
+  append(type: string, payload: unknown, intent?: unknown): { readonly seq: number }
+  /** 事件计数，供合成流载荷的 session.seq 使用。 */
+  readonly seq: number
+}
+
+/** What the builder needs from the host. */
+export type SubagentSessionHost = {
+  readonly available: boolean
+  /** 建带血缘的子会话；宿主无能力包时返回 undefined（调用方据此跳过）。 */
+  openChild(parentSessionId: string, childId: string): ChildSessionLike | undefined
+  /** 往父会话日志追加一条事件（目录事件走这里）。 */
+  appendParent(parentSessionId: string, type: string, payload: unknown): void
+  /** 为子会话发一帧实时流（载荷形状由宿主适配）。 */
+  emitChildStream(child: ChildSessionLike, frame: Record<string, unknown>): void
+}
+
+type ChildState = {
+  readonly rawId: string
+  readonly child: ChildSessionLike
+  readonly stream: AcpAssistantStream
+  readonly thought: string[]
+  readonly text: string[]
+  readonly aggregator: RawOutputAggregator
+  /** 子代理已见过的工具调用，按 callId 留存：增量帧靠它累积参数与状态。 */
+  readonly tools: Map<string, ToolCall>
+  /** 已落过公告的工具 callId，避免同一张卡随更新帧重复。 */
+  readonly writtenCards: Set<string>
+  /** 已落过结果的工具 callId：终态帧可能重复到达，而一条调用只允许一条结果。 */
+  readonly writtenResults: Set<string>
+  /** 子会话的 append，过保存时的工具生命周期校验。 */
+  readonly append: GuardedAppend
+  settled: boolean
+}
+
+/** 一个外部回合里收到的子代理信息，投影成 DSH 子会话。 */
+export class SubagentSessions {
+  private readonly host: SubagentSessionHost
+  private readonly dialect: AcpDialect
+  private readonly states = new Map<string, ChildState>()
+  /** 无 id 的出生帧留下的标签（grok）：等到首条子会话帧再建会话。 */
+  private pending: { readonly label: string; readonly task: string } | undefined
+
+  constructor(host: SubagentSessionHost, dialect: AcpDialect) {
+    this.host = host
+    this.dialect = dialect
+  }
+
+  /** 出生帧：有 id 立即建会话；无 id 记下标签等首次子会话帧。 */
+  spawn(parentSessionId: string, childId: string | undefined, label: string, task: string): void {
+    if (!this.host.available) return
+    if (childId === undefined) {
+      this.pending = { label, task }
+      return
+    }
+    this.ensure(parentSessionId, childId, label, task)
+  }
+
+  /** 子会话正文/思考增量：懒建会话 + 实时流。 */
+  chunk(parentSessionId: string, childSessionId: string, kind: 'thought' | 'message', text: string): void {
+    if (!this.host.available || text === '') return
+    const pending = this.pending
+    const state = this.ensure(
+      parentSessionId,
+      childSessionId,
+      pending?.label ?? childSessionId,
+      pending?.task ?? '',
+    )
+    if (state === undefined) return
+    this.pending = undefined
+    // 收尾之后迟到的增量（子代理先报终态、帧后到）：流已关闭，丢弃即可——
+    // 往已结束的流里推增量会抛，帧处理器不能被一条晚到帧打死。
+    if (state.settled || state.stream.finished) return
+    if (kind === 'thought') state.thought.push(text)
+    else state.text.push(text)
+    if (kind === 'thought') state.stream.reasoningDelta(text)
+    else state.stream.textDelta(text)
+  }
+
+  /**
+   * 子代理的一帧工具调用 → 子会话里一张真工具卡。
+   *
+   * 子代理运行在它自己的进程里，我们线上收到的就是它的 tool_call / tool_call_update
+   * 帧。把它们按当地方言折叠、映射工具名，落成与父会话同形的「公告 + call + result」，
+   * 宿主 ui-tool 才能渲染富视图（搜索/读文件/编辑/命令），而不是一张「外部输出」卡。
+   * 同一 callId 只落一张卡；终态帧落 result。
+   */
+  toolFrame(parentSessionId: string, childSessionId: string, frame: AcpFrame): void {
+    if (!this.host.available) return
+    const pending = this.pending
+    const state = this.ensure(parentSessionId, childSessionId, pending?.label ?? childSessionId, pending?.task ?? '')
+    if (state === undefined || state.settled) return
+    this.pending = undefined
+    const params = (frame.params as Record<string, unknown> | undefined) ?? {}
+    const update = (params['update'] as Record<string, unknown> | undefined) ?? {}
+    const sessionUpdate = update['sessionUpdate']
+    const isTool = frame.method === 'session/update'
+      && (sessionUpdate === 'tool_call' || sessionUpdate === 'tool_call_update'
+        || (sessionUpdate === 'tool_call_delta_chunk' && this.dialect.foldToolDelta !== undefined))
+    if (!isTool) return
+    const rawId = update['toolCallId'] ?? update['tool_call_id']
+    const resolvedId = typeof rawId === 'string' ? rawId : undefined
+    if (resolvedId === undefined) return
+    const carried = state.tools.get(resolvedId)
+    const deltaFold = this.dialect.foldToolDelta
+    const folded = sessionUpdate === 'tool_call_delta_chunk' && deltaFold !== undefined
+      ? (deltaFold(carried, update) ?? this.dialect.foldTool(carried, update))
+      : this.dialect.foldTool(carried, update)
+    state.tools.set(resolvedId, folded)
+    // 占位帧（参数还没到）先不落卡：卡片不可变，落下去就冻住空参数。
+    if (folded.status !== 'completed' && folded.status !== 'failed'
+      && Object.keys((folded.arguments as Record<string, unknown>) ?? {}).length === 0) return
+    // 公告 + call：只落一次。
+    if (!state.writtenCards.has(resolvedId)) {
+      try {
+        const announcement = projectToolCallAnnouncementCall(folded, { turn: TURN, step: STEP, dialect: this.dialect })
+        if (announcement !== undefined) state.append(announcement.type, announcement.payload, { surfaceOp: 'append' })
+        const call = toolCallEvent({ turn: TURN, step: STEP, callId: resolvedId, name: mapToolName(this.dialect, folded.name), arguments: JSON.stringify(folded.arguments) })
+        if (state.append(call.type, call.payload) === undefined) return
+      } catch {
+        return
+      }
+      state.writtenCards.add(resolvedId)
+    }
+    // 终态帧落 result。
+    if (folded.status !== 'completed' && folded.status !== 'failed') return
+    if (folded.output === '' && folded.status === 'completed') return
+    const isError = folded.status === 'failed'
+    const result = toolResultMessageEvent({
+      turn: TURN, step: STEP, callId: resolvedId, text: folded.output, isError,
+      ...(isError ? { error: { name: 'tool', code: folded.status ?? 'failed', ...(folded.title === undefined ? {} : { reason: folded.title }) } } : {}),
+    })
+    if (state.writtenResults.has(resolvedId)) return
+    try {
+      const written = state.append(result.type, result.payload, { surfaceOp: 'append' })
+      if (written !== undefined) state.writtenResults.add(resolvedId)
+    } catch {
+      // 写失败不打断帧流。
+    }
+  }
+
+  /** 真实终态：落最后一段消息 + 结束子回合。 */
+  terminal(parentSessionId: string, childSessionId: string, status: 'completed' | 'failed', output: string | undefined): void {
+    if (!this.host.available) return
+    const pending = this.pending
+    const state = this.ensure(
+      parentSessionId,
+      childSessionId,
+      pending?.label ?? childSessionId,
+      pending?.task ?? '',
+    )
+    if (state === undefined || state.settled) return
+    this.pending = undefined
+    state.settled = true
+    // 收尾前先封这块里未闭合的未知输出：终态之后就写不进去了（子会话回合关闭，
+    // tool 事件会被日志拒绝），所以它是这块未知内容的最后一次落盘机会。
+    const tail = state.aggregator.flush({ turn: TURN, step: STEP })
+    if (tail !== undefined) this.writeRawBlock(state, tail)
+    // 遥测帧按种类在终态前汇总：子会话也是「回合末」才把它们摆出来。
+    for (const block of state.aggregator.summary({ turn: TURN, step: STEP })) this.writeRawBlock(state, block)
+    // 已落卡但始终没等到结果帧的调用：宿主校验要求每条 call 在 step/end 前
+    // 结算，否则整份子会话日志拒绝加载。空输出也是合法结果，补一条。
+    for (const callId of state.writtenCards) {
+      if (state.writtenResults.has(callId)) continue
+      try {
+        const closed = toolResultMessageEvent({ turn: TURN, step: STEP, callId, text: '', isError: false })
+        if (state.append(closed.type, closed.payload, { surfaceOp: 'append' }) !== undefined) {
+          state.writtenResults.add(callId)
+        }
+      } catch {
+        // 写失败不打断收尾；这条日志的其它内容照常落盘。
+      }
+    }
+    const content = [
+      ...(state.thought.length > 0 ? [{ type: 'reasoning' as const, text: state.thought.join('') }] : []),
+      ...(state.text.length > 0 ? [{ type: 'text' as const, text: state.text.join('') }] : []),
+    ]
+    const message = assistantMessageEvent({
+      turn: TURN,
+      step: STEP,
+      content,
+      provider: PROVIDER,
+      model: this.dialect.id,
+      stream: state.stream.records(),
+    })
+    const messageSeq = state.append(message.type, message.payload, { surfaceOp: 'append' })?.seq
+    state.append('step/end', { turn: TURN, step: STEP })
+    state.append('turn/end', {
+      turn: TURN,
+      reason: status === 'completed'
+        ? { kind: 'completed' }
+        : { kind: 'error', error: { message: output ?? '子代理未完成', code: 'SUBAGENT_FAILED' } },
+    })
+    if (!state.stream.finished) {
+      if (messageSeq === undefined) state.stream.abandon()
+      else state.stream.settle('assistant/message', () => messageSeq)
+    }
+  }
+
+  /** 父回合结束：只放弃实时流，子会话保持开放（不写 turn/end）。 */
+  parentTurnEnd(parentSessionId: string): void {
+    void parentSessionId
+    for (const state of this.states.values()) {
+      if (!state.settled && !state.stream.finished) state.stream.abandon()
+    }
+  }
+
+  /** 该子会话的未知块聚合器（子会话帧里未映射的内容走它）。 */
+  rawOutputOf(childSessionId: string): RawOutputAggregator | undefined {
+    return this.stateOf(childSessionId)?.aggregator
+  }
+
+  /**
+   * 子会话的一帧未映射内容 → 子会话自己的未知块。
+   *
+   * 块写进子会话的日志（不串到父会话）；收尾之后的迟到帧不再写——那个会话的
+   * 回合已经结束，往里塞 tool 事件会让日志校验拒绝。
+   */
+  rawOutputFrame(parentSessionId: string, childSessionId: string, frame: AcpFrame): void {
+    if (!this.host.available) return
+    const pending = this.pending
+    const state = this.ensure(parentSessionId, childSessionId, pending?.label ?? childSessionId, pending?.task ?? '')
+    if (state === undefined || state.settled) return
+    this.pending = undefined
+    const block = state.aggregator.observe(frame, { turn: TURN, step: STEP }, { childSession: true })
+    if (block !== undefined) this.writeRawBlock(state, block)
+  }
+
+  /** 把一块未知输出按「公告 + 卡片 + 结果」写进子会话（与父会话同一形状）。 */
+  private writeRawBlock(state: ChildState, block: RawOutputBlock): void {
+    const name = `外部输出 · ${block.kind}`
+    const args = JSON.stringify({ format: block.format, count: block.count })
+    const callId = randomUUID()
+    try {
+      const announcement = toolCallAnnouncementEvent({
+        turn: TURN, step: STEP, callId, name, arguments: args, provider: PROVIDER, model: this.dialect.id,
+      })
+      state.append(announcement.type, announcement.payload, { surfaceOp: 'append' })
+      const call = toolCallEvent({ turn: TURN, step: STEP, callId, name, arguments: args })
+      const started = state.append(call.type, call.payload)
+      if (started === undefined) return
+      const result = toolResultMessageEvent({ turn: TURN, step: STEP, callId, text: block.content, isError: false })
+      state.append(result.type, result.payload, { surfaceOp: 'append', sourceEventSeqs: [started.seq] })
+    } catch {
+      // 写失败不打断帧流：这条块丢了，其余内容照旧。
+    }
+  }
+
+  private stateOf(rawOrPrefixed: string): ChildState | undefined {
+    return this.states.get(rawOrPrefixed.startsWith(CHILD_PREFIX) ? rawOrPrefixed : CHILD_PREFIX + rawOrPrefixed)
+  }
+
+  private ensure(parentSessionId: string, rawId: string, label: string, task: string): ChildState | undefined {
+    const prefixed = CHILD_PREFIX + rawId
+    const existing = this.states.get(prefixed)
+    if (existing !== undefined) return existing
+    const child = this.host.openChild(parentSessionId, prefixed)
+    if (child === undefined) return undefined
+    const append = withLifecycleGuard((type, payload, intent) => child.append(type, payload, intent))
+    append('turn/start', { turn: TURN })
+    append('step/start', { turn: TURN, step: STEP })
+    const prompt = task !== '' ? task : label
+    if (prompt !== '') {
+      const message = userMessageEvent(TURN, prompt)
+      append(message.type, message.payload, { surfaceOp: 'append' })
+    }
+    this.host.appendParent(parentSessionId, 'subagent/catalog', {
+      version: CATALOG_VERSION,
+      childId: prefixed,
+      childCreatedAt: child.header?.createdAt ?? Date.now(),
+      mode: CATALOG_MODE,
+      label,
+    })
+    let revision = 0
+    const stream = new AcpAssistantStream({
+      emit: frame => { this.host.emitChildStream(child, frame) },
+      nextRevision: () => ++revision,
+      sessionId: child.id,
+      attempt: 1,
+      turn: TURN,
+      step: STEP,
+    })
+    stream.start()
+    const state: ChildState = {
+      rawId,
+      child,
+      stream,
+      thought: [],
+      text: [],
+      aggregator: new RawOutputAggregator(),
+      tools: new Map<string, ToolCall>(),
+      writtenCards: new Set<string>(),
+      writtenResults: new Set<string>(),
+      append,
+      settled: false,
+    }
+    this.states.set(prefixed, state)
+    return state
+  }
+}

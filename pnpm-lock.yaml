@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@threadharbor/dsh-acp-agent':
+        specifier: workspace:^
+        version: link:packages/dsh-acp-agent
       '@threadharbor/dsh-client':
         specifier: workspace:^
         version: link:packages/dsh-client
@@ -23,9 +26,6 @@ importers:
       '@threadharbor/dsh-mobile-relay':
         specifier: workspace:^
         version: link:packages/dsh-mobile-relay
-      '@threadharbor/dsh-preset-dispatch':
-        specifier: workspace:^
-        version: link:packages/dsh-preset-dispatch
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1
@@ -64,7 +64,21 @@ importers:
         specifier: ^3.2.4
         version: 3.2.7(@types/debug@4.1.13)(@types/node@24.13.3)(jiti@2.7.0)(jsdom@30.1.2)(lightningcss@1.33.0)(tsx@4.23.12)(yaml@2.9.1)
 
-  packages/dsh-acp-agent: {}
+  packages/dsh-acp-agent:
+    dependencies:
+      '@deepseek-ai/schemastery':
+        specifier: ^3.18.1
+        version: 3.18.4
+      mermaid:
+        specifier: ^11.16.0
+        version: 11.17.2
+      proper-lockfile:
+        specifier: ^4.1.2
+        version: 4.1.2
+    devDependencies:
+      '@types/proper-lockfile':
+        specifier: ^4.1.4
+        version: 4.1.4
 
   packages/dsh-client:
     dependencies:
@@ -228,36 +242,6 @@ importers:
       ws:
         specifier: ^8.21.0
         version: 8.22.0
-
-  packages/dsh-preset-dispatch:
-    dependencies:
-      '@deepseek-ai/schemastery':
-        specifier: ^3.18.1
-        version: 3.18.1
-      '@threadharbor/dsh-acp-agent':
-        specifier: workspace:^
-        version: link:../dsh-acp-agent
-      '@threadharbor/minimaxi-acp':
-        specifier: workspace:^
-        version: link:../minimaxi-acp
-      '@threadharbor/zcode-acp':
-        specifier: workspace:^
-        version: link:../zcode-acp
-      mermaid:
-        specifier: ^11.16.0
-        version: 11.17.2
-
-  packages/minimaxi-acp:
-    dependencies:
-      proper-lockfile:
-        specifier: ^4.1.2
-        version: 4.1.2
-    devDependencies:
-      '@types/proper-lockfile':
-        specifier: ^4.1.4
-        version: 4.1.4
-
-  packages/zcode-acp: {}
 
 packages:
 
@@ -944,9 +928,6 @@ packages:
       '@deepseek-ai/dsh-storage': 0.2.0-rc.2
       '@deepseek-ai/dsh-storage-domain': 0.2.0-rc.2
       '@deepseek-ai/dsh-typert-protocol': 0.2.0-rc.2
-
-  '@deepseek-ai/schemastery@3.18.1':
-    resolution: {integrity: sha512-Qn0FCSwCQnpnj6SB31I6i2sIKgKWnkbJM8O0EU91Gv2UsYVvtZTl6IA0sCwk2e2MZf5S8w5hpq9QkeVvK9qwxg==}
 
   '@deepseek-ai/schemastery@3.18.4':
     resolution: {integrity: sha512-SSXO6tYuyrIqKVbmOnIq0s+riUywYzouFMcnBluHF9n4KMo2G8HvEzhCYj6pj2617/glOjbJuVInJ9hfONsjkg==}
@@ -3669,11 +3650,6 @@ snapshots:
       '@deepseek-ai/dsh-storage-domain': 0.2.0-rc.2(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.2.0-rc.2(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-storage@0.2.0-rc.2(@deepseek-ai/cordis@4.0.1))
       '@deepseek-ai/dsh-typert-protocol': 0.2.0-rc.2(@deepseek-ai/cordis@4.0.1)
       zod: 4.6.5
-
-  '@deepseek-ai/schemastery@3.18.1':
-    dependencies:
-      '@deepseek-ai/cosmokit': 1.8.2
-      '@standard-schema/spec': 1.1.0
 
   '@deepseek-ai/schemastery@3.18.4':
     dependencies:

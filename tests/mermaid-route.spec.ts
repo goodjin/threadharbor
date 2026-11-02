@@ -7,7 +7,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { MERMAID_ROUTE_PATH as CLIENT_ROUTE } from '../packages/dsh-client/src/mermaid.ts'
-import { MERMAID_ROUTE_PATH as HOST_ROUTE } from '../packages/dsh-preset-dispatch/src/mermaid-asset.ts'
+import { MERMAID_ROUTE_PATH as HOST_ROUTE } from '../packages/dsh-acp-agent/src/mermaid-asset.ts'
 
 describe('Mermaid 资产路由', () => {
   it('客户端与宿主用同一个路径', () => {

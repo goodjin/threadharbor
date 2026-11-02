@@ -1,1090 +1,604 @@
 /**
- * End-to-end checks against the real agent binaries.
+ * The phase-3 stack against the real agent binaries.
  *
- * These are the acceptance gate for phase 2: each agent must independently run
- * "open a session → ask a question → get an answer → project its tool call
- * correctly", and a permission request must be approvable in a way that lets
- * the turn continue.
+ * This is the acceptance gate for dispatch: a real agent must be driven through
+ * the turn runner, produce text that reaches the stream **while the turn is
+ * still running**, and project into the same content events the native loop
+ * expects around it.
  *
- * They are skipped unless `THREADHARBOR_LIVE_ACP=1`, because they need the real
- * binaries, a real model behind them, and minutes of wall clock. The default
- * suite stays hermetic and fast; this is the run you do before believing a
- * change works.
+ * The streaming assertion is the load-bearing one. Collecting frames and
+ * replaying them after the turn passes every other test here and still shows
+ * the user nothing until the agent finishes — which is the exact behaviour
+ * this work exists to remove. So the test records whether any text arrived
+ * before the prompt call resolved.
  *
- * Note on claude: the agent behind the local claude-agent-acp is a relay, not
- * Anthropic's Claude (see the design doc §2.6). What this test proves is the
- * adapter's frame shapes and the turn's plumbing — not Claude's behaviour.
+ * Skipped unless `THREADHARBOR_LIVE_ACP=1`: real binaries, real model, real
+ * wall clock. See the ACP layer's live spec for what the local claude actually
+ * is — its frame shapes are genuine, its model behaviour is not.
  */
 
 import { describe, expect, it } from 'vitest'
-import { spawn } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
-import { rmSync } from 'node:fs'
-import { deflateSync } from 'node:zlib'
-import { AcpClient } from '../src/client.ts'
-import { TerminalService } from '../src/terminals.ts'
-import { StdioAcpTransport, WebSocketAcpTransport, grokWebSocketUrl } from '../src/transport.ts'
-import { projectTurn, projectToolCallFrame, projectTurnIncremental } from '../src/projection.ts'
-import { bridgePermissions } from '../src/approval.ts'
-import { claudeDialect } from '../src/dialects/claude.ts'
-import { codexDialect } from '../src/dialects/codex.ts'
-import { cursorDialect } from '../src/dialects/cursor.ts'
-import { grokDialect } from '../src/dialects/grok.ts'
-import { qoderDialect } from '../src/dialects/qoder.ts'
-import { stdioArgsForDialect, stdioEnvFor } from '../src/spawn-args.ts'
-import type { AcpDialect } from '../src/dialects/types.ts'
-import type { AcpTransport } from '../src/transport.ts'
-import type { AcpFrame, AcpSession } from '../src/acp-client.ts'
-
-/**
- * Wait for `grok agent serve` to accept its secret.
- *
- * A real handshake, not "the port is open": a port check cannot tell a keyed
- * serve from any other listener, which is exactly how a secret mismatch used to
- * slip through until a session failed much later.
- */
-async function waitForGrokServe(port: number, secret: string, timeoutMs = 20_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  let lastError = 'never connected'
-  while (Date.now() < deadline) {
-    const reachable = await new Promise<boolean>(resolve => {
-      const probe = new WebSocket(grokWebSocketUrl(`127.0.0.1:${port}`, secret))
-      const finish = (result: boolean) => {
-        probe.onmessage = null
-        probe.onerror = null
-        probe.onclose = null
-        try { probe.close() } catch { /* already closing */ }
-        resolve(result)
-      }
-      probe.onopen = () => finish(true)
-      probe.onerror = () => finish(false)
-      probe.onclose = () => finish(false)
-    })
-    if (reachable) return
-    await new Promise(resolveWait => setTimeout(resolveWait, 300))
-  }
-  throw new Error(`grok agent serve never became reachable: ${lastError}`)
-}
+import { AcpClient, TerminalService, StdioAcpTransport } from '../src/index.ts'
+import type { AcpDialect, AcpTransport } from '../src/index.ts'
+import { AcpTurnRunner } from '../src/runner.ts'
+import type { ChildSessionLike, SubagentSessionHost } from '../src/subagent-sessions.ts'
+import type { AcpClientPort } from '../src/runner.ts'
+import { adaptClient } from '../src/factory.ts'
+import { stdioArgsForDialect } from '../src/index.ts'
+import { AcpAssistantStream } from '../src/stream.ts'
+import { makeContentWriter, UNDELIVERED } from '../src/content-writer.ts'
+import { projectStepContent } from '../src/index.ts'
+import { claudeDialect } from '../src/index.ts'
+import { codexDialect, cursorDialect } from '../src/index.ts'
+import { grokDialect } from '../src/index.ts'
+import { bridgePermissions } from '../src/index.ts'
+import type { StepEndReason, TurnContext } from '../src/dispatch.ts'
+import { mkdtemp } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 const LIVE = process.env['THREADHARBOR_LIVE_ACP'] === '1'
-
-/**
- * Which binary each test drives.
- *
- * Overridable because the installed version is not always the pinned one:
- * hostd pins `@agentclientprotocol/codex-acp@1.6.2`, and the machine may well
- * have a different build on PATH. A live run against the wrong build says
- * nothing about the shipped one, so the run has to be able to name its binary.
- */
 const CODEX_ACP = process.env['THREADHARBOR_CODEX_ACP'] ?? 'codex-acp'
-const CLAUDE_ACP = process.env['THREADHARBOR_CLAUDE_ACP'] ?? 'claude-agent-acp'
 const CURSOR_ACP = process.env['THREADHARBOR_CURSOR_ACP'] ?? 'cursor-agent'
-/** CN build installs `qoderclicn`; the international build installs `qoder`. */
-const QODER_ACP = process.env['THREADHARBOR_QODER_ACP'] ?? 'qoderclicn'
-const CWD = process.cwd()
-const PROMPT = 'Run the shell command `echo ACP_LIVE_OK` and then tell me what it printed.'
-/**
- * A command that is safe but sits outside the workspace, so an agent in Manual
- * mode has to ask before running it. Asking is the whole point of this prompt —
- * a harmless in-workspace command may simply be auto-approved and prove nothing.
- */
-const PROMPT_REQUIRING_APPROVAL =
-  'Create a file at /tmp/threadharbor-acp-live.txt containing the word ok, using a shell command, then tell me it is done.'
+const CLAUDE_ACP = process.env['THREADHARBOR_CLAUDE_ACP'] ?? 'claude-agent-acp'
 
-/** What one live round must produce. */
-type LiveResult = {
-  readonly session: AcpSession
-  readonly frames: AcpFrame[]
-  readonly answer: string
-  readonly toolNames: readonly string[]
-  readonly toolOutputs: readonly string[]
-  readonly permissionsAnswered: number
-}
+const PROMPT = 'Reply with exactly this one sentence and nothing else: the tide comes in and goes out.'
 
-async function runLiveAgent(
-  command: string,
-  dialect: AcpDialect,
-  options: { readonly modeId?: string; readonly prompt?: string } = {},
-): Promise<LiveResult> {
-  const env = stdioEnvFor(dialect.id)
-  const transport = new StdioAcpTransport({
-    command,
-    // The same table production spawns from: qoder needs `--acp`, cursor needs
-    // `acp --trust`, and a bare spawn would pass this suite while production
-    // launched the interactive agent.
-    args: stdioArgsForDialect(dialect),
-    cwd: CWD,
-    ...(env === undefined ? {} : { env }),
-    onDiagnostic: () => {}, // agents are chatty on stderr; it is not protocol
-  })
-  return runLiveAgentOver(transport, dialect, options)
-}
-
-/** Open one live session over stdio, for the case helpers that drive it themselves. */
-async function openLiveAgent(
-  command: string,
-  dialect: AcpDialect,
-  options: { readonly modeId?: string } = {},
-): Promise<LiveSession> {
-  const env = stdioEnvFor(dialect.id)
-  const transport = new StdioAcpTransport({
-    command,
-    // The same table production spawns from, so a probe can never pass over a
-    // deployment that launches the agent wrongly.
-    args: stdioArgsForDialect(dialect),
-    cwd: CWD,
-    ...(env === undefined ? {} : { env }),
-    onDiagnostic: () => {}, // agents are chatty on stderr; it is not protocol
-  })
-  return openLiveAgentOver(transport, dialect, options)
-}
-
-/** One image block, in the exact shape the runner's `promptContent` puts on the wire. */
-type PromptImageBlock = { readonly type: 'image'; readonly data: string; readonly mimeType: string }
-
-/**
- * One opened live session, held open for the caller to drive turn by turn.
- *
- * The whole-turn helper below (`runLiveAgentOver`) is built on this: the same
- * handshake, the same field shapes, but the prompt is the caller's to time —
- * which is what the cancel case needs (stop after the first frame arrives, not
- * after the turn ends).
- */
-type LiveSession = {
-  readonly client: AcpClient
-  readonly session: AcpSession
-  /** Every inbound notification frame in arrival order, with its arrival time. */
-  readonly frames: readonly { readonly frame: AcpFrame; readonly at: number }[]
-  /** The frames without timestamps, for the projections. */
-  plainFrames(): AcpFrame[]
-  /** The turn's assistant text, projected the way production projects it. */
-  answer(): string
-  /** Send one prompt (text first, then image blocks) and resolve with its reply. */
-  prompt(text: string, images?: readonly PromptImageBlock[]): Promise<{ readonly stopReason?: unknown }>
-  /** Resolves with the turn's first CONTENT frame (message/thought chunk or tool frame). */
-  waitForFirstContentFrame(timeoutMs: number): Promise<AcpFrame>
-  close(): void
-  /** Counters the whole-turn helper reports. */
-  readonly counters: { readonly permissionsAnswered: number }
-  /** Resolves with the first frame the predicate accepts, scanning arrivals and history. */
-  waitFor(accept: (frame: AcpFrame) => boolean, timeoutMs: number, what: string): Promise<AcpFrame>
-}
-
-/**
- * One live round over any transport, opened but not yet prompted.
- *
- * Transport and field-shape are the only things that differ between agents, so
- * this is where the session is actually opened. Every handshake step is
- * deadline-bounded: an agent that accepts the connection and then says nothing
- * (a wedged worker, a dead login) fails loudly here instead of silently eating
- * the whole test budget.
- */
-async function openLiveAgentOver(
-  transport: AcpTransport,
-  dialect: AcpDialect,
-  options: { readonly modeId?: string } = {},
-): Promise<LiveSession> {
+/** Drive one real agent through the dispatch stack and report what streamed. */
+async function runDispatch(command: string, dialect: AcpDialect, options: { modeId?: string } = {}) {
+  const cwd = await mkdtemp(join(tmpdir(), 'th-acp-dispatch-'))
+  const transport = new StdioAcpTransport({ command, args: stdioArgsForDialect(dialect), cwd, onDiagnostic: () => {} })
   const client = new AcpClient(transport, dialect)
   if (dialect.id === 'grok') client.terminals = new TerminalService()
+  // Through the very bridge production uses, so this exercises the fail-closed
+  // path rather than a test-only shortcut.
+  client.onPermissionRequest = request => bridgePermissions(request, async () => 'allowed-once')
 
-  const frames: { frame: AcpFrame; at: number }[] = []
-  let waiter: { readonly accept: (frame: AcpFrame) => boolean; readonly settle: (frame: AcpFrame) => void } | undefined
-  client.onNotification = frame => {
-    frames.push({ frame, at: Date.now() })
-    const pending = waiter
-    if (pending === undefined || !pending.accept(frame)) return
-    waiter = undefined
-    pending.settle(frame)
-  }
-  const counters = { permissionsAnswered: 0 }
-  // Approve through the very bridge production uses, so this also exercises the
-  // fail-closed path rather than a test-only shortcut.
-  client.onPermissionRequest = request =>
-    bridgePermissions(request, async () => 'allowed-once').then(decision => {
-      counters.permissionsAnswered += 1
-      return decision
-    })
-  // Cursor's two blocking custom methods stall the turn when left unanswered;
-  // give them the same benign auto-answers the factory gives in production,
-  // so a question the test is not about cannot wedge the turn.
-  if (dialect.id === 'cursor') {
-    client.onExtensionRequest = frame => {
-      if (typeof frame.id !== 'number') return false
-      if (frame.method === 'cursor/ask_question') { client.reply(frame.id, { outcome: { outcome: 'skipped' } }); return true }
-      if (frame.method === 'cursor/create_plan') { client.reply(frame.id, { outcome: { outcome: 'cancelled' } }); return true }
-      return false
-    }
-  }
-
-  const initializeResult = await bounded(`${dialect.id}: initialize`, client.request('initialize', {
-    protocolVersion: 1,
-    // Mirrors the runner's handshake, including both subagent-capability
-    // spellings (the draft field and the _meta.jetbrains.air fallback the
-    // released SDK keeps): the live suite must exercise what production
-    // actually sends, or a field the real agents reject would pass here and
-    // break every real session.
-    clientCapabilities: {
-      fs: { readTextFile: true, writeTextFile: true },
-      terminal: true,
-      subagents: {},
-      _meta: {
-        ...(dialect.capabilities.metaSubagents === true ? { subagents: {} } : {}),
-        // Mirrors the runner: codex-acp 2.5.0's AIR tool-call contract serves
-        // command output only to clients that declared this key (2026-11-01).
-        ...(dialect.capabilities.terminalOutputDelta === true ? { terminal_output_delta: true } : {}),
-        jetbrains: { air: { version: 1, capabilities: ['nativeSubagentSessions', 'asyncTasks'] } },
-      },
+  let stream: AcpAssistantStream | undefined
+  const deltas: { text: string; settled: boolean }[] = []
+  // Through the same adapter production uses. Handing the runner a no-op
+  // frame sink here would make every streaming assertion below pass vacuously
+  // — the frames reach the client but never the turn.
+  const runner = new AcpTurnRunner(
+    adaptClient(client, grokDialect),
+    {
+      cwd,
+      ...(options.modeId === undefined ? {} : { modeId: options.modeId }),
     },
-  }))
-  client.notify('initialized', {})
-  // Mirror the runner's auth policy exactly: cursor authenticates before
-  // session/new; qoder opens first and authenticates only if refused.
-  const authenticate = async () => {
-    const methodId = dialect.authenticateMethodId ?? dialect.authenticateMethodIdFrom?.(initializeResult)
-    if (methodId === undefined) return
-    await bounded(`${dialect.id}: authenticate`, client.request('authenticate', { methodId }))
-  }
-  const onDemand = dialect.authenticateOnDemand === true
-  if (!onDemand) await authenticate()
-
-  const openSession = () => bounded(`${dialect.id}: session/new`, client.request('session/new', { cwd: CWD, mcpServers: [] }))
-  let rawSession: unknown
-  try {
-    rawSession = await openSession()
-  } catch (error) {
-    if (!onDemand || dialect.sessionNeedsAuthenticate?.(error) !== true) throw error
-    await authenticate()
-    rawSession = await openSession()
-  }
-  const session = AcpClient.toSession(rawSession, dialect)
-
-  // grok needs no mode; claude ships in bypassPermissions and must be switched
-  // to Manual or it will never ask for anything.
-  if (options.modeId !== undefined) {
-    await bounded(`${dialect.id}: session/set_mode`, client.request('session/set_mode', { sessionId: session.sessionId, modeId: options.modeId }))
-  }
-
-  const first = session.models[0]?.id
-  if (first !== undefined && dialect.id !== 'claude') {
-    await bounded(`${dialect.id}: session/set_model`, client.request('session/set_model', { sessionId: session.sessionId, modelId: first }).catch(() => {}))
-  }
-
-  const live: LiveSession = {
-    client,
-    session,
-    frames,
-    plainFrames: () => frames.map(entry => entry.frame),
-    answer: () => answerOf(frames.map(entry => entry.frame), dialect),
-    prompt: async (text, images = []) => await client.request('session/prompt', {
-      sessionId: session.sessionId,
-      prompt: [{ type: 'text', text }, ...images],
-      ...(first === undefined || dialect.id === 'claude' ? {} : { modelId: first }),
-    }) as { stopReason?: unknown },
-    waitFor: (accept, timeoutMs, what) => new Promise<AcpFrame>((resolve, reject) => {
-      const seen = frames.find(entry => accept(entry.frame))
-      if (seen !== undefined) { resolve(seen.frame); return }
-      const timer = setTimeout(() => reject(new Error(`no ${what} within ${String(timeoutMs)}ms`)), timeoutMs)
-      // A late settle after the timer fired resolves an already-rejected
-      // promise — a no-op, so no bookkeeping is needed here.
-      waiter = { accept, settle: frame => { clearTimeout(timer); resolve(frame) } }
-    }),
-    waitForFirstContentFrame: timeoutMs => live.waitFor(isTurnContentFrame, timeoutMs, 'content frame'),
-    close: () => client.close(),
-    counters,
-  }
-  return live
-}
-
-/** The turn's assistant text, folded through the same projection production uses. */
-function answerOf(frames: readonly AcpFrame[], dialect: AcpDialect): string {
-  const events = projectTurn(frames, { turn: 1, dialect })
-  return events
-    .filter(event => event.type === 'assistant/message')
-    .flatMap(event => (event.payload as { message: { content: { type: string; text: string }[] } }).message.content)
-    .filter(block => block.type === 'text')
-    .map(block => block.text)
-    .join('')
-}
-
-/**
- * One live round over any transport.
- *
- * Built on the opened-session helper above; the only thing it adds is driving
- * one prompt to completion and projecting the result.
- */
-async function runLiveAgentOver(
-  transport: AcpTransport,
-  dialect: AcpDialect,
-  options: { readonly modeId?: string; readonly prompt?: string } = {},
-): Promise<LiveResult> {
-  const live = await openLiveAgentOver(transport, dialect, options)
-  try {
-    await live.prompt(options.prompt ?? PROMPT)
-    const events = projectTurn(live.plainFrames(), { turn: 1, dialect })
-    return {
-      session: live.session,
-      frames: live.plainFrames(),
-      answer: answerOf(live.plainFrames(), dialect),
-      toolNames: events
-        .filter(event => event.type === 'tool/call')
-        .map(event => (event.payload as { name: string }).name),
-      toolOutputs: events
-        .filter(event => event.type === 'tool/result')
-        .map(event => {
-          const message = (event.payload as { message: { content: { text: string }[] } }).message
-          return message.content.map(part => part.text).join('')
-        }),
-      permissionsAnswered: live.counters.permissionsAnswered,
-    }
-  } finally {
-    live.close()
-  }
-}
-
-/* ----------------------------------------------------------------------- */
-/* Shared helpers for the acceptance block below.                           */
-/* ----------------------------------------------------------------------- */
-
-/** Long enough for a cold agent process, short enough to fail with its own name. */
-const HANDSHAKE_DEADLINE_MS = 90_000
-
-/**
- * Bound one handshake step, so a silent agent fails naming the step instead of
- * eating the whole test budget on a connection nobody is reading.
- */
-function bounded<T>(label: string, work: Promise<T>): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`${label}: agent did not answer within ${String(HANDSHAKE_DEADLINE_MS)}ms`))
-    }, HANDSHAKE_DEADLINE_MS)
-    work.then(
-      value => { clearTimeout(timer); resolve(value) },
-      error => { clearTimeout(timer); reject(error) },
-    )
-  })
-}
-
-/**
- * Spawn a fresh `grok agent serve`, hand the caller a transport for it, and
- * make sure the process is gone when the case is done.
- */
-async function withGrokServe(run: (transport: AcpTransport) => Promise<void>): Promise<void> {
-  const port = 24_400 + Math.floor(Math.random() * 400)
-  const secret = randomUUID()
-  const serve = spawn(
-    'grok',
-    ['agent', 'serve', '--bind', `127.0.0.1:${port}`, '--secret', secret],
-    { cwd: CWD, stdio: 'ignore' },
   )
-  try {
-    await waitForGrokServe(port, secret)
-    await run(new WebSocketAcpTransport({ url: grokWebSocketUrl(`127.0.0.1:${port}`, secret) }))
-  } finally {
-    serve.kill('SIGTERM')
-  }
-}
-
-const CRC_TABLE = (() => {
-  const table = new Uint32Array(256)
-  for (let n = 0; n < 256; n++) {
-    let c = n
-    for (let bit = 0; bit < 8; bit++) c = (c & 1) !== 0 ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1)
-    table[n] = c >>> 0
-  }
-  return table
-})()
-
-function crc32(bytes: Uint8Array): number {
-  let c = 0xffffffff
-  for (const byte of bytes) c = CRC_TABLE[(c ^ byte) & 0xff]! ^ (c >>> 8)
-  return (c ^ 0xffffffff) >>> 0
-}
-
-/** One PNG chunk: length, type, payload, CRC. */
-function pngChunk(type: string, data: Uint8Array): Uint8Array {
-  const out = new Uint8Array(12 + data.length)
-  const view = new DataView(out.buffer)
-  view.setUint32(0, data.length)
-  for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i)
-  out.set(data, 8)
-  const crcInput = new Uint8Array(4 + data.length)
-  crcInput.set(out.subarray(4, 8), 0)
-  crcInput.set(data, 4)
-  view.setUint32(8 + data.length, crc32(crcInput))
-  return out
-}
-
-/**
- * A 64×64 PNG of four solid quadrants — red, green, blue, yellow — as an ACP
- * image block in the exact shape the runner puts on the wire.
- *
- * Built in-process on purpose: no fixture file, no dependency, and a
- * deterministic picture is what makes a "name the four colors" answer
- * checkable at all.
- */
-function fourColorImage(): PromptImageBlock {
-  const size = 64
-  const half = size / 2
-  const quadrants: [number, number, number][] = [
-    [255, 0, 0],   // top-left: red
-    [0, 255, 0],   // top-right: green
-    [0, 0, 255],   // bottom-left: blue
-    [255, 255, 0], // bottom-right: yellow
-  ]
-  const raw: number[] = []
-  for (let y = 0; y < size; y++) {
-    raw.push(0) // filter type: none
-    for (let x = 0; x < size; x++) {
-      const [r, g, b] = quadrants[(y < half ? 0 : 2) + (x < half ? 0 : 1)]!
-      raw.push(r, g, b)
+  const openStream = () => {
+    let attempt = 0
+        stream = new AcpAssistantStream({
+          emit: () => {},
+          nextRevision: () => ++attempt,
+          sessionId: 'live',
+          attempt: 1,
+          turn: 1,
+          step: 1,
+        })
+    stream.start()
+    return {
+      start: () => {},
+      textDelta: (text: string) => { deltas.push({ text, settled: stream?.finished ?? false }) },
+      reasoningDelta: () => {},
+      records: () => [],
+      settle: () => {},
+      abandon: () => {},
     }
   }
-  const ihdr = new Uint8Array(13)
-  const view = new DataView(ihdr.buffer)
-  view.setUint32(0, size)
-  view.setUint32(4, size)
-  ihdr[8] = 8 // bit depth
-  ihdr[9] = 2 // color type: truecolor RGB
-  const png = new Uint8Array([
-    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, // signature
-    ...pngChunk('IHDR', ihdr),
-    ...pngChunk('IDAT', deflateSync(Uint8Array.from(raw))),
-    ...pngChunk('IEND', new Uint8Array(0)),
-  ])
-  return { type: 'image', data: Buffer.from(png).toString('base64'), mimeType: 'image/png' }
-}
 
-/** One tool-related update frame, flattened for shape assertions. */
-type ToolUpdate = { readonly id: string; readonly kind: string; readonly status: unknown; readonly frame: AcpFrame }
+  // Through TurnContext, which is where the runner reads it — the same place
+  // dispatch puts it. Passing it as a runner option tested a path nothing uses.
+  const result = await runner.run({
+    kind: 'enter',
+    messages: [{ role: 'user', content: [{ type: 'text', text: PROMPT }] }],
+  }, { sessionId: 's1', position: { turn: 1, step: 1 }, produce: r => [], write: () => 1, openStream })
+  stream?.settle('assistant/message', () => 1)
 
-/** The tool_call / tool_call_update frames of a turn, in arrival order. */
-function toolUpdates(frames: readonly AcpFrame[]): ToolUpdate[] {
-  const updates: ToolUpdate[] = []
-  for (const frame of frames) {
-    if (frame.method !== 'session/update') continue
-    const update = (frame.params as { update?: Record<string, unknown> } | null)?.update ?? {}
-    const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
-    if (kind !== 'tool_call' && kind !== 'tool_call_update') continue
-    updates.push({
-      id: typeof update['toolCallId'] === 'string' ? update['toolCallId'] : '',
-      kind,
-      status: update['status'],
-      frame,
-    })
-  }
-  return updates
-}
-
-/** The content-chunk text one frame carries (assistant text or thought), if any. */
-function contentChunkText(frame: AcpFrame): string {
-  if (frame.method !== 'session/update') return ''
-  const update = (frame.params as { update?: Record<string, unknown> } | null)?.update ?? {}
-  const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
-  if (kind !== 'agent_message_chunk' && kind !== 'agent_thought_chunk') return ''
-  const content = update['content'] as { text?: unknown } | undefined
-  return typeof content?.['text'] === 'string' ? content['text'] : ''
+  return { result, deltas, stream, client }
 }
 
 /**
- * Whether one frame is the turn actually working: a non-empty text or thought
- * chunk, or a tool frame. Session chatter (`available_commands_update` and
- * friends) is not — cancelling against chatter measures nothing.
+ * The segmented case's prompt: a real tool run plus a report. Running
+ * something is the point — the segmenter only finds a boundary once a tool
+ * batch has settled — and demanding the report afterwards is what makes the
+ * multi-segment shape the expected outcome rather than a lucky one. Cheap
+ * and deterministic: one echo, one line of answer.
  */
-function isTurnContentFrame(frame: AcpFrame): boolean {
-  if (frame.method !== 'session/update') return false
-  const update = (frame.params as { update?: Record<string, unknown> } | null)?.update ?? {}
-  const kind = typeof update['sessionUpdate'] === 'string' ? update['sessionUpdate'] : ''
-  if (kind === 'agent_message_chunk' || kind === 'agent_thought_chunk') return contentChunkText(frame) !== ''
-  return kind === 'tool_call' || kind === 'tool_call_update'
+const TOOL_REPORT_PROMPT =
+  'Run the shell command `echo acp-live-ok` and then tell me exactly what it printed.'
+
+/** What one segmented live turn collected, for the assertions that read it. */
+type SegmentedTurn = {
+  /** Every runSteps call's return, in call order; null means "the turn goes on". */
+  readonly calls: (StepEndReason | null)[]
+  /** Every event appended to the log, in write order, tagged with the call that wrote it. */
+  readonly appended: { readonly type: string; readonly payload: Record<string, unknown>; readonly call: number }[]
+  /** Each call's live stream, whose records() is what that call's message embeds. */
+  readonly streams: AcpAssistantStream[]
+  /** How many events were on the log when the prompt reply resolved. */
+  readonly promptSettledOrder: number
+  /** The prompt reply's own result object, as the agent sent it. */
+  readonly promptReply: { readonly stopReason?: unknown } | undefined
 }
 
-/** The prompt that keeps a command running long enough to be cancelled mid-flight. */
-const CANCEL_PROMPT =
-  'Run the shell command `sleep 45`, and only after it finishes reply with the single word DONE. Do not send any message before the command finishes.'
-
 /**
- * A command that keeps one tool call open long enough for mid-flight frames to
- * exist. A plain `sleep 3` on purpose: compound `sleep 3 && echo …` commands
- * reproducibly fail inside the local claude relay's upstream (`API Error: 405`,
- * isolated by probe — `sleep 3` alone completes, the compound form fails
- * regardless of the echoed token). The shape assertions need the frames, not
- * the output text.
- */
-const TOOL_PROMPT_SLOW =
-  'Run the shell command `sleep 3`, then tell me exactly what the command printed.'
-
-describe.skipIf(!LIVE)('live ACP agents through the shared layer', () => {
-  it('claude: opens a session, answers, and projects its tool call', async () => {
-    const result = await runLiveAgent(CLAUDE_ACP, claudeDialect, { modeId: 'default' })
-    expect(result.session.sessionId).toBeTruthy()
-    expect(result.answer.length).toBeGreaterThan(0)
-    // The projected card carries the MAPPED name (Task 4's toolNameMap:
-    // Anthropic's "Bash" renders as DSH's "bash"); the raw agent name never
-    // reaches the log.
-    expect(result.toolNames).toContain('bash')
-    // The regression this whole dialect split exists to prevent.
-    expect(result.toolOutputs.join('')).toContain('ACP_LIVE_OK')
-  }, 240_000)
-
-  it('codex: opens a session, answers, and projects its tool call', async () => {
-    const result = await runLiveAgent(CODEX_ACP, codexDialect)
-    expect(result.session.sessionId).toBeTruthy()
-    expect(result.session.models.length).toBeGreaterThan(0)
-    expect(result.answer.length).toBeGreaterThan(0)
-    expect(result.toolNames.length).toBeGreaterThan(0)
-    // codex never puts results in `content`: 1.x carried them in
-    // rawOutput.formatted_output, 2.5.0's AIR contract in terminal_output_delta
-    // chunks — reading `content` alone silently drops every tool output.
-    expect(result.toolOutputs.join('')).toContain('ACP_LIVE_OK')
-  }, 240_000)
-
-  it('answers a permission request and the turn continues', async () => {
-    const result = await runLiveAgent('claude-agent-acp', claudeDialect, {
-      modeId: 'default',
-      prompt: PROMPT_REQUIRING_APPROVAL,
-    })
-    // claude in Manual mode asks before writing outside the workspace. If this
-    // ever reads 0, the mode did not take effect and this test is proving
-    // nothing — so assert it fired rather than tolerating either outcome.
-    expect(result.permissionsAnswered).toBeGreaterThan(0)
-    // The part that actually matters: the approval was answered, the tool ran,
-    // and the agent went on to finish its turn. An unanswered request shows up
-    // here as an empty answer.
-    expect(result.answer.length).toBeGreaterThan(0)
-  }, 240_000)
-
-  it('grok: opens a session over the WebSocket transport and projects its tool call', async () => {
-    const port = 24_400 + Math.floor(Math.random() * 400)
-    const secret = randomUUID()
-    const serve = spawn(
-      'grok',
-      ['agent', 'serve', '--bind', `127.0.0.1:${port}`, '--secret', secret],
-      { cwd: CWD, stdio: 'ignore' },
-    )
-    try {
-      await waitForGrokServe(port, secret)
-      const result = await runLiveAgentOver(
-        new WebSocketAcpTransport({ url: grokWebSocketUrl(`127.0.0.1:${port}`, secret) }),
-        grokDialect,
-      )
-      expect(result.session.sessionId).toBeTruthy()
-      expect(result.session.models.length).toBeGreaterThan(0)
-      expect(result.answer.length).toBeGreaterThan(0)
-      // Mapped like claude's above: grok's run_terminal_command renders as
-      // DSH's "bash" (Task 4's toolNameMap).
-      expect(result.toolNames).toContain('bash')
-      // grok nests its output one level deeper than codex or claude.
-      expect(result.toolOutputs.join('')).toContain('ACP_LIVE_OK')
-    } finally {
-      serve.kill('SIGTERM')
-    }
-  }, 240_000)
-
-  it('qoder: opens a session, answers, and projects its tool call', async () => {
-    // The CN binary here is qoderclicn, spawned with `--acp` from the shared
-    // table. A logged-in CLI opens without authenticate; if the login has
-    // expired the helper's on-demand step logs in and retries.
-    const result = await runLiveAgent(QODER_ACP, qoderDialect)
-    expect(result.session.sessionId).toBeTruthy()
-    expect(result.session.models.length).toBeGreaterThan(0)
-    expect(result.answer.length).toBeGreaterThan(0)
-    // Qoder names the tool in _meta.qoder.toolName; the map renders it as bash.
-    expect(result.toolNames).toContain('bash')
-    expect(result.toolOutputs.join('')).toContain('ACP_LIVE_OK')
-  }, 240_000)
-
-  it('qoder: answers a permission request and the turn continues', async () => {
-    // A leftover from a previous run would make the agent's write tool report
-    // "updated" instead of "created" — clear the path so the prompt means the
-    // same thing every time this case runs.
-    rmSync('/tmp/threadharbor-qoder-live.txt', { force: true })
-    const result = await runLiveAgent(QODER_ACP, qoderDialect, {
-      prompt: 'Create a file at /tmp/threadharbor-qoder-live.txt containing the word ok, using the write tool. Then tell me it is done.',
-    })
-    // Qoder's default mode asks before writes. If this reads 0, the prompt
-    // stopped triggering an edit and the test is proving nothing.
-    expect(result.permissionsAnswered).toBeGreaterThan(0)
-    expect(result.answer.length).toBeGreaterThan(0)
-    expect(result.toolOutputs.join('')).toContain('File created successfully')
-  }, 240_000)
-})
-
-/* ----------------------------------------------------------------------- */
-/* Acceptance: cancel, image, tool frames, replay — each against all five.  */
-/* ----------------------------------------------------------------------- */
-
-/**
- * The four acceptance cases of the session-parity spec (§11), per agent. The
- * capability table is these cases' input (spec §4): a cell that lies makes
- * exactly the case that reads it go red, so every case asserts the cell it
- * exercises before it drives the agent.
+ * Drive one real codex turn through runSteps the way the takeover loop does.
  *
- * Note on the tool-frame case, per the Task 3 ruling (spec §6.1/§11): the DSH
- * host has no supported way to update an already-written session event in place
- * (SurfaceOp is append/replace only, and a log-only `tool/update` is not a
- * known event type — writing one bricks session reload). ThreadHarbor therefore
- * never emits `tool/update`: claude's card appears at the FIRST frame and the
- * result closes it. These cases pin exactly that shape — never a live tick.
+ * Everything is the production wiring — the adapted client port, a runner
+ * carrying the dialect (the segmenter and the live cards exist only then),
+ * the real content writer, and a real per-call stream like entry.ts's
+ * `openAssistantStream` — plus three observation taps that change nothing on
+ * the wire: the call tag on each append, the log's size when the prompt reply
+ * resolved, and the reply result itself. The client is closed before the
+ * assertions run; they read only what this collected.
  */
-
-/**
- * Cancel: first content frame → `session/cancel` → the turn ends fast and
- * silent. The cancel targets the first CONTENT frame (a message chunk or a
- * tool frame), not session chatter — an `available_commands_update` that
- * arrives with the prompt is not the turn working yet, and cancelling then
- * measures nothing (measured live: codex answered such a cancel by running the
- * task to `end_turn`).
- */
-async function cancelCase(dialect: AcpDialect, open: () => Promise<LiveSession>): Promise<void> {
-  expect(dialect.capabilities.cancelsTurns).toBe(true)
-  const live = await open()
-  try {
-    const replying = live.prompt(CANCEL_PROMPT)
-    await live.waitForFirstContentFrame(90_000)
-    const cancelSentAt = Date.now()
-    live.client.notify('session/cancel', { sessionId: live.session.sessionId })
-    const reply = await replying
-    // The turn ends within ~5s of the cancel, and ends as a cancellation.
-    expect(reply.stopReason).toBe('cancelled')
-    expect(Date.now() - cancelSentAt).toBeLessThan(5_000)
-    // 中止后无内容落库, wire-level: once the turn has ended the agent goes
-    // quiet. (Frames still in flight between the stop and this reply are the
-    // agent's own trailing words; production drops those, which is pinned
-    // hermetically by the dispatch package's cancel.spec.ts.)
-    const repliedAt = Date.now()
-    await new Promise(resolve => setTimeout(resolve, 1_500))
-    const late = live.frames
-      .filter(entry => entry.at > repliedAt)
-      .map(entry => contentChunkText(entry.frame))
-      .filter(text => text !== '')
-    expect(late).toEqual([])
-  } finally {
-    live.close()
+async function runStepsLive(prompt: string, options?: {
+  subagents?: SubagentSessionHost
+  dialect?: AcpDialect
+  command?: string
+}): Promise<SegmentedTurn> {
+  const dialect = options?.dialect ?? codexDialect
+  const command = options?.command ?? CODEX_ACP
+  const cwd = await mkdtemp(join(tmpdir(), 'th-acp-runsteps-'))
+  const transport = new StdioAcpTransport({ command, args: stdioArgsForDialect(dialect), cwd, onDiagnostic: () => {} })
+  const client = new AcpClient(transport, dialect)
+  // cursor 的两个阻塞式自定义方法：按生产 client 的方式跳过/取消，否则回合会干等。
+  client.onExtensionRequest = frame => {
+    if (dialect.id !== 'cursor' || typeof frame.id !== 'number') return false
+    if (frame.method === 'cursor/ask_question') { client.reply(frame.id, { outcome: { outcome: 'skipped' } }); return true }
+    if (frame.method === 'cursor/create_plan') { client.reply(frame.id, { outcome: { outcome: 'cancelled' } }); return true }
+    return false
   }
-}
+  // Through the very bridge production uses, so a real command execution is
+  // approved the way a session approves it.
+  client.onPermissionRequest = request => bridgePermissions(request, async () => 'allowed-once')
 
-/** Image: the agent must name all four quadrant colors of the test picture. */
-const IMAGE_PROMPT =
-  'The attached image is a 2×2 grid of four solid colors. Look at the image and name each quadrant color, one per line, in the form "top-left: <color>", "top-right: <color>", "bottom-left: <color>", "bottom-right: <color>". No other text.'
-
-function expectFourColors(answer: string): void {
-  const text = answer.toLowerCase()
-  for (const color of ['red', 'green', 'blue', 'yellow'] as const) {
-    expect(text, `expected the answer to name ${color}, got: ${answer}`).toContain(color)
+  const appended: SegmentedTurn['appended'] = []
+  let promptSettledOrder = -1
+  let promptReply: SegmentedTurn['promptReply']
+  const base = adaptClient(client, dialect)
+  const port: AcpClientPort = {
+    request: async (method, params) => {
+      const reply = await base.request(method, params)
+      if (method === 'session/prompt') promptSettledOrder = appended.length
+      return reply
+    },
+    notify: (method, params) => { base.notify(method, params) },
+    onFrame: handler => base.onFrame(frame => {
+      // The reply frame reaches onFrame before the request promise resolves
+      // (client.ts answers its pending call after observing the frame), so
+      // this holds the agent's own usage report for the assertions below.
+      const result = (frame as { result?: { stopReason?: unknown } }).result
+      if (frame.method === undefined && result !== undefined && result.stopReason !== undefined) promptReply = result
+      handler(frame)
+    }),
   }
-}
-
-async function imageCase(dialect: AcpDialect, open: () => Promise<LiveSession>): Promise<string> {
-  expect(dialect.capabilities.acceptsImageContent).toBe(true)
-  const live = await open()
-  try {
-    await live.prompt(IMAGE_PROMPT, [fourColorImage()])
-    return live.answer()
-  } finally {
-    live.close()
-  }
-}
-
-/**
- * Tool frames: the opening frame opens the card, the terminal frame closes it
- * with the result, and everything in between folds without emitting — the
- * incremental projection's contract, checked against the agent's real frames.
- */
-/**
- * Tool frames: the opening frame opens the card, the terminal frame closes it
- * with the result, and everything in between folds without emitting — the
- * incremental projection's contract, checked against the agent's real frames.
- *
- * The raw frame COUNT is deliberately not asserted: it drifts with the build
- * (grok's 2026-10-13 probe recorded two frames for one call; today's build adds
- * a kind/title update in between). What does not drift, and what production
- * rests on, is the status shape and the projection: `in_progress` agents keep
- * frames flowing across the execution window; `two_frame` agents never carry a
- * non-terminal status after the opening frame — no "running" tick, by cell.
- */
-async function toolShapeCase(dialect: AcpDialect, open: () => Promise<LiveSession>): Promise<void> {
-  const shape = dialect.capabilities.toolFrameShape
-  const live = await open()
-  try {
-    // The slow command gives `in_progress` agents room to show their
-    // mid-flight frames; `two_frame` agents stay two-status regardless.
-    await live.prompt(shape === 'in_progress' ? TOOL_PROMPT_SLOW : PROMPT)
-    const updates = toolUpdates(live.plainFrames())
-    const ids = [...new Set(updates.map(update => update.id))]
-    expect(ids.length).toBeGreaterThanOrEqual(1)
-    for (const id of ids) {
-      const mine = updates.filter(update => update.id === id)
-      expect(mine[0]!.kind).toBe('tool_call') // the opening frame is a call
-      expect(mine.at(-1)!.status).toBe('completed') // the terminal frame closes it
-      const midFlight = mine.slice(1, -1)
-      if (shape === 'in_progress') {
-        // Frames keep arriving across the execution window (the card's title
-        // and output change live); the flattened card shows first-frame state.
-        expect(midFlight.length).toBeGreaterThan(0)
-      } else {
-        // No mid-flight frame carries a non-terminal status: these agents never
-        // show "running", they go straight from issued to completed.
-        expect(midFlight.some(update => typeof update.status === 'string' && update.status !== 'completed' && update.status !== 'failed')).toBe(false)
-      }
-    }
-    // The mid-turn write production performs: the first frame alone opens the card.
-    const card = projectToolCallFrame(updates[0]!.frame, { turn: 1, step: 1, dialect })
-    expect(card?.type).toBe('tool/call')
-    // Incremental projection: exactly one card and one result per call, and —
-    // the Task 3 ruling, negative form — never a `tool/update` event.
-    const events = projectTurnIncremental(live.plainFrames(), { turn: 1, dialect })
-    expect(events.filter(event => event.type === 'tool/call').length).toBe(ids.length)
-    expect(events.filter(event => event.type === 'tool/result').length).toBe(ids.length)
-    expect(events.some(event => event.type === 'tool/update')).toBe(false)
-  } finally {
-    live.close()
-  }
-}
-
-/**
- * Replay: ask in one external session, close it, and answer from it in a fresh
- * one. The two rounds take separate openers on purpose — a fresh agent process
- * for the second round is the production situation itself (the connection is
- * gone; only the host transcript carries the history) and rules out any
- * server-side session memory faking the pass.
- *
- * The remembered fact is a plain personal name on purpose. The first draft used
- * a "code word", and grok's safety policy refused to repeat anything shaped
- * like a credential ("I won't repeat that code word…") — a refusal about the
- * prompt, not about replay. A fact carries the same mechanism with no
- * credential tripwire.
- */
-const CAT_NAME = 'Marmalade'
-const REPLAY_Q1 = `Please remember one thing about me: the name of my cat is ${CAT_NAME}. Reply with exactly: noted.`
-const REPLAY_Q2 = 'What is the name of my cat? Reply with just the name, nothing else.'
-
-async function replayCase(
-  dialect: AcpDialect,
-  openFirst: () => Promise<LiveSession>,
-  openSecond: () => Promise<LiveSession>,
-): Promise<void> {
-  // Turn 1: plant the code word in a real external session, then close it.
-  const first = await openFirst()
-  let firstAnswer = ''
-  try {
-    await first.prompt(REPLAY_Q1)
-    firstAnswer = first.answer()
-    expect(firstAnswer.length).toBeGreaterThan(0)
-  } finally {
-    first.close()
-  }
-
-  // The production replay text, byte-for-byte: switch-shared renders the
-  // transcript as 【用户】/【助手】 lines and the runner wraps it in
-  // 【之前对话】/【当前问题】 for the first request of a fresh external
-  // session. The renderer itself is pinned hermetically (replay-primer.spec.ts);
-  // the live question here is whether a real, freshly opened agent answers
-  // from that text alone — its own conversation carried nothing over.
-  const replayed = `【之前对话】\n【用户】${REPLAY_Q1}\n【助手】${firstAnswer}\n\n【当前问题】\n${REPLAY_Q2}`
-
-  const second = await openSecond()
-  try {
-    await second.prompt(replayed)
-    expect(second.answer()).toContain(CAT_NAME)
-  } finally {
-    second.close()
-  }
-}
-
-/** A stdio session opener, as the case helpers take one. */
-function openStdio(
-  command: string,
-  dialect: AcpDialect,
-  options: { readonly modeId?: string } = {},
-): () => Promise<LiveSession> {
-  return () => openLiveAgent(command, dialect, options)
-}
-
-describe.skipIf(!LIVE)('live acceptance: cancel, image, tool frames, replay (five agents)', () => {
-  it('claude: session/cancel ends the turn within 5s as cancelled, then silence', async () => {
-    await cancelCase(claudeDialect, openStdio(CLAUDE_ACP, claudeDialect, { modeId: 'default' }))
-  }, 240_000)
-
-  it('codex: session/cancel ends the turn within 5s as cancelled, then silence', async () => {
-    await cancelCase(codexDialect, openStdio(CODEX_ACP, codexDialect))
-  }, 240_000)
-
-  it('grok: session/cancel ends the turn within 5s as cancelled, then silence', async () => {
-    await withGrokServe(transport => cancelCase(grokDialect, () => openLiveAgentOver(transport, grokDialect)))
-  }, 240_000)
-
-  it('cursor: session/cancel ends the turn within 5s as cancelled, then silence', async () => {
-    await cancelCase(cursorDialect, openStdio(CURSOR_ACP, cursorDialect))
-  }, 240_000)
-
-  it('qoder: session/cancel ends the turn within 5s as cancelled, then silence', async () => {
-    await cancelCase(qoderDialect, openStdio(QODER_ACP, qoderDialect))
-  }, 240_000)
-
-  it('codex: names the four quadrant colors of an image block', async () => {
-    expectFourColors(await imageCase(codexDialect, openStdio(CODEX_ACP, codexDialect)))
-  }, 240_000)
-
-  it('grok: names the four quadrant colors of an image block', async () => {
-    await withGrokServe(async transport => {
-      expectFourColors(await imageCase(grokDialect, () => openLiveAgentOver(transport, grokDialect)))
-    })
-  }, 240_000)
-
-  it('cursor: names the four quadrant colors of an image block', async () => {
-    expectFourColors(await imageCase(cursorDialect, openStdio(CURSOR_ACP, cursorDialect)))
-  }, 240_000)
-
-  it('qoder: names the four quadrant colors of an image block', async () => {
-    expectFourColors(await imageCase(qoderDialect, openStdio(QODER_ACP, qoderDialect)))
-  }, 240_000)
-
-  it('claude: the capability table declines images, so the router holds them back (拦下)', async () => {
-    // This cell IS the branch: production routes by it (promptContent in the
-    // dispatch package), never puts an image block on claude's wire, and the
-    // writer turns the held-back attachment into the 未送达 row — that branch
-    // is driven end to end in the dispatch live spec. The spec's anti-drift
-    // rule (§4) makes this the cell the live suite pins for claude.
-    expect(claudeDialect.capabilities.acceptsImageContent).toBe(false)
+  // The dialect rides the runner options — without it there is no segmenter
+  // and no live-card binding, and every assertion below would pass vacuously.
+  const runner = new AcpTurnRunner(port, {
+    cwd,
+    dialect,
+    ...(options?.subagents === undefined ? {} : { subagents: options.subagents }),
   })
 
-  it('claude: card opens at the first tool frame, result closes it, no tool/update', async () => {
-    await toolShapeCase(claudeDialect, openStdio(CLAUDE_ACP, claudeDialect, { modeId: 'default' }))
-  }, 240_000)
-
-  it('codex: tool frames are exactly call + completed, projected as one card and one result', async () => {
-    await toolShapeCase(codexDialect, openStdio(CODEX_ACP, codexDialect))
-  }, 240_000)
-
-  it('grok: tool frames are exactly call + completed, projected as one card and one result', async () => {
-    await withGrokServe(transport => toolShapeCase(grokDialect, () => openLiveAgentOver(transport, grokDialect)))
-  }, 240_000)
-
-  it('cursor: card opens at the first tool frame, result closes it, no tool/update', async () => {
-    await toolShapeCase(cursorDialect, openStdio(CURSOR_ACP, cursorDialect))
-  }, 240_000)
-
-  it('qoder: tool frames are call + optional terminal output + completed, one card and one result', async () => {
-    await toolShapeCase(qoderDialect, openStdio(QODER_ACP, qoderDialect))
-  }, 240_000)
-
-  it('qoder: session/set_config_option switches the model and the agent reports it back', async () => {
-    // The picker's choice travels the config option Qoder publishes in
-    // session/new (id "model", category "model") — the protocol's write path,
-    // not an undocumented prompt param. The agent confirms the write either in
-    // the reply or in a following config_option_update notification; either
-    // name must be gmodel, the value the dialect reads for GLM-5.3.
-    const live = await openStdio(QODER_ACP, qoderDialect)()
-    try {
-      const reply = await live.client.request('session/set_config_option', {
-        sessionId: live.session.sessionId,
-        configId: 'model',
-        value: 'gmodel',
+  let activeStep = 0
+  const write = makeContentWriter((type, payload) => ({
+    seq: appended.push({ type, payload: payload as Record<string, unknown>, call: activeStep }),
+  }))
+  let attempt = 0
+  let revision = 0
+  const streams: AcpAssistantStream[] = []
+  const turnOf = (step: number): TurnContext => ({
+    sessionId: 's1',
+    position: { turn: 1, step },
+    produce: result => projectStepContent(result.frames, {
+      turn: 1,
+      step,
+      dialect,
+      ...(result.stream === undefined ? {} : { stream: result.stream }),
+    }),
+    write,
+    openStream: () => {
+      const stream = new AcpAssistantStream({
+        emit: () => {},
+        nextRevision: () => ++revision,
+        sessionId: 'live',
+        attempt: ++attempt,
+        turn: 1,
+        step,
       })
-      if (JSON.stringify(reply).includes('gmodel')) return
-      await live.waitFor(
-        frame => frame.method === 'session/update'
-          && (frame.params as { update?: { sessionUpdate?: string } }).update?.sessionUpdate === 'config_option_update'
-          && JSON.stringify(frame.params).includes('gmodel'),
-        8_000,
-        'the config_option_update echo naming gmodel',
-      )
-    } finally {
-      live.close()
-    }
-  }, 60_000)
+      streams.push(stream)
+      return stream
+    },
+  })
 
-  it('qoder: session/resume reattaches the conversation a closed transport left behind', async () => {
-    // initialize advertised loadSession with the resume capability; this is
-    // the wire proof that a host restart can reattach instead of rebuilding
-    // context from a text replay. One session with a real turn (measured
-    // 2026-10-20: a session opened but never prompted is never persisted, and
-    // its id resumes as INVALID_SESSION_IDENTIFIER), transport closed, a new
-    // process resuming the same id must succeed.
-    const first = await openStdio(QODER_ACP, qoderDialect)()
-    const sessionId = first.session.sessionId
-    await first.prompt('Reply with the single word ok.')
-    first.close()
-    const second = await openStdio(QODER_ACP, qoderDialect)()
-    try {
-      await second.client.request('session/resume', { sessionId, cwd: CWD, mcpServers: [] })
-    } finally {
-      second.close()
-    }
-  }, 60_000)
-
-  it('claude: a fresh session answers from the replayed previous turn', async () => {
-    // stdio: each call to the opener spawns a fresh process, which is exactly
-    // the fresh-agent situation the second round wants.
-    const opener = openStdio(CLAUDE_ACP, claudeDialect, { modeId: 'default' })
-    await replayCase(claudeDialect, opener, opener)
-  }, 240_000)
-
-  it('codex: a fresh session answers from the replayed previous turn', async () => {
-    const opener = openStdio(CODEX_ACP, codexDialect)
-    await replayCase(codexDialect, opener, opener)
-  }, 240_000)
-
-  it('grok: a fresh session answers from the replayed previous turn', async () => {
-    await withGrokServe(
-      first => withGrokServe(second => replayCase(
-        grokDialect,
-        () => openLiveAgentOver(first, grokDialect),
-        () => openLiveAgentOver(second, grokDialect),
-      )),
-    )
-  }, 240_000)
-
-  it('cursor: a fresh session answers from the replayed previous turn', async () => {
-    const opener = openStdio(CURSOR_ACP, cursorDialect)
-    await replayCase(cursorDialect, opener, opener)
-  }, 240_000)
-
-  it('qoder: a fresh session answers from the replayed previous turn', async () => {
-    const opener = openStdio(QODER_ACP, qoderDialect)
-    await replayCase(qoderDialect, opener, opener)
-  }, 240_000)
-})
-/* ----------------------------------------------------------------------- */
-/* Native subagent / async-task frames (ACP draft #1992).                    */
-/* ----------------------------------------------------------------------- */
-
-/** Where the raw delegation captures land, for fixtures and documentation. */
-const SUBAGENT_CAPTURE = new URL('./fixtures/captured-subagent-frames.json', import.meta.url)
-
-/** One delegation turn's raw frames, recorded for the fixtures file. */
-async function recordCapture(agent: string, frames: readonly AcpFrame[]): Promise<void> {
-  const { writeFile } = await import('node:fs/promises')
-  let existing: Record<string, unknown> = {}
+  const calls: (StepEndReason | null)[] = []
   try {
-    existing = JSON.parse(await (await import('node:fs/promises')).readFile(SUBAGENT_CAPTURE, 'utf8')) as Record<string, unknown>
-  } catch {
-    // First capture on this machine.
+    // The takeover loop itself: null makes the loop append the next step's
+    // boundaries and call again with a fresh position; the real end reason is
+    // the last segment. Twelve steps is far past anything this prompt can
+    // produce — a runaway loop fails here with its shape on the record.
+    for (let step = 1; step <= 12; step++) {
+      activeStep = step
+      const end = await runner.runSteps(
+        { kind: 'enter', messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] },
+        turnOf(step),
+        { first: step === 1 },
+      )
+      calls.push(end)
+      if (end !== null) break
+    }
+    return { calls, appended, streams, promptSettledOrder, promptReply }
+  } finally {
+    client.close()
   }
-  existing[agent] = { capturedAt: new Date().toISOString(), frames }
-  await writeFile(SUBAGENT_CAPTURE, `${JSON.stringify(existing, null, 2)}\n`)
 }
 
-/** The update payload of one session/update frame. */
-const updateOf = (frame: AcpFrame): Record<string, unknown> =>
-  ((frame.params as { update?: Record<string, unknown> } | undefined)?.update) ?? {}
+/** The usage the reply reported and the log may honestly carry, or nothing. */
+function reportedUsage(reply: SegmentedTurn['promptReply']): { inputTokens: number; outputTokens: number } | undefined {
+  const usage = reply === undefined ? undefined : codexDialect.readReplyUsage(reply)
+  if (usage === undefined) return undefined
+  if (!Number.isSafeInteger(usage.inputTokens) || !Number.isSafeInteger(usage.outputTokens)) return undefined
+  return { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens }
+}
 
-describe.skipIf(!LIVE)('live acceptance: native subagent and async-task frames', () => {
-  it('codex: a delegated run arrives as subagent_spawned and projects onto the subagent card', async () => {
-    const live = await openLiveAgent(CODEX_ACP, codexDialect)
-    try {
-      const reply = live.prompt(
-        'Delegate a tiny job to a subagent using your spawn/collab tool: have it compute 6*7 and report just the answer. '
-        + 'Wait for the subagent to finish, then reply with its answer.',
-      )
-      try {
-        const spawned = await live.waitFor(
-          frame => frame.method === 'session/update' && updateOf(frame)['sessionUpdate'] === 'subagent_spawned',
-          140_000,
-          'subagent_spawned frame',
-        )
-        // A collab turn that spawned but never settles would otherwise eat the
-        // whole test budget as a bare timeout; name it and keep the evidence.
-        await Promise.race([
-          reply,
-          new Promise<never>((_, reject) => {
-            setTimeout(() => { reject(new Error('turn did not settle within 80s after subagent_spawned')) }, 80_000)
-          }),
-        ])
+describe.skipIf(!LIVE)('dispatch stack against real agents', () => {
+  it('streams text while the turn is still running (claude)', async () => {
+    const { deltas, result, client } = await runDispatch(CLAUDE_ACP, claudeDialect, { modeId: 'default' })
+    expect(deltas.length).toBeGreaterThan(0)
+    // Some text must arrive while the turn is open. If everything arrives
+    // after, the turn is being replayed rather than streamed.
+    expect(deltas.some(d => !d.settled)).toBe(true)
+    expect(deltas.map(d => d.text).join('')).toContain('tide')
+    expect(result.end.kind).toBe('completed')
+    client.close()
+  }, 240_000)
 
-        const childId = updateOf(spawned)['subagentSessionId']
-        expect(typeof childId).toBe('string')
-        const events = projectTurn(live.plainFrames(), { turn: 1, dialect: codexDialect })
-        const card = events.find(event => event.type === 'tool/call'
-          && (event.payload as { name: string; callId: string }).name === 'subagent')
-        expect(card, 'the spawned run must project onto the subagent card').toBeDefined()
-        expect((card!.payload as { callId: string }).callId).toBe(childId)
-        await recordCapture('codex', live.plainFrames())
-      } catch (error) {
-        // The failure capture is the diagnosis: what the turn actually did —
-        // refused, answered directly, or hung mid-collab — is in the frames.
-        await reply.catch(() => {})
-        await recordCapture('codex-failed', live.plainFrames()).catch(() => {})
-        throw error
-      }
-    } finally {
-      live.close()
+  it('streams text while the turn is still running (codex)', async () => {
+    const { deltas, result, client } = await runDispatch(CODEX_ACP, codexDialect)
+    expect(deltas.length).toBeGreaterThan(0)
+    expect(deltas.some(d => !d.settled)).toBe(true)
+    expect(result.end.kind).toBe('completed')
+    client.close()
+  }, 240_000)
+
+  it('projects a real turn into content events', async () => {
+    const { result, client } = await runDispatch(CODEX_ACP, codexDialect)
+    const events = projectStepContent(result.frames as never[], { turn: 1, step: 1, dialect: codexDialect })
+    // Only content events: the native loop owns the boundaries around them.
+    expect(events.every(e => e.type === 'assistant/message' || e.type === 'tool/call' || e.type === 'tool/result')).toBe(true)
+    expect(events.some(e => e.type === 'assistant/message')).toBe(true)
+    client.close()
+  }, 240_000)
+
+  /**
+   * The segmented takeover against a real codex turn (Tasks 1-6 end to end).
+   *
+   * A turn that actually segmented — some later call wrote events under its
+   * own step — must span at least two runSteps calls: the first returning
+   * null after writing its segment under its own step position, the last
+   * returning the real end reason. Each segment's durable message embeds
+   * exactly its own call's stream records, a result filed by a non-final
+   * segment must be on the log before the prompt reply resolved (the live
+   * result, not a turn-end replay), and the final segment's message carries
+   * the usage the reply itself reported. Model mood is tolerated where it is
+   * real: codex may answer without touching a tool, and a tool it runs as
+   * its very last act forms no boundary at all (the segmenter needs fresh
+   * content after the batch settles) — both turns are one call, and the
+   * branch is read off what the frames actually wrote, not off what the
+   * prompt hoped for.
+   */
+  it('a real tool turn spans several runSteps calls with live results', async () => {
+    const { calls, appended, streams, promptSettledOrder, promptReply } = await runStepsLive(TOOL_REPORT_PROMPT)
+
+    // The turn produced something, and every event was written under the
+    // step position of the call that wrote it — the loop's numbering and
+    // the log agree all the way through, first call included.
+    expect(appended.length, 'the turn wrote nothing').toBeGreaterThan(0)
+    for (const event of appended) {
+      expect(event.payload['step'], `event ${event.type} of call ${event.call} numbered ${String(event.payload['step'])}`).toBe(event.call)
     }
-  }, 300_000)
 
-  it('claude: a Task delegation arrives as subagent_spawned and projects onto the subagent card', async () => {
-    const live = await openLiveAgent(CLAUDE_ACP, claudeDialect, { modeId: 'default' })
-    try {
-      const reply = live.prompt(
-        'Use the Task tool to delegate a tiny job: the subagent computes 6*7 and returns just the number. '
-        + 'Wait for it to finish, then reply with its answer.',
+    // Tool use is read off the projected cards by name. The projection names
+    // spawned runs 'subagent'/'async_task', and those are exactly the runs
+    // the segmenter never lets open, settle or close anything — its exclusion
+    // is by update kind (only tool_call/tool_call_update move it, never the
+    // spawned kinds), this one by the name that kind projects to. Two
+    // spellings of the same distinction.
+    const usedTools = appended.some(
+      event => event.type === 'tool/call' && event.payload['name'] !== 'subagent' && event.payload['name'] !== 'async_task',
+    )
+    // Whether the turn segmented is read off the log itself: a later call
+    // wrote events under its own step number. A boundary needs a settled
+    // tool batch AND fresh content after it, so a tool the model runs as its
+    // very last act never segments — that is correct behaviour (the
+    // segmenter's own rule), and this branch accepts it as one call instead
+    // of demanding two. Branching on written events keeps model mood out of
+    // the assertion: the test holds the loop to what the frames did, not to
+    // what the prompt hoped the model would do.
+    const segmented = appended.some(
+      event => typeof event.payload['step'] === 'number' && (event.payload['step'] as number) > 1,
+    )
+    if (segmented) {
+      // Segment 1 closed and the loop was called again: interior calls null,
+      // the last one the turn's real end.
+      expect(calls.length, `expected ≥2 segment calls, got ${JSON.stringify(calls)}`).toBeGreaterThanOrEqual(2)
+      expect(calls[0]).toBeNull()
+      expect(calls.slice(1, -1).every(c => c === null)).toBe(true)
+      expect(calls.at(-1)).toEqual({ kind: 'completed' })
+
+      // Live result: a tool result filed by a non-final segment was already
+      // on the log when the reply resolved — written at the terminal frame,
+      // not replayed at turn end.
+      const midResult = appended.findIndex(
+        event => event.type === 'tool/result' && (event.payload['step'] as number) < calls.length,
       )
-      try {
-        const spawned = await live.waitFor(
-          frame => frame.method === 'session/update' && updateOf(frame)['sessionUpdate'] === 'subagent_spawned',
-          180_000,
-          'subagent_spawned frame',
-        )
-        await reply
-
-        const childId = updateOf(spawned)['subagentSessionId']
-        expect(typeof childId).toBe('string')
-        const events = projectTurn(live.plainFrames(), { turn: 1, dialect: claudeDialect })
-        const card = events.find(event => event.type === 'tool/call'
-          && (event.payload as { name: string; callId: string }).name === 'subagent')
-        expect(card, 'the spawned run must project onto the subagent card').toBeDefined()
-        expect((card!.payload as { callId: string }).callId).toBe(childId)
-        await recordCapture('claude', live.plainFrames())
-      } catch (error) {
-        // Same evidence rule as codex: whether Task ran as a legacy tool call,
-        // was refused, or never happened — the frames say so.
-        await reply.catch(() => {})
-        await recordCapture('claude-failed', live.plainFrames()).catch(() => {})
-        throw error
+      expect(midResult, 'no tool result was written by a non-final segment').toBeGreaterThanOrEqual(0)
+      expect(midResult, 'the mid-turn result was written after the reply settled').toBeLessThan(promptSettledOrder)
+      // Stronger still: it preceded the first prose message on the log. That
+      // message is written at the segment's close, so a result landing at or
+      // after it would be a close-batch replay, not a live settle.
+      const firstProse = appended.findIndex(
+        event => event.type === 'assistant/message'
+          && (event.payload['message'] as { content: { type: string }[] }).content.some(block => block.type === 'text'),
+      )
+      if (firstProse >= 0) {
+        expect(midResult, 'the mid-turn result was written at its segment close, not at its terminal frame').toBeLessThan(firstProse)
       }
-    } finally {
-      live.close()
+    } else {
+      // Nothing was ever written past step 1: no boundary was found, and one
+      // call owns the whole turn — with or without tools.
+      expect(calls).toEqual([{ kind: 'completed' }])
     }
-  }, 300_000)
 
-  it('grok: a delegated run arrives in grok’s private vocabulary and projects onto the subagent card', async () => {
-    // grok declares no draft capability, but it DOES report subagents — in its
-    // own vocabulary (`subagent_spawned`/`subagent_finished` with snake_case
-    // fields, riding the private `_x.ai/session_notification` method), first
-    // captured 2026-10-20. The dialect normalizes it; this case holds the
-    // whole chain to the real wire behavior.
-    await withGrokServe(async transport => {
-      const live = await openLiveAgentOver(transport, grokDialect)
-      try {
-        const reply = live.prompt(
-          'If you have a tool that delegates work to a subagent, use it once for a trivial job and report what it returned. '
-          + 'If you have no such tool, reply with the single word READY.',
-        )
-        let spawned: AcpFrame
-        try {
-          spawned = await live.waitFor(
-            frame => frame.method === '_x.ai/session_notification'
-              && updateOf(frame)['sessionUpdate'] === 'subagent_spawned',
-            180_000,
-            'grok subagent_spawned frame',
-          )
-        } catch (error) {
-          await reply.catch(() => {})
-          throw error
+    // Whatever the shape, a tool the turn ran has its outcome on the log —
+    // written live at the terminal frame, or close-paired by the projection.
+    if (usedTools) {
+      expect(appended.some(event => event.type === 'tool/result'), 'a tool ran but no result was written').toBe(true)
+    }
+
+    // The agent answered in prose either way — the report is what the turn
+    // was for, and a completed turn without an answer is a broken one.
+    const prose = appended
+      .filter(event => event.type === 'assistant/message')
+      .flatMap(event => (event.payload['message'] as { content: { type: string; text?: string }[] }).content)
+      .filter(block => block.type === 'text')
+      .map(block => block.text ?? '')
+      .join('')
+    expect(prose.length).toBeGreaterThan(0)
+
+    // Each segment's message embeds exactly its own call's stream records —
+    // segment 2 must not carry segment 1's text. A message with prose has
+    // its call's records, and the records' text IS the message's text; an
+    // announcement (a one-block tool-call message the live card path files)
+    // carries no stream at all.
+    for (let step = 1; step <= calls.length; step++) {
+      const own = streams[step - 1]!.records()
+      for (const message of appended.filter(e => e.type === 'assistant/message' && e.call === step)) {
+        const content = (message.payload['message'] as { content: { type: string; text?: string }[] }).content
+        const carried = message.payload['stream'] as { type: string; texts?: readonly string[] }[]
+        if (content.some(block => block.type === 'text' || block.type === 'reasoning')) {
+          expect(carried, `step ${step}'s message does not embed its own stream`).toEqual(own)
+          expect(
+            carried.filter(record => record.type === 'text-chunks').flatMap(record => record.texts ?? []).join(''),
+          ).toBe(content.filter(block => block.type === 'text').map(block => block.text ?? '').join(''))
+        } else {
+          expect(carried).toEqual([])
         }
-        await reply
-
-        const childId = updateOf(spawned)['child_session_id']
-        expect(typeof childId).toBe('string')
-        const events = projectTurn(live.plainFrames(), { turn: 1, dialect: grokDialect })
-        const card = events.find(event => event.type === 'tool/call'
-          && (event.payload as { name: string }).name === 'subagent')
-        expect(card, 'grok 的私有帧必须经方言归一化投成 subagent 卡片').toBeDefined()
-        expect((card!.payload as { callId: string }).callId).toBe(childId)
-        await recordCapture('grok', live.plainFrames())
-      } finally {
-        live.close()
       }
-    })
+    }
+
+    // The final segment's message carries the usage the reply itself
+    // reported, when it reported one the log may carry. Guarded twice by
+    // what actually happened: a reply without a usable usage asserts
+    // nothing, and a final segment whose content was only tool cards (mood:
+    // a batch as the very last act) writes no message and cannot carry one.
+    // In the one-call shape the reply frame rides the same segment as the
+    // answer, so the message exists and the usage is asserted there.
+    const usage = reportedUsage(promptReply)
+    if (usage !== undefined) {
+      const last = appended
+        .filter(event => event.type === 'assistant/message' && event.call === calls.length)
+        .at(-1)
+      if (last !== undefined) {
+        expect(last.payload['usage']).toMatchObject(usage)
+      }
+    }
   }, 300_000)
+
+  /**
+   * 外部子代理 → 影子子会话（真实 codex 回合）。
+   *
+   * 条件断言：是否真的派子代理由模型决定——没有出生帧就只断言回合正常收尾
+   * （测试不替模型打包票）；有出生帧就必须看到会话创建（`acp-sub-` 前缀）、
+   * 父会话目录事件、任务用户消息；子会话只在其真实终态到达时收尾。
+   */
+  it('codex: a real subagent turn becomes a shadow child session', async () => {
+    const children: { id: string; appends: { type: string; payload: unknown }[] }[] = []
+    const parentEvents: { type: string; payload: unknown }[] = []
+    const host: SubagentSessionHost = {
+      available: true,
+      openChild(_parent, childId) {
+        const appends: { type: string; payload: unknown }[] = []
+        children.push({ id: childId, appends })
+        let seq = 0
+        const child: ChildSessionLike = {
+          id: childId,
+          header: { createdAt: 1 },
+          get seq() { return seq },
+          append: (type, payload) => { seq += 1; appends.push({ type, payload }); return { seq } },
+        }
+        return child
+      },
+      appendParent(_parent, type, payload) { parentEvents.push({ type, payload }) },
+      emitChildStream() {},
+    }
+    const { calls } = await runStepsLive(
+      'Use your subagent/spawn-agent tool to delegate computing 6*7 to a child agent, wait for the child result, then reply with the number.',
+      { subagents: host },
+    )
+    // No delegation happened: the turn still completes, and nothing else is claimed.
+    if (parentEvents.length === 0) {
+      expect(children).toEqual([])
+      expect(calls.at(-1)).toEqual({ kind: 'completed' })
+      return
+    }
+    expect(children.length).toBeGreaterThanOrEqual(1)
+    expect(children[0]!.id.startsWith('acp-sub-')).toBe(true)
+    expect(parentEvents.some(event => event.type === 'subagent/catalog')).toBe(true)
+    expect(parentEvents[0]!.type).toBe('subagent/catalog')
+    const types = children[0]!.appends.map(entry => entry.type)
+    expect(types).toContain('turn/start')
+    expect(types).toContain('user/message')
+    // 等真实终态：收到终态才写收尾消息；父回合先结束时它保持开放（用户选择的语义）。
+    if (types.includes('turn/end')) {
+      expect(types).toContain('assistant/message')
+      expect(types.at(-1)).toBe('turn/end')
+    }
+  }, 300_000)
+
+  /**
+   * cursor: 接管路径的活体验收（对照 codex 的同一组断言）。
+   *
+   * cursor 走自己的方言——`kind` 当工具名、pending 占位帧、diff 输出、无用量——
+   * 但接管路径的契约与 codex 相同：正文/思考在回合进行中就进流；工具结果在应答
+   * 落定前落盘（实时结果，不是回合末重放）；切段时首调 null、末调 completed；
+   * 回合末的遥测只以汇总卡出现，不混别的内容。
+   */
+  it('cursor: a real turn streams live, files live results, and summarizes telemetry', async () => {
+    const { calls, appended, streams, promptSettledOrder } = await runStepsLive(TOOL_REPORT_PROMPT, {
+      dialect: cursorDialect,
+      command: CURSOR_ACP,
+    })
+    expect(appended.length, 'the turn wrote nothing').toBeGreaterThan(0)
+    expect(streams.some(stream => stream.records().length > 0), 'no text streamed during the turn').toBe(true)
+    for (const event of appended) expect(typeof event.payload['step']).toBe('number')
+    const toolResultAt = appended.findIndex(event => event.type === 'tool/result')
+    if (toolResultAt >= 0 && promptSettledOrder >= 0) {
+      expect(toolResultAt, 'the tool result was replayed at turn end, not filed live').toBeLessThan(promptSettledOrder)
+    }
+    const segmented = appended.some(event => typeof event.payload['step'] === 'number' && (event.payload['step'] as number) > 1)
+    if (segmented) {
+      expect(calls.length).toBeGreaterThanOrEqual(2)
+      expect(calls[0]).toBeNull()
+    }
+    expect(calls.at(-1)).toEqual({ kind: 'completed' })
+    // 遥测汇总卡只允许四种已知遥测种类；`外部输出 ·` 前缀下出现别的种类就是分类缺口。
+    const rawCards = appended.filter(event => event.type === 'tool/call'
+      && String((event.payload as { name?: string }).name ?? '').includes('外部输出 ·'))
+    for (const card of rawCards) {
+      expect(String((card.payload as { name?: string }).name)).toMatch(
+        /外部输出 · (usage_update|session_info_update|available_commands_update|current_mode_update)/,
+      )
+    }
+  }, 300_000)
+
+  /**
+   * claude: 接管路径的活体验收（对照 codex/cursor 的同一组断言）。
+   *
+   * claude 的方言差异（工具名在 _meta.claudeCode.toolName、双层嵌套 content、
+   * 双帧工具生命周期）不影响接管路径的契约：分段、实时结果、遥测汇总。
+   */
+  it('claude: a real turn spans several runSteps calls with live results', async () => {
+    const { calls, appended, streams, promptSettledOrder } = await runStepsLive(TOOL_REPORT_PROMPT, {
+      dialect: claudeDialect,
+      command: CLAUDE_ACP,
+    })
+    expect(appended.length, 'the turn wrote nothing').toBeGreaterThan(0)
+    expect(streams.some(stream => stream.records().length > 0), 'no text streamed during the turn').toBe(true)
+    for (const event of appended) expect(typeof event.payload['step']).toBe('number')
+    const toolResultAt = appended.findIndex(event => event.type === 'tool/result')
+    if (toolResultAt >= 0 && promptSettledOrder >= 0) {
+      expect(toolResultAt, 'the tool result was replayed at turn end, not filed live').toBeLessThan(promptSettledOrder)
+    }
+    const segmented = appended.some(event => typeof event.payload['step'] === 'number' && (event.payload['step'] as number) > 1)
+    if (segmented) {
+      expect(calls.length).toBeGreaterThanOrEqual(2)
+      expect(calls[0]).toBeNull()
+    }
+    expect(calls.at(-1)).toEqual({ kind: 'completed' })
+  }, 300_000)
+
+  /**
+   * The image-interception branch of the capability table, end to end: a real
+   * claude turn whose user message carries an image. claude's table cell says
+   * no, so the wire prompt must stay text-only, and the writer must expand the
+   * held-back attachment into the paired 未送达 row — never the internal marker.
+   * (The wire-level half — codex/grok/cursor really reading an image — lives in
+   * the ACP package's live spec.)
+   */
+  it('claude: a declined image rides no wire prompt and lands as the 未送达 row', async () => {
+    // A minimal 1×1 red PNG: the branch never lets the agent see it — only its
+    // presence in the user message matters.
+    const image = {
+      type: 'image',
+      data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC',
+      mimeType: 'image/png',
+    }
+    const cwd = await mkdtemp(join(tmpdir(), 'th-acp-image-'))
+    const inner = new StdioAcpTransport({ command: CLAUDE_ACP, cwd, onDiagnostic: () => {} })
+    // A sending spy: the assertion is about what claude was actually handed.
+    const sent: string[] = []
+    const transport: AcpTransport = {
+      send: line => { sent.push(line); inner.send(line) },
+      onLine: handler => inner.onLine(handler),
+      onDeath: handler => inner.onDeath(handler),
+      lastFrameAt: () => inner.lastFrameAt(),
+      lastDiagnosticAt: () => inner.lastDiagnosticAt(),
+      stderrTail: () => inner.stderrTail(),
+      close: () => inner.close(),
+    }
+    const client = new AcpClient(transport, claudeDialect)
+    client.onPermissionRequest = request => bridgePermissions(request, async () => 'allowed-once')
+    const runner = new AcpTurnRunner(adaptClient(client, claudeDialect), { cwd, modeId: 'default' })
+    // The real writer over a capturing sink: the row the user reads is the
+    // expanded pair, so that pair is what the test accepts.
+    const appended: { type: string; payload: unknown }[] = []
+    const write = makeContentWriter((type, payload) => ({ seq: appended.push({ type, payload }) }))
+
+    try {
+      const result = await runner.run({
+        kind: 'enter',
+        messages: [{ role: 'user', content: [{ type: 'text', text: PROMPT }, image] }],
+      }, {
+        sessionId: 's1',
+        position: { turn: 1, step: 1 },
+        produce: r => projectStepContent(r.frames as never[], { turn: 1, step: 1, dialect: claudeDialect }),
+        write,
+      })
+
+      // The interception is not a failure: the turn completes as an answer.
+      expect(result.end.kind).toBe('completed')
+
+      // Nothing but text went over the wire — every block of every
+      // session/prompt request claude received is a text block.
+      const promptBlocks = sent
+        .map(line => JSON.parse(line) as { method?: string; params?: { prompt?: { type?: string }[] } })
+        .filter(frame => frame.method === 'session/prompt')
+        .flatMap(frame => frame.params?.prompt ?? [])
+      expect(promptBlocks.length).toBeGreaterThan(0)
+      expect(promptBlocks.every(block => block.type === 'text')).toBe(true)
+
+      // The visible half: the marker became the paired row, and the marker
+      // itself never touched the log.
+      expect(appended.some(event => event.type === UNDELIVERED)).toBe(false)
+      const noticeCall = appended.find(
+        event => event.type === 'tool/call' && (event.payload as { name?: string }).name === '附件未送达',
+      )
+      expect(noticeCall).toBeDefined()
+      const callId = (noticeCall!.payload as { callId?: string }).callId
+      expect(typeof callId).toBe('string')
+      const noticeRow = appended.find(
+        event => event.type === 'tool/result' &&
+          (event.payload as { message?: { toolCallId?: string } }).message?.toolCallId === callId,
+      )
+      expect(noticeRow).toBeDefined()
+      const message = (noticeRow!.payload as { message?: { content?: { text?: string }[]; isError?: boolean } }).message
+      expect(message?.isError).toBe(true)
+      expect((message?.content ?? []).map(part => part.text).join('')).toContain('未送达')
+    } finally {
+      client.close()
+    }
+  }, 240_000)
 })
