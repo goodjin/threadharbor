@@ -30,6 +30,7 @@ const PACKAGES = ['dsh-acp-agent', 'dsh-client', 'dsh-host-federation', 'dsh-mob
  */
 const ROOTS = [
   'packages/dsh-acp-agent/src/entry.ts',
+  'packages/dsh-acp-agent/src/client/index.ts',
   'packages/dsh-client/src/index.ts',
   'packages/dsh-client/src/client/index.ts',
 ]

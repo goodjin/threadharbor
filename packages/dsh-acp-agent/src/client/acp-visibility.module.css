@@ -1,0 +1,155 @@
+/*
+ * The ACP visibility settings section.
+ *
+ * Same shell-derived rules as panel.module.css: only --dsw-* tokens, so the
+ * section follows the active theme. It sits in the settings dialog beside the
+ * hosts section and reads as a plain form: one card per agent, its models in
+ * a compact list.
+ */
+
+.root {
+  font-family: var(--dsw-font-family);
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  line-height: 1.6;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 0 8px;
+}
+
+.title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.intro {
+  margin: 0;
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.summary {
+  flex: 1;
+  min-width: 160px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+}
+
+.action {
+  appearance: none;
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 12px;
+  cursor: pointer;
+}
+
+.action:hover:not(:disabled) {
+  border-color: var(--dsw-alias-border-l4);
+}
+
+.action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.stateLine {
+  margin: 0;
+  font-size: 12px;
+  color: var(--dsw-alias-label-caption);
+}
+
+.stateBad {
+  composes: stateLine;
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.errorRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.agents {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent {
+  border: 1px solid var(--dsw-alias-settings-card-stroke);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-settings-card-fill);
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agentHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+}
+
+.toggle input:disabled {
+  cursor: default;
+}
+
+.agentName {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.route {
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+  font-family: var(--dsw-font-family-mono, monospace);
+}
+
+.note {
+  margin: 0;
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+}
+
+.models {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.models li {
+  min-width: 0;
+}
+
+.modelId {
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+  font-family: var(--dsw-font-family-mono, monospace);
+}

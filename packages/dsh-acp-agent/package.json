@@ -6,23 +6,79 @@
   "main": "./src/entry.ts",
   "types": "./src/entry.ts",
   "exports": {
-    ".": { "types": "./src/entry.ts", "default": "./src/entry.ts" },
-    "./index": { "types": "./src/index.ts", "default": "./src/index.ts" },
-    "./entry": { "types": "./src/entry.ts", "default": "./src/entry.ts" },
-    "./roster-filter": { "types": "./src/roster-filter.ts", "default": "./src/roster-filter.ts" },
-    "./zcode-quota": { "types": "./src/zcode-quota.ts", "default": "./src/zcode-quota.ts" },
-    "./minimaxi-quota": { "types": "./src/minimaxi-quota.ts", "default": "./src/minimaxi-quota.ts" },
-    "./codex-quota": { "types": "./src/usage-codex.ts", "default": "./src/usage-codex.ts" },
-    "./claude-quota": { "types": "./src/usage-claude.ts", "default": "./src/usage-claude.ts" },
-    "./mermaid-asset": { "types": "./src/mermaid-asset.ts", "default": "./src/mermaid-asset.ts" },
+    ".": {
+      "types": "./src/entry.ts",
+      "default": "./src/entry.ts"
+    },
+    "./index": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./entry": {
+      "types": "./src/entry.ts",
+      "default": "./src/entry.ts"
+    },
+    "./client": {
+      "types": "./src/client/index.ts",
+      "default": "./src/client/index.ts"
+    },
+    "./roster-filter": {
+      "types": "./src/roster-filter.ts",
+      "default": "./src/roster-filter.ts"
+    },
+    "./zcode-quota": {
+      "types": "./src/zcode-quota.ts",
+      "default": "./src/zcode-quota.ts"
+    },
+    "./minimaxi-quota": {
+      "types": "./src/minimaxi-quota.ts",
+      "default": "./src/minimaxi-quota.ts"
+    },
+    "./codex-quota": {
+      "types": "./src/usage-codex.ts",
+      "default": "./src/usage-codex.ts"
+    },
+    "./claude-quota": {
+      "types": "./src/usage-claude.ts",
+      "default": "./src/usage-claude.ts"
+    },
+    "./mermaid-asset": {
+      "types": "./src/mermaid-asset.ts",
+      "default": "./src/mermaid-asset.ts"
+    },
     "./package.json": "./package.json"
   },
+  "dsh": {
+    "host": {
+      "entry": "./src/entry.ts"
+    },
+    "client": {
+      "entry": "./src/client/index.ts"
+    }
+  },
   "dependencies": {
+    "@deepseek-ai/dsh-api-session-controller": "0.2.0-rc.2",
     "@deepseek-ai/schemastery": "^3.18.1",
     "mermaid": "^11.16.0",
-    "proper-lockfile": "^4.1.2"
+    "proper-lockfile": "^4.1.2",
+    "@deepseek-ai/dsh-session": "0.2.0-rc.2"
   },
   "devDependencies": {
-    "@types/proper-lockfile": "^4.1.4"
+    "@types/proper-lockfile": "^4.1.4",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^18.2.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-client-ui-layout": ">=0.2.0-rc.2 <0.3",
+    "@deepseek-ai/dsh-client-ui-primitives": ">=0.2.0-rc.2 <0.3",
+    "@deepseek-ai/dsh-client-ui-renderer": ">=0.2.0-rc.2 <0.3",
+    "@deepseek-ai/dsh-client-ui-sidebar": ">=0.2.0-rc.2 <0.3",
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.2.0-rc.2 <0.3",
+    "react": "^18.2.0",
+    "@deepseek-ai/dsh-client-ui-conversation": ">=0.2.0-rc.2 <0.3",
+    "@deepseek-ai/dsh-client-ui-chat": ">=0.2.0-rc.2 <0.3",
+    "@deepseek-ai/dsh-client-ui-model-selection": ">=0.2.0-rc.2 <0.3"
   }
 }
