@@ -20,7 +20,7 @@
     },
     "./client": {
       "types": "./src/client/index.ts",
-      "default": "./src/client/index.ts"
+      "default": "./lib/client.js"
     },
     "./roster-filter": {
       "types": "./src/roster-filter.ts",
@@ -49,11 +49,19 @@
     "./package.json": "./package.json"
   },
   "dsh": {
-    "host": {
-      "entry": "./src/entry.ts"
-    },
     "client": {
-      "entry": "./src/client/index.ts"
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-chat",
+        "@deepseek-ai/dsh-client-ui-model-selection",
+        "@deepseek-ai/dsh-client-ui-workspace",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
     }
   },
   "dependencies": {
