@@ -45,6 +45,10 @@ function binding(run?: AcpPresetBinding['run']): AcpPresetBinding {
 }
 
 const DECISION: StepDecisionLike = { kind: 'enter', messages: [{ type: 'text', text: 'hi' }] }
+const HUMAN_CLAIM: StepDecisionLike = {
+  kind: 'enter',
+  messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }],
+}
 
 describe('resolvePreset', () => {
   it('finds the binding named by the session header', () => {
@@ -315,6 +319,65 @@ describe('installAcpDispatch', () => {
       { phase: 'run', types: [] },
       { phase: 'write', types: ['assistant/message'] },
     ])
+  })
+
+  it('labels a claimed message as human only when its source is user', async () => {
+    // The host can trail a step's claim with injected context. The surface only
+    // treats `source.kind === 'user'` as a human message, so the plugin must
+    // preserve that distinction when it records the claim.
+    const cases = [
+      {
+        name: 'preserves a missing source for the host to reject',
+        decision: DECISION,
+        source: undefined,
+      },
+      {
+        name: 'preserves an injected source instead of claiming it as human',
+        decision: {
+          kind: 'enter',
+          messages: [{
+            role: 'user',
+            source: { kind: 'compact-checkpoint' },
+            content: [{ type: 'text', text: 'The user is asking whether there was a design/implementation...' }],
+          }],
+        },
+        source: { kind: 'compact-checkpoint' },
+      },
+      {
+        name: 'preserves a human source',
+        decision: {
+          kind: 'enter',
+          messages: [{
+            role: 'user',
+            source: { kind: 'user' },
+            content: [{ type: 'text', text: 'hi' }],
+          }],
+        },
+        source: { kind: 'user' },
+      },
+    ] as const
+
+    for (const testCase of cases) {
+      const agent = new FakeAgent('acp-grok')
+      const written: unknown[] = []
+      installAcpDispatch(
+        agent,
+        new Map([['acp-grok', binding()]]),
+        {
+          produce: () => [],
+          write: events => {
+            written.push(...events)
+            return 1
+          },
+          positionOf: () => ({ turn: 1, step: 1 }),
+        },
+      )
+      await (agent as unknown as { step(d: StepDecisionLike): Promise<unknown> }).step(testCase.decision as StepDecisionLike)
+
+      expect(written, testCase.name).toHaveLength(1)
+      const payload = written[0] as { payload?: { source?: unknown } }
+      expect(payload.payload?.source, testCase.name).toEqual(testCase.source)
+    }
   })
 
   it('refuses the turn when the model decision says so, after committing the input', async () => {

@@ -600,9 +600,32 @@ export function installAcpDispatch(
   return true
 }
 
+function messageRecord(message: unknown): Record<string, unknown> {
+  return typeof message === 'object' && message !== null ? message as Record<string, unknown> : {}
+}
+
+/** The source a claimed message carries, or nothing for a host message without one. */
+function messageSourceKind(message: unknown): unknown {
+  const source = messageRecord(message)['source']
+  return typeof source === 'object' && source !== null ? source : undefined
+}
+
 /** The claimed messages, as the log's user-message events. */
 function userEvents(decision: StepDecisionLike): readonly ContentEvent[] {
-  return decision.messages.map(message => ({ type: 'user/message', payload: message }))
+  return decision.messages.map(message => {
+    const source = messageSourceKind(message)
+    // The host validates the durable message shape when it admits the append,
+    // and its readers use `source.kind === 'user'` to tell the human's words
+    // from injected context. Normalizing a missing source here would make a
+    // compaction checkpoint or runtime note look like a request the user made.
+    return {
+      type: 'user/message',
+      payload: {
+        ...messageRecord(message),
+        ...(source === undefined ? {} : { source }),
+      },
+    }
+  })
 }
 
 /**
