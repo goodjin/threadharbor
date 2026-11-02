@@ -178,42 +178,12 @@ describe('面板挂载', () => {
 
     const sections = ctx.core.entriesOfSlot('settings.section')
     expect(sections.some(entry => entry.options.id === 'threadharbor-rollup')).toBe(true)
-    // The ACP visibility section is a second rail row, not a second screen on
-    // the hosts section: it must register even when this page has no catalog.
-    expect(sections.some(entry => entry.options.id === 'threadharbor-acp-visibility')).toBe(true)
     // 同一份主机界面挂了两个座位：设置里的那个分区，和侧栏顶部图标点开后
     // 主区那个 keyed 座位。图标行的 id 与主区座位的 key 必须同名——侧栏
     // 给面板行画的按钮点下去就是 selectPanel(id)。
     expect(ctx.core.entriesOfSlot('main').some(entry => entry.options.key === 'threadharbor-rollup')).toBe(true)
     expect(ctx.core.entriesOfSlot('sidebar.panellist').some(entry => entry.options.id === 'threadharbor-rollup')).toBe(true)
     expect(ctx.core.entriesOfSlot('main').some(entry => entry.options.key === 'threadharbor-remote-session')).toBe(true)
-  })
-
-  it('输入框的模型名占官方那个标签子座位', () => {
-    // 2026-10-20 改法：不再接管整个模型座位，只占官方 model-selection 声明的
-    // 标签子座位（可见的模型名由它渲染）。子座位是官方声明的，inject 等它出现，
-    // 装载顺序不影响结果——旧做法在挂载那一刻读一次模型目录服务，读不到就静默
-    // 不注册，官方座位顶上，界面上只剩裸模型名。
-    const ctx = fakeCtx({ services: { ...remoteNamespaces() } })
-    const registered: string[] = []
-    const inner = ctx.core.register.bind(ctx.core)
-    ;(ctx.core.register as unknown as (...args: never[]) => unknown) = (...args: never[]) => {
-      const options = args[0] as { name?: string } | undefined
-      if (typeof options?.name === 'string') registered.push(options.name)
-      return (inner as unknown as (...a: never[]) => unknown)(...args)
-    }
-
-    expect(() => { apply(ctx) }).not.toThrow()
-
-    expect(registered).toContain('conversation.input.model.label')
-  })
-
-  it('模型目录服务缺席也照样挂载：那道读数已经不在我们这条路上', () => {
-    // 旧做法要读模型目录服务来决定要不要注册，读不到就安静不注册。现在标签的
-    // props 里就带着 provider 与 model，agent 名字直接从 provider 拿——没有
-    // 「读不到」这条路，也就没有那种静默失败。
-    const ctx = fakeCtx({ services: { ...remoteNamespaces() } })
-    expect(() => { apply(ctx) }).not.toThrow()
   })
 
   it('入口声明了模型座位那条路要读的服务', () => {

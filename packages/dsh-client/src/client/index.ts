@@ -57,37 +57,21 @@ import { layeredIdentitySettings, IDENTITY_STORAGE_KEY } from '../settings-sourc
 import { maybeRegisterSidebarTree } from '../sidebar-tree.ts'
 import { registerRemoteConversation } from '../remote-conversation.tsx'
 import { sharedRemoteConversation } from '../remote-conversation-store.ts'
-import { registerModelLabel } from '../model-label.tsx'
 import { registerSessionIdBar } from '../session-id-bar.ts'
-import { createQuotaPoller, QUOTA_PILL_SPECS, registerQuotaDockPills, routeQuotaFetcher } from '../quota-pill.ts'
-import { registerInterruptedTurnRecovery } from '../interrupted-turn-recovery.ts'
-import { createMarkdownTurnReaders } from '../markdown-turn-sources.ts'
-import { registerMarkdownTurn } from '../markdown-turn.tsx'
 import { HOST_ACCESS_ORIGIN_KEY, HOST_REGISTRY_KEY, HOST_STORE_ENTRY_ID, TAILSCALE_ERROR_KEY, TAILSCALE_PEERS_KEY, TAILSCALE_REFRESHED_KEY, TAILSCALE_REFRESH_KEY, hostRegistry } from '@threadharbor/dsh-host-federation'
 import type { TailscalePeer } from '@threadharbor/dsh-host-federation'
 import { startHostStore } from '../host-store.ts'
 import type { HostStoreChannel, HostStoreDeps, StoreOp } from '../host-store.ts'
 import { startMobileLayout } from '../mobile-layout.ts'
-import { startMermaidDiagrams } from '../mermaid.ts'
 import { startRollUpSection } from '../rollup-section.ts'
 import { buildHostSessions, readSessionSources } from '../session-source.ts'
 import type { SectionSession, SessionRead } from '../session-source.ts'
 import { startPairingSurface } from '../pairing-panel.ts'
 import { startFederationAnnounce } from '../federation-announce.ts'
-import { startAcpVisibility } from '../acp-visibility.ts'
-import type { AcpVisibilityStore } from '../acp-visibility.ts'
-import { createAcpCatalogStore } from '../acp-visibility-catalog.ts'
-import { installAcpVisibilityFilter } from '../acp-visibility-filter.ts'
-import { registerAcpVisibilitySection } from '../acp-visibility-panel.tsx'
-import type { AcpVisibilityBusinessProps, AcpVisibilitySlotHost } from '../acp-visibility-panel.tsx'
 import { AgentPanel } from '../panel.tsx'
 import { HostIcon, HOST_ICON_PANEL_ORDER } from '../host-icon.tsx'
 import type { AgentListPort, AgentPanelBusinessProps, ProbeStarter, RemotePort, TailscalePeersResult, TailscalePort } from '../panel.tsx'
 import { readRemotePeer, startRemotePeer } from '../ssh-deploy.ts'
-import { registerAgentSwitchHandoverSurface } from '../handover-card.ts'
-import { registerLostInputSurface } from '../lost-input.ts'
-import { registerAcpProcessSurface } from '../acp-process-surface.tsx'
-import { createSwitchProgressStore, startSwitchProgressSurface } from '../switch-progress.ts'
 import { NAMESPACE, en, fallbackT, zh } from '../locales.ts'
 import type { ClientLocaleKey, RuntimeT } from '../locales.ts'
 import { createElement } from 'react'
@@ -123,56 +107,6 @@ export const inject = ['slots', 'remote', 'remote.settings', 'remote.session', '
 // The panel's pieces are one published surface: the verify-build step reads
 // every export under src/client and requires it in the built artifact, and a
 // name that only tests import would silently drop out of the bundle.
-export { describeVerdict } from '../verdict.ts'
-export type { VerdictDisplay, VerdictTone } from '../verdict.ts'
-export { openSessionGateway } from '../gateway.ts'
-export type { AgentDescriptor, GatewayOpening, GatewayResult, SessionGateway } from '../gateway.ts'
-export { runSessionProbe } from '../probe.ts'
-export type { ProbeOutcome, ProbeRunOptions } from '../probe.ts'
-export {
-  IDENTITY_STORAGE_KEY,
-  IDENTITY_TAB_STORAGE_KEY,
-  layeredIdentitySettings,
-  storageIdentitySettings,
-} from '../settings-source.ts'
-export type { ConfiguredIdentity, IdentitySettings, IdentityStorage } from '../settings-source.ts'
-export { startRollUpSection } from '../rollup-section.ts'
-export type { RollUpSection, RollUpSectionDeps } from '../rollup-section.ts'
-export { ANNOUNCE_INTERVAL_MS, startFederationAnnounce } from '../federation-announce.ts'
-export type { AnnounceFetch, AnnounceIdentity, FederationAnnounceParams, FederationAnnouncer } from '../federation-announce.ts'
-export { PAIRING_PANEL_ID, PAIRING_PANEL_ORDER, PAIR_URL_PATH, PairingIcon, PairingPanel, createPairingStore, requestPairUrl, saveAccessOriginDraft, startPairingSurface } from '../pairing-panel.ts'
-export type { AccessOriginSaveOutcome, PairingAccessOrigin, PairingOriginPort, PairingPanelProps, PairingSlotHost, PairingState, PairingStore, PairingStoreWriter, PairingSurface, PairingSurfaceParams, PairQrRenderer, PairUrlOutcome, SameOriginFetch } from '../pairing-panel.ts'
-export { mergeHostRows, heartbeatWord, richSegments } from '../panel.tsx'
-export type { HostListRow, PanelT } from '../panel.tsx'
-export { AgentPanel, AgentRow, runProbe } from '../panel.tsx'
-export type { AgentListPort, AgentPanelBusinessProps, AgentPanelProps, HostRegistryPort, ProbeRunState, ProbeStarter, RemotePort, RemoteReadResult, RemoteStartResult } from '../panel.tsx'
-export {
-  registerAgentSwitchHandoverSurface,
-  agentSwitchHandoverDefinition,
-  AgentSwitchHandoverCard,
-} from '../handover-card.ts'
-export type {
-  AgentSwitchHandoverData,
-  HandoverCardProps,
-  HandoverSlotHost,
-  HandoverSurfaceContext,
-} from '../handover-card.ts'
-export {
-  SwitchProgressLayer,
-  createSwitchProgressStore,
-  startSwitchProgressSurface,
-} from '../switch-progress.ts'
-export type {
-  SwitchProgress,
-  SwitchProgressActions,
-  SwitchProgressContext,
-  SwitchProgressLayerProps,
-  SwitchProgressPhase,
-  SwitchProgressSlotHost,
-  SwitchProgressState,
-  SwitchProgressStore,
-  SwitchProgressSurface,
-} from '../switch-progress.ts'
 
 /** Shared identity of the sidebar entry and the body it mounts. */
 const PANEL_ID = 'threadharbor-rollup'
@@ -410,12 +344,6 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // 手机窄屏：侧栏展开时改浮层 + 遮罩（DSH 默认会把它挤进主列），点遮罩
   // 或侧栏导航后自动收起；桌面宽度下这段样式与监听都不生效。
   ctx.effect(() => startMobileLayout({ log: message => { log.warn(message) } }).dispose, 'threadharbor: mobile layout')
-  // 会话区 Markdown 里的 ```mermaid 代码块：宿主提供运行时（按需加载），这里
-  // 认块、画图、给「图表 / 源码」开关；助手回复与 .md 阅读卡片一并覆盖。
-  ctx.effect(
-    () => startMermaidDiagrams({ log: message => { log.warn(message) }, t }).dispose,
-    'threadharbor: mermaid diagrams',
-  )
   // The registry and the default identity follow the machine that served
   // this page (2026-10-12 用户要求：名单当然应该跟着本机的设置走): both go
   // through ONE settings channel whenever that channel exists, including when
@@ -472,13 +400,6 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // filter waits for that service (`ctx.inject`) so it cannot patch a
   // service that has not arrived yet — and re-applies if the service is ever
   // replaced.
-  const acpVisibility = startAcpVisibility(hostStore.storage, message => { log.warn(message) })
-  ctx.effect(
-    () => hostStore.subscribe(() => { acpVisibility.refresh() }),
-    'threadharbor: acp visibility re-read on host storage change',
-  )
-  safeRegister('acp visibility filter', () => mountAcpVisibilityFilter(ctx, acpVisibility, message => { log.warn(message) }), message => log.warn(message))
-
   const openGateway = (): GatewayOpening => openSessionGateway(ctx)
   // A mount-time read, purely for the self-report: what the host provides may
   // settle later, so absence here is a log line, never a functional gate.
@@ -502,23 +423,6 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
     },
   }
   safeRegister('panel slots', () => registerPanelSlots(ctx.slots, face, () => t('panel.label')), message => log.warn(message))
-
-  // 第二个设置栏目：提供方与模型的屏蔽。它读原始目录（不是被过滤后的
-  // 目录），否则被屏蔽的行就没法在这里重新出现、取消屏蔽；也正因官方
-  // 「模型」设置页不过滤，这里是屏蔽后唯一的恢复入口。
-  const acpFace: AcpVisibilityBusinessProps = {
-    visibility: acpVisibility,
-    catalog: createAcpCatalogStore(catalogReaderOf(ctx)),
-    hostStore: {
-      posture: () => hostStore.posture(),
-      subscribe: hostStore.subscribe,
-    },
-  }
-  safeRegister('acp visibility section', () => registerAcpVisibilitySection(
-    ctx.slots as unknown as AcpVisibilitySlotHost,
-    acpFace,
-    () => t('acpVisibility.label'),
-  ), message => log.warn(message))
 
   // The shadow tree is opt-in now: by default nothing registers for
   // sidebar.workspaces, so DSH's native browsing area keeps the slot and all
@@ -555,66 +459,8 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // 接口表达不了它（种类条件类型在泛型下摊不开），所以这里按调用方给的最小接
   // 口投影一次——和下面 registerSessionIdBar 同一处境，不是这一行特有的将就。
   const seatHost = ctx.slots as never
-  ctx.effect(() => registerModelLabel(seatHost), 'threadharbor: composer model label')
-
   // 会话头工具行：会话编号 + 复制按钮（会话作用域槽位，inject 首参即编号）。
   safeRegister('session id bar', () => registerSessionIdBar(seatHost), message => log.warn(message))
-
-  // 「被打断且无正文」轮次的找回入口（2026-10-16 治本）：挂在轮次结尾的
-  // turnTail 列表座位（折叠范围之外），命中盲区条件时给一个展开过程按钮，
-  // 走聊天存储现成的展开动作。座位由轮次结尾渲染器声明，inject 负责等它。
-  ctx.effect(() => registerInterruptedTurnRecovery(seatHost), 'threadharbor: interrupted turn recovery')
-
-  // 这一轮的文本文件在会话区展开：产出和交付的路径来自轮次数据，改动清单
-  // 再向主机要一次摘要。官方改动卡片仍在，点它照旧打开右侧。
-  ctx.effect(
-    () => registerMarkdownTurn(seatHost, createMarkdownTurnReaders(() => readService(ctx, 'remote'))),
-    'threadharbor: markdown turn',
-  )
-
-  // 套餐配额胶囊：输入框下方 dock 里、token 用量同一排。配额是账号级数字，
-  // 轮询器每口径全浏览器一份（5 分钟一拍，回到页面再补一拍）；数据各自走宿主
-  // 侧的同源路由（凭据/令牌不出宿主进程）。只在当前会话选了对应那组模型/agent
-  // 时渲染；取不到配额整行不渲染，原因去重后留一条日志。
-  // 四套口径一张表：GLM、MiniMax、Codex、Claude——路由、出现条件、文案各归各。
-  const quotaPollers = QUOTA_PILL_SPECS.map((spec) => {
-    const poller = createQuotaPoller({
-      fetchQuota: routeQuotaFetcher(fetch, spec.routePath),
-      report: message => { log.warn(message) },
-    })
-    poller.start()
-    ctx.effect(() => () => { poller.dispose() }, `threadharbor: ${spec.dockId} poller`)
-    const refreshQuotaOnVisible = (): void => {
-      if (document.visibilityState === 'visible') void poller.refresh()
-    }
-    window.addEventListener('visibilitychange', refreshQuotaOnVisible)
-    ctx.effect(
-      () => () => { window.removeEventListener('visibilitychange', refreshQuotaOnVisible) },
-      `threadharbor: ${spec.dockId} visibility refresh`,
-    )
-    return { spec, poller }
-  })
-  // 服务经 inject 绑，不经一次性 ctx.get：模型目录服务随连接重建被替换，
-  // 一次性拿到的引用随后就是死的——它一被调用就抛「inactive context」，崩的是
-  // 座位条目（2026-10-20 桌面版：输入框下面的 dock 崩了）。inject 会在服务被
-  // 替换时重跑回调，胶囊因此始终绑着当下那一个。
-  const bindQuotaPills = (modelDirectories: unknown, sessions: unknown): void => {
-    for (const { spec, poller } of quotaPollers) {
-      ctx.effect(() => registerQuotaDockPills(seatHost, poller, {
-        modelDirectories: modelDirectories as never,
-        sessions: sessions as never,
-      }, spec), `threadharbor: ${spec.dockId} pills`)
-    }
-  }
-  const quotaInjector = ctx.inject
-  if (typeof quotaInjector === 'function') {
-    quotaInjector.call(ctx, ['modelDirectories', 'sessions'], (child: unknown) => {
-      bindQuotaPills(propertyOf(child, 'modelDirectories'), propertyOf(child, 'sessions'))
-    })
-  } else {
-    // 没有 inject 的宿主（测试用的假上下文）：立刻绑一次当下这两个服务。
-    bindQuotaPills(ctx.get('modelDirectories'), ctx.get('sessions'))
-  }
 
   // 手机配对 section：和主机面板同一套侧栏注册面（sidebar.panellist + main），
   // 数据只有一条同源 GET（pair-url）。带令牌的网址只进面板状态、只画在这台
@@ -667,21 +513,6 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // conversation into the new session. The progress surface rides along: the
   // switch replaces the whole conversation panel, so it says so and loads the
   // new session's first page before the notice jumps.
-  safeRegister('agent switch handover', () => registerAgentSwitchHandoverSurface(
-    ctx,
-    startSwitchProgressSurface({
-      ctx,
-      store: createSwitchProgressStore(),
-      slots: ctx.slots,
-    }),
-  ), message => log.warn(message))
-
-  // 失败回合的恢复行：回合在 claim 之后、user/message 落盘之前失败时，请求
-  // 只留在 inbox splice 事件里。沿 DSH 自己的会话事件回放折叠出这个组合，在
-  // 那条错误旁把原文留下，给复制与直接重发（服务缺席时只复制）。
-  safeRegister('lost input surface', () => registerLostInputSurface(ctx), message => log.warn(message))
-  safeRegister('acp process surface', () => registerAcpProcessSurface(ctx), message => log.warn(message))
-
   // Self-report at mount. This panel is easy to mistake for a plugin that
   // never loaded; these lines are how anyone can tell the difference.
   const identity = section.identity()
@@ -949,63 +780,6 @@ function tailscalePort(ctx: ClientPanelContext, channel: HostStoreChannel | unde
   }
 }
 
-/**
- * Install the picker filter once the model-directory service exists.
- *
- * `ctx.inject` is the real path: it runs the callback in a child fiber, so a
- * service replaced later re-runs it and the old filter is disposed with that
- * fiber. A test context without `inject` gets one immediate attempt, and a
- * service that is not there yet simply means the pickers are unfiltered for
- * this page — the settings section still stores the choice.
- *
- * The fallback reads through `ctx.get` only: a property read here would hit
- * cordis's undeclared-property refusal (modelDirectories is optional for this
- * entry, so it is not in the entry's inject list) and take the whole entry
- * down.
- */
-function mountAcpVisibilityFilter(
-  ctx: ClientPanelContext,
-  visibility: AcpVisibilityStore,
-  report: (message: string) => void,
-): void {
-  const attach = (service: unknown, effect: (dispose: () => void) => void): void => {
-    const dispose = installAcpVisibilityFilter(service, visibility, report)
-    if (dispose !== undefined) effect(dispose)
-  }
-  const injector = ctx.inject
-  if (typeof injector === 'function') {
-    injector.call(ctx, ['modelDirectories'], child => {
-      const childEffect = boundMethod(child, 'effect')
-      attach(propertyOf(child, 'modelDirectories'), dispose => {
-        if (childEffect !== undefined) childEffect(() => dispose)
-        else ctx.effect(() => dispose, 'threadharbor: acp visibility picker filter')
-      })
-    })
-    return
-  }
-  let service: unknown
-  try {
-    service = ctx.get('modelDirectories')
-  } catch {
-    service = undefined
-  }
-  attach(service, dispose => {
-    ctx.effect(() => dispose, 'threadharbor: acp visibility picker filter')
-  })
-}
-
-/**
- * The raw model catalog for the settings section — the open door, not the
- * filtered directories. Hidden rows must stay listable so they can be
- * unhidden. Absent (no remote or no modelCatalog method) reads as undefined
- * and the section says the host offers none.
- */
-function catalogReaderOf(ctx: ClientPanelContext): (() => Promise<unknown>) | undefined {
-  const direct = readService(ctx, 'remote.session')
-  const session = direct ?? propertyOf(readService(ctx, 'remote'), 'session')
-  const read = boundMethod(session, 'modelCatalog')
-  return read === undefined ? undefined : async () => await read()
-}
 
 /** Re-read the host storage when this document changes elsewhere (another tab). */
 function settingsInvalidation(ctx: ClientPanelContext, refresh: () => void): () => void {
