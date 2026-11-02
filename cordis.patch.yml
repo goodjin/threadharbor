@@ -54,7 +54,13 @@
     - id: threadharbor-federation-sync
       name: '@goodjin2/dsh-host-federation/federation-sync'
     # 浏览器 UI（联邦界面）：主机面板、跨机侧栏、手机配对、SSH 部署界面。
-    # 由 package.json 的 dsh.client 声明装载到 web 平台，构建产物在
-    # lib/client.js（同一包的第二个角色）。
+    #
+    # 行名必须是**裸包名**。DSH 不按 package.json 的 dsh.client 自动装载浏览器
+    # 包：客户端模块系统扫的是 Loader 的行，只有 name 恰好等于包名时那个包才会进
+    # window.__DSH_BOOT__（`ClientModuleRegistry.resolveMeta` 经 `locatePkgJson`
+    # 解析，带子路径的 `/client` 行不算）。这一行取包根（lib/index.js，`export {}`）
+    # 什么都不做，浏览器产物仍是 lib/client.js，按 exports["./client"] 下发。
+    # 2026-11-02 现场：@goodjin2/dsh-acp-agent 就因为少了这样一行，整块浏览器
+    # 界面（含设置里的屏蔽页）安静消失，宿主日志一个字都没有。
     - id: threadharbor-client
-      name: '@goodjin2/dsh-threadharbor/client'
+      name: '@goodjin2/dsh-threadharbor'
