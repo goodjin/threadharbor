@@ -18,11 +18,11 @@ describe('remote Web bundle', () => {
     // and configureProfile mirrors this same scoped set into the profile —
     // an undeclared package loads nowhere and the pruning deletes its link.
     expect(manifest.dependencies).toEqual({
+      '@threadharbor/dsh-acp-agent': 'workspace:^',
       '@threadharbor/dsh-client': 'workspace:^',
       '@threadharbor/dsh-host-federation': 'workspace:^',
       '@threadharbor/dsh-mobile-entry': 'workspace:^',
       '@threadharbor/dsh-mobile-relay': 'workspace:^',
-      '@threadharbor/dsh-preset-dispatch': 'workspace:^',
     })
 
     // The stock sidebar stays enabled. It used to be disabled, because the
