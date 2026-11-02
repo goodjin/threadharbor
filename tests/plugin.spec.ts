@@ -19,6 +19,7 @@ describe('remote Web bundle', () => {
     // an undeclared package loads nowhere and the pruning deletes its link.
     expect(manifest.dependencies).toEqual({
       '@threadharbor/dsh-client': 'workspace:^',
+      '@threadharbor/dsh-command-commit-merge-push': 'workspace:^',
       '@threadharbor/dsh-host-federation': 'workspace:^',
       '@threadharbor/dsh-mobile-entry': 'workspace:^',
       '@threadharbor/dsh-mobile-relay': 'workspace:^',

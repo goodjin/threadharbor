@@ -43,6 +43,8 @@ export const zh = {
   /** 结果卡：回合最终答案的复制按钮。 */
   'answerCard.copy': '复制结果',
   'answerCard.copied': '已复制',
+  /** 结果卡：把最终答案当任务发出去的编辑入口。 */
+  'answerCard.edit': '编辑',
   /** 失败回合的恢复行：请求在 claim 之后、落盘之前失败时把原文留下。 */
   'lostInput.title': '本轮请求未送达',
   'lostInput.hint': '这条请求在进入对话记录之前失败了，原文还在这里。',
@@ -607,6 +609,7 @@ export const en = {
   /** Answer card: copy button for a turn's final answer. */
   'answerCard.copy': 'Copy result',
   'answerCard.copied': 'Copied',
+  'answerCard.edit': 'Edit',
   'lostInput.title': 'This request was not delivered',
   'lostInput.hint': 'It failed before it entered the transcript. The text is still here.',
   'lostInput.copy': 'Copy text',

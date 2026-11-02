@@ -10,6 +10,8 @@ import { wrapChatView } from './acp-process-view.ts'
 import type { SegmentChatData } from './acp-process-view.ts'
 import type { ProcessSegment } from './acp-process-segments.ts'
 import { AnswerCard } from './answer-card.tsx'
+import { createMarkdownTurnReaders } from './markdown-turn-sources.ts'
+import type { MarkdownTurnReaders } from './markdown-turn-sources.ts'
 import { defaultLinkOpenMode, httpLinkHref, openInBrowser } from './link-open.ts'
 import styles from './acp-process.module.css'
 
@@ -102,6 +104,18 @@ function LinkTextBlock({ text, labels }: { readonly text: string; readonly label
   )
 }
 
+/**
+ * 当前会话编号。chat 节点的 view props 不带 sessionId，但会话根节点把它标在
+ * `data-conversation-session` 上（和 markdown-turn 找滚动层同一套 DOM 读法）。
+ * 拿不到返回 undefined，结果卡的编辑入口据此不放。
+ */
+function currentSessionIdFromDom(): string | undefined {
+  if (typeof document === 'undefined') return undefined
+  const node = document.querySelector('[data-conversation-session]')
+  const value = node?.getAttribute('data-conversation-session')
+  return value === null || value === '' ? undefined : value
+}
+
 /** The segment is one presentation unit; individual deltas never create separate rows. */
 export function AcpProcessBlock({ segment, t }: { readonly segment: ProcessSegment; readonly t: ChatNodeViewProps<'assistant-step'>['t'] }) {
   // The running host adds these shared Chat labels after the pinned 0.2.0 types.
@@ -138,6 +152,8 @@ export function registerAcpProcessSurface(ctx: Surface): void {
   if (typeof ui?.views?.entries !== 'function' || typeof ui.views.subscribe !== 'function'
     || typeof ui.events?.register !== 'function' || typeof slots?.entries !== 'function'
     || typeof slots.subscribe !== 'function' || typeof slots.register !== 'function') return
+  // 结果卡的编辑功能复用文件阅读区那套 readers：发送到会话 / 新建会话都走这里。
+  const readers: MarkdownTurnReaders = createMarkdownTurnReaders(() => ctx.get('remote'))
   ctx.effect(() => {
     let active: ConversationViewDefinition | undefined
     let restore: (() => void) | undefined
@@ -180,7 +196,7 @@ export function registerAcpProcessSurface(ctx: Surface): void {
             (block.kind === 'text' || block.kind === 'reasoning') &&
             (block.text?.trim() ?? '') !== '')
           return hasProse
-            ? <AnswerCard blocks={props.node.data.blocks} t={props.t as (key: string) => string}>{native}</AnswerCard>
+            ? <AnswerCard blocks={props.node.data.blocks} sessionId={currentSessionIdFromDom()} readers={readers} t={props.t as (key: string) => string}>{native}</AnswerCard>
             : native
         }
         removeRenderer = slots.register({
