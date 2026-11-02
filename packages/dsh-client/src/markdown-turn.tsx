@@ -11,12 +11,12 @@
  * 助手正文里的本地文件链接也列在这里，用同一套下拉打开。链接上的点击由会话打开右侧。
  */
 
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
 import { CodeBlock, FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconCloseOutlineRegular, IconEditOutlineRegular, IconNewChatOutlineRegular, IconSendOutlineRegular, IconWarningOutlineRegular, MarkdownText, Toast, classifyFileType, languageForPath } from '@deepseek-ai/dsh-client-ui-primitives'
 import { FileOpenSplit } from './markdown-turn-open.tsx'
 import { ActiveFileBar } from './markdown-turn-active-bar.tsx'
-import { setActiveFilePath } from './markdown-turn-active.ts'
+import { getFileState, setActiveFilePath, subscribeActiveFilePath, toggleFileEditing, toggleFileOpen } from './markdown-turn-active.ts'
 import type { MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
 import { fallbackT, NAMESPACE } from './locales.ts'
 import type { RuntimeT } from './locales.ts'
@@ -297,7 +297,11 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
   t: RuntimeT
   onNotify?: (message: string) => void
 }): ReactNode {
-  const [open, setOpen] = useState(false)
+  // 展开/编辑态存共享 store（不是本地 useState）：顶部 ActiveFileBar 的编辑/展开
+  // 按钮和这里的内联按钮改同一份，两处才能同步。按 path 取值，多个文件各自独立。
+  const fileUi = useSyncExternalStore(subscribeActiveFilePath, () => getFileState(path), () => getFileState(path))
+  const open = fileUi.open
+  const editing = fileUi.editing
   const [attempt, setAttempt] = useState(0)
   const [body, setBody] = useState<DocumentBody>({ kind: 'loading' })
   const barRef = useRef<HTMLDivElement>(null)
@@ -311,7 +315,6 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
   const [comments, setComments] = useState<readonly { id: number; blockText: string; comment: string }[]>([])
   const commentIdRef = useRef(0)
   const [composeOpen, setComposeOpen] = useState(false)
-  const [editing, setEditing] = useState(false)
   const [toast, setToast] = useState<{ seq: number; text: string; ok: boolean } | null>(null)
   const toastSeq = useRef(0)
   const editRef = useRef<HTMLTextAreaElement>(null)
@@ -326,7 +329,7 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
   const toggleOpen = (): void => {
     holdFileTop(barRef.current)
     if (!open) setActiveFilePath(path)
-    setOpen(value => !value)
+    toggleFileOpen(path)
   }
   const sendText = (text: string): void => {
     if (text === '') return
@@ -428,8 +431,10 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
         title={t('markdownTurn.edit')}
         onClick={() => {
           holdFileTop(barRef.current)
-          if (!open) setOpen(true)
-          setEditing(value => !value)
+          if (!open) setActiveFilePath(path)
+          // 编辑按钮在折叠态点也先把文档展开，再进编辑态（与内联按钮原行为一致）。
+          if (!open) toggleFileOpen(path)
+          toggleFileEditing(path)
         }}
       >
         <IconEditOutlineRegular size={16} />
@@ -467,7 +472,7 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
         const target = event.target
         if (target instanceof Element && target.closest('button, a')) return
         holdFileTop(barRef.current)
-        setOpen(false)
+        if (open) toggleFileOpen(path)
       }}
     >
       {body.kind === 'loading' && <p className={css.status}>{t('markdownTurn.loading')}</p>}
@@ -501,7 +506,7 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
                   data-edit-cancel=""
                   aria-label={t('markdownTurn.cancel')}
                   title={t('markdownTurn.cancel')}
-                  onClick={() => setEditing(false)}
+                  onClick={() => { if (editing) toggleFileEditing(path) }}
                 >
                   <IconCloseOutlineRegular size={15} /> {t('markdownTurn.cancel')}
                 </button>
@@ -509,7 +514,7 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
                   type="button"
                   className={css.sendBtn}
                   data-edit-send=""
-                  onClick={() => { sendText(editRef.current?.value ?? ''); setEditing(false) }}
+                  onClick={() => { sendText(editRef.current?.value ?? ''); if (editing) toggleFileEditing(path) }}
                 >
                   <IconSendOutlineRegular size={15} /> {t('markdownTurn.send')}
                 </button>
@@ -519,7 +524,7 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
                   data-edit-new-session=""
                   aria-label={t('markdownTurn.newSession')}
                   title={t('markdownTurn.newSession')}
-                  onClick={() => { sendToNewSession(editRef.current?.value ?? ''); setEditing(false) }}
+                  onClick={() => { sendToNewSession(editRef.current?.value ?? ''); if (editing) toggleFileEditing(path) }}
                 >
                   <IconNewChatOutlineRegular size={15} /> {t('markdownTurn.newSession')}
                 </button>
