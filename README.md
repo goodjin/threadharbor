@@ -67,7 +67,6 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 agent 接进 
 
 **已知未接的部分**（代码与测试都在，但从宿主加载的入口走不到，登记在 `tests/wiring.spec.ts` 的 `KNOWN_UNWIRED`）：
 
-- 早期入口 `packages/dsh-preset-dispatch/src/service.ts` 与现行 `entry.ts` 重叠，只剩导出和测试在用。
 - 手机协议常量 `packages/dsh-mobile-entry/src/wire.ts` 目前是记录，手机页用的是硬编码的 `mobile/wire.js`。
 
 ## 插件清单
@@ -84,13 +83,13 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 agent 接进 
 | `@threadharbor/dsh-host-federation/ssh-deploy` | `threadharbor-ssh-deploy` | 主机侧 SSH 部署与远端操作接口：检查连通性、安装/启动远端 DSH、读取远端会话和执行运维操作。 |
 | `@threadharbor/dsh-host-federation/host-gateway` | `threadharbor-host-gateway` | 同源反向代理：浏览器把普通 DSH 请求发到本机 `/threadharbor/gateway/<主机标识>/`，由它转到登记主机自己的 DSH；登录 cookie 留在网关，不进浏览器。 |
 | `@threadharbor/dsh-mobile-relay` | `threadharbor-mobile-relay` | 云主机侧的手机中转：公网 HTTPS 入口、手机页壳、`pair-url` / `peers`、SSH 隧道、会话/审批/事件转发。本机没有中转配置时默认停用、不注册。 |
-| `@threadharbor/dsh-preset-dispatch/roster-filter` | `threadharbor-roster-filter` | 把标了 `hideFromRoster: true` 的 ACP preset 从新建会话/预设选择器中隐藏；注册本身保留，所以模型列表切换和会话接管仍可用。内部 `list()` 不过滤。 |
-| `@threadharbor/dsh-preset-dispatch/zcode-quota` | `threadharbor-zcode-quota` | 宿主侧读取本机 ZCode 登录凭据并查询 Coding Plan 的 5 小时/周限额，供输入框下方的 GLM 配额胶囊显示；密钥不出宿主进程。 |
-| `@threadharbor/dsh-preset-dispatch/mermaid-asset` | `threadharbor-mermaid-asset` | 本机 `/threadharbor/mermaid.js`：按需提供给会话区 Mermaid 代码块（mermaid fence）渲染的运行时（来自本包依赖，客户端包不内联 3.5 MB；同一登录准入，ETag/304 缓存）。 |
+| `@threadharbor/dsh-acp-agent/roster-filter` | `threadharbor-roster-filter` | 把标了 `hideFromRoster: true` 的 ACP preset 从新建会话/预设选择器中隐藏；注册本身保留，所以模型列表切换和会话接管仍可用。内部 `list()` 不过滤。 |
+| `@threadharbor/dsh-acp-agent/zcode-quota` | `threadharbor-zcode-quota` | 宿主侧读取本机 ZCode 登录凭据并查询 Coding Plan 的 5 小时/周限额，供输入框下方的 GLM 配额胶囊显示；密钥不出宿主进程。 |
+| `@threadharbor/dsh-acp-agent/mermaid-asset` | `threadharbor-mermaid-asset` | 本机 `/threadharbor/mermaid.js`：按需提供给会话区 Mermaid 代码块（mermaid fence）渲染的运行时（来自本包依赖，客户端包不内联 3.5 MB；同一登录准入，ETag/304 缓存）。 |
 
 ### Agent preset 行
 
-七个 agent 不是七个 ThreadHarbor 插件包，而是七条 DSH 的 `@deepseek-ai/dsh-agent-preset` 组合行；每条内嵌同一个 `@threadharbor/dsh-preset-dispatch`（binding），只是配置不同。dispatch 负责把外部 agent 的回合、流式输出、审批/提问、模型目录、会话交接与写回接进 DSH 原生会话。
+七个 agent 不是七个 ThreadHarbor 插件包，而是七条 DSH 的 `@deepseek-ai/dsh-agent-preset` 组合行；每条内嵌同一个 `@threadharbor/dsh-acp-agent`（binding），只是配置不同。dispatch 负责把外部 agent 的回合、流式输出、审批/提问、模型目录、会话交接与写回接进 DSH 原生会话。
 
 | preset / 组合行 | 名称 | 接入方式与用途 |
 | --- | --- | --- |
@@ -106,9 +105,6 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 agent 接进 
 
 这些包没有独立的组合行，被上面的插件 import：
 
-- `@threadharbor/dsh-acp-agent` — 通用 ACP 接入层：客户端、stdio/WebSocket 传输、各家方言、帧投影、终端与文件子协议、准入与参数补齐。dispatch 的 ACP 路径都走它。
-- `@threadharbor/zcode-acp` — ZCode/GLM 模型客户端：登录凭据解密、Anthropic 格式请求、流解析、Coding Plan 配额查询。
-- `@threadharbor/minimaxi-acp` — MiniMax 模型客户端：凭据发现与刷新、请求构造、流解析、模型能力表。
 - `@threadharbor/dsh-mobile-entry` — 手机页静态资源、`pair-url` / `peers` 的路由实现。直连模式取消后不再独立挂载，由 `dsh-mobile-relay` 调用其导出函数出页面。
 - `@threadharbor/dsh-host-federation`（主入口） — 主机身份、登记簿、跨标签页通道、分组视图与网关路径等共享库；上面挂载的是它的 `host-store` / `tailscale` / `ssh-deploy` / `host-gateway` 子路径入口。
 
@@ -136,13 +132,13 @@ dsh --profile web
 
 源码链接安装依赖这个 checkout 及其 `node_modules` 和 `lib`，不要在卸载前移动或删除目录。`npm run reference:checkout` 只创建被忽略的 `reference/deepseek-harness/`，用于开发时核对公开 API；运行和打包均不需要该参考目录。
 
-装好后 agent 不会自动出现：每个 agent 需要在 profile 组合里加一条 preset 行（`@deepseek-ai/dsh-agent-preset` 内嵌 `@threadharbor/dsh-preset-dispatch`），写明 `presetId`、`agent` 与连接方式。配置支持可选的 `args`；省略时按 `agent` 补上它说 ACP 所必需的默认参数（cursor 是 `acp --trust`，qoder 是 `--acp`），显式写了则完全以配置为准。qoder 子进程还会剥掉 IDE 注入的 SDK 入口环境变量（`QODER_*`、`CLAUDE*`、`VSCODE_*` 等），否则从 Qoder IDE 终端启动时会直接退出。
+装好后 agent 不会自动出现：每个 agent 需要在 profile 组合里加一条 preset 行（`@deepseek-ai/dsh-agent-preset` 内嵌 `@threadharbor/dsh-acp-agent`），写明 `presetId`、`agent` 与连接方式。配置支持可选的 `args`；省略时按 `agent` 补上它说 ACP 所必需的默认参数（cursor 是 `acp --trust`，qoder 是 `--acp`），显式写了则完全以配置为准。qoder 子进程还会剥掉 IDE 注入的 SDK 入口环境变量（`QODER_*`、`CLAUDE*`、`VSCODE_*` 等），否则从 Qoder IDE 终端启动时会直接退出。
 
 preset 行注册后，agent 的模型会进全局模型目录，从模型列表即可切换；binding 上的 `hideFromRoster: true` 让 `threadharbor-roster-filter` 按标记把这些 preset 从选择器名册里隐藏（切换机制依赖注册本身，不能直接删行），细节见 [docs/install-plugins.zh.md](docs/install-plugins.zh.md)。
 
 ## 真机活测
 
-`packages/dsh-acp-agent/tests/live.spec.ts` 与 `packages/dsh-preset-dispatch/tests/live.spec.ts` 会拉起真实的 agent 二进制跑完整回合，默认跳过：
+`packages/dsh-acp-agent/tests/live.spec.ts` 会拉起真实的 agent 二进制跑完整回合，默认跳过：
 
 ```sh
 THREADHARBOR_LIVE_ACP=1 npx vitest run packages/dsh-acp-agent/tests/live.spec.ts
@@ -153,14 +149,11 @@ THREADHARBOR_LIVE_ACP=1 npx vitest run packages/dsh-acp-agent/tests/live.spec.ts
 ## 仓库结构
 
 ```text
-packages/dsh-acp-agent/        通用 ACP 接入层：客户端、传输、各家方言、投影、终端/文件子协议
-packages/dsh-preset-dispatch/  preset 组合行（宿主加载入口 entry.ts）：分流、回合驱动、写回、流式；另含 roster-filter / zcode-quota 两个宿主插件
+packages/dsh-acp-agent/         ACP 接入层 + 模型客户端 + preset 框架：传输、方言、投影、ZCode/GLM、MiniMax、dispatch、roster-filter、quota 等
 packages/dsh-client/           浏览器插件：左侧主机树、主机切换、「各主机」设置、手机配对二维码、模型入口与「提供方与模型」屏蔽等界面
 packages/dsh-host-federation/  跨主机汇总的库与宿主插件：主机身份、设置存储、Tailscale 桥、SSH 部署、同源网关
 packages/dsh-mobile-entry/     手机页与 pair-url / peers 的路由库（由 dsh-mobile-relay 复用，不再独立挂载）
 packages/dsh-mobile-relay/     手机中转（云主机侧）：公网入口、手机页、SSH 隧道、会话/审批/事件转发
-packages/zcode-acp/            ZCode/GLM 模型客户端：凭据解密、请求、流解析、套餐配额
-packages/minimaxi-acp/         MiniMax 模型客户端：凭据发现/刷新、请求、流解析
 tests/wiring.spec.ts           「代码对」与「代码跑得到」分开检查；到不了的模块登记在 KNOWN_UNWIRED
 cordis.patch.yml               安装到 DSH Web profile 的标准 bundle patch（浏览器插件、宿主插件与 agent preset 行）
 reference/                     被 Git 忽略的 DeepSeek Harness 参考源码
