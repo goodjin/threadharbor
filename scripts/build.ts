@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, statSync, utimesSync } from 'node:fs'
 import { build, type UserConfig } from 'tsdown'
 import plugin from '../tsdown.plugin.config.ts'
+import clientPlugin from '../tsdown.client.config.ts'
 
 /**
  * The packaged outputs, and what they cost when their timestamp moves.
@@ -45,6 +46,10 @@ function restoreUnchangedTimestamps(before: ReadonlyMap<string, Stamp>): void {
 
 const builds: readonly [string, UserConfig | readonly UserConfig[]][] = [
   ['.', plugin],
+  // Browser bundle: the federation UI (host panel, cross-machine sidebar,
+  // pairing, SSH deploy surfaces). Same package, second role — DSH loads it
+  // via the ./client export. Its config carries absolute paths, so cwd is moot.
+  ['.', clientPlugin],
 ]
 
 const before = new Map<string, Stamp>()

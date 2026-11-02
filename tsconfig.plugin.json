@@ -6,7 +6,7 @@
     "tsBuildInfoFile": "lib/types/tsconfig.tsbuildinfo"
   },
   "include": [
-    "src"
+    "src/index.ts"
   ],
   "references": []
 }

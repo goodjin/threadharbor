@@ -69,9 +69,9 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 agent 接进 
 
 ## 插件清单
 
-`cordis.patch.yml` 是安装到 DSH Web profile 的标准 bundle patch。它插入下面这些条目，装载器按行 id 导入对应模块并执行其 `apply`（`host-store` 是纯声明式的一行，只提供一个 volatile 设置字段）。
+`cordis.patch.yml` 是安装到 DSH Web profile 的标准 bundle patch。本包同时声明两个角色（`dsh.bundle` 宿主侧 + `dsh.client` 浏览器侧），前后端一体、同一个插件。它插入下面这些条目，装载器按行 id 导入对应模块并执行其 `apply`（`host-store` 是纯声明式的一行，只提供一个 volatile 设置字段）。
 
-浏览器侧的联邦界面（主机面板、跨机侧栏、「各主机」设置、手机配对二维码、SSH 部署界面）已独立出仓：[goodjin/dsh-client](https://github.com/goodjin/dsh-client)（`@goodjin2/dsh-client`），bundle 组合行在那个仓库的 `cordis.patch.yml` 里；agent 相关界面（配额胶囊、模型入口、屏蔽栏、切换反馈）在 [goodjin/dsh-acp-agent](https://github.com/goodjin/dsh-acp-agent)。本仓库的 patch 只保留宿主侧插件行。
+浏览器侧的联邦界面（主机面板、跨机侧栏、「各主机」设置、手机配对二维码、SSH 部署界面）由本包的 `dsh.client` 角色提供（构建产物 `lib/client.js`，组合行 `@goodjin2/dsh-threadharbor/client`）。agent 相关界面（配额胶囊、模型入口、屏蔽栏、切换反馈）与宿主侧的 agent/配额挂载在 [goodjin/dsh-acp-agent](https://github.com/goodjin/dsh-acp-agent)（`@goodjin2/dsh-acp-agent`），需要完整 agent 功能时一并安装。本仓库的 patch 只保留多主机相关的宿主侧插件行。
 
 ### 运行时插件
 
@@ -81,13 +81,13 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 agent 接进 
 | `@goodjin2/dsh-host-federation/tailscale` | `threadharbor-tailscale` | 在提供页面的机器上运行 `tailscale status --json`，把 peer 清单写进 host-store 的 `data` 字典，供「从 Tailscale 选主机」使用。 |
 | `@goodjin2/dsh-host-federation/ssh-deploy` | `threadharbor-ssh-deploy` | 主机侧 SSH 部署与远端操作接口：检查连通性、安装/启动远端 DSH、读取远端会话和执行运维操作。 |
 | `@goodjin2/dsh-host-federation/host-gateway` | `threadharbor-host-gateway` | 同源反向代理：浏览器把普通 DSH 请求发到本机 `/threadharbor/gateway/<主机标识>/`，由它转到登记主机自己的 DSH；登录 cookie 留在网关，不进浏览器。 |
-| `@goodjin2/dsh-acp-agent/roster-filter` | `threadharbor-roster-filter` | 把标了 `hideFromRoster: true` 的 ACP preset 从新建会话/预设选择器中隐藏；注册本身保留，所以模型列表切换和会话接管仍可用。内部 `list()` 不过滤。 |
-| `@goodjin2/dsh-acp-agent/zcode-quota` | `threadharbor-zcode-quota` | 宿主侧读取本机 ZCode 登录凭据并查询 Coding Plan 的 5 小时/周限额，供输入框下方的 GLM 配额胶囊显示；密钥不出宿主进程。 |
-| `@goodjin2/dsh-acp-agent/mermaid-asset` | `threadharbor-mermaid-asset` | 本机 `/threadharbor/mermaid.js`：按需提供给会话区 Mermaid 代码块（mermaid fence）渲染的运行时（来自本包依赖，客户端包不内联 3.5 MB；同一登录准入，ETag/304 缓存）。 |
+| `@goodjin2/dsh-threadharbor/client` | `threadharbor-client` | 浏览器联邦 UI（主机面板、跨机侧栏、手机配对、SSH 部署界面），由 `dsh.client` 角色装载，构建产物 `lib/client.js`。 |
 
-### Agent preset 行
+agent 相关宿主插件（`roster-filter`、`zcode-quota`、`mermaid-asset`）与七条 agent preset 行已迁到 [goodjin/dsh-acp-agent](https://github.com/goodjin/dsh-acp-agent)，不在本 patch 里。
 
-七个 agent 不是七个 ThreadHarbor 插件包，而是七条 DSH 的 `@deepseek-ai/dsh-agent-preset` 组合行；每条内嵌同一个 `@goodjin2/dsh-acp-agent`（binding），只是配置不同。dispatch 负责把外部 agent 的回合、流式输出、审批/提问、模型目录、会话交接与写回接进 DSH 原生会话。
+### Agent preset 行（在 @goodjin2/dsh-acp-agent 仓库）
+
+七个 agent 不是七个 ThreadHarbor 插件包，而是七条 DSH 的 `@deepseek-ai/dsh-agent-preset` 组合行；每条内嵌同一个 `@goodjin2/dsh-acp-agent`（binding），只是配置不同。dispatch 负责把外部 agent 的回合、流式输出、审批/提问、模型目录、会话交接与写回接进 DSH 原生会话。这些行在 [goodjin/dsh-acp-agent](https://github.com/goodjin/dsh-acp-agent) 的 `cordis.patch.yml` 里。
 
 | preset / 组合行 | 名称 | 接入方式与用途 |
 | --- | --- | --- |
@@ -131,7 +131,7 @@ dsh --profile web
 
 装好后 agent 不会自动出现：每个 agent 需要在 profile 组合里加一条 preset 行（`@deepseek-ai/dsh-agent-preset` 内嵌 `@goodjin2/dsh-acp-agent`），写明 `presetId`、`agent` 与连接方式。配置支持可选的 `args`；省略时按 `agent` 补上它说 ACP 所必需的默认参数（cursor 是 `acp --trust`，qoder 是 `--acp`），显式写了则完全以配置为准。qoder 子进程还会剥掉 IDE 注入的 SDK 入口环境变量（`QODER_*`、`CLAUDE*`、`VSCODE_*` 等），否则从 Qoder IDE 终端启动时会直接退出。
 
-`@goodjin2/dsh-acp-agent` 不在本仓库的软链范围内，profile 需单独引用它的 checkout：在 profile 的 `package.json` 依赖里加 `"@goodjin2/dsh-acp-agent": "link:~/github/dsh-plugins/dsh-acp-agent"` 再 `pnpm install`（bundle 组合里 `@goodjin/...` 的行都指向它）。
+`@goodjin2/dsh-acp-agent` 不在本仓库的软链范围内，profile 需单独引用它的 checkout：在 profile 的 `package.json` 依赖里加 `"@goodjin2/dsh-acp-agent": "link:~/github/dsh-plugins/dsh-acp-agent"` 再 `pnpm install`（bundle 组合里 `@goodjin/...` 的行都指向它）。agent 相关宿主插件行（`roster-filter`、`zcode-quota`、`mermaid-asset`）也在那个仓库的 patch 里，要一并装。
 
 preset 行注册后，agent 的模型会进全局模型目录，从模型列表即可切换；binding 上的 `hideFromRoster: true` 让 `threadharbor-roster-filter` 按标记把这些 preset 从选择器名册里隐藏（切换机制依赖注册本身，不能直接删行），细节见 [docs/install-plugins.zh.md](docs/install-plugins.zh.md)。
 
@@ -148,12 +148,12 @@ cd ~/github/dsh-plugins/dsh-acp-agent && THREADHARBOR_LIVE_ACP=1 npx vitest run 
 ## 仓库结构
 
 ```text
-~/github/dsh-plugins/dsh-acp-agent  ACP 接入层 + 模型客户端 + preset 框架（独立仓库，含浏览器侧 UI 与配额胶囊）
-~/github/dsh-plugins/dsh-client  浏览器联邦界面（独立仓库）：主机面板、跨机侧栏、「各主机」设置、手机配对、SSH 部署界面
 packages/dsh-host-federation/  跨主机汇总的库与宿主插件：主机身份、设置存储、Tailscale 桥、SSH 部署、同源网关
-tests/wiring.spec.ts           「代码对」与「代码跑得到」分开检查；到不了的模块登记在 KNOWN_UNWIRED
-cordis.patch.yml               安装到 DSH Web profile 的标准 bundle patch（浏览器插件、宿主插件与 agent preset 行）
-reference/                     被 Git 忽略的 DeepSeek Harness 参考源码
+src/client/                   浏览器联邦 UI（主机面板、跨机侧栏、手机配对、SSH 部署界面），由 dsh.client 角色构建
+tests-client/                 浏览器联邦 UI 的测试
+tests/wiring.spec.ts          「代码对」与「代码跑得到」分开检查；到不了的模块登记在 KNOWN_UNWIRED
+cordis.patch.yml              安装到 DSH Web profile 的标准 bundle patch（多主机宿主插件 + 浏览器 UI）
+reference/                    被 Git 忽略的 DeepSeek Harness 参考源码
 ```
 
 设计说明见 [docs/design/dsh-multi-host-migration.md](docs/design/dsh-multi-host-migration.md)，各 agent 的对接实测见 [docs/agent-acp/](docs/agent-acp/README.md)，AgentHarbor/SessionPort 对比见 [docs/landscape.zh.md](docs/landscape.zh.md)。主机添加、SSH 部署与失败排查见 [docs/ops.zh.md](docs/ops.zh.md)（[ssh-deploy.zh.md](docs/ssh-deploy.zh.md) 为 API 与状态机补充）。手机端（Android）的通道、配对与手机页见 [docs/mobile-client.zh.md](docs/mobile-client.zh.md)。zcode 与 minimaxi 两组模型贴着 ZCode 与 MiniMax Code 两个上游走，依赖哪些上游事实、上游更新时如何判断要不要跟，见 [docs/upstream-sync.zh.md](docs/upstream-sync.zh.md)。
@@ -161,12 +161,14 @@ reference/                     被 Git 忽略的 DeepSeek Harness 参考源码
 ## 开发检查
 
 ```sh
-npm run typecheck
-npm run test
-npm run build
+npm run typecheck          # 宿主侧
+npm run typecheck:client   # 浏览器侧
+npm run test               # 宿主侧
+npm run test:client        # 浏览器侧
+npm run build              # 宿主侧 + 浏览器侧 + verify-client-build
 ```
 
-`npm run test` 里包含 wiring 检查：凡是从宿主加载入口走不到、又没有在 `KNOWN_UNWIRED` 登记说明的模块，测试直接失败。
+`npm run test` 里包含 wiring 检查：凡是从宿主加载入口走不到、又没有在 `KNOWN_UNWIRED` 登记说明的模块，测试直接失败。`npm run build` 末尾跑 `verify-client-build.mjs`：浏览器产物必须自注册、单文件、携带源码声明的全部导出。
 
 ## 本地开发与双通道
 

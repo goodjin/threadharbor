@@ -1,0 +1,28 @@
+.panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.host {
+  margin: 0;
+  padding: 8px 16px;
+  color: var(--fg-muted, #667);
+  font-size: 12px;
+  border-bottom: 1px solid var(--border, rgba(127, 127, 127, 0.35));
+}
+
+.frame {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  background: transparent;
+}
+
+.hint {
+  margin: 0;
+  padding: 16px;
+  color: var(--fg-muted, #667);
+}

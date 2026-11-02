@@ -70,15 +70,15 @@ function compositionSpecifiers(): string[] {
  * just the bug it is meant to describe, given a longer life.
  */
 const KNOWN_UNWIRED: Readonly<Record<string, string>> = {
-  // 这四个模块是浏览器侧库：真正的消费者是联邦 UI 的 bundle
-  // （github.com/goodjin/dsh-client，2026-11-02 独立出仓），宿主侧的
-  // 五个挂载入口都不引它们。包根 index.ts 保留 re-export 供那边内联。
-  // 清除条件：goodjin/dsh-client 不再引用对应导出时，把模块与 re-export
-  // 一起删掉。
-  'packages/dsh-host-federation/src/channel.ts': '仅由独立出仓的 goodjin/dsh-client bundle 消费',
-  'packages/dsh-host-federation/src/rollup-view.ts': '仅由独立出仓的 goodjin/dsh-client bundle 消费',
-  'packages/dsh-host-federation/src/settings.ts': '仅由独立出仓的 goodjin/dsh-client bundle 消费',
-  'packages/dsh-host-federation/src/workspace-map.ts': '仅由独立出仓的 goodjin/dsh-client bundle 消费',
+  // 这四个模块是浏览器侧库：真正的消费者是本仓并入的联邦 UI bundle
+  // （src/client/index.ts，原 goodjin/dsh-client，2026-11 并入）。宿主侧的
+  // 五个挂载入口都不引它们；静态扫描只跟 @goodjin2/dsh-host-federation 的组合
+  // 行，走不到 client bundle 的 import 图，所以它们仍登记为「宿主侧到不了」。
+  // 清除条件：client bundle 不再引用对应导出时，把模块与 re-export 一起删掉。
+  'packages/dsh-host-federation/src/channel.ts': '仅由本仓并入的 client bundle（src/client）消费',
+  'packages/dsh-host-federation/src/rollup-view.ts': '仅由本仓并入的 client bundle（src/client）消费',
+  'packages/dsh-host-federation/src/settings.ts': '仅由本仓并入的 client bundle（src/client）消费',
+  'packages/dsh-host-federation/src/workspace-map.ts': '仅由本仓并入的 client bundle（src/client）消费',
 }
 
 function packageExports(pkg: string): Record<string, unknown> {

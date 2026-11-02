@@ -33,10 +33,10 @@
 工作树，在它的分支上改；不要直接在主工作区改代码。纯文档改动（本文件、
 `docs/`）不经工作树，直接在主工作区改。
 
-- **合并回主线前过全部门禁**：`npm run typecheck`、`npm run test`；动过被
-  界面或宿主加载的包（如 `dsh-client`）还要 `npm run build` 重建产物——界面
-  加载的是 `lib/` 里的构建结果，只并源码不重建，表现与「功能消失」一模一样，
-  且无任何报错。
+- **合并回主线前过全部门禁**：`npm run typecheck`、`npm run typecheck:client`、
+  `npm run test`、`npm run test:client`、`npm run build`。动过浏览器侧代码（`src/client/`
+  或 `src/` 下的平铺模块）后，`npm run build` 会重建 `lib/client.js`——界面加载的是
+  构建产物，只并源码不重建，表现与「功能消失」一模一样，且无任何报错。
 - **合并后要重启才可见**：桌面版重启应用；web 测试实例按上面的 3080 铁律重启。
 - 原因（2026-10-20 真实事故，勿再重演）：各 profile 与界面加载的插件代码，经
   仓库 `node_modules/@threadharbor/` 这组软链**唯一来自主工作区**。当天软链曾

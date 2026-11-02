@@ -17,8 +17,10 @@ describe('remote Web bundle', () => {
     // a linked install resolves the patch's rows through these dependencies,
     // and configureProfile mirrors this same scoped set into the profile —
     // an undeclared package loads nowhere and the pruning deletes its link.
+    // qrcode ships with the browser bundle (pairing-panel draws its QR).
     expect(manifest.dependencies).toEqual({
       '@goodjin2/dsh-host-federation': 'workspace:^',
+      'qrcode': '^1.5.4',
     })
 
     // The stock sidebar stays enabled. It used to be disabled, because the
@@ -33,8 +35,9 @@ describe('remote Web bundle', () => {
     for (const runtimeOwner of ['agent-loop', 'workspace', 'cordis-host-runner']) {
       expect(patch).not.toContain(`- id: ${runtimeOwner}\n  disabled: true`)
     }
-    // 联邦 UI（threadharbor-client 行）已独立出仓（goodjin/dsh-client）。
-    expect(patch).not.toContain('threadharbor-client')
+    // 联邦 UI（threadharbor-client 行）已并入本包（2026-11，原 goodjin/dsh-client）。
+    expect(patch).toContain('threadharbor-client')
+    expect(patch).toContain("name: '@goodjin2/dsh-threadharbor/client'")
     expect(patch).toContain("threadharbor-ssh-deploy")
     expect(patch).toContain("threadharbor-host-gateway")
     // 手机中转已独立出仓（goodjin/dsh-mobile-relay），不再随本仓库分发。

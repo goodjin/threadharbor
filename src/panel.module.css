@@ -1,0 +1,851 @@
+/*
+ * The 各主机 panel's skin.
+ *
+ * 2026-10-13 用户反馈定下的形状：面板是三个界面——列表页（一张正常的表：
+ * 名称、IP、设置按钮 三列，行高一致）、详情页和添加页（同一套表单的两种
+ * 模式，主机只有名称和 IP 两个字段）。添加页的返回按钮在表单方框外面，
+ * 「从 Tailscale 选」在表单前面，确定/取消之后不再有内容。
+ * Built only from DSH's own design tokens (--dsw-*): the panel sits inside
+ * DSH's shell, so hard-coded colors would disagree with whatever theme the
+ * shell is in. Class names are CSS modules.
+ */
+
+.root {
+  font-family: var(--dsw-font-family);
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  line-height: 1.6;
+  /* 宽度跟随挂载它的 DSH 槽（main 全宽），不再固定 640px 居中——
+     用户反馈：挤在页面中间一小块。 */
+  width: 100%;
+  height: auto;
+  max-height: 100%;
+  margin: 0;
+  /* 左右各 20px：之前 4px 让所有内容贴边，是「没间距、对不齐」的根因。 */
+  padding: 16px 20px 24px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow: auto;
+}
+
+/* 列表页的页头：标题靠左、添加按钮靠右，是这页最响的一行。 */
+.pageHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+}
+
+/* One card per page: the frame the list, the detail and the add form share. */
+.card {
+  border: 1px solid var(--dsw-alias-settings-card-stroke);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-settings-card-fill);
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 表单页：返回按钮在方框外面（2026-10-13 用户反馈），框里才是表单。 */
+.formPage {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.formNav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+}
+
+.cardHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+}
+
+.title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+/* 详情页顶部的「主机管理」标记：点开的每一台主机都进这里，标题点明这是
+   主机管理设置界面，下面的主机信息（自报标识、状态、登记字段）是其中一个栏目。 */
+.managementTag {
+  padding: 1px 8px;
+  border: 1px solid var(--dsw-alias-label-caption, currentColor);
+  border-radius: 10px;
+  color: var(--dsw-alias-label-caption, inherit);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.6;
+}
+
+.sectionHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  margin-top: 6px;
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.note {
+  margin: 0;
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+}
+
+/* Explanatory text lives folded away by default. */
+.noteDetails {
+  margin: 0;
+}
+
+.noteDetails > .note {
+  margin-top: 6px;
+}
+
+.summary {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.summary:hover {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.agentSection {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  margin-top: 10px;
+  padding-top: 8px;
+}
+
+.agentList {
+  display: flex;
+  flex-direction: column;
+}
+
+.agentRow {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 0;
+}
+
+.agentRow + .agentRow {
+  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+
+.agentHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agentName {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.agentId {
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.action {
+  appearance: none;
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 12px;
+  cursor: pointer;
+}
+
+.action:hover {
+  border-color: var(--dsw-alias-border-l4);
+}
+
+.actionPrimary {
+  composes: action;
+  background: var(--dsw-alias-brand-primary);
+  border-color: var(--dsw-alias-brand-primary);
+  color: var(--dsw-alias-label-primary-inverted);
+}
+
+.stateLine {
+  margin: 0;
+  font-size: 12px;
+  color: var(--dsw-alias-label-caption);
+}
+
+.stateBad {
+  composes: stateLine;
+  color: var(--dsw-alias-state-error-primary);
+}
+
+/*
+ * The verdict is the row's payload: a state word with its own color and a
+ * leading dot, the measured number beside it in tabular figures, the advice
+ * one click away.
+ */
+.verdictLine {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.verdictWord {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.verdictWord::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  margin-right: 6px;
+  vertical-align: 1px;
+}
+
+.verdictWord[data-verdict-tone='ok'] {
+  color: var(--dsw-static-green-500);
+}
+
+.verdictWord[data-verdict-tone='slow'] {
+  color: var(--dsw-alias-state-warn-label);
+}
+
+.verdictWord[data-verdict-tone='hung'],
+.verdictWord[data-verdict-tone='unreachable'] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.verdictDetail {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.verdictMore {
+  min-width: 0;
+}
+
+.verdictAdvice {
+  margin: 6px 0 0;
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+  max-width: 52ch;
+}
+
+/*
+ * The form page's fields: label over control, one column, so the add page and
+ * the detail page read the same. Read-only values keep the field's place.
+ */
+.accessModes {
+  border: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.launchUrlBox {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--dsw-radius-sm);
+  border: 1px solid var(--dsw-alias-settings-card-stroke);
+  background: var(--dsw-alias-settings-card-fill);
+}
+
+.launchUrlText {
+  display: block;
+  word-break: break-all;
+  font-size: 12px;
+}
+
+.sshSection {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 主机信息之下的部署信息框：独立一块，部署中的异常也落在框内。 */
+.deploySection {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+
+.comboRow {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.comboRow .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.segmented {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.segmentedItem,
+.segmentedActive {
+  flex: 1;
+  border-radius: var(--dsw-radius-sm);
+  border: 1px solid var(--dsw-alias-settings-card-stroke);
+  background: var(--dsw-alias-settings-card-fill);
+  padding: 6px 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.segmentedActive {
+  background: var(--dsw-alias-label-primary);
+  color: var(--dsw-alias-label-on-accent);
+  border-color: transparent;
+}
+
+.addMethodList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.addMethodCard {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  text-align: left;
+  padding: 12px 14px;
+  border-radius: var(--dsw-radius-sm);
+  border: 1px solid var(--dsw-alias-settings-card-stroke);
+  background: var(--dsw-alias-settings-card-fill);
+  cursor: pointer;
+}
+
+.addMethodTitle {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.sshKeys {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: var(--dsw-radius-sm);
+  border: 1px solid var(--dsw-alias-settings-card-stroke);
+  background: var(--dsw-alias-settings-card-fill);
+}
+
+.bindProgressSticky {
+  composes: sshKeys;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  box-shadow: 0 1px 0 var(--dsw-alias-settings-card-stroke);
+}
+
+.progressCurrent {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+
+.progressRunning {
+  composes: stateLine;
+  color: var(--dsw-alias-brand-primary);
+  font-weight: 600;
+}
+
+.bindFailureBox {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: var(--dsw-radius-sm);
+  border: 1px solid var(--dsw-alias-state-error-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 8%, transparent);
+}
+
+.bindNextAction {
+  margin: 0;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.progressLogDetails {
+  margin: 0;
+  font-size: 12px;
+}
+
+.progressLogDetails summary {
+  cursor: pointer;
+  color: var(--dsw-alias-label-caption);
+}
+
+.sshKeyRow {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-family: var(--dsw-font-mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+
+.textarea {
+  width: 100%;
+  min-height: 72px;
+  font-family: var(--dsw-font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  border-radius: var(--dsw-radius-sm);
+  border: 1px solid var(--dsw-alias-settings-card-stroke);
+  background: var(--dsw-alias-settings-card-fill);
+  color: var(--dsw-alias-label-primary);
+  padding: 8px;
+  box-sizing: border-box;
+}
+
+.formGrid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+  max-width: 420px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-caption);
+}
+
+.input {
+  font: inherit;
+  font-size: 13px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-sm);
+  padding: 5px 10px;
+  outline: none;
+  min-width: 0;
+}
+
+.input:focus-visible {
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+.readonlyValue {
+  font-size: 13px;
+  color: var(--dsw-alias-label-secondary);
+  padding: 5px 0;
+  overflow-wrap: anywhere;
+}
+
+.formActions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+/*
+ * The detail page's facts block: what the host itself reports, kept visually
+ * apart from what the operator filled in. Mismatches are said out loud.
+ */
+.reportedFacts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-layer-2);
+  padding: 8px 10px;
+}
+
+.mismatch {
+  color: var(--dsw-alias-state-warn-label);
+}
+
+.registryActions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px dashed var(--dsw-alias-border-l2);
+  padding-top: 8px;
+}
+
+.notices {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/*
+ * The host list as a table (2026-10-13 用户反馈)：three columns — name, IP,
+ * a settings button — one line per machine, every row one fixed height. The
+ * whole row is the button that opens the host's settings page; the header
+ * row shares the row's grid so the labels sit over their columns.
+ */
+.hostList {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--dsw-alias-settings-card-stroke);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-settings-card-fill);
+  overflow: hidden;
+}
+
+/* Column header: same grid as the rows, one fixed height of its own. The
+   third column is a fixed width, not auto: the header's cell is empty and
+   would collapse to 0px, and the 1fr name column would then absorb the
+   difference — shifting the IP label off the IP column it labels. */
+.hostListHead {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 96px) minmax(0, 220px) 56px;
+  align-items: center;
+  gap: 12px;
+  height: 32px;
+  padding: 0 16px;
+  box-sizing: border-box;
+  /* 2026-10-15 用户反馈：表头要有自己的框、与记录之间要有横线。带子底色
+     不能用 bg-layer-2（在设置卡片里解析成同色白，等于隐形），改用明确的
+     浅灰带 + 底部分隔线，两条都钉在卡片的描边色上。 */
+  background: rgba(127, 127, 127, 0.08);
+  border-bottom: 1px solid var(--dsw-alias-settings-card-stroke);
+  color: var(--dsw-alias-label-caption);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.hostListHeadLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hostListEmpty {
+  margin: 0;
+  padding: 14px 16px;
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+}
+
+.hostRow {
+  display: flex;
+  flex-direction: column;
+}
+
+.hostRow + .hostRow {
+  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+
+/* 每行高度一致（2026-10-13 用户反馈）：定高，不是最小高——内容都是单行
+   （长了省略号），行与行不会因为内容不同而高矮不齐。设置按钮绝对定位在
+   行尾，主按钮的三列与表头的前三列同宽。 */
+.hostRowLine {
+  position: relative;
+}
+
+.hostRowButton {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 96px) minmax(0, 220px);
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  width: 100%;
+  height: 40px;
+  /* 右侧给设置按钮留出 56px + 间距 + 行内边距。 */
+  padding: 0 84px 0 16px;
+  box-sizing: border-box;
+  cursor: pointer;
+}
+
+.hostRowButton:hover .hostName {
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* 名称列：状态圆点 + 名字；状态列单独显示文字标签。 */
+.hostNameCell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.hostStatusDot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.hostStatusDot[data-host-status='self'] {
+  background: var(--dsw-alias-brand-primary);
+}
+
+.hostStatusDot[data-host-status='online'] {
+  background: var(--dsw-static-green-500);
+}
+
+.hostStatusDot[data-host-status='offline'] {
+  background: var(--dsw-alias-label-tertiary);
+}
+
+.hostName {
+  font-weight: 600;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hostConnection {
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hostIp {
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 行尾的设置按钮：与主按钮（进入主机）分开的第二个动作。 */
+.rowSettings {
+  appearance: none;
+  position: absolute;
+  right: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: transparent;
+  cursor: pointer;
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-sm);
+  padding: 2px 10px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.rowSettings:hover {
+  border-color: var(--dsw-alias-border-l4);
+  color: var(--dsw-alias-label-primary);
+}
+
+/*
+ * The registration actions live on the detail page; the destructive one folds
+ * behind a confirm.
+ */
+.confirmBox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--dsw-alias-state-error-primary);
+  flex-wrap: wrap;
+}
+
+/* 从 Tailscale 选：表单前面的入口，和它拉出来的节点清单（2026-10-13
+   用户反馈：放在表单前面，选一台把名称和 IP 一起填上）。 */
+.tailscaleSection {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+  max-width: 420px;
+}
+
+.tailscalePicker {
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-2);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 248px;
+  overflow-y: auto;
+}
+
+.tailscalePickerBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tailscalePickerTitle {
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.tailscalePeerList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tailscalePeer,
+.tailscalePeerOffline {
+  appearance: none;
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  text-align: left;
+  padding: 6px 10px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tailscalePeer:hover {
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+/* 未连接：置灰但仍可点——选了照样填地址，只是这台现在没在 tailnet 上。 */
+.tailscalePeerOffline {
+  opacity: 0.55;
+}
+
+.tailscalePeerName {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tailscalePeerMeta {
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+/*
+ * 手机/窄屏（2026-10-22）：列表行只留「名称 + 状态」和设置按钮，IP 列让位；
+ * 表单不再被 420px 卡住；输入框 16px 防止 iOS 聚焦时整页缩放；点按目标
+ * 抬到 32px 以上。侧栏浮层由 mobile-layout.ts 管，不在这里。
+ */
+@media (max-width: 640px) {
+  .root {
+    padding: 12px 12px 20px;
+    gap: 12px;
+  }
+
+  .card {
+    padding: 10px 12px;
+  }
+
+  .hostListHead {
+    display: none;
+  }
+
+  .hostRowButton {
+    grid-template-columns: minmax(0, 1fr) minmax(0, auto);
+    gap: 8px;
+    height: 44px;
+    padding: 0 60px 0 12px;
+  }
+
+  .hostIp {
+    display: none;
+  }
+
+  .rowSettings {
+    right: 8px;
+    min-height: 32px;
+    padding: 4px 10px;
+  }
+
+  .formGrid,
+  .tailscaleSection {
+    max-width: none;
+  }
+
+  .input,
+  .textarea {
+    font-size: 16px;
+  }
+
+  .action {
+    min-height: 32px;
+    padding: 5px 12px;
+  }
+
+  .sshKeyRow,
+  .launchUrlText,
+  .readonlyValue {
+    overflow-wrap: anywhere;
+  }
+
+  .verdictAdvice {
+    max-width: none;
+  }
+}
