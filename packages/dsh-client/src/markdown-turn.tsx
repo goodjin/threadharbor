@@ -13,7 +13,7 @@
 
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { CodeBlock, FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconCloseOutlineRegular, IconCopyOutlineRegular, IconEditOutlineRegular, IconNewChatOutlineRegular, IconSendOutlineRegular, IconWarningOutlineRegular, MarkdownText, Toast, classifyFileType, languageForPath } from '@deepseek-ai/dsh-client-ui-primitives'
+import { CodeBlock, FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconCloseOutlineRegular, IconEditOutlineRegular, IconNewChatOutlineRegular, IconSendOutlineRegular, IconWarningOutlineRegular, MarkdownText, Toast, classifyFileType, languageForPath } from '@deepseek-ai/dsh-client-ui-primitives'
 import { FileOpenSplit } from './markdown-turn-open.tsx'
 import { ActiveFileBar } from './markdown-turn-active-bar.tsx'
 import { setActiveFilePath } from './markdown-turn-active.ts'
@@ -239,15 +239,6 @@ function scrollComposerIntoView(bar: HTMLElement | null): void {
   }
 }
 
-/** 复制一段文本到剪贴板；失败时回调 onFail。 */
-async function copyTextToClipboard(text: string, onFail: () => void): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(text)
-  } catch {
-    onFail()
-  }
-}
-
 /**
  * 把用户评论按文档顺序合进原文：每条评论挂在它所评的那段正文后，
  * 用引用块 + 一句说明标记。段落之间、评论与下一段之间各加一个换行。
@@ -462,13 +453,8 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
         const text = blockText(block)
         if (text === '') return
         const action = button.getAttribute('data-line-action')
-        if (action === 'copy') {
-          button.setAttribute('data-copy-text', text)
-          void copyTextToClipboard(text, () => notify(t('markdownTurn.copyFailed')))
-        } else {
-          void readers.sendToSession(sessionId, text)
-            .catch(() => notify(t('markdownTurn.sendFailed')))
-        }
+        void readers.sendToSession(sessionId, text)
+          .catch(() => notify(t('markdownTurn.sendFailed')))
       }}
       onMouseOver={(event) => {
         // 指针从正文移到工具条上时也会触发 mouseover；工具条是正文块的兄弟节点，
@@ -505,6 +491,7 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
                 className={css.editInput}
                 data-markdown-body=""
                 defaultValue={body.text}
+                style={{ minHeight: '50dvh' }}
                 aria-label={t('markdownTurn.edit')}
               />
               <div className={css.editActions}>
@@ -569,7 +556,6 @@ function MarkdownDocument({ sessionId, path, readers, t, onNotify }: {
         {!editing && <div className={css.lineTools} data-line-tools="" role="toolbar" aria-label={t('markdownTurn.sendToSession')}>
           <button type="button" className={css.lineTool} data-line-action="send" title={t('markdownTurn.sendToSession')} aria-label={t('markdownTurn.sendToSession')}><IconSendOutlineRegular size={15} /></button>
           <button type="button" className={css.lineTool} data-line-action="direct" title={t('markdownTurn.send')} aria-label={t('markdownTurn.send')}><IconEditOutlineRegular size={15} /></button>
-          <button type="button" className={css.lineTool} data-line-action="copy" title={t('markdownTurn.copy')} aria-label={t('markdownTurn.copy')}><IconCopyOutlineRegular size={15} /></button>
         </div>}
         {!editing && selBar !== null && !commenting && (
           <div ref={selBarRef} className={css.selBar} data-selection-bar="" role="toolbar">

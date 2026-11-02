@@ -968,7 +968,7 @@ describe('createMarkdownTurnReaders sendToSession', () => {
 })
 
 describe('MarkdownDocument 行内工具条', () => {
-  it('正文块 hover 出现行内按钮，点复制写剪贴板，点发送以块原文调用 sendToSession', async () => {
+  it('正文块 hover 出现行内按钮，只留发送类动作（复制与 dsh 原生重复，已去掉），点发送以块原文调用 sendToSession', async () => {
     const send = vi.fn(async () => {})
     const face = readers({ readPage: vi.fn(async () => page('# 甲\n\n段落乙', 1, true)), sendToSession: send })
     const container = document.createElement('div')
@@ -988,12 +988,10 @@ describe('MarkdownDocument 行内工具条', () => {
     expect(para).not.toBeNull()
     await act(async () => { para?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
     const body = container.querySelector('[data-markdown-body]') as HTMLElement
-    const copyBtn = body.querySelector('[data-line-action="copy"]') as HTMLElement | null
-    expect(copyBtn).not.toBeNull()
-    await act(async () => { copyBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
-    expect(copyBtn?.getAttribute('data-copy-text')).toBe('段落乙')
-
+    // 复制与 dsh 原生代码块工具条重复，已去掉；只留发送到会话 / 发送。
+    expect(body.querySelector('[data-line-action="copy"]')).toBeNull()
     const sendBtn = body.querySelector('[data-line-action="send"]') as HTMLElement | null
+    expect(sendBtn).not.toBeNull()
     await act(async () => { sendBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     expect(send).toHaveBeenCalledWith('sess', '段落乙')
     await act(async () => { root.unmount() })
@@ -1293,6 +1291,8 @@ describe('MarkdownDocument 编辑与 compose box', () => {
     const ta = container.querySelector('[data-markdown-body] textarea') as HTMLTextAreaElement
     expect(ta).not.toBeNull()
     expect(ta.value).toBe('# 原始')
+    // 编辑框最小高度一屏，不塌成两行。
+    expect(ta.style.minHeight).toBe('50dvh')
     await act(async () => {
       ta.value = '# 改过'
       ta.dispatchEvent(new Event('input', { bubbles: true }))

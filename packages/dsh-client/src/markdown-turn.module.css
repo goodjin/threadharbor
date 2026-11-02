@@ -106,17 +106,17 @@
   border-radius: 4px;
 }
 
-/* 行内工具条：body hover 时浮出，跨主题半透明底衬。 */
+/* 行内工具条：body hover 时浮出。去掉厚卡片底衬，做成和 dsh 原生代码块工具条
+   一致的轻量图标按钮组（透明底 + 细微描边），让两者看起来是同一行、不重复。 */
 .lineTools {
   position: absolute;
-  top: 4px;
-  right: 4px;
+  top: 6px;
+  right: 8px;
   display: flex;
   gap: 2px;
   padding: 2px;
   border-radius: 6px;
-  background: rgb(255 255 255 / 85%);
-  box-shadow: 0 1px 4px rgb(0 0 0 / 15%);
+  background: transparent;
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--ds-transition-duration, 120ms) var(--ds-ease-in-out, ease);
