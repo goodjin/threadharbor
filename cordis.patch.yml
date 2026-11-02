@@ -47,32 +47,32 @@
     # hideFromRoster: true；过滤器只认这个标记（以及行上的同名字段）。
     # 新增 agent 只要打标记，不必改过滤器配置。内部 list() 仍不过滤。
     - id: threadharbor-roster-filter
-      name: '@threadharbor/dsh-acp-agent/roster-filter'
+      name: '@goodjin/dsh-acp-agent/roster-filter'
     # GLM 套餐限额接口：宿主解密本机 ZCode 登录密钥后问一次 Coding Plan 的
     # monitor 地址，把 5 小时/周两个窗口的数字发回；浏览器侧输入框下方的
     # 配额胶囊从这里读（密钥不出宿主进程，成功应答带 30 秒缓存）。
     - id: threadharbor-zcode-quota
-      name: '@threadharbor/dsh-acp-agent/zcode-quota'
+      name: '@goodjin/dsh-acp-agent/zcode-quota'
     # MiniMax Token Plan 限额+积分接口：宿主用本机 MiniMax 登录令牌（签名查组与
     # 积分 + 开放平台查两个窗口）问一次，把 5 小时/周/积分发回；与 GLM 那条同面，
     # 浏览器侧给 MiniMax 模型画配额胶囊时读它（令牌不出宿主进程，30 秒缓存）。
     - id: threadharbor-minimaxi-quota
-      name: '@threadharbor/dsh-acp-agent/minimaxi-quota'
+      name: '@goodjin/dsh-acp-agent/minimaxi-quota'
     # Codex（ChatGPT 套餐）额度接口：宿主读本机 ~/.codex 登录令牌问一次官方
     # usage 只读接口，把主/次窗口（时长决定标签）与按量积分发回；没登录就
     # 不出数据，浏览器侧按 acp:acp-codex 画胶囊（令牌不出宿主，30 秒缓存）。
     - id: threadharbor-codex-quota
-      name: '@threadharbor/dsh-acp-agent/codex-quota'
+      name: '@goodjin/dsh-acp-agent/codex-quota'
     # Claude（Anthropic 官方订阅）额度接口：宿主读本机官方 OAuth 令牌（文件或
     # 钥匙串）问一次 oauth usage，把 5 小时/7 天两档发回；走中转站没登官方的
     # 机器上没有凭据，胶囊安静地不出现（上游接口自带 429 冷却，缓存 2 分钟）。
     - id: threadharbor-claude-quota
-      name: '@threadharbor/dsh-acp-agent/claude-quota'
+      name: '@goodjin/dsh-acp-agent/claude-quota'
     # Mermaid 运行时的同源静态路由：会话区里的 ```mermaid 代码块在第一次出现时
     # 才注入 <script> 加载这个文件（客户端包不内联 3.5 MB 的 mermaid）；资产
     # 来自本包的 mermaid 依赖，与页面同一登录准入，缓存走 ETag/304。
     - id: threadharbor-mermaid-asset
-      name: '@threadharbor/dsh-acp-agent/mermaid-asset'
+      name: '@goodjin/dsh-acp-agent/mermaid-asset'
     # /commit-merge-push：跑 typecheck → test → build 门禁，提交当前分支，
     # 合到 main 并推送。worktree 分支合完主分支和分支都推；已经在 main 上只推 main。
     - id: threadharbor-commit-merge-push
@@ -85,7 +85,7 @@
         order: 20
         plugins:
           - id: acp-codex-binding
-            name: '@threadharbor/dsh-acp-agent'
+            name: '@goodjin/dsh-acp-agent'
             config:
               presetId: acp-codex
               agent: codex
@@ -253,7 +253,7 @@
         order: 30
         plugins:
           - id: acp-claude-binding
-            name: '@threadharbor/dsh-acp-agent'
+            name: '@goodjin/dsh-acp-agent'
             config:
               presetId: acp-claude
               agent: claude
@@ -288,7 +288,7 @@
         order: 25
         plugins:
           - id: acp-grok-binding
-            name: '@threadharbor/dsh-acp-agent'
+            name: '@goodjin/dsh-acp-agent'
             config:
               presetId: acp-grok
               agent: grok
@@ -331,7 +331,7 @@
         order: 35
         plugins:
           - id: acp-cursor-binding
-            name: '@threadharbor/dsh-acp-agent'
+            name: '@goodjin/dsh-acp-agent'
             config:
               presetId: acp-cursor
               agent: cursor
@@ -360,7 +360,7 @@
         order: 40
         plugins:
           - id: acp-zcode-binding
-            name: '@threadharbor/dsh-acp-agent'
+            name: '@goodjin/dsh-acp-agent'
             config:
               presetId: acp-zcode
               agent: zcode
@@ -389,7 +389,7 @@
         order: 45
         plugins:
           - id: acp-minimax-binding
-            name: '@threadharbor/dsh-acp-agent'
+            name: '@goodjin/dsh-acp-agent'
             config:
               presetId: acp-minimax
               agent: minimaxi
@@ -420,7 +420,7 @@
         order: 50
         plugins:
           - id: acp-qoder-binding
-            name: '@threadharbor/dsh-acp-agent'
+            name: '@goodjin/dsh-acp-agent'
             config:
               presetId: acp-qoder
               agent: qoder

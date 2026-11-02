@@ -44,7 +44,6 @@
     }
   },
   "dependencies": {
-    "@threadharbor/dsh-acp-agent": "workspace:^",
     "@threadharbor/dsh-client": "workspace:^",
     "@threadharbor/dsh-command-commit-merge-push": "workspace:^",
     "@threadharbor/dsh-host-federation": "workspace:^"

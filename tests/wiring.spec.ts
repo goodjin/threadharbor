@@ -19,7 +19,7 @@ import { describe, expect, it } from 'vitest'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
-const PACKAGES = ['dsh-acp-agent', 'dsh-client', 'dsh-host-federation'] as const
+const PACKAGES = ['dsh-client', 'dsh-host-federation'] as const
 
 /**
  * What the host actually loads.
@@ -28,9 +28,9 @@ const PACKAGES = ['dsh-acp-agent', 'dsh-client', 'dsh-host-federation'] as const
  * one. Anything not downstream of these does not run because someone opened the
  * product — it runs only because a test imported it.
  */
+// dsh-acp-agent 已独立出仓（goodjin/dsh-acp-agent）：它的入口可达性由那个
+// 仓库自己的门禁看管，本仓库的静态扫描不再覆盖它。
 const ROOTS = [
-  'packages/dsh-acp-agent/src/entry.ts',
-  'packages/dsh-acp-agent/src/client/index.ts',
   'packages/dsh-client/src/index.ts',
   'packages/dsh-client/src/client/index.ts',
 ]
@@ -178,19 +178,3 @@ describe('代码真机上到不到', () => {
   })
 })
 
-describe('配置项配了有没有人读', () => {
-  it('入口配置里每个字段都被生产代码读过', () => {
-    const entry = readFileSync('packages/dsh-acp-agent/src/entry.ts', 'utf8')
-    const start = entry.indexOf('export const Config')
-    const end = entry.indexOf('\n})', start)
-    const schema = entry.slice(start, end === -1 ? undefined : end)
-    const fields = [...schema.matchAll(/^ {2}(\w+):/gm)].map(match => match[1])
-
-    const consumers = ['entry.ts', 'plugin.ts', 'registry.ts', 'factory.ts', 'service.ts']
-      .map(file => readFileSync(`packages/dsh-acp-agent/src/${file}`, 'utf8'))
-      .join('\n')
-
-    const unread = fields.filter(field => new RegExp(`config\\.${field}\\b`).test(consumers) === false)
-    expect(unread, '这些配置字段没有任何代码读过，配了等于没配').toEqual([])
-  })
-})

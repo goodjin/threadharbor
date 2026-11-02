@@ -50,7 +50,7 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 agent 接进 
 
 以下每条都以当前代码为准（核对时间 2026-10-16；「真机可达」按 `tests/wiring.spec.ts` 从宿主加载入口做的传递可达性检查口径）：
 
-- 五个 agent（grok、codex、claude code、cursor、qoder）走同一套通用 ACP 接入层（`@threadharbor/dsh-acp-agent`）：stdio 与 WebSocket 两种传输、各家的帧方言、帧到 DSH 会话事件的投影、终端与文件两个子协议的应答。zcode 不走这条路：它在模型列表里单独成一组 GLM，用本机 ZCode 的登录密钥直连 Coding Plan，文字和工具调用交回 DSH 自己的循环。它的 5 小时/周套餐限额也带到了界面上（核对时间 2026-10-16）：GLM 会话的输入框下方、token 用量同一排有两枚胶囊，显示已用百分比，悬停看已用/总量和重置时刻，详见 [docs/agent-acp/zcode.md](docs/agent-acp/zcode.md)。 minimaxi 是同一条路的第二个模型插件：模型列表里单独一组 MiniMax，用本机 MiniMax Code 的登录凭据直连托管网关，凭据的读取与刷新采用官方那套实现，与桌面版共用同一个文件和同一把锁（核对时间 2026-10-20，国内站真机已跑通含工具调用的多轮），详见 [docs/agent-acp/minimaxi.md](docs/agent-acp/minimaxi.md)。
+- 五个 agent（grok、codex、claude code、cursor、qoder）走同一套通用 ACP 接入层（[goodjin/dsh-acp-agent](https://github.com/goodjin/dsh-acp-agent)，`@goodjin/dsh-acp-agent`，2026-11-02 起独立出仓）：stdio 与 WebSocket 两种传输、各家的帧方言、帧到 DSH 会话事件的投影、终端与文件两个子协议的应答。zcode 不走这条路：它在模型列表里单独成一组 GLM，用本机 ZCode 的登录密钥直连 Coding Plan，文字和工具调用交回 DSH 自己的循环。它的 5 小时/周套餐限额也带到了界面上（核对时间 2026-10-16）：GLM 会话的输入框下方、token 用量同一排有两枚胶囊，显示已用百分比，悬停看已用/总量和重置时刻，详见 [docs/agent-acp/zcode.md](docs/agent-acp/zcode.md)。 minimaxi 是同一条路的第二个模型插件：模型列表里单独一组 MiniMax，用本机 MiniMax Code 的登录凭据直连托管网关，凭据的读取与刷新采用官方那套实现，与桌面版共用同一个文件和同一把锁（核对时间 2026-10-20，国内站真机已跑通含工具调用的多轮），详见 [docs/agent-acp/minimaxi.md](docs/agent-acp/minimaxi.md)。
 - 权限请求桥接到 DSH 审批服务：请求在回合内发起，应答是回带同一 id 的 JSON-RPC 响应帧；宿主没有审批服务时一律拒绝并在启动自报里写明 `approvals=refuse-all`。
 - 流式：回合进行中经 `agent/assistant-stream` 通道增量下发，回合结束后落一条内嵌压缩流的持久 `assistant/message`；两段靠同一 attemptId 对上。
 - 断连与进程退出会判明并结束回合，不再无限等待；会话按会话 id 隔离外部对话，一个会话一个外部会话。
@@ -80,13 +80,13 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 agent 接进 
 | `@threadharbor/dsh-host-federation/tailscale` | `threadharbor-tailscale` | 在提供页面的机器上运行 `tailscale status --json`，把 peer 清单写进 host-store 的 `data` 字典，供「从 Tailscale 选主机」使用。 |
 | `@threadharbor/dsh-host-federation/ssh-deploy` | `threadharbor-ssh-deploy` | 主机侧 SSH 部署与远端操作接口：检查连通性、安装/启动远端 DSH、读取远端会话和执行运维操作。 |
 | `@threadharbor/dsh-host-federation/host-gateway` | `threadharbor-host-gateway` | 同源反向代理：浏览器把普通 DSH 请求发到本机 `/threadharbor/gateway/<主机标识>/`，由它转到登记主机自己的 DSH；登录 cookie 留在网关，不进浏览器。 |
-| `@threadharbor/dsh-acp-agent/roster-filter` | `threadharbor-roster-filter` | 把标了 `hideFromRoster: true` 的 ACP preset 从新建会话/预设选择器中隐藏；注册本身保留，所以模型列表切换和会话接管仍可用。内部 `list()` 不过滤。 |
-| `@threadharbor/dsh-acp-agent/zcode-quota` | `threadharbor-zcode-quota` | 宿主侧读取本机 ZCode 登录凭据并查询 Coding Plan 的 5 小时/周限额，供输入框下方的 GLM 配额胶囊显示；密钥不出宿主进程。 |
-| `@threadharbor/dsh-acp-agent/mermaid-asset` | `threadharbor-mermaid-asset` | 本机 `/threadharbor/mermaid.js`：按需提供给会话区 Mermaid 代码块（mermaid fence）渲染的运行时（来自本包依赖，客户端包不内联 3.5 MB；同一登录准入，ETag/304 缓存）。 |
+| `@goodjin/dsh-acp-agent/roster-filter` | `threadharbor-roster-filter` | 把标了 `hideFromRoster: true` 的 ACP preset 从新建会话/预设选择器中隐藏；注册本身保留，所以模型列表切换和会话接管仍可用。内部 `list()` 不过滤。 |
+| `@goodjin/dsh-acp-agent/zcode-quota` | `threadharbor-zcode-quota` | 宿主侧读取本机 ZCode 登录凭据并查询 Coding Plan 的 5 小时/周限额，供输入框下方的 GLM 配额胶囊显示；密钥不出宿主进程。 |
+| `@goodjin/dsh-acp-agent/mermaid-asset` | `threadharbor-mermaid-asset` | 本机 `/threadharbor/mermaid.js`：按需提供给会话区 Mermaid 代码块（mermaid fence）渲染的运行时（来自本包依赖，客户端包不内联 3.5 MB；同一登录准入，ETag/304 缓存）。 |
 
 ### Agent preset 行
 
-七个 agent 不是七个 ThreadHarbor 插件包，而是七条 DSH 的 `@deepseek-ai/dsh-agent-preset` 组合行；每条内嵌同一个 `@threadharbor/dsh-acp-agent`（binding），只是配置不同。dispatch 负责把外部 agent 的回合、流式输出、审批/提问、模型目录、会话交接与写回接进 DSH 原生会话。
+七个 agent 不是七个 ThreadHarbor 插件包，而是七条 DSH 的 `@deepseek-ai/dsh-agent-preset` 组合行；每条内嵌同一个 `@goodjin/dsh-acp-agent`（binding），只是配置不同。dispatch 负责把外部 agent 的回合、流式输出、审批/提问、模型目录、会话交接与写回接进 DSH 原生会话。
 
 | preset / 组合行 | 名称 | 接入方式与用途 |
 | --- | --- | --- |
@@ -128,16 +128,18 @@ dsh --profile web
 
 源码链接安装依赖这个 checkout 及其 `node_modules` 和 `lib`，不要在卸载前移动或删除目录。`npm run reference:checkout` 只创建被忽略的 `reference/deepseek-harness/`，用于开发时核对公开 API；运行和打包均不需要该参考目录。
 
-装好后 agent 不会自动出现：每个 agent 需要在 profile 组合里加一条 preset 行（`@deepseek-ai/dsh-agent-preset` 内嵌 `@threadharbor/dsh-acp-agent`），写明 `presetId`、`agent` 与连接方式。配置支持可选的 `args`；省略时按 `agent` 补上它说 ACP 所必需的默认参数（cursor 是 `acp --trust`，qoder 是 `--acp`），显式写了则完全以配置为准。qoder 子进程还会剥掉 IDE 注入的 SDK 入口环境变量（`QODER_*`、`CLAUDE*`、`VSCODE_*` 等），否则从 Qoder IDE 终端启动时会直接退出。
+装好后 agent 不会自动出现：每个 agent 需要在 profile 组合里加一条 preset 行（`@deepseek-ai/dsh-agent-preset` 内嵌 `@goodjin/dsh-acp-agent`），写明 `presetId`、`agent` 与连接方式。配置支持可选的 `args`；省略时按 `agent` 补上它说 ACP 所必需的默认参数（cursor 是 `acp --trust`，qoder 是 `--acp`），显式写了则完全以配置为准。qoder 子进程还会剥掉 IDE 注入的 SDK 入口环境变量（`QODER_*`、`CLAUDE*`、`VSCODE_*` 等），否则从 Qoder IDE 终端启动时会直接退出。
+
+`@goodjin/dsh-acp-agent` 不在本仓库的软链范围内，profile 需单独引用它的 checkout：在 profile 的 `package.json` 依赖里加 `"@goodjin/dsh-acp-agent": "link:~/github/dsh-plugins/dsh-acp-agent"` 再 `pnpm install`（bundle 组合里 `@goodjin/...` 的行都指向它）。
 
 preset 行注册后，agent 的模型会进全局模型目录，从模型列表即可切换；binding 上的 `hideFromRoster: true` 让 `threadharbor-roster-filter` 按标记把这些 preset 从选择器名册里隐藏（切换机制依赖注册本身，不能直接删行），细节见 [docs/install-plugins.zh.md](docs/install-plugins.zh.md)。
 
 ## 真机活测
 
-`packages/dsh-acp-agent/tests/live.spec.ts` 会拉起真实的 agent 二进制跑完整回合，默认跳过：
+独立仓库里的 live 测试会拉起真实的 agent 二进制跑完整回合，默认跳过：
 
 ```sh
-THREADHARBOR_LIVE_ACP=1 npx vitest run packages/dsh-acp-agent/tests/live.spec.ts
+cd ~/github/dsh-plugins/dsh-acp-agent && THREADHARBOR_LIVE_ACP=1 npx vitest run tests/live.spec.ts
 ```
 
 需要 PATH 上有 `claude-agent-acp`、`codex-acp`、`cursor-agent`、`grok` 和 `qoderclicn`（国际版为 `qodercli`）；可用 `THREADHARBOR_CLAUDE_ACP` / `THREADHARBOR_CODEX_ACP` / `THREADHARBOR_CURSOR_ACP` / `THREADHARBOR_QODER_ACP` 覆盖二进制路径。Qoder 需先在本机完成一次 `qoderclicn login`。活测驱动真实模型，一轮要几十秒。
@@ -145,7 +147,7 @@ THREADHARBOR_LIVE_ACP=1 npx vitest run packages/dsh-acp-agent/tests/live.spec.ts
 ## 仓库结构
 
 ```text
-packages/dsh-acp-agent/         ACP 接入层 + 模型客户端 + preset 框架：传输、方言、投影、ZCode/GLM、MiniMax、dispatch、roster-filter、quota 等
+~/github/dsh-plugins/dsh-acp-agent  ACP 接入层 + 模型客户端 + preset 框架（独立仓库，含浏览器侧 UI 与配额胶囊）
 packages/dsh-client/           浏览器插件：左侧主机树、主机切换、「各主机」设置、手机配对二维码、模型入口与「提供方与模型」屏蔽等界面
 packages/dsh-host-federation/  跨主机汇总的库与宿主插件：主机身份、设置存储、Tailscale 桥、SSH 部署、同源网关
 tests/wiring.spec.ts           「代码对」与「代码跑得到」分开检查；到不了的模块登记在 KNOWN_UNWIRED

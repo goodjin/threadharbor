@@ -20,10 +20,9 @@ import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const clientLib = `${root}packages/dsh-client/lib/client.js`
-const acpClientLib = `${root}packages/dsh-acp-agent/lib/client.js`
 const workspaceLink = `${root}node_modules/@threadharbor/dsh-client`
 
-const done = existsSync(clientLib) && existsSync(acpClientLib) && existsSync(workspaceLink)
+const done = existsSync(clientLib) && existsSync(workspaceLink)
 if (done) {
   process.exit(0)
 }
@@ -60,10 +59,6 @@ run('pnpm', ['exec', 'tsx', 'scripts/build.ts'])
 
 if (!existsSync(clientLib)) {
   console.error('prepare-install: packages/dsh-client/lib/client.js 仍未产出 —— 构建链断了，页面将拿不到插件客户端')
-  process.exit(1)
-}
-if (!existsSync(acpClientLib)) {
-  console.error('prepare-install: packages/dsh-acp-agent/lib/client.js 仍未产出 —— 构建链断了，页面将拿不到 ACP 客户端')
   process.exit(1)
 }
 console.log('prepare-install: threadharbor client bundle built.')

@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, statSync, utimesSync } from 'node:fs'
 import { build, type UserConfig } from 'tsdown'
 import client from '../packages/dsh-client/tsdown.config.ts'
-import acpClient from '../packages/dsh-acp-agent/tsdown.config.ts'
 import plugin from '../tsdown.plugin.config.ts'
 
 /**
@@ -21,7 +20,6 @@ import plugin from '../tsdown.plugin.config.ts'
  */
 const PACKAGED_OUTPUTS = [
   'packages/dsh-client/lib/client.js',
-  'packages/dsh-acp-agent/lib/client.js',
   'packages/dsh-client/lib/client.js.map',
   'packages/dsh-client/lib/index.js',
   'lib/index.js',
@@ -51,7 +49,6 @@ function restoreUnchangedTimestamps(before: ReadonlyMap<string, Stamp>): void {
 
 const builds: readonly [string, UserConfig | readonly UserConfig[]][] = [
   ['packages/dsh-client', client],
-  ['packages/dsh-acp-agent', acpClient],
   ['.', plugin],
 ]
 

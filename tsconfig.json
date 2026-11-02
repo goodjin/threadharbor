@@ -5,9 +5,6 @@
       "path": "packages/dsh-client"
     },
     {
-      "path": "packages/dsh-acp-agent"
-    },
-    {
       "path": "packages/dsh-host-federation"
     },
     {
