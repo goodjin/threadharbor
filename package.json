@@ -47,9 +47,7 @@
     "@threadharbor/dsh-acp-agent": "workspace:^",
     "@threadharbor/dsh-client": "workspace:^",
     "@threadharbor/dsh-command-commit-merge-push": "workspace:^",
-    "@threadharbor/dsh-host-federation": "workspace:^",
-    "@threadharbor/dsh-mobile-entry": "workspace:^",
-    "@threadharbor/dsh-mobile-relay": "workspace:^"
+    "@threadharbor/dsh-host-federation": "workspace:^"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1"

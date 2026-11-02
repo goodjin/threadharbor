@@ -57,7 +57,7 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 agent 接进 
 - 中途切换 agent（判定 / 历史交接 / 执行三段）：已经在说话的会话锁死了预设，只能在目标预设上新建会话继续。切换时整段对话既作为上下文交给新 agent，也原样回填到新会话自己的记录上——打开新会话看到的还是刚才那段对话，只是底下接上了新的内容；旧会话留下一条交接提示并自动跳过去。轮次历史的可读性同理有兜底：「被打断且全程没有正文」的轮次（长工具轮次遇重启的常态）会在轮次结尾出现一条找回入口，一键展开全部过程内容（核对时间 2026-10-16）。
 - 切换过程看得见：面板整个换掉，所以切换一开始就在窗口顶部挂一条进度（准备 → 读新会话的历史 → 就绪），同时先把新会话的首屏读出来，读完才跳过去，跳过去时内容已经在屏幕上。首屏读不出来或迟迟不来都不卡住跳转，最多等 4 秒。历史长不长都只取首屏（DSH 自带的分页，约 50 条消息起），更早的用「加载更早」按页取。
 - 主机侧的 agent 探测（发一条真实小任务看是否回应）与重启已实现，但目前没有界面入口。
-- 云主机中转通道（核对时间 2026-10-16）：`@threadharbor/dsh-mobile-relay` 让手机只经公网 HTTPS 连一台云主机、不装 Tailscale，即可切换多台机器——数据面是 SSH 本地隧道，tailnet 只做在线发现。入口 `dsh.agentlab.fun`（灰云 DNS + Let's Encrypt + nginx 反代 + 一层 HTTP 口令），机器清单、会话转发、审批按机器归属与事件汇流都在这个包里；配置片段由 `scripts/relay-setup.sh` 生成（只打印，不改文件）。
+- 云主机中转通道（核对时间 2026-10-16，2026-11-02 起独立出仓）：[goodjin/dsh-mobile-relay](https://github.com/goodjin/dsh-mobile-relay)（`@goodjin/dsh-mobile-relay`）让手机只经公网 HTTPS 连一台云主机、不装 Tailscale，即可切换多台机器——数据面是 SSH 本地隧道，tailnet 只做在线发现。手机页（原 mobile-entry）随中转一并出仓。需要中转的 profile 单独安装挂载，本仓库不再分发。
 - 手机直连（核对时间 2026-10-22）：手机装 Tailscale，扫桌面端「手机配对」面板的二维码，打开的是该机的**完整 DSH 界面**（配对网址由 `/threadharbor/federation/pair-url` 生成，带进程令牌）。面板里的「手机访问地址」保存这台机器的对外源（`dsh.host.accessOrigin`），保存即生效；地址是 loopback 时面板会提示手机进不来。手机宽度下侧栏变抽屉、主机列表隐去 IP 列；从主机面板或远端页顶部的切换器可整页切到其余已登记主机。主机之间由 `threadharbor-federation-sync` 互推「自己 + 登记簿」与令牌入口，对端只补缺失、不改本机事实。可达性由 `tailscale serve --bg` 提供，dsh 启动须带 `--trusted-host`；`scripts/mobile-setup.sh <dsh端口>` 一键完成发布并打印步骤，详见 [docs/mobile-client.zh.md](docs/mobile-client.zh.md)。云主机中转那条精简手机页通道见上一条。
 - 同一窗口管理多台主机（核对时间 2026-10-18）：左侧树列出本机和其他已登记主机的项目与会话。点其他主机，主区通过本机网关打开那台机器自己的 DSH 界面，浏览器调的还是那套接口，只是地址换成了登记簿里的那台；审批、流式、模型选择和上传都在这个界面里。会话仍跑在那台主机上。登录 cookie 留在本机网关，不写进浏览器。
 - 原生 dsh preset 的行为不受影响：组合行只认得自己 presetId 下的会话，其余一律不接管。
@@ -65,9 +65,7 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 agent 接进 
 - 各 agent 的端到端活测（建会话 → 提问 → 收到回答 → 工具调用正确投影、权限批准后回合继续）默认跳过，带 `THREADHARBOR_LIVE_ACP=1` 运行；见下文「真机活测」。
 - ACP 五家里的委派看得见（核对时间 2026-10-20）：握手声明 [ACP 子代理草案](https://github.com/agentclientprotocol/agent-client-protocol/pull/1992)的 `subagents` 能力后，codex 与 claude 的子代理委派、claude 的后台任务以原生帧（`subagent_spawned` 等）到达，实时投成 `subagent` / `async_task` 卡片，子会话内容不漏进父回答（单测照真实抓包钉死投影行为；codex / claude / grok 三家帧级真机验收均已通过，2026-10-20）；grok 不实现草案但发自己的一套子代理帧（私有方法名＋蛇形字段，经方言归一化后同样投成卡片，真机抓包已钉死）；cursor 与 qoder 忽略该字段。帧表与投影规则见 [docs/agent-acp/README.md](docs/agent-acp/README.md)。
 
-**已知未接的部分**（代码与测试都在，但从宿主加载的入口走不到，登记在 `tests/wiring.spec.ts` 的 `KNOWN_UNWIRED`）：
-
-- 手机协议常量 `packages/dsh-mobile-entry/src/wire.ts` 目前是记录，手机页用的是硬编码的 `mobile/wire.js`。
+**已知未接的部分**：当前没有。
 
 ## 插件清单
 
@@ -82,7 +80,6 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 agent 接进 
 | `@threadharbor/dsh-host-federation/tailscale` | `threadharbor-tailscale` | 在提供页面的机器上运行 `tailscale status --json`，把 peer 清单写进 host-store 的 `data` 字典，供「从 Tailscale 选主机」使用。 |
 | `@threadharbor/dsh-host-federation/ssh-deploy` | `threadharbor-ssh-deploy` | 主机侧 SSH 部署与远端操作接口：检查连通性、安装/启动远端 DSH、读取远端会话和执行运维操作。 |
 | `@threadharbor/dsh-host-federation/host-gateway` | `threadharbor-host-gateway` | 同源反向代理：浏览器把普通 DSH 请求发到本机 `/threadharbor/gateway/<主机标识>/`，由它转到登记主机自己的 DSH；登录 cookie 留在网关，不进浏览器。 |
-| `@threadharbor/dsh-mobile-relay` | `threadharbor-mobile-relay` | 云主机侧的手机中转：公网 HTTPS 入口、手机页壳、`pair-url` / `peers`、SSH 隧道、会话/审批/事件转发。本机没有中转配置时默认停用、不注册。 |
 | `@threadharbor/dsh-acp-agent/roster-filter` | `threadharbor-roster-filter` | 把标了 `hideFromRoster: true` 的 ACP preset 从新建会话/预设选择器中隐藏；注册本身保留，所以模型列表切换和会话接管仍可用。内部 `list()` 不过滤。 |
 | `@threadharbor/dsh-acp-agent/zcode-quota` | `threadharbor-zcode-quota` | 宿主侧读取本机 ZCode 登录凭据并查询 Coding Plan 的 5 小时/周限额，供输入框下方的 GLM 配额胶囊显示；密钥不出宿主进程。 |
 | `@threadharbor/dsh-acp-agent/mermaid-asset` | `threadharbor-mermaid-asset` | 本机 `/threadharbor/mermaid.js`：按需提供给会话区 Mermaid 代码块（mermaid fence）渲染的运行时（来自本包依赖，客户端包不内联 3.5 MB；同一登录准入，ETag/304 缓存）。 |
@@ -105,7 +102,6 @@ ThreadHarbor 是 DeepSeek Harness 的独立 Web 插件，把外部 agent 接进 
 
 这些包没有独立的组合行，被上面的插件 import：
 
-- `@threadharbor/dsh-mobile-entry` — 手机页静态资源、`pair-url` / `peers` 的路由实现。直连模式取消后不再独立挂载，由 `dsh-mobile-relay` 调用其导出函数出页面。
 - `@threadharbor/dsh-host-federation`（主入口） — 主机身份、登记簿、跨标签页通道、分组视图与网关路径等共享库；上面挂载的是它的 `host-store` / `tailscale` / `ssh-deploy` / `host-gateway` 子路径入口。
 
 ## 安装到 DeepSeek Harness
@@ -152,8 +148,6 @@ THREADHARBOR_LIVE_ACP=1 npx vitest run packages/dsh-acp-agent/tests/live.spec.ts
 packages/dsh-acp-agent/         ACP 接入层 + 模型客户端 + preset 框架：传输、方言、投影、ZCode/GLM、MiniMax、dispatch、roster-filter、quota 等
 packages/dsh-client/           浏览器插件：左侧主机树、主机切换、「各主机」设置、手机配对二维码、模型入口与「提供方与模型」屏蔽等界面
 packages/dsh-host-federation/  跨主机汇总的库与宿主插件：主机身份、设置存储、Tailscale 桥、SSH 部署、同源网关
-packages/dsh-mobile-entry/     手机页与 pair-url / peers 的路由库（由 dsh-mobile-relay 复用，不再独立挂载）
-packages/dsh-mobile-relay/     手机中转（云主机侧）：公网入口、手机页、SSH 隧道、会话/审批/事件转发
 tests/wiring.spec.ts           「代码对」与「代码跑得到」分开检查；到不了的模块登记在 KNOWN_UNWIRED
 cordis.patch.yml               安装到 DSH Web profile 的标准 bundle patch（浏览器插件、宿主插件与 agent preset 行）
 reference/                     被 Git 忽略的 DeepSeek Harness 参考源码
