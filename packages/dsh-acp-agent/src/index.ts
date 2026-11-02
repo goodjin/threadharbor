@@ -24,3 +24,45 @@ export {
   assistantMessageEvent, systemNoteEvent, toolCallAnnouncementEvent, toolCallEvent, toolResultMessageEvent, userMessageEvent,
 } from './message-events.ts'
 export type { MessageEvent, ReasoningBlock, TextBlock, ToolCallBlock } from './message-events.ts'
+
+// ─── GLM (ZCode) model client ────────────────────────────────────────────────
+export {
+  decryptCredential,
+  deriveKey,
+  loadApiKey,
+} from './zcode/credential.ts'
+export {
+  BIGMODEL_CODING_PLAN_BASE,
+  ZAI_CODING_PLAN_BASE,
+  buildAnthropicBody,
+  messagesUrl,
+  reasoningFields,
+} from './zcode/anthropic.ts'
+export type { AnthropicBody, PromptInput, PromptTool } from './zcode/anthropic.ts'
+export { streamGlm, scrub } from './zcode/glm.ts'
+export type { GlmRequest } from './zcode/glm.ts'
+export { fetchCodingPlanQuota, parseQuotaLimits, quotaUrl } from './zcode/quota.ts'
+export type { GlmCodingPlanQuota, GlmQuotaRequest, GlmQuotaWindow } from './zcode/quota.ts'
+export type { GlmBlock, GlmFinish, GlmStreamChunk, GlmUsage } from './zcode/sse.ts'
+
+// ─── MiniMax model client ────────────────────────────────────────────────────
+export {
+  detectNamespace,
+  resolveCredential,
+  resolveDataDir,
+} from './minimaxi/credential.ts'
+export type { CredentialOverrides, DataDirOptions, MiniMaxCredential, AuthBuildEnv, AuthRegion } from './minimaxi/credential.ts'
+// Disambiguate: these names collide with zcode exports above.
+export {
+  buildAnthropicBody as miniMaxBuildAnthropicBody,
+  defaultMaxTokens,
+  reasoningFields as miniMaxReasoningFields,
+} from './minimaxi/anthropic.ts'
+export type { AnthropicBody as MiniMaxAnthropicBody, Effort, PromptInput as MiniMaxPromptInput, PromptTool as miniMaxPromptTool } from './minimaxi/anthropic.ts'
+export { messagesUrl as miniMaxMessagesUrl } from './minimaxi/credential.ts'
+export { streamMiniMax, scrub as miniMaxScrub } from './minimaxi/minimax.ts'
+export type { MiniMaxRequest } from './minimaxi/minimax.ts'
+export { fetchMiniMaxQuota } from './minimaxi/quota.ts'
+export type { MiniMaxCodingPlanQuota, MiniMaxCredit, MiniMaxQuotaRequest, MiniMaxQuotaWindow } from './minimaxi/quota.ts'
+export type { MiniMaxBlock, MiniMaxFinish, MiniMaxStreamChunk, MiniMaxUsage } from './minimaxi/sse.ts'
+export { canDisableThinking, MINIMAX_MODELS } from './minimaxi/vendor/mcode-runtime/model-catalog.ts'
