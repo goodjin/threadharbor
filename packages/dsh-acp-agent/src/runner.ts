@@ -2378,6 +2378,9 @@ export class AcpTurnRunner {
     }
     const current = this.currentModelId
     if (current !== undefined && baseIdOf(current) === base && ids.has(current)) return current
+    // No effort specified and no current model: default to medium tier
+    const mediumDefault = `${base}[medium]`
+    if (ids.has(mediumDefault)) return mediumDefault
     return undefined
   }
 
