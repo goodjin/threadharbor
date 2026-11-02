@@ -5,6 +5,8 @@
   "type": "module",
   "exports": { ".": "./src/index.ts" },
   "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "mermaid": "^11.16.0",
     "proper-lockfile": "^4.1.2"
   },
   "devDependencies": {

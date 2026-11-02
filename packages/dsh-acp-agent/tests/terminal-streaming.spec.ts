@@ -1,0 +1,202 @@
+/**
+ * Live terminal output streaming for grok's bash cards.
+ *
+ * grok delegates shell execution to the client via the terminal sub-protocol.
+ * Without streaming, the UI shows nothing until the process exits and grok
+ * relays the output in a tool_call_update. With streaming, output appears as
+ * it arrives — the same experience grok's own UI gives.
+ */
+
+import type { AcpFrame } from '../src/index.ts'
+import { grokDialect } from '../src/index.ts'
+import { describe, expect, it } from 'vitest'
+import { AcpTurnRunner } from '../src/runner.ts'
+import type { AcpClientPort } from '../src/runner.ts'
+import type { StepDecisionLike } from '../src/dispatch.ts'
+import { makeContentWriter } from '../src/content-writer.ts'
+import type { ContentWriter } from '../src/content-writer.ts'
+
+const DECISION: StepDecisionLike = {
+  kind: 'enter',
+  messages: [{ role: 'user', content: [{ type: 'text', text: 'run a command' }] }],
+}
+
+const update = (fields: Record<string, unknown>): AcpFrame['params'] => ({
+  sessionId: 'ext',
+  update: fields,
+})
+
+/** grok's run_terminal_command opening frame. */
+const bashOpenFrame: AcpFrame = {
+  jsonrpc: '2.0',
+  method: 'session/update',
+  params: update({
+    sessionUpdate: 'tool_call',
+    toolCallId: 'call-bash-1',
+    title: 'run_terminal_command',
+    rawInput: { command: 'echo hello' },
+  }),
+}
+
+type Append = {
+  type: string
+  payload: Record<string, unknown>
+  intent?: {
+    surfaceOp?: 'append' | { readonly op: 'replace'; readonly startSeq: number; readonly endSeq: number }
+    sourceEventSeqs?: readonly number[]
+  }
+}
+
+function recordingWrite(): { write: ContentWriter; appends: Append[] } {
+  const appends: Append[] = []
+  const write = makeContentWriter((type, payload, intent) => {
+    appends.push({ type, payload: payload as Record<string, unknown>, ...(intent === undefined ? {} : { intent }) })
+    return { seq: appends.length }
+  })
+  return { write, appends }
+}
+
+type Harness = {
+  run: () => Promise<{ end: { kind: string } }>
+  started: () => Promise<void>
+  release: () => void
+  appends: Append[]
+  push: (frames: readonly AcpFrame[]) => void
+  emitTerminalOutput: (terminalId: string, data: string) => void
+  emitTerminalExit: (terminalId: string, exitCode: number) => void
+}
+
+function harness(): Harness {
+  let deliver: ((frame: AcpFrame) => void) | undefined
+  let releasePrompt: () => void
+  let startedResolve: () => void
+  const started = new Promise<void>(resolve => { startedResolve = resolve })
+  let terminalOutputHandler: ((terminalId: string, data: string) => void) | undefined
+  let terminalExitHandler: ((terminalId: string, exitCode: number) => void) | undefined
+
+  const client: AcpClientPort = {
+    onFrame: handler => { deliver = handler },
+    onTerminalOutput: handler => { terminalOutputHandler = handler },
+    onTerminalExit: handler => { terminalExitHandler = handler },
+    notify: () => {},
+    request: async method => {
+      if (method === 'initialize') return {}
+      if (method === 'session/new') return { sessionId: 'ext' }
+      if (method === 'session/prompt') {
+        startedResolve()
+        await new Promise<void>(resolve => {
+          releasePrompt = () => resolve()
+        })
+        return { stopReason: 'end_turn' }
+      }
+      return {}
+    },
+  }
+
+  const { write, appends } = recordingWrite()
+  const runner = new AcpTurnRunner(client, {
+    cwd: '/tmp',
+    dialect: grokDialect,
+  })
+
+  const running = runner.run(DECISION, {
+    sessionId: 'dsh1',
+    position: { turn: 1, step: 1 },
+    produce: () => [],
+    write,
+  })
+
+  return {
+    run: () => running,
+    started: () => started.then(() => new Promise<void>(resolve => { setTimeout(resolve, 0) })),
+    release: () => releasePrompt(),
+    appends,
+    push: frames => {
+      for (const frame of frames) deliver!(frame)
+    },
+    emitTerminalOutput: (terminalId, data) => terminalOutputHandler?.(terminalId, data),
+    emitTerminalExit: (terminalId, exitCode) => terminalExitHandler?.(terminalId, exitCode),
+  }
+}
+
+describe('live terminal output streaming', () => {
+  it('streams output to the bash card as it arrives from the terminal', async () => {
+    const h = harness()
+    await h.started()
+
+    // grok announces the bash tool call.
+    h.push([bashOpenFrame])
+
+    // The opening card should be written (as tool/call for the opening).
+    const toolCalls = h.appends.filter(a => a.type === 'tool/call')
+    expect(toolCalls.length).toBeGreaterThanOrEqual(1)
+    expect(toolCalls[0]!.payload['name']).toBe('bash')
+
+    // Simulate terminal output arriving in chunks.
+    h.emitTerminalOutput('term-1', 'hello ')
+    h.emitTerminalOutput('term-1', 'world\n')
+
+    // The card should have been updated with accumulated output.
+    const results = h.appends.filter(a => a.type === 'tool/result')
+    expect(results.some(a => JSON.stringify(a.payload).includes('hello'))).toBe(true)
+    // Exactly one result append: the log pairs a call with one result, and a
+    // second append is the corruption that makes a session refuse to load.
+    expect(results.filter(a => a.intent?.surfaceOp === 'append')).toHaveLength(1)
+    // Every later update rewrites that same result node in place.
+    const refinements = results.filter(a => typeof a.intent?.surfaceOp === 'object')
+    expect(refinements.length).toBeGreaterThanOrEqual(1)
+    for (const refinement of refinements) {
+      expect(refinement.intent?.surfaceOp).toMatchObject({ op: 'replace' })
+      expect(refinement.intent?.sourceEventSeqs).toHaveLength(1)
+    }
+    // The newest version carries the full output.
+    const texts = refinements.map(a => JSON.stringify(a.payload))
+    expect(texts.some(text => text.includes('hello ') && text.includes('world'))).toBe(true)
+
+    h.release()
+    await h.run()
+  })
+
+  it('settles the bash card on terminal exit without a second append', async () => {
+    const h = harness()
+    await h.started()
+
+    h.push([bashOpenFrame])
+    h.emitTerminalOutput('term-1', 'output data')
+    h.emitTerminalExit('term-1', 0)
+
+    h.release()
+    const result = await h.run()
+
+    expect(result.end.kind).toBe('completed')
+    const results = h.appends.filter(a => a.type === 'tool/result')
+    expect(results.length).toBeGreaterThanOrEqual(1)
+    expect(results.filter(a => a.intent?.surfaceOp === 'append')).toHaveLength(1)
+  })
+
+  it('treats the provider\'s late outcome frame as a refinement, not a new result', async () => {
+    const h = harness()
+    await h.started()
+
+    h.push([bashOpenFrame])
+    h.emitTerminalOutput('term-1', 'done\n')
+    h.emitTerminalExit('term-1', 0)
+    // grok relays its own completion after the terminal exit.
+    h.push([{
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: update({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-bash-1',
+        status: 'completed',
+        rawOutput: 'done\n',
+      }),
+    }])
+
+    h.release()
+    await h.run()
+
+    const results = h.appends.filter(a => a.type === 'tool/result')
+    expect(results.filter(a => a.intent?.surfaceOp === 'append')).toHaveLength(1)
+  })
+})
