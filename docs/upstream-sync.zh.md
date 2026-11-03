@@ -1,8 +1,10 @@
 # 上游同步说明：zcode（GLM）与 minimaxi（MiniMax）
 
-> 核对时间：2026-10-20。本文里的事实都带核对时间；核对之后上游变了，以本文为准去排查，再回来更新本文。
+> 核对时间：2026-11-03（2026-10-20 首核；2026-11-03 重新对照桌面版 MiniMax Code 与上游真机应答复核了积分口径）。本文里的事实都带核对时间；核对之后上游变了，以本文为准去排查，再回来更新本文。
 >
 > 配套的**做法**写在仓库守则 [AGENTS.md](../AGENTS.md)（「zcode / minimaxi 出异常时的排查顺序」）：先读本文定位依赖点，再拉上游最新代码对比，然后才动手改。
+>
+> **代码在哪**：2026-11 起这套实现整体搬到了独立仓 `@goodjin2/dsh-acp-agent`（本文表格里写 `packages/minimaxi-acp/...` 的老路径，按 `src/minimaxi/...` 找）。本文留在本仓，因为它记的是「上游长什么样」这份事实。
 
 ## 这份文档解决什么问题
 
@@ -91,7 +93,7 @@ zcode 与 minimaxi 这两组模型不是我们自己的实现，它们贴着两�
 | A10 | `/matrix/` 与 `/v1/api/user/info` 的请求签名：`x-signature`=md5(秒级时间戳+固定密钥+请求体)、`yy`=md5(编码路径+请求体或`{}`+md5(毫秒时间戳)+密钥盐)；密钥与盐**写死在桌面版里** | 桌面版 `MemoryQuotaTransport`（2026-10-30 实测并真机验证） | `packages/minimaxi-acp/src/quota.ts` | 换密钥 → 签名被拒 → 额度胶囊消失 | 同上（官方桌面版也会一起断） |
 | A11 | 组 id 从签名后的 `get_user_extra_info`（个人工作区 `workspace_type===0`）取 `op_group_id`；会员确认走 `get_membership_info`（`workspace_id` 用个人工作区的 id，不是组 id） | 同上 | 同上 | 拿不到组 id → 只显示订阅态、没有窗口 | 同上 |
 | A12 | `remains` 字段口径：`model_remains[]`，5 小时=`current_interval_*`、周=`current_weekly_*`，`status===3` 为不限；percent 口径是**剩余**（与 GLM 相反） | 同上 + 真机实测（2026-10-30，Max 档：5h 0%、周不限） | `packages/minimaxi-acp/src/quota.ts`（`projectQuota`） | 字段改名 → 窗口缺失 | 胶囊缺窗口或整行隐藏 |
-| A13 | 积分：会员应答里的 `op_credit_summary.total_remaining_amount` | 同上 | 同上（`creditOf`） | 字段改名 → 积分胶囊不出现 | 胶囊缺积分 |
+| A13 | 积分（余额）：会员应答里的 `op_credit_summary.total_remaining_amount`——**上游现在发的是字符串**（"22000"），不是数字；退路是工作区/会员的 `opcredit_balance`；两个 `total_remains_credit` 是旧字段，迁到开放平台计费后个人工作区那个**一直是 0**（合法的 0 会把真值短路掉） | 桌面版 MiniMax Code 自己的投影（app.asar，取余额那段：先会员 summary，再 `opcredit_balance`；数字解析容忍千分位） | `src/minimaxi/quota.ts` 的 `creditOf`（现居 `@goodjin2/dsh-acp-agent`） | 字段改名或类型变字符串 → 积分胶囊读成 0 | 胶囊显示「积分 0」，而账号其实有余额 |
 | A14 | Codex 额度：`~/.codex/auth.json` 的 ChatGPT OAuth 令牌 + `GET chatgpt.com/backend-api/codex/usage`（Bearer + `chatgpt-account-id`）；**必须走 node:https**（防护按 TLS 指纹拦 undici，2026-11-01 实测）；UA 只拼版本号 | 桌面 CLI `/status` 同源只读接口（真机实测） | `packages/dsh-preset-dispatch/src/usage-codex.ts` | 形状变 → 胶囊隐藏；防护收紧 → 403（日志留原因） | 胶囊不出现 |
 | A15 | Claude 额度：`claudeAiOauth.accessToken`（文件优先、macOS 退钥匙串，只读）+ `GET api.anthropic.com/api/oauth/usage`（`anthropic-beta: oauth-2025-04-20`）；**上游自带 429 冷却**（约 160 秒），宿主缓存 2 分钟 | 官方 `/usage` 同源只读接口（2026-11-01 核对） | `packages/dsh-preset-dispatch/src/usage-claude.ts` | 形状变 → 胶囊隐藏；429 → 该次失败下轮再试 | 胶囊不出现 |
 
@@ -314,6 +316,7 @@ npm run test
 | 2026-10-30 | MiniMax 额度+积分上线（依赖点 A9–A13）：真机验证宿主接口带真实登录返回完整数据（Max 档：5h 0%、周不限、积分 0，与手工探针一致）；GLM 胶囊在两次 dock 注册并存下照常渲染（5h 1% / 周 91%）、无控制台报错、无槽位错误。**待补**：会话切到 MiniMax 模型后的三枚胶囊截图（web 端模型选择器只列当前 agent 的模型，自动化没切过去；渲染逻辑已由单测覆盖） |
 | 2026-11-01 | Codex 额度胶囊上线（第四节 5）：真机验证宿主接口返回 Pro 档周窗 92%（与手工探针一致）；真机发现并解决 chatgpt.com 按 TLS 指纹拦 undici 的问题（改走 node:https，见第四节 5）。GLM 胶囊在**四条** dock 注册并存下照常渲染（5h 9% / 周 93%）、无控制台报错。 |
 | 2026-11-01 | Claude 额度胶囊实装但本机**无数据**（凭据空：这台机器的 Claude Code 走 `api.minimaxi.com` 中转，没登官方 OAuth）——宿主接口诚实回 ok:false，胶囊不出现；接口形状按官方 `/usage` 同源只读接口钉死并有单测，用户一旦登官方 OAuth 胶囊即出现。Cursor / Grok / Qoder 三家核对后明确不做（原因见第四节 6）。 |
+| 2026-11-03 | **积分口径修正（依赖点 A13）**：真机探针（cn/prod 登录）取到上游三份应答，发现两处读错——`op_credit_summary.total_remaining_amount` 现在是**字符串**（"22000"），而我们的数字解析只认 number；个人工作区的旧字段 `total_remains_credit` 是**合法的 0**，`??` 不会往后看，把会员应答里的真余额短路掉了。对照桌面版 MiniMax Code 自己的投影（先会员 summary、再 `opcredit_balance`、数字解析容忍千分位）改完：真机复测 `credit.remaining` 从 0 变成 **22000**（5 小时窗口同期 5%，周不限）。单测按真机应答形状钉住五种取值路径。**同时**：浏览器半边迁仓时丢了「每个口径一只轮询器、各挂一条 dock」，且那只轮询器从没 start 过——四种配额胶囊（GLM/MiniMax/Codex/Claude）一只都不出现，已一并修复（见 `@goodjin2/dsh-acp-agent` 的提交 `fix(client): 配额胶囊按口径各挂一只轮询器`）。 |
 
 ---
 
