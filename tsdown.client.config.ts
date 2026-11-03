@@ -76,13 +76,21 @@ export default defineConfig([
         const file = virtualId.slice(cssPrefix.length, -cssSuffix.length)
         this.addWatchFile(file)
         const result = transform({
-          filename: file,
+          // lightningcss 的 [hash] 以文件名为种子：传绝对路径会让类名哈希随构建目录
+          // 变化（隔离工作区 vs 主仓 → 同一份 CSS 出不同 hash，产物于是每次都“变脏”，
+          // 宿主按内容算 rev，会白白让每个打开的页面重载一次插件）。
+          // 本包的 .module.css 基名唯一，传基名即让哈希只由内容决定。
+          filename: basename(file),
           code: await readFile(file),
           cssModules: { pattern: '[hash]_[local]' },
           minify: true,
         })
         const classes: Record<string, string> = {}
-        for (const [local, value] of Object.entries(result.exports ?? {})) classes[local] = value.name
+        // 键序也要固定：lightningcss 的 exports 来自 Rust 侧哈希表，遍历顺序随进程
+        // （HashMap 随机种子）变化，不排序的话同一份源码每次构建的产物字节都不同。
+        const exported = Object.entries(result.exports ?? {})
+          .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+        for (const [local, value] of exported) classes[local] = value.name
         const css = result.code.toString()
         const tag = `${id}/${basename(file)}`
         return [
