@@ -61,7 +61,6 @@ import type { TailscalePeer } from '@goodjin2/dsh-host-federation'
 import { startHostStore } from '../host-store.ts'
 import type { HostStoreChannel, HostStoreDeps, StoreOp } from '../host-store.ts'
 import { startMobileLayout } from '../mobile-layout.ts'
-import { startRightbarOverlay } from '../rightbar-overlay.ts'
 import { startRollUpSection } from '../rollup-section.ts'
 import { buildHostSessions, readSessionSources } from '../session-source.ts'
 import type { SectionSession, SessionRead } from '../session-source.ts'
@@ -362,8 +361,9 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
   // 或侧栏导航后自动收起；桌面宽度下这段样式与监听都不生效。
   ctx.effect(() => startMobileLayout({ log: message => { log.warn(message) } }).dispose, 'threadharbor: mobile layout')
   // 桌面宽度的右侧栏（终端/文件/预览/浏览器）改覆盖式：展开时不再推挤
-  // 会话区，面板直接叠在上面；收起与全屏不受影响，手机窄屏交给上面那段。
-  ctx.effect(() => startRightbarOverlay({ log: message => { log.warn(message) } }).dispose, 'threadharbor: rightbar overlay')
+  // 会话区，面板直接叠在上面。这一段已迁到独立插件
+  // `@goodjin2/dsh-rightbar-overlay`（2026-11-03）：它与本包无关，谁装谁生效，
+  // 两边同时装会互相抢（都是 !important 网格模板）。
   // The registry and the default identity follow the machine that served
   // this page (2026-10-12 用户要求：名单当然应该跟着本机的设置走): both go
   // through ONE settings channel whenever that channel exists, including when
