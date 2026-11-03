@@ -18,9 +18,7 @@
  * the hosts panel sits a second sidebar section of the same registration face:
  * 手机配对 (pairing-panel.ts), which fetches the mobile pair-url over the
  * same origin and draws its QR — or the configuration guidance when the host
- * has no mobileOrigin. Under the composer rides one more row (quota-pill.ts):
- * GLM 套餐的两枚配额胶囊，读宿主侧 /threadharbor/zcode/quota，只在
- * 当前会话选的模型是 GLM 时出现（2026-10-16 用户拍板）。
+ * has no mobileOrigin. 配额胶囊已迁至 @goodjin2/dsh-acp-agent（2026-11-02）。
  *
  * There is no restart control here, and that is not an omission: a restart
  * ordered from this page must travel through the channel that is hung. The
