@@ -36,8 +36,14 @@ describe('remote Web bundle', () => {
       expect(patch).not.toContain(`- id: ${runtimeOwner}\n  disabled: true`)
     }
     // 联邦 UI（threadharbor-client 行）已并入本包（2026-11，原 goodjin/dsh-client）。
+    // 行名必须是**裸包名**：DSH 只把 name 恰好等于包名的 Loader 行认成客户端行
+    // （ClientModuleRegistry.resolveMeta 经 locatePkgJson 解析），带 `/client`
+    // 子路径的行会被判成「不是客户端行」，还会去 node 里 import 浏览器产物——
+    // 结果是联邦 UI 整块消失且没有任何报错（2026-11-02 在 dsh-acp-agent 上
+    // 刚踩过一次）。这两条断言钉住的就是那个字面量，别再改回子路径。
     expect(patch).toContain('threadharbor-client')
-    expect(patch).toContain("name: '@goodjin2/dsh-threadharbor/client'")
+    expect(patch).toContain("name: '@goodjin2/dsh-threadharbor'")
+    expect(patch).not.toContain("name: '@goodjin2/dsh-threadharbor/client'")
     expect(patch).toContain("threadharbor-ssh-deploy")
     expect(patch).toContain("threadharbor-host-gateway")
     // 手机中转已独立出仓（goodjin/dsh-mobile-relay），不再随本仓库分发。
