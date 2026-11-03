@@ -47,6 +47,7 @@ function shellWith(core: SlotCore): void {
       name: 'sidebar',
       children: {
         'sidebar.panellist': { kind: 'list', scope: 'root' },
+        'sidebar.footer.action': { kind: 'list', scope: 'root' },
         'settings.section': { kind: 'list', scope: 'root' },
       },
     },

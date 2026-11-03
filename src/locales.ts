@@ -69,6 +69,11 @@ export const zh = {
   /** 页面标题与小节标题。 */
   'panel.title.hosts': '主机',
   'panel.title.addHost': '添加新主机',
+  /** 侧栏底部的主机切换器。 */
+  'switcher.label': '主机',
+  'switcher.addHost': '＋ 添加主机',
+  'switcher.local': '本机',
+  'switcher.current': '当前',
   'panel.add.methodPrompt': '选择连接方式',
   'panel.add.methodUrl': '登记已有 DSH / URL',
   'panel.add.methodUrlHint': '对方已经在跑 DSH，你知道可打开的地址或 launch URL。',
@@ -526,6 +531,11 @@ export const en = {
 
   'panel.title.hosts': 'Hosts',
   'panel.title.addHost': 'Add a new host',
+  /** The host switcher at the foot of the sidebar. */
+  'switcher.label': 'Hosts',
+  'switcher.addHost': '+ Add host',
+  'switcher.local': 'This machine',
+  'switcher.current': 'Current',
   'panel.add.methodPrompt': 'Choose how to connect',
   'panel.add.methodUrl': 'Register an existing DSH / URL',
   'panel.add.methodUrlHint': 'DSH is already running and you know the page address or launch URL.',

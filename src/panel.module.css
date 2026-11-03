@@ -849,3 +849,122 @@
     max-width: none;
   }
 }
+
+/* ── 侧栏底部的主机切换器 ─────────────────────────────────────────
+   常驻在 sidebar.footer.action 槽：列出所有主机，选一台整页切过去。
+   折叠态（侧栏收起为 56px 轨道）只显示图标，弹层仍可读。 */
+.hostSwitcher {
+  position: relative;
+}
+
+.hostSwitcherTrigger {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  padding: 4px 10px;
+  box-sizing: border-box;
+  border-radius: 6px;
+}
+
+.hostSwitcherTrigger:hover {
+  background: var(--dsw-alias-state-hover, rgba(255, 255, 255, 0.06));
+}
+
+.hostSwitcherTrigger:focus-visible {
+  outline: 2px solid var(--dsw-alias-accent, #8ab4ff);
+  outline-offset: -2px;
+}
+
+.hostSwitcherTriggerLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.hostSwitcherIcon {
+  flex: none;
+  display: inline-flex;
+  opacity: 0.75;
+}
+
+.hostSwitcherMenu {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: calc(100% + 4px);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px;
+  background: var(--dsw-alias-surface-overlay, #151a24);
+  border: 1px solid var(--dsw-alias-border, #3a4252);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.hostSwitcherItem {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 32px;
+  padding: 4px 8px;
+  box-sizing: border-box;
+  border-radius: 5px;
+  text-align: left;
+}
+
+.hostSwitcherItem:hover {
+  background: var(--dsw-alias-state-hover, rgba(255, 255, 255, 0.06));
+}
+
+.hostSwitcherItem[data-current] {
+  background: var(--dsw-alias-state-active, rgba(138, 180, 255, 0.14));
+}
+
+.hostSwitcherItemLabel {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.hostSwitcherItemTag {
+  flex: none;
+  font-size: 11px;
+  opacity: 0.6;
+}
+
+.hostSwitcherItem[data-add] {
+  color: var(--dsw-alias-accent, #8ab4ff);
+}
+
+/* Closed menu stays in the DOM but out of sight: */
+.hostSwitcherMenu:not([data-open]) {
+  display: none;
+}
+
+.hostSwitcherSeparator {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--dsw-alias-border, #3a4252);
+}

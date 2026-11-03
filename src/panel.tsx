@@ -65,6 +65,15 @@ import { NAMESPACE } from './locales.ts'
 import styles from './panel.module.css'
 
 /**
+ * Window event the sidebar host switcher dispatches to open this panel on its
+ * add view. The switcher lives in `sidebar.footer.action`, a different slot
+ * from the panel's `main` seat; it cannot call `setView` directly, so it
+ * signals and the panel listens. Paired with the switcher's `selectPanel`
+ * (which brings the panel to the main column first).
+ */
+const OPEN_ADD_HOST_EVENT = 'threadharbor:open-add-host'
+
+/**
  * 去重：各 agent 下面的模型相同则不重复展示。
  *
  * 用户 2026-10-12 反馈：「各 Agent 下面的模型如果相同则去重，不要展示多个」。
@@ -177,6 +186,12 @@ export type AgentPanelBusinessProps = {
   listenStorage?(handler: () => void): () => void
   /** Whole-page navigation into another host's gateway; injectable for tests. */
   navigate?(url: string): void
+  /**
+   * Open the hosts panel on its add view. The sidebar host switcher calls
+   * this for its "＋ add host" entry; absent (tests that don't wire it) and
+   * the entry is hidden.
+   */
+  openAddHost?: () => void
   /** Said instead of an empty list, so "none listed" never reads as "none configured". */
   readonly agentsNote?: string | undefined
 }
@@ -2281,6 +2296,16 @@ export function AgentPanel(props: AgentPanelProps): ReactNode {
   }, [props.agents])
 
   useEffect(() => props.listenStorage?.(() => { setRegistryRevision(revision => revision + 1) }), [props.listenStorage])
+
+  // The sidebar host switcher's "＋ add host" entry opens this panel straight on
+  // its add view: it dispatches the event below, and we react by opening add.
+  // (selectPanel to reach this panel is the switcher's side; the event carries
+  // the "go to add" intent so the panel does not need to be re-selected.)
+  useEffect(() => {
+    const open = (): void => { openAdd() }
+    window.addEventListener(OPEN_ADD_HOST_EVENT, open)
+    return () => { window.removeEventListener(OPEN_ADD_HOST_EVENT, open) }
+  }, [])
 
   // The storage posture changes on its own schedule: the first read of the
   // machine's document lands after mount, and a write can fail later. Either

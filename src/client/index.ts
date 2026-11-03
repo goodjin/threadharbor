@@ -71,6 +71,7 @@ import { startPairingSurface } from '../pairing-panel.ts'
 import { startFederationAnnounce } from '../federation-announce.ts'
 import { AgentPanel } from '../panel.tsx'
 import { HostIcon, HOST_ICON_PANEL_ORDER } from '../host-icon.tsx'
+import { HostSwitcher, type HostSwitcherFace } from '../host-switcher.tsx'
 import type { AgentListPort, AgentPanelBusinessProps, ProbeStarter, RemotePort, TailscalePeersResult, TailscalePort } from '../panel.tsx'
 import { readRemotePeer, startRemotePeer } from '../ssh-deploy.ts'
 import { NAMESPACE, en, fallbackT, zh } from '../locales.ts'
@@ -174,7 +175,7 @@ export type ClientPanelContext = {
  * @param label - the sidebar row's label, re-read per render so it follows the
  * active locale without re-registering (SlotLabel's thunk form).
  */
-export function registerPanelSlots(slots: PanelSlotHost, face: AgentPanelBusinessProps, label: () => string): void {
+export function registerPanelSlots(slots: PanelSlotHost, face: AgentPanelBusinessProps, label: () => string, openAddHost: () => void): void {
   // The hosts surface lives in the settings dialog as one section (its sidebar
   // row and main-panel seat are gone): `settings.section` is the list the
   // dialog's rail renders from, and `inject` hands the section its business
@@ -196,6 +197,23 @@ export function registerPanelSlots(slots: PanelSlotHost, face: AgentPanelBusines
   slots.inject('main', () => slots.register(
     { name: 'main', key: PANEL_ID, locale: NAMESPACE, inject: () => face },
     AgentPanel,
+  ))
+
+  // The host switcher: a resident control at the sidebar's foot (the
+  // `sidebar.footer.action` slot) listing every host and switching the whole
+  // page to the picked one. It shares the panel's face (rollUp / registry /
+  // navigate) and adds `openAddHost` for its "＋ add host" entry, which opens
+  // the hosts panel on its add view. `wide` comes from the slot's owner props
+  // (false = 56px rail): the trigger shows only its icon then.
+  slots.inject('sidebar.footer.action', () => slots.register(
+    {
+      name: 'sidebar.footer.action',
+      id: 'threadharbor-host-switcher',
+      order: 1,
+      locale: NAMESPACE,
+      inject: (): HostSwitcherFace => ({ ...face, openAddHost }),
+    },
+    HostSwitcher,
   ))
 }
 
@@ -425,8 +443,18 @@ function applyToClientPanel(ctx: ClientPanelContext): void {
       window.addEventListener('storage', handler)
       return () => { window.removeEventListener('storage', handler) }
     },
+    navigate: (url: string): void => { window.location.assign(url) },
   }
-  safeRegister('panel slots', () => registerPanelSlots(ctx.slots, face, () => t('panel.label')), message => log.warn(message))
+  // The sidebar host switcher's "＋ add host" entry: bring the hosts panel to
+  // the main column, then tell it to open its add view. selectPanel comes from
+  // the layout service (same path remote-conversation uses); the event carries
+  // the "go to add" intent the panel cannot read off a slot selection.
+  const openAddHost = (): void => {
+    const layout = ctx.get('layout') as { selectPanel?: (id: string | null) => void } | undefined
+    if (typeof layout?.selectPanel === 'function') layout.selectPanel(PANEL_ID)
+    window.dispatchEvent(new CustomEvent('threadharbor:open-add-host'))
+  }
+  safeRegister('panel slots', () => registerPanelSlots(ctx.slots, face, () => t('panel.label'), openAddHost), message => log.warn(message))
 
   // The shadow tree is opt-in now: by default nothing registers for
   // sidebar.workspaces, so DSH's native browsing area keeps the slot and all
