@@ -189,3 +189,23 @@ stable / test 双通道发版规范见 [docs/release-channel.zh.md](docs/release
 - 权限决定权在人：外部 agent 的权限请求走 DSH 审批服务，桥接层宁可拒绝错、不可放行错；没有审批服务时全拒。
 - 配置只声明 agent 入口（`url`，或 `command` + 可选 `args`），浏览器不能提交可执行文件或 shell。
 - MIT License。
+
+
+## Version anchor tags
+
+This repo participates in the container's DSH version-correspondence mechanism: every
+plugin repo carries tags named `dsh-<dsh版本>` (e.g. `dsh-0.2.2-rc.1`), each an annotated
+tag recording the dsh version it was verified against, the check result, and the date.
+The tag is the immutable "known-good coordinate" of that dsh version — a snapshot of
+`main` taken the moment the whole-plugin row check went green on every installed host.
+
+- **Why tags instead of releases**: the desktop app reads this checkout by path and the
+  web install pulls `repo#ref` — a git tag is already the furthest installable form, so
+  no npm publish or GitHub Release is needed.
+- **Rollback**: `scripts/pin-to-dsh.sh 0.2.2-rc.1` (from the container) checks out the
+  tag in every repo at once; `scripts/check-host-rows.mjs --report` shows which repos are
+  on the anchor for the running dsh version.
+- **Do not move or delete a `dsh-*` tag**; it is a rollback coordinate. A follow-up fix on
+  the same dsh version adds a `-p2` (then `-p3`) suffixed tag instead.
+- New tags are cut after each dsh upgrade, as step 4 of the upgrade runbook — see the
+  container's `AGENTS.md` for the full flow.
